@@ -1,0 +1,1420 @@
+{
+	"source": "mypaint-brushes v2.0.2 (https://github.com/mypaint/mypaint-brushes)",
+	"license": "CC0-1.0",
+	"categories": [
+		{
+			"id": "pencils",
+			"name": "Pencils"
+		},
+		{
+			"id": "inks",
+			"name": "Inks & pens"
+		},
+		{
+			"id": "markers",
+			"name": "Markers"
+		},
+		{
+			"id": "charcoal",
+			"name": "Charcoal & pastel"
+		},
+		{
+			"id": "airbrush",
+			"name": "Airbrush & soft"
+		},
+		{
+			"id": "paint",
+			"name": "Paint"
+		},
+		{
+			"id": "watercolour",
+			"name": "Watercolour"
+		},
+		{
+			"id": "blend",
+			"name": "Blend & smudge"
+		},
+		{
+			"id": "fx",
+			"name": "Texture & FX"
+		},
+		{
+			"id": "erasers",
+			"name": "Erasers"
+		}
+	],
+	"brushes": [
+		{
+			"id": "classic-blend-paint",
+			"name": "Blend+paint",
+			"author": "MyPaint Classic",
+			"category": "blend",
+			"preview": true
+		},
+		{
+			"id": "classic-blending-knife",
+			"name": "Blending knife",
+			"author": "MyPaint Classic",
+			"category": "blend",
+			"preview": true
+		},
+		{
+			"id": "classic-blur",
+			"name": "Blur",
+			"author": "MyPaint Classic",
+			"category": "blend",
+			"preview": true
+		},
+		{
+			"id": "classic-brush",
+			"name": "Brush",
+			"author": "MyPaint Classic",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "classic-bulk",
+			"name": "Bulk",
+			"author": "MyPaint Classic",
+			"category": "markers",
+			"preview": true
+		},
+		{
+			"id": "classic-calligraphy",
+			"name": "Calligraphy",
+			"author": "MyPaint Classic",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "classic-charcoal",
+			"name": "Charcoal",
+			"author": "MyPaint Classic",
+			"category": "charcoal",
+			"preview": true
+		},
+		{
+			"id": "classic-coarse-bulk-1",
+			"name": "Coarse bulk 1",
+			"author": "MyPaint Classic",
+			"category": "markers",
+			"preview": true
+		},
+		{
+			"id": "classic-coarse-bulk-2",
+			"name": "Coarse bulk 2",
+			"author": "MyPaint Classic",
+			"category": "markers",
+			"preview": true
+		},
+		{
+			"id": "classic-coarse-bulk-3",
+			"name": "Coarse bulk 3",
+			"author": "MyPaint Classic",
+			"category": "markers",
+			"preview": true
+		},
+		{
+			"id": "classic-dry-brush",
+			"name": "Dry brush",
+			"author": "MyPaint Classic",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "classic-imp-blending",
+			"name": "Imp blending",
+			"author": "MyPaint Classic",
+			"category": "blend",
+			"preview": true
+		},
+		{
+			"id": "classic-imp-details",
+			"name": "Imp details",
+			"author": "MyPaint Classic",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "classic-impressionism",
+			"name": "Impressionism",
+			"author": "MyPaint Classic",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "classic-ink-blot",
+			"name": "Ink blot",
+			"author": "MyPaint Classic",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "classic-ink-eraser",
+			"name": "Ink eraser",
+			"author": "MyPaint Classic",
+			"category": "erasers",
+			"preview": true
+		},
+		{
+			"id": "classic-kabura",
+			"name": "Kabura",
+			"author": "MyPaint Classic",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "classic-knife",
+			"name": "Knife",
+			"author": "MyPaint Classic",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "classic-long-grass",
+			"name": "Long grass",
+			"author": "MyPaint Classic",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "classic-marker-fat",
+			"name": "Marker fat",
+			"author": "MyPaint Classic",
+			"category": "markers",
+			"preview": true
+		},
+		{
+			"id": "classic-marker-small",
+			"name": "Marker small",
+			"author": "MyPaint Classic",
+			"category": "markers",
+			"preview": true
+		},
+		{
+			"id": "classic-modelling",
+			"name": "Modelling",
+			"author": "MyPaint Classic",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "classic-modelling2",
+			"name": "Modelling2",
+			"author": "MyPaint Classic",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "classic-pen",
+			"name": "Pen",
+			"author": "MyPaint Classic",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "classic-pencil",
+			"name": "Pencil",
+			"author": "MyPaint Classic",
+			"category": "pencils",
+			"preview": true
+		},
+		{
+			"id": "classic-pointy-ink",
+			"name": "Pointy ink",
+			"author": "MyPaint Classic",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "classic-puantilism",
+			"name": "Puantilism",
+			"author": "MyPaint Classic",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "classic-puantilism2",
+			"name": "Puantilism2",
+			"author": "MyPaint Classic",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "classic-rounded",
+			"name": "Rounded",
+			"author": "MyPaint Classic",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "classic-short-grass",
+			"name": "Short grass",
+			"author": "MyPaint Classic",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "classic-slow-ink",
+			"name": "Slow ink",
+			"author": "MyPaint Classic",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "classic-smudge-paint",
+			"name": "Smudge+paint",
+			"author": "MyPaint Classic",
+			"category": "blend",
+			"preview": true
+		},
+		{
+			"id": "classic-smudge",
+			"name": "Smudge",
+			"author": "MyPaint Classic",
+			"category": "blend",
+			"preview": true
+		},
+		{
+			"id": "classic-textured-ink",
+			"name": "Textured ink",
+			"author": "MyPaint Classic",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "classic-wet-knife",
+			"name": "Wet knife",
+			"author": "MyPaint Classic",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "deevad-2b-pencil",
+			"name": "2B pencil",
+			"author": "David Revoy",
+			"category": "pencils",
+			"preview": true
+		},
+		{
+			"id": "deevad-4h-pencil",
+			"name": "4H pencil",
+			"author": "David Revoy",
+			"category": "pencils",
+			"preview": true
+		},
+		{
+			"id": "deevad-airbrush",
+			"name": "Airbrush",
+			"author": "David Revoy",
+			"category": "airbrush",
+			"preview": true
+		},
+		{
+			"id": "deevad-ballpen",
+			"name": "Ballpen",
+			"author": "David Revoy",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "deevad-basic-digital-brush",
+			"name": "Basic digital brush",
+			"author": "David Revoy",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "deevad-basic-digital-brush-smudging",
+			"name": "Basic digital brush smudging",
+			"author": "David Revoy",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "deevad-basic-digital-knife",
+			"name": "Basic digital knife",
+			"author": "David Revoy",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "deevad-basic-digital-knife-smudging",
+			"name": "Basic digital knife smudging",
+			"author": "David Revoy",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "deevad-blending",
+			"name": "Blending",
+			"author": "David Revoy",
+			"category": "blend",
+			"preview": true
+		},
+		{
+			"id": "deevad-brush",
+			"name": "Brush",
+			"author": "David Revoy",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "deevad-chalk",
+			"name": "Chalk",
+			"author": "David Revoy",
+			"category": "pencils",
+			"preview": true
+		},
+		{
+			"id": "deevad-detail-brush-large",
+			"name": "Detail brush large",
+			"author": "David Revoy",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "deevad-detail-brush-large-glazing",
+			"name": "Detail brush large glazing",
+			"author": "David Revoy",
+			"category": "watercolour",
+			"preview": true
+		},
+		{
+			"id": "deevad-detail-brush-thin",
+			"name": "Detail brush thin",
+			"author": "David Revoy",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "deevad-detail-brush-thin-glazing",
+			"name": "Detail brush thin glazing",
+			"author": "David Revoy",
+			"category": "watercolour",
+			"preview": true
+		},
+		{
+			"id": "deevad-fill",
+			"name": "Fill",
+			"author": "David Revoy",
+			"category": "markers",
+			"preview": true
+		},
+		{
+			"id": "deevad-grainy-blending",
+			"name": "Grainy blending",
+			"author": "David Revoy",
+			"category": "blend",
+			"preview": true
+		},
+		{
+			"id": "deevad-kneaded-eraser",
+			"name": "Kneaded eraser",
+			"author": "David Revoy",
+			"category": "erasers",
+			"preview": true
+		},
+		{
+			"id": "deevad-kneaded-eraser-large",
+			"name": "Kneaded eraser large",
+			"author": "David Revoy",
+			"category": "erasers",
+			"preview": true
+		},
+		{
+			"id": "deevad-large-hard-eraser",
+			"name": "Large hard eraser",
+			"author": "David Revoy",
+			"category": "erasers",
+			"preview": true
+		},
+		{
+			"id": "deevad-large-watercolor-fringe",
+			"name": "Large watercolor fringe",
+			"author": "David Revoy",
+			"category": "watercolour",
+			"preview": true
+		},
+		{
+			"id": "deevad-liner",
+			"name": "Liner",
+			"author": "David Revoy",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "deevad-only-water-fringe",
+			"name": "Only water fringe",
+			"author": "David Revoy",
+			"category": "watercolour",
+			"preview": true
+		},
+		{
+			"id": "deevad-pen-note",
+			"name": "Pen note",
+			"author": "David Revoy",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "deevad-pen",
+			"name": "Pen",
+			"author": "David Revoy",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "deevad-rigger-brush",
+			"name": "Rigger brush",
+			"author": "David Revoy",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "deevad-rigger-brush-thin",
+			"name": "Rigger brush thin",
+			"author": "David Revoy",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "deevad-rough",
+			"name": "Rough",
+			"author": "David Revoy",
+			"category": "charcoal",
+			"preview": true
+		},
+		{
+			"id": "deevad-soft-dip-pen",
+			"name": "Soft dip pen",
+			"author": "David Revoy",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "deevad-sponge-smudging",
+			"name": "Sponge smudging",
+			"author": "David Revoy",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "deevad-spray",
+			"name": "Spray",
+			"author": "David Revoy",
+			"category": "airbrush",
+			"preview": true
+		},
+		{
+			"id": "deevad-spray2",
+			"name": "Spray2",
+			"author": "David Revoy",
+			"category": "airbrush",
+			"preview": true
+		},
+		{
+			"id": "deevad-thin-hard-eraser",
+			"name": "Thin hard eraser",
+			"author": "David Revoy",
+			"category": "erasers",
+			"preview": true
+		},
+		{
+			"id": "deevad-thin-watercolor",
+			"name": "Thin watercolor",
+			"author": "David Revoy",
+			"category": "watercolour",
+			"preview": true
+		},
+		{
+			"id": "deevad-watercolor-expressive",
+			"name": "Watercolor expressive",
+			"author": "David Revoy",
+			"category": "watercolour",
+			"preview": true
+		},
+		{
+			"id": "deevad-watercolor-glazing",
+			"name": "Watercolor glazing",
+			"author": "David Revoy",
+			"category": "watercolour",
+			"preview": true
+		},
+		{
+			"id": "dieterle-8b-pencil-1",
+			"name": "8B Pencil",
+			"author": "Brien Dieterle",
+			"category": "pencils",
+			"preview": true
+		},
+		{
+			"id": "dieterle-blender",
+			"name": "Blender",
+			"author": "Brien Dieterle",
+			"category": "blend",
+			"preview": true
+		},
+		{
+			"id": "dieterle-dissolver",
+			"name": "Dissolver",
+			"author": "Brien Dieterle",
+			"category": "blend",
+			"preview": true
+		},
+		{
+			"id": "dieterle-eraser",
+			"name": "Eraser",
+			"author": "Brien Dieterle",
+			"category": "erasers",
+			"preview": true
+		},
+		{
+			"id": "dieterle-fan-1",
+			"name": "Fan",
+			"author": "Brien Dieterle",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "dieterle-flat2-1",
+			"name": "Flat2",
+			"author": "Brien Dieterle",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "dieterle-flight-feathers",
+			"name": "Flight Feathers",
+			"author": "Brien Dieterle",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "dieterle-fount-offset-1",
+			"name": "Fount offset",
+			"author": "Brien Dieterle",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "dieterle-fountain-sf-1",
+			"name": "Fountain SF",
+			"author": "Brien Dieterle",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "dieterle-halftone-1",
+			"name": "HalfTone",
+			"author": "Brien Dieterle",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "dieterle-halftonecmy-1",
+			"name": "HalfToneCMY",
+			"author": "Brien Dieterle",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "dieterle-pencil-left-handed",
+			"name": "Pencil Left Handed",
+			"author": "Brien Dieterle",
+			"category": "pencils",
+			"preview": true
+		},
+		{
+			"id": "dieterle-posterizer",
+			"name": "Posterizer",
+			"author": "Brien Dieterle",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "dieterle-round-1",
+			"name": "Round",
+			"author": "Brien Dieterle",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "dieterle-splash",
+			"name": "Splash",
+			"author": "Brien Dieterle",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "dieterle-tail-feathers",
+			"name": "Tail Feathers",
+			"author": "Brien Dieterle",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "dieterle-tail-feathers2",
+			"name": "Tail Feathers2",
+			"author": "Brien Dieterle",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "dieterle-wateryflatbrush",
+			"name": "WateryFlatbrush",
+			"author": "Brien Dieterle",
+			"category": "watercolour",
+			"preview": true
+		},
+		{
+			"id": "dieterle-arrow-1",
+			"name": "Arrow",
+			"author": "Brien Dieterle",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "experimental-1pixel",
+			"name": "1pixel",
+			"author": "MyPaint Experimental",
+			"category": "pencils",
+			"preview": true
+		},
+		{
+			"id": "experimental-dna-brush",
+			"name": "DNA brush",
+			"author": "MyPaint Experimental",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "experimental-basic",
+			"name": "Basic",
+			"author": "MyPaint Experimental",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "experimental-bubble",
+			"name": "Bubble",
+			"author": "MyPaint Experimental",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "experimental-fur",
+			"name": "Fur",
+			"author": "MyPaint Experimental",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "experimental-glow",
+			"name": "Glow",
+			"author": "MyPaint Experimental",
+			"category": "airbrush",
+			"preview": true
+		},
+		{
+			"id": "experimental-hard-blot",
+			"name": "Hard blot",
+			"author": "MyPaint Experimental",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "experimental-hard-sting",
+			"name": "Hard sting",
+			"author": "MyPaint Experimental",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "experimental-irregular-ink",
+			"name": "Irregular ink",
+			"author": "MyPaint Experimental",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "experimental-leaves",
+			"name": "Leaves",
+			"author": "MyPaint Experimental",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "experimental-particules-3",
+			"name": "Particules 3",
+			"author": "MyPaint Experimental",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "experimental-particules-eraser",
+			"name": "Particules eraser",
+			"author": "MyPaint Experimental",
+			"category": "erasers",
+			"preview": true
+		},
+		{
+			"id": "experimental-pick-and-drag",
+			"name": "Pick and drag",
+			"author": "MyPaint Experimental",
+			"category": "blend",
+			"preview": true
+		},
+		{
+			"id": "experimental-pixel-hardink",
+			"name": "Pixel hardink",
+			"author": "MyPaint Experimental",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "experimental-pixelblocking",
+			"name": "Pixelblocking",
+			"author": "MyPaint Experimental",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "experimental-sewing",
+			"name": "Sewing",
+			"author": "MyPaint Experimental",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "experimental-small-blot",
+			"name": "Small blot",
+			"author": "MyPaint Experimental",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "experimental-soft",
+			"name": "Soft",
+			"author": "MyPaint Experimental",
+			"category": "airbrush",
+			"preview": true
+		},
+		{
+			"id": "experimental-soft-irregular",
+			"name": "Soft irregular",
+			"author": "MyPaint Experimental",
+			"category": "airbrush",
+			"preview": true
+		},
+		{
+			"id": "experimental-spaced-blot",
+			"name": "Spaced blot",
+			"author": "MyPaint Experimental",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "experimental-speed-blot",
+			"name": "Speed blot",
+			"author": "MyPaint Experimental",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "experimental-subtle-pencil",
+			"name": "Subtle pencil",
+			"author": "MyPaint Experimental",
+			"category": "pencils",
+			"preview": true
+		},
+		{
+			"id": "experimental-track",
+			"name": "Track",
+			"author": "MyPaint Experimental",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "kaerhon-v1-airbrush-a",
+			"name": "Airbrush",
+			"author": "Guillaume Loussarévian",
+			"category": "airbrush",
+			"preview": true
+		},
+		{
+			"id": "kaerhon-v1-dirty-transparent-sk",
+			"name": "Dirty Transparent",
+			"author": "Guillaume Loussarévian",
+			"category": "charcoal",
+			"preview": true
+		},
+		{
+			"id": "kaerhon-v1-sketcher2-sk",
+			"name": "Sketcher2",
+			"author": "Guillaume Loussarévian",
+			"category": "pencils",
+			"preview": true
+		},
+		{
+			"id": "kaerhon-v1-smear-sm",
+			"name": "Smear",
+			"author": "Guillaume Loussarévian",
+			"category": "blend",
+			"preview": true
+		},
+		{
+			"id": "kaerhon-v1-airbruch-press-a",
+			"name": "Airbrush press",
+			"author": "Guillaume Loussarévian",
+			"category": "airbrush",
+			"preview": true
+		},
+		{
+			"id": "kaerhon-v1-airsmudge-a",
+			"name": "Airsmudge",
+			"author": "Guillaume Loussarévian",
+			"category": "blend",
+			"preview": true
+		},
+		{
+			"id": "kaerhon-v1-airsmudgeultimate-sk",
+			"name": "Airsmudgeultimate",
+			"author": "Guillaume Loussarévian",
+			"category": "blend",
+			"preview": true
+		},
+		{
+			"id": "kaerhon-v1-classic-sk",
+			"name": "Classic",
+			"author": "Guillaume Loussarévian",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "kaerhon-v1-classicroundblock-static-c",
+			"name": "Classicroundblock static",
+			"author": "Guillaume Loussarévian",
+			"category": "markers",
+			"preview": true
+		},
+		{
+			"id": "kaerhon-v1-extreme-round-l",
+			"name": "Extreme round",
+			"author": "Guillaume Loussarévian",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "kaerhon-v1-fill-c",
+			"name": "Fill",
+			"author": "Guillaume Loussarévian",
+			"category": "markers",
+			"preview": true
+		},
+		{
+			"id": "kaerhon-v1-flat-bar-l",
+			"name": "Flat bar",
+			"author": "Guillaume Loussarévian",
+			"category": "markers",
+			"preview": true
+		},
+		{
+			"id": "kaerhon-v1-ink-slowline-s",
+			"name": "Ink slowline",
+			"author": "Guillaume Loussarévian",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "kaerhon-v1-ink-slow-s",
+			"name": "Ink slow",
+			"author": "Guillaume Loussarévian",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "kaerhon-v1-inkster-l",
+			"name": "Inkster",
+			"author": "Guillaume Loussarévian",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "kaerhon-v1-paint-barrr-sm",
+			"name": "Paint barrr",
+			"author": "Guillaume Loussarévian",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "kaerhon-v1-paint-radius-2-sm",
+			"name": "Paint radius 2",
+			"author": "Guillaume Loussarévian",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "kaerhon-v1-paint-sm",
+			"name": "Paint",
+			"author": "Guillaume Loussarévian",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "kaerhon-v1-smudge-ink-0-7-sm",
+			"name": "Smudge ink(0.7)",
+			"author": "Guillaume Loussarévian",
+			"category": "blend",
+			"preview": true
+		},
+		{
+			"id": "kaerhon-v1-wet-paint-sm",
+			"name": "Wet paint",
+			"author": "Guillaume Loussarévian",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "ramon-100pct-opaque",
+			"name": "100% Opaque",
+			"author": "Ramón Miranda",
+			"category": "markers",
+			"preview": true
+		},
+		{
+			"id": "ramon-2b-pencil",
+			"name": "2B pencil",
+			"author": "Ramón Miranda",
+			"category": "pencils",
+			"preview": true
+		},
+		{
+			"id": "ramon-b-pencil",
+			"name": "B pencil",
+			"author": "Ramón Miranda",
+			"category": "pencils",
+			"preview": true
+		},
+		{
+			"id": "ramon-beamlight",
+			"name": "Beamlight",
+			"author": "Ramón Miranda",
+			"category": "airbrush",
+			"preview": true
+		},
+		{
+			"id": "ramon-bigairbrush",
+			"name": "BigAirbrush",
+			"author": "Ramón Miranda",
+			"category": "airbrush",
+			"preview": true
+		},
+		{
+			"id": "ramon-blur-fast",
+			"name": "Blur Fast",
+			"author": "Ramón Miranda",
+			"category": "blend",
+			"preview": true
+		},
+		{
+			"id": "ramon-classic-paint",
+			"name": "Classic Paint",
+			"author": "Ramón Miranda",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "ramon-clouds",
+			"name": "Clouds",
+			"author": "Ramón Miranda",
+			"category": "airbrush",
+			"preview": true
+		},
+		{
+			"id": "ramon-delayed",
+			"name": "Delayed",
+			"author": "Ramón Miranda",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "ramon-dirty-noise",
+			"name": "Dirty Noise",
+			"author": "Ramón Miranda",
+			"category": "charcoal",
+			"preview": true
+		},
+		{
+			"id": "ramon-glow-airbrush",
+			"name": "Glow Airbrush",
+			"author": "Ramón Miranda",
+			"category": "airbrush",
+			"preview": true
+		},
+		{
+			"id": "ramon-grain",
+			"name": "Grain",
+			"author": "Ramón Miranda",
+			"category": "charcoal",
+			"preview": true
+		},
+		{
+			"id": "ramon-hard-eraser",
+			"name": "Hard Eraser",
+			"author": "Ramón Miranda",
+			"category": "erasers",
+			"preview": true
+		},
+		{
+			"id": "ramon-knife",
+			"name": "Knife",
+			"author": "Ramón Miranda",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "ramon-marker",
+			"name": "Marker",
+			"author": "Ramón Miranda",
+			"category": "markers",
+			"preview": true
+		},
+		{
+			"id": "ramon-p-shade",
+			"name": "P. Shade",
+			"author": "Ramón Miranda",
+			"category": "charcoal",
+			"preview": true
+		},
+		{
+			"id": "ramon-pastel-1",
+			"name": "Pastel 1",
+			"author": "Ramón Miranda",
+			"category": "charcoal",
+			"preview": true
+		},
+		{
+			"id": "ramon-pen",
+			"name": "Pen",
+			"author": "Ramón Miranda",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "ramon-penbrush",
+			"name": "PenBrush",
+			"author": "Ramón Miranda",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "ramon-rs-blendop",
+			"name": "RS blendOP",
+			"author": "Ramón Miranda",
+			"category": "blend",
+			"preview": true
+		},
+		{
+			"id": "ramon-round",
+			"name": "Round",
+			"author": "Ramón Miranda",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "ramon-round-bl",
+			"name": "Round Bl",
+			"author": "Ramón Miranda",
+			"category": "markers",
+			"preview": true
+		},
+		{
+			"id": "ramon-sketch-1",
+			"name": "Sketch 1",
+			"author": "Ramón Miranda",
+			"category": "pencils",
+			"preview": true
+		},
+		{
+			"id": "ramon-smear",
+			"name": "Smear",
+			"author": "Ramón Miranda",
+			"category": "blend",
+			"preview": true
+		},
+		{
+			"id": "ramon-soft-eraser",
+			"name": "Soft Eraser",
+			"author": "Ramón Miranda",
+			"category": "erasers",
+			"preview": true
+		},
+		{
+			"id": "ramon-thin-pen",
+			"name": "Thin Pen",
+			"author": "Ramón Miranda",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "ramon-wet-direction",
+			"name": "Wet Direction",
+			"author": "Ramón Miranda",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "ramon-wet-round",
+			"name": "Wet round",
+			"author": "Ramón Miranda",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "tanda-acrylic-03-only-water",
+			"name": "Acrylic 03 only water",
+			"author": "Marcelo “Tanda” Cerviño",
+			"category": "watercolour",
+			"preview": true
+		},
+		{
+			"id": "tanda-acrylic-03-paint",
+			"name": "Acrylic 03 paint",
+			"author": "Marcelo “Tanda” Cerviño",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "tanda-acrylic-03-with-water",
+			"name": "Acrylic 03 with water",
+			"author": "Marcelo “Tanda” Cerviño",
+			"category": "watercolour",
+			"preview": true
+		},
+		{
+			"id": "tanda-acrylic-04-only-water",
+			"name": "Acrylic 04 only water",
+			"author": "Marcelo “Tanda” Cerviño",
+			"category": "watercolour",
+			"preview": true
+		},
+		{
+			"id": "tanda-acrylic-04-paint",
+			"name": "Acrylic 04 paint",
+			"author": "Marcelo “Tanda” Cerviño",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "tanda-acrylic-04-with-water",
+			"name": "Acrylic 04 with water",
+			"author": "Marcelo “Tanda” Cerviño",
+			"category": "watercolour",
+			"preview": true
+		},
+		{
+			"id": "tanda-acrylic-05-only-water",
+			"name": "Acrylic 05 only water",
+			"author": "Marcelo “Tanda” Cerviño",
+			"category": "watercolour",
+			"preview": true
+		},
+		{
+			"id": "tanda-acrylic-05-paint",
+			"name": "Acrylic 05 paint",
+			"author": "Marcelo “Tanda” Cerviño",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "tanda-acrylic-05-with-water",
+			"name": "Acrylic 05 with water",
+			"author": "Marcelo “Tanda” Cerviño",
+			"category": "watercolour",
+			"preview": true
+		},
+		{
+			"id": "tanda-charcoal-01",
+			"name": "Charcoal 01",
+			"author": "Marcelo “Tanda” Cerviño",
+			"category": "charcoal",
+			"preview": true
+		},
+		{
+			"id": "tanda-charcoal-03",
+			"name": "Charcoal 03",
+			"author": "Marcelo “Tanda” Cerviño",
+			"category": "charcoal",
+			"preview": true
+		},
+		{
+			"id": "tanda-charcoal-04",
+			"name": "Charcoal 04",
+			"author": "Marcelo “Tanda” Cerviño",
+			"category": "charcoal",
+			"preview": true
+		},
+		{
+			"id": "tanda-charcoal-blur1",
+			"name": "Charcoal blur1",
+			"author": "Marcelo “Tanda” Cerviño",
+			"category": "blend",
+			"preview": true
+		},
+		{
+			"id": "tanda-marker-01",
+			"name": "Marker 01",
+			"author": "Marcelo “Tanda” Cerviño",
+			"category": "markers",
+			"preview": true
+		},
+		{
+			"id": "tanda-marker-05",
+			"name": "Marker 05",
+			"author": "Marcelo “Tanda” Cerviño",
+			"category": "markers",
+			"preview": true
+		},
+		{
+			"id": "tanda-oil-01-clean",
+			"name": "Oil 01 clean",
+			"author": "Marcelo “Tanda” Cerviño",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "tanda-oil-01-paint",
+			"name": "Oil 01 paint",
+			"author": "Marcelo “Tanda” Cerviño",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "tanda-oil-03-clean",
+			"name": "Oil 03 clean",
+			"author": "Marcelo “Tanda” Cerviño",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "tanda-oil-03-paint",
+			"name": "Oil 03 paint",
+			"author": "Marcelo “Tanda” Cerviño",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "tanda-oil-06-clean",
+			"name": "Oil 06 clean",
+			"author": "Marcelo “Tanda” Cerviño",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "tanda-oil-06-paint",
+			"name": "Oil 06 paint",
+			"author": "Marcelo “Tanda” Cerviño",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "tanda-oil-mop",
+			"name": "Oil mop",
+			"author": "Marcelo “Tanda” Cerviño",
+			"category": "blend",
+			"preview": true
+		},
+		{
+			"id": "tanda-pencil-2b",
+			"name": "Pencil 2b",
+			"author": "Marcelo “Tanda” Cerviño",
+			"category": "pencils",
+			"preview": true
+		},
+		{
+			"id": "tanda-pencil-8b",
+			"name": "Pencil 8b",
+			"author": "Marcelo “Tanda” Cerviño",
+			"category": "pencils",
+			"preview": true
+		},
+		{
+			"id": "tanda-splatter-02",
+			"name": "Splatter 02",
+			"author": "Marcelo “Tanda” Cerviño",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "tanda-splatter-04",
+			"name": "Splatter 04",
+			"author": "Marcelo “Tanda” Cerviño",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "tanda-texture-03",
+			"name": "Texture 03",
+			"author": "Marcelo “Tanda” Cerviño",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "tanda-texture-06",
+			"name": "Texture 06",
+			"author": "Marcelo “Tanda” Cerviño",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "tanda-texture-12",
+			"name": "Texture 12",
+			"author": "Marcelo “Tanda” Cerviño",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "tanda-water-01",
+			"name": "Water 01",
+			"author": "Marcelo “Tanda” Cerviño",
+			"category": "watercolour",
+			"preview": true
+		},
+		{
+			"id": "tanda-water-02",
+			"name": "Water 02",
+			"author": "Marcelo “Tanda” Cerviño",
+			"category": "watercolour",
+			"preview": true
+		},
+		{
+			"id": "tanda-water-05",
+			"name": "Water 05",
+			"author": "Marcelo “Tanda” Cerviño",
+			"category": "watercolour",
+			"preview": true
+		},
+		{
+			"id": "tanda-water-06",
+			"name": "Water 06",
+			"author": "Marcelo “Tanda” Cerviño",
+			"category": "watercolour",
+			"preview": true
+		},
+		{
+			"id": "tanda-watercolor-02-paint",
+			"name": "Watercolor 02 paint",
+			"author": "Marcelo “Tanda” Cerviño",
+			"category": "watercolour",
+			"preview": true
+		},
+		{
+			"id": "tanda-watercolor-02-water",
+			"name": "Watercolor 02 water",
+			"author": "Marcelo “Tanda” Cerviño",
+			"category": "watercolour",
+			"preview": true
+		}
+	]
+}

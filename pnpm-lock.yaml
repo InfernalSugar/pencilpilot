@@ -10,6 +10,9 @@ importers:
 
   apps/web:
     dependencies:
+      pencilpilot-brush-wasm:
+        specifier: workspace:*
+        version: link:../../crates/brush-wasm/pkg
       pencilpilot-grader-wasm:
         specifier: workspace:*
         version: link:../../crates/grader-wasm/pkg
@@ -74,6 +77,8 @@ importers:
       vitest:
         specifier: ^5.1.0
         version: 5.1.1(@types/node@26.6.6)(vite@8.3.8(@types/node@26.6.6))
+
+  crates/brush-wasm/pkg: {}
 
   crates/grader-wasm/pkg: {}
 
