@@ -1,0 +1,408 @@
+{
+	"_comment": "Topics inside each category. A reference gets the first topic whose tags match its Pixabay tags (or the --topic given to `pnpm refs fetch`, or a reviewer's choice). Order matters: more specific topics first.",
+	"anime": [
+		{
+			"id": "action",
+			"name": "Action & fights",
+			"blurb": "Battles, swords, dynamic poses",
+			"tags": [
+				"fight",
+				"battle",
+				"warrior",
+				"samurai",
+				"sword",
+				"ninja",
+				"action",
+				"martial",
+				"katana",
+				"combat",
+				"hero"
+			]
+		},
+		{
+			"id": "chibi",
+			"name": "Chibi & cute",
+			"blurb": "Small, round, adorable",
+			"tags": [
+				"chibi",
+				"kawaii",
+				"cute",
+				"mascot"
+			]
+		},
+		{
+			"id": "scenery",
+			"name": "Scenery",
+			"blurb": "Skies, towns, backgrounds",
+			"tags": [
+				"landscape",
+				"scenery",
+				"background",
+				"wallpaper",
+				"sky",
+				"city",
+				"sunset",
+				"night",
+				"nature"
+			]
+		},
+		{
+			"id": "full-body",
+			"name": "Full body & poses",
+			"blurb": "Whole characters, standing or moving",
+			"tags": [
+				"full body",
+				"pose",
+				"standing",
+				"walking",
+				"dance",
+				"skateboard",
+				"sitting"
+			]
+		},
+		{
+			"id": "characters",
+			"name": "Characters",
+			"blurb": "Faces, portraits, expressions",
+			"tags": [
+				"portrait",
+				"face",
+				"head",
+				"girl",
+				"boy",
+				"woman",
+				"man",
+				"character",
+				"avatar"
+			]
+		}
+	],
+	"real-life": [
+		{
+			"id": "hands",
+			"name": "Hands & poses",
+			"blurb": "Hands, gestures, body poses",
+			"tags": [
+				"hand",
+				"hands",
+				"finger",
+				"gesture",
+				"pose",
+				"feet"
+			]
+		},
+		{
+			"id": "food",
+			"name": "Food",
+			"blurb": "Fruit, meals, drinks",
+			"tags": [
+				"food",
+				"fruit",
+				"apple",
+				"bread",
+				"cake",
+				"coffee",
+				"vegetable",
+				"drink",
+				"cup"
+			]
+		},
+		{
+			"id": "vehicles",
+			"name": "Vehicles",
+			"blurb": "Cars, bikes, boats",
+			"tags": [
+				"car",
+				"bike",
+				"bicycle",
+				"motorcycle",
+				"boat",
+				"train",
+				"vehicle",
+				"truck"
+			]
+		},
+		{
+			"id": "still-life",
+			"name": "Still life & objects",
+			"blurb": "Everyday things on a table",
+			"tags": [
+				"still life",
+				"object",
+				"vase",
+				"bottle",
+				"shoe",
+				"chair",
+				"lamp",
+				"book",
+				"flower",
+				"glass",
+				"candle",
+				"shell",
+				"shells",
+				"decoration",
+				"lantern"
+			]
+		},
+		{
+			"id": "people",
+			"name": "People",
+			"blurb": "Portraits and figures",
+			"tags": [
+				"portrait",
+				"woman",
+				"man",
+				"girl",
+				"boy",
+				"person",
+				"people",
+				"face",
+				"child"
+			]
+		}
+	],
+	"animals": [
+		{
+			"id": "birds",
+			"name": "Birds",
+			"blurb": "Feathers, beaks, wings",
+			"tags": [
+				"bird",
+				"birds",
+				"parrot",
+				"owl",
+				"eagle",
+				"sparrow",
+				"robin",
+				"duck",
+				"chicken",
+				"pigeon"
+			]
+		},
+		{
+			"id": "sea-life",
+			"name": "Sea life",
+			"blurb": "Fish, turtles, whales",
+			"tags": [
+				"fish",
+				"turtle",
+				"whale",
+				"dolphin",
+				"shark",
+				"octopus",
+				"jellyfish",
+				"sea",
+				"underwater"
+			]
+		},
+		{
+			"id": "insects",
+			"name": "Insects",
+			"blurb": "Butterflies, bees, beetles",
+			"tags": [
+				"insect",
+				"butterfly",
+				"bee",
+				"beetle",
+				"ladybug",
+				"dragonfly",
+				"ant",
+				"spider"
+			]
+		},
+		{
+			"id": "pets",
+			"name": "Pets",
+			"blurb": "Cats, dogs, rabbits",
+			"tags": [
+				"cat",
+				"kitten",
+				"dog",
+				"puppy",
+				"rabbit",
+				"bunny",
+				"hamster",
+				"pet",
+				"guinea pig"
+			]
+		},
+		{
+			"id": "wildlife",
+			"name": "Wildlife",
+			"blurb": "Lions, foxes, deer and more",
+			"tags": [
+				"lion",
+				"tiger",
+				"fox",
+				"deer",
+				"bear",
+				"wolf",
+				"elephant",
+				"giraffe",
+				"zebra",
+				"horse",
+				"squirrel",
+				"wildlife",
+				"animal"
+			]
+		}
+	],
+	"environment": [
+		{
+			"id": "interiors",
+			"name": "Interiors",
+			"blurb": "Rooms, cafés, stairs",
+			"tags": [
+				"interior",
+				"room",
+				"kitchen",
+				"cafe",
+				"library",
+				"stairs",
+				"living room"
+			]
+		},
+		{
+			"id": "city",
+			"name": "City & streets",
+			"blurb": "Buildings, roads, bridges",
+			"tags": [
+				"city",
+				"street",
+				"building",
+				"architecture",
+				"bridge",
+				"town",
+				"house",
+				"road"
+			]
+		},
+		{
+			"id": "plants",
+			"name": "Plants & trees",
+			"blurb": "Trees, flowers, leaves",
+			"tags": [
+				"tree",
+				"trees",
+				"flower",
+				"plant",
+				"leaf",
+				"forest",
+				"garden"
+			]
+		},
+		{
+			"id": "skies-water",
+			"name": "Skies & water",
+			"blurb": "Clouds, sea, rivers",
+			"tags": [
+				"sky",
+				"cloud",
+				"clouds",
+				"sea",
+				"ocean",
+				"river",
+				"lake",
+				"waterfall",
+				"sunset"
+			]
+		},
+		{
+			"id": "landscapes",
+			"name": "Landscapes",
+			"blurb": "Hills, mountains, fields",
+			"tags": [
+				"landscape",
+				"mountain",
+				"hill",
+				"field",
+				"valley",
+				"nature",
+				"scenery"
+			]
+		}
+	],
+	"cartoon": [
+		{
+			"id": "animals",
+			"name": "Animals",
+			"blurb": "Cartoon critters",
+			"tags": [
+				"animal",
+				"cat",
+				"dog",
+				"bird",
+				"bear",
+				"fox",
+				"rabbit",
+				"fish"
+			]
+		},
+		{
+			"id": "objects",
+			"name": "Objects",
+			"blurb": "Food, toys, things",
+			"tags": [
+				"object",
+				"food",
+				"toy",
+				"fruit",
+				"car",
+				"house",
+				"cup",
+				"icon"
+			]
+		},
+		{
+			"id": "characters",
+			"name": "Characters",
+			"blurb": "Cartoon people and creatures",
+			"tags": [
+				"character",
+				"boy",
+				"girl",
+				"man",
+				"woman",
+				"people",
+				"monster",
+				"robot",
+				"person"
+			]
+		}
+	],
+	"fundamentals": [
+		{
+			"id": "perspective",
+			"name": "Perspective",
+			"blurb": "Boxes, cylinders, depth",
+			"tags": [
+				"perspective",
+				"cube",
+				"box",
+				"cylinder"
+			]
+		},
+		{
+			"id": "gesture",
+			"name": "Gesture",
+			"blurb": "Quick poses and movement",
+			"tags": [
+				"gesture",
+				"pose",
+				"figure",
+				"silhouette"
+			]
+		},
+		{
+			"id": "shapes",
+			"name": "Shapes",
+			"blurb": "Circles, ellipses, lines",
+			"tags": [
+				"shape",
+				"circle",
+				"geometric",
+				"line"
+			]
+		}
+	]
+}

@@ -71,7 +71,7 @@
 			<a
 				class="cat"
 				class:dark={c.dark}
-				href={c.available ? `/draw?category=${c.id}` : undefined}
+				href={c.available ? `/practice/${c.id}` : undefined}
 				aria-disabled={!c.available}
 			>
 				<span class="dot" style="background: {c.color}"></span>

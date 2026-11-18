@@ -32,6 +32,7 @@ const CATEGORIES: &[&str] = &[
     "real-life",
     "animals",
     "environment",
+    "cartoon",
     "fundamentals",
 ];
 const LICENSE: &str = "Pixabay Content License";
@@ -57,6 +58,18 @@ struct Reference {
     title: String,
     #[serde(default)]
     keypoints: Vec<Value>,
+    /// topic id inside the category (see content/topics.json)
+    #[serde(default)]
+    topic: String,
+    /// 0–100 from `grader::difficulty` (higher = harder to draw)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    difficulty: Option<f32>,
+    /// automatic tier: 1 Beginner, 2 Easy, 3 Medium, 4 Hard
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tier: Option<u8>,
+    /// a reviewer's tier, which wins over the automatic one
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tier_override: Option<u8>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -183,8 +196,9 @@ fn auto_reject(hit: &Value) -> Option<&'static str> {
         "erotic",
         "blood",
         "gore",
-        "weapon",
         "gun",
+        "rifle",
+        "pistol",
         "pokemon",
         "naruto",
         "disney",
@@ -212,7 +226,7 @@ fn search(key: &str, query: &str, kind: &str, page: u32) -> Value {
     resp.body_mut().read_json().expect("Pixabay JSON")
 }
 
-fn fetch(category: &str, query: &str, kind: &str, count: usize) {
+fn fetch(category: &str, query: &str, kind: &str, count: usize, topic: Option<&str>) {
     assert!(
         CATEGORIES.contains(&category),
         "unknown category {category}; use one of {CATEGORIES:?}"
@@ -271,7 +285,14 @@ fn fetch(category: &str, query: &str, kind: &str, count: usize) {
                 query: query.into(),
                 title: String::new(),
                 keypoints: Vec::new(),
+                topic: topic.unwrap_or("").into(),
+                difficulty: None,
+                tier: None,
+                tier_override: None,
             });
+            let r = cands.references.last_mut().unwrap();
+            rate(r);
+            assign_topic(r, &topics(), false);
             added += 1;
             write_json(&cand_path, &cands); // save progress as we go
             println!("  + {id} by {}", cands.references.last().unwrap().author);
@@ -336,6 +357,139 @@ fn sync() {
     println!("{ok} images present, {missing} missing");
 }
 
+/// The drawing canvas size references are fitted into (keep in sync with the web app).
+const CANVAS: (u32, u32) = (800, 600);
+
+/// Load a reference image and fit it (contain, centred, white background) into
+/// the canvas exactly as the web app shows it, as grayscale.
+fn fitted_gray(path: &Path) -> Result<grader::Gray, String> {
+    // Pixabay sometimes serves PNG/BMP under a .jpg name: sniff the real format.
+    let img = image::ImageReader::open(path)
+        .and_then(|r| r.with_guessed_format())
+        .map_err(|e| e.to_string())?
+        .decode()
+        .map_err(|e| e.to_string())?
+        .to_luma8();
+    let (w, h) = CANVAS;
+    let s = (w as f32 / img.width() as f32).min(h as f32 / img.height() as f32);
+    let (dw, dh) = (
+        ((img.width() as f32 * s).round() as u32).clamp(1, w),
+        ((img.height() as f32 * s).round() as u32).clamp(1, h),
+    );
+    let small = image::imageops::resize(&img, dw, dh, image::imageops::FilterType::Triangle);
+    let mut canvas = image::GrayImage::from_pixel(w, h, image::Luma([255]));
+    image::imageops::overlay(
+        &mut canvas,
+        &small,
+        ((w - dw) / 2) as i64,
+        ((h - dh) / 2) as i64,
+    );
+    grader::Gray::new(w, h, canvas.into_raw()).map_err(|e| format!("{e:?}"))
+}
+
+/// Compute difficulty + automatic tier from the downloaded image.
+fn rate(r: &mut Reference) {
+    match fitted_gray(&images_dir().join(format!("{}.jpg", r.id))) {
+        Ok(g) => {
+            let d = grader::difficulty::difficulty(&g);
+            r.difficulty = Some((d.score * 10.0).round() / 10.0);
+            r.tier = Some(d.tier);
+        }
+        Err(e) => eprintln!("  {}: can't rate ({e})", r.id),
+    }
+}
+
+fn topics() -> Value {
+    serde_json::from_str(&fs::read_to_string(root().join("content/topics.json")).unwrap())
+        .expect("content/topics.json")
+}
+
+/// Pick the first topic whose tags match the reference's tags (topics are
+/// ordered specific → general; the last one is the fallback).
+fn topic_for(category: &str, tags: &[String], topics: &Value) -> String {
+    let list = topics[category].as_array().cloned().unwrap_or_default();
+    let tags: Vec<String> = tags.iter().map(|t| t.to_lowercase()).collect();
+    list.iter()
+        .find(|t| {
+            t["tags"].as_array().is_some_and(|ks| {
+                ks.iter()
+                    .filter_map(Value::as_str)
+                    .any(|k| tags.iter().any(|g| g == k))
+            })
+        })
+        .or(list.last())
+        .and_then(|t| t["id"].as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+fn assign_topic(r: &mut Reference, topics: &Value, force: bool) {
+    let valid = topics[r.category.as_str()]
+        .as_array()
+        .is_some_and(|l| l.iter().any(|t| t["id"] == r.topic.as_str()));
+    if force || !valid {
+        r.topic = topic_for(&r.category, &r.tags, topics);
+    }
+}
+
+/// (Re)compute difficulty, tier and (missing) topics for every reference.
+fn classify(report: bool, retopic: bool) {
+    let topics = topics();
+    let mut rows = Vec::new();
+    let files: Vec<String> = CATEGORIES
+        .iter()
+        .map(|c| format!("{c}.json"))
+        .chain(["candidates.json".to_string()])
+        .collect();
+    for f in files {
+        let path = refs_dir().join(&f);
+        if !path.exists() {
+            continue;
+        }
+        let mut list: RefList = read_json(&path);
+        for r in &mut list.references {
+            rate(r);
+            assign_topic(r, &topics, retopic);
+            rows.push((
+                r.difficulty.unwrap_or(-1.0),
+                r.tier_override.or(r.tier).unwrap_or(0),
+                format!("{}/{}", r.category, r.topic),
+                r.id.clone(),
+                r.tags
+                    .iter()
+                    .take(3)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ));
+        }
+        write_json(&path, &list);
+    }
+    rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+    if report {
+        for (d, t, c, id, tags) in &rows {
+            println!("{d:>5.1}  T{t}  {c:<24} {id:<12} {tags}");
+        }
+    }
+    let mut per = [0usize; 5];
+    for r in &rows {
+        per[r.1 as usize] += 1;
+    }
+    let n = grader::difficulty::TIER_NAMES;
+    println!(
+        "{} rated: {} {} · {} {} · {} {} · {} {}",
+        rows.len(),
+        n[0],
+        per[1],
+        n[1],
+        per[2],
+        n[2],
+        per[3],
+        n[3],
+        per[4]
+    );
+}
+
 fn status() {
     for c in CATEGORIES {
         let n = read_json::<RefList>(&refs_dir().join(format!("{c}.json")))
@@ -363,12 +517,17 @@ fn main() {
             &args[2],
             &flag("--type").unwrap_or_else(|| "photo".into()),
             flag("--count").and_then(|c| c.parse().ok()).unwrap_or(10),
+            flag("--topic").as_deref(),
         ),
         Some("sync") => sync(),
         Some("status") => status(),
+        Some("classify") => classify(
+            args.iter().any(|a| a == "--report"),
+            args.iter().any(|a| a == "--retopic"),
+        ),
         _ => {
             eprintln!(
-                "usage:\n  ref-importer fetch <category> <query> [--type photo|illustration|vector] [--count N]\n  ref-importer sync\n  ref-importer status"
+                "usage:\n  ref-importer fetch <category> <query> [--type photo|illustration|vector] [--count N] [--topic ID]\n  ref-importer sync\n  ref-importer classify [--report] [--retopic]\n  ref-importer status"
             );
             std::process::exit(2);
         }
@@ -382,6 +541,24 @@ mod tests {
 
     fn hit(ai: bool, g: bool, low: bool, tags: &str) -> Value {
         json!({"isAiGenerated": ai, "isGRated": g, "isLowQuality": low, "tags": tags})
+    }
+
+    #[test]
+    fn topics_match_tags_specific_first() {
+        let t = json!({"animals": [
+            {"id": "birds", "tags": ["bird", "owl"]},
+            {"id": "pets", "tags": ["cat", "dog"]},
+            {"id": "wildlife", "tags": ["fox"]}
+        ]});
+        let tags = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(topic_for("animals", &tags(&["Cat", "pet"]), &t), "pets");
+        assert_eq!(topic_for("animals", &tags(&["owl", "cat"]), &t), "birds");
+        assert_eq!(
+            topic_for("animals", &tags(&["rock"]), &t),
+            "wildlife",
+            "falls back to the last topic"
+        );
+        assert_eq!(topic_for("nope", &tags(&["cat"]), &t), "");
     }
 
     #[test]
