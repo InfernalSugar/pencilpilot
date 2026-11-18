@@ -6,7 +6,14 @@
 	import ScoreReveal from '#lib/results/ScoreReveal.svelte';
 	import { loadSubmission, type Submission } from '#lib/submission.js';
 	import { byId, imageUrl, referencePixels, tierName, tierOf, titleOf } from '#lib/references.js';
-	import { recommendedTier, recordAttempt } from '#lib/progress.js';
+	import {
+		attempts,
+		recommendedTier,
+		recordAttempt,
+		recurringMistakes,
+		saveThumb,
+		type Pattern
+	} from '#lib/progress.js';
 	import {
 		getFeedback,
 		gradeImages,
@@ -28,6 +35,7 @@
 	let levelUp = $state(0);
 	let mode = $state<OverlayMode>('fade');
 	let focused = $state<string | null>(null);
+	let patterns = $state<Pattern[]>([]);
 	const reference = $derived(sub?.reference ?? byId(sub?.referenceId));
 
 	const time = $derived(
@@ -82,12 +90,25 @@
 			if (!alreadyRecorded(sub.at)) {
 				recordAttempt({
 					category: ref.category,
-					topic: sub.topic ?? null,
+					topic: sub.topic ?? ref.topic ?? null,
 					tier,
 					score: grade.score,
-					at: sub.at ?? Date.now()
+					at: sub.at ?? Date.now(),
+					refId: ref.id,
+					title: titleOf(ref),
+					fixes: fb.fixes.map((f) => f.id),
+					skills: Object.fromEntries(
+						SKILLS.map((s) => [s.skill, measurement(grade!, s.name)]).filter(
+							([, v]) => v !== undefined
+						)
+					)
 				});
+				if (sub.at) saveThumb(sub.at, sub.png);
 			}
+			// a mistake that keeps coming back (and is in this drawing too)
+			patterns = recurringMistakes(attempts()).filter((p) =>
+				fb!.fixes.some((f) => f.id === p.ruleId)
+			);
 			const after = recommendedTier(ref.category);
 			if (after > before) levelUp = after;
 		} catch (e) {
@@ -245,6 +266,31 @@
 			</div>
 		{/if}
 
+		{#if patterns.length && fb}
+			{@const p = patterns[0]}
+			{@const fix = fb.fixes.find((f) => f.id === p.ruleId)}
+			{#if fix}
+				<div class="pp-bento levelup">
+					<Tile tone="lilac" span={4}>
+						<span class="pp-eyebrow lilac-ink">Pattern spotted</span>
+						<p class="big-line">
+							“{fix.title}” came up in {p.count} of your last {p.window} drawings.
+						</p>
+						<div class="fix-actions">
+							{#if fix.lesson}
+								<Button href="/lessons/{fix.lesson}?from={fix.id}" variant="dark">
+									Fix it: {humanize(fix.lesson)} →
+								</Button>
+							{/if}
+							{#if fix.drill}
+								<Button href="/drills/{fix.drill}" variant="outline">Drill it</Button>
+							{/if}
+						</div>
+					</Tile>
+				</div>
+			{/if}
+		{/if}
+
 		{#if fb}
 			<h2 class="section">{fb.fixes.length ? 'What to work on next' : 'Nothing big to fix'}</h2>
 			<div class="fixes">
@@ -260,10 +306,12 @@
 								<button type="button" class="chip dark" onclick={() => showMe(f)}>Show me</button>
 							{/if}
 							{#if f.lesson}
-								<span class="chip" title="Lessons arrive in M6">Lesson: {humanize(f.lesson)}</span>
+								<a class="chip" href="/lessons/{f.lesson}?from={f.id}">
+									Lesson: {humanize(f.lesson)}
+								</a>
 							{/if}
 							{#if f.drill}
-								<span class="chip" title="Drills arrive in M6">Drill: {humanize(f.drill)}</span>
+								<a class="chip" href="/drills/{f.drill}">Drill: {humanize(f.drill)}</a>
 							{/if}
 						</div>
 					</Tile>
@@ -422,6 +470,16 @@
 		background: var(--pp-ground);
 		font: 600 13px var(--pp-font-body);
 		color: var(--pp-ink);
+	}
+	a.chip {
+		text-decoration: none;
+	}
+	a.chip:hover {
+		background: var(--pp-lilac);
+		color: var(--pp-ink);
+	}
+	.lilac-ink {
+		color: var(--pp-lilac-ink);
 	}
 	.chip.dark {
 		background: var(--pp-ink);

@@ -4,14 +4,19 @@
 	import { onMount } from 'svelte';
 	import { categories } from '#lib/categories.js';
 	import { liveAvailable } from '#lib/live.js';
+	import { attempts, streakDays, type Attempt } from '#lib/progress.js';
 
 	/** With Endless references every category is drawable. */
 	let live = $state(false);
 	onMount(() => {
+		history = attempts();
 		liveAvailable().then((ok) => (live = ok));
 	});
 
 	const days = [0, 1, 2, 3, 4, 5, 6];
+	let history = $state<Attempt[]>([]);
+	const last = $derived(history.at(-1));
+	const streak = $derived(streakDays(history));
 </script>
 
 <svelte:head>
@@ -48,15 +53,22 @@
 
 		<Tile tone="ink">
 			<span class="pp-eyebrow on-ink">Last score</span>
-			<span class="big">–</span>
-			<span class="note">Your first score shows up here after you submit a drawing.</span>
+			{#if last}
+				<span class="big">{last.score.toFixed(1)}</span>
+				<span class="note">
+					{last.title ?? last.category} · <a href="/progress">See progress →</a>
+				</span>
+			{:else}
+				<span class="big">–</span>
+				<span class="note">Your first score shows up here after you submit a drawing.</span>
+			{/if}
 		</Tile>
 
 		<Tile tone="yellow">
 			<span class="pp-eyebrow ink">Streak</span>
-			<span class="big">0<small> days</small></span>
+			<span class="big">{streak}<small> {streak === 1 ? 'day' : 'days'}</small></span>
 			<div class="streak" aria-hidden="true">
-				{#each days as d (d)}<span></span>{/each}
+				{#each days as d (d)}<span class:on={d < Math.min(streak, 7)}></span>{/each}
 			</div>
 		</Tile>
 
@@ -79,13 +91,19 @@
 			<a
 				class="cat"
 				class:dark={c.dark}
-				href={c.available || live ? `/practice/${c.id}` : undefined}
-				aria-disabled={!c.available && !live}
+				href={c.id === 'fundamentals'
+					? '/drills'
+					: c.available || live
+						? `/practice/${c.id}`
+						: undefined}
+				aria-disabled={c.id !== 'fundamentals' && !c.available && !live}
 			>
 				<span class="dot" style="background: {c.color}"></span>
 				<span class="cat-text">
 					<span class="cat-name">{c.name}</span>
-					<span class="cat-blurb">{c.available || live ? c.blurb : 'Coming soon'}</span>
+					<span class="cat-blurb">
+						{c.id === 'fundamentals' || c.available || live ? c.blurb : 'Coming soon'}
+					</span>
 				</span>
 			</a>
 		{/each}
@@ -165,6 +183,7 @@
 		margin-top: auto;
 	}
 	.big small {
+		margin-left: 6px;
 		font-size: 28px;
 		letter-spacing: 0;
 	}
@@ -185,6 +204,9 @@
 	.streak {
 		display: flex;
 		gap: 6px;
+	}
+	.streak span.on {
+		background: var(--pp-ink);
 	}
 	.streak span {
 		flex: 1;
