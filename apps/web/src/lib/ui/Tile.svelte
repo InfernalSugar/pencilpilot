@@ -10,6 +10,7 @@
 		as = 'div',
 		href,
 		label,
+		area,
 		children
 	}: {
 		tone?: Tone;
@@ -18,10 +19,14 @@
 		as?: 'div' | 'section' | 'article';
 		href?: string;
 		label?: string;
+		/** Place the tile by `grid-area` name instead of span/rows. */
+		area?: string;
 		children: Snippet;
 	} = $props();
 
-	const style = $derived(`grid-column: span ${span}; grid-row: span ${rows};`);
+	const style = $derived(
+		area ? `grid-area: ${area};` : `grid-column: span ${span}; grid-row: span ${rows};`
+	);
 </script>
 
 {#if href}
@@ -68,5 +73,13 @@
 	.link:hover {
 		transform: translateY(-4px) rotate(-0.6deg);
 		color: inherit;
+	}
+	.link.tone-ink,
+	.link.tone-ink:hover {
+		color: var(--pp-on-ink);
+	}
+	.link.tone-accent,
+	.link.tone-accent:hover {
+		color: #fff;
 	}
 </style>
