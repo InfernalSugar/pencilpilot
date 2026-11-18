@@ -207,10 +207,15 @@ export interface Feedback {
 	praise: FeedbackItem | null;
 }
 
-/** Ranked fixes (max 3, one per skill) + praise for a graded drawing. */
-export async function getFeedback(g: Grade, seed: number): Promise<Feedback> {
+/**
+ * Ranked fixes (max 3, one per skill) + praise for a graded drawing.
+ * `category` is the site category (e.g. "cartoon"), which can differ from the
+ * grader category used for weights (cartoon is graded like anime); feedback
+ * rules are written per site category.
+ */
+export async function getFeedback(g: Grade, seed: number, category?: string): Promise<Feedback> {
 	await load();
-	return wasmFeedback(g.measurements, g.category, seed >>> 0) as Feedback;
+	return wasmFeedback(g.measurements, category ?? g.category, seed >>> 0) as Feedback;
 }
 
 /** "measuring-with-units" → "Measuring with units" */
