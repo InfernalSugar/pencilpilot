@@ -15,6 +15,7 @@
 	} from '#lib/progress.js';
 	import { ruleById } from '#lib/rules.js';
 	import { humanize } from '#lib/grader.js';
+	import { SYNCED } from '#lib/sync.js';
 
 	interface DrillResult {
 		id: string;
@@ -29,7 +30,7 @@
 	let range = $state<'week' | 'month' | 'all'>('month');
 	let loaded = $state(false);
 
-	onMount(() => {
+	function load() {
 		history = attempts();
 		pics = thumbs();
 		try {
@@ -38,6 +39,12 @@
 			drills = [];
 		}
 		loaded = true;
+	}
+	onMount(() => {
+		load();
+		// a signed-in browser may receive synced history a moment later
+		window.addEventListener(SYNCED, load);
+		return () => window.removeEventListener(SYNCED, load);
 	});
 
 	const avg30 = $derived(averageScore(history, 30));

@@ -6,6 +6,7 @@
  * targets are plain geometry and scoring is the maths grader plus the stroke
  * metrics in `drill-metrics.ts` (see docs/planning/CONTENT_GUIDE.md → Drills).
  */
+import { queueSync } from './sync';
 import type { GradeWeights } from './grader';
 
 export type DrillKind =
@@ -797,6 +798,7 @@ export function saveDrillResult(
 	try {
 		const list = [...loadDrillResults(storage), r].slice(-200);
 		storage.setItem(DRILLS_KEY, JSON.stringify(list));
+		queueSync();
 	} catch {
 		/* storage unavailable: the summary still shows, nothing is kept */
 	}

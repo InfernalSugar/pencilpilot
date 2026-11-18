@@ -5,12 +5,16 @@
 	import { categories } from '#lib/categories.js';
 	import { liveAvailable } from '#lib/live.js';
 	import { attempts, streakDays, type Attempt } from '#lib/progress.js';
+	import { SYNCED } from '#lib/sync.js';
 
 	/** With Endless references every category is drawable. */
 	let live = $state(false);
 	onMount(() => {
 		history = attempts();
+		const reload = () => (history = attempts());
+		window.addEventListener(SYNCED, reload);
 		liveAvailable().then((ok) => (live = ok));
+		return () => window.removeEventListener(SYNCED, reload);
 	});
 
 	const days = [0, 1, 2, 3, 4, 5, 6];
