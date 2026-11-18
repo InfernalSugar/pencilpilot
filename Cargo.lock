@@ -120,7 +120,9 @@ name = "pencilpilot-grader-wasm"
 version = "0.1.0"
 dependencies = [
  "pencilpilot-grader",
+ "serde",
  "serde-wasm-bindgen",
+ "serde_json",
  "wasm-bindgen",
 ]
 
