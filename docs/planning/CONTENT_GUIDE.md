@@ -38,6 +38,30 @@ variants = ["…{n}%…", "…"]     # 2–4 wordings; picked per attempt so rep
 ## Lessons and drills (`content/lessons/`)
 Short (2–3 minute read), picture-first, ending with a drill the site can grade.
 
+One file per lesson, `content/lessons/<id>.md` (the id is what `lesson = "…"` in rules.toml points to):
+```markdown
+---
+title: Measuring with units
+skill: proportions          # placement | outline | silhouette | tone | line_confidence | proportions
+minutes: 3
+summary: One line for the lesson cards.
+learn:                      # exactly 3 bullets for the "You'll learn" tile
+  - …
+drill: head-units           # a drill id used in rules.toml
+next: finding-angles        # another lesson id ("Up next")
+---
+
+## Step title
+Short paragraphs. 3–5 steps in all.
+```
+- Every lesson needs at least one **hand-drawn inline SVG** diagram: `role="img"`, a descriptive
+  `aria-label`, `stroke="currentColor"`, and **no blank lines inside the `<svg>`** (Markdown would
+  end the HTML block). Theme classes: `accent` (coral stroke), `faint` (muted stroke),
+  `fill-yellow`, `fill-lilac`, `fill-paper`, `label` (text). Each step shows its own diagram, or
+  the latest one before it.
+- No `<script>`, event handlers or `javascript:` links (they are stripped, and a test fails on them).
+- `src/lib/lessons.test.ts` checks ids, drill/next links, step counts and diagrams.
+
 ## References (how to add pictures)
 1. **Fetch candidates** (needs `PIXABAY_API_KEY` in the git-ignored `.env`):
    `pnpm refs fetch animals "horse" --count 8` (`--type illustration` or `--type vector` for anime/cartoon).
