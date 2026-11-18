@@ -9,5 +9,7 @@ describe('rules (UI view of content/feedback/rules.toml)', () => {
 		expect(r.drill).toBe('block-in-boxes');
 		expect(r.title).toBe('Your drawing is too big');
 		for (const x of rules) expect(x.title).not.toMatch(/[{}]/);
+		expect(ruleById('wrong-width')!.title).toBe('It’s too wide or narrow');
+		expect(ruleById('off-sideways')!.title).toBe('It sits too far right or left');
 	});
 });

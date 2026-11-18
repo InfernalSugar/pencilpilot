@@ -28,6 +28,10 @@ export const rules: RuleInfo[] = rulesToml
 	.slice(1)
 	.map((b) => {
 		const id = field(b, 'id')!;
+		// No direction is known out of context: "wide or narrow", "left or right"…
+		const pos = field(b, 'dir_pos');
+		const neg = field(b, 'dir_neg');
+		const dir = pos && neg ? `${pos} or ${neg}` : 'off';
 		return {
 			id,
 			skill: field(b, 'skill') ?? '',
@@ -35,7 +39,7 @@ export const rules: RuleInfo[] = rulesToml
 			drill: field(b, 'drill'),
 			title: (tipTitles.get(id) ?? id)
 				.replace(/\{n\}%?\s*/g, '')
-				.replace(/\{dir\}/g, 'off')
+				.replace(/\{dir\}/g, dir)
 				.replace(/\s+/g, ' ')
 				.trim()
 		};
