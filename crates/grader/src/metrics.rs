@@ -23,6 +23,20 @@ pub(crate) fn mean_distance(pts: &Mask, dt: &Plane) -> Option<f32> {
     (n > 0).then(|| s / n as f32)
 }
 
+/// Like [`mean_distance`], each point weighted by `weight` (e.g. edge
+/// strength, so missing a strong edge costs more than missing a faint one).
+pub(crate) fn weighted_mean_distance(pts: &Mask, weight: &Plane, dt: &Plane) -> Option<f32> {
+    let (mut s, mut n) = (0.0f32, 0.0f32);
+    for (i, &b) in pts.d.iter().enumerate() {
+        if b {
+            let k = weight.d[i].max(1e-3);
+            s += k * dt.d[i].min(CAP);
+            n += k;
+        }
+    }
+    (n > 0.0).then(|| s / n)
+}
+
 pub(crate) fn sigma_px(w: usize, h: usize) -> f32 {
     OUTLINE_SIGMA * ((w * w + h * h) as f32).sqrt()
 }
@@ -187,5 +201,34 @@ pub(crate) fn robust_bbox(pts: &[(f32, f32)]) -> Option<(f32, f32, f32, f32)> {
     let (x0, x1) = q(pts.iter().map(|p| p.0).collect(), 0.005, 0.995);
     let (y0, y1) = q(pts.iter().map(|p| p.1).collect(), 0.005, 0.995);
     // A pixel has extent 1: grow by half a pixel each side.
+    Some((x0 - 0.5, y0 - 0.5, x1 + 0.5, y1 + 0.5))
+}
+
+/// Bounding box of weighted points, from mass quantiles: each side is
+/// where `trim` of the total weight lies beyond it. With edge strength as
+/// weight, a few faint stray edges (background texture, a speck) can't
+/// stretch the box. `(x0, y0, x1, y1)`.
+pub(crate) fn mass_bbox(pts: &[(f32, f32, f32)], trim: f32) -> Option<(f32, f32, f32, f32)> {
+    let total: f32 = pts.iter().map(|p| p.2.max(0.0)).sum();
+    if pts.is_empty() || total <= 0.0 {
+        return None;
+    }
+    let q = |mut v: Vec<(f32, f32)>| {
+        v.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let at = |q: f32| {
+            let target = q * total;
+            let mut acc = 0.0;
+            for &(x, w) in &v {
+                acc += w.max(0.0);
+                if acc >= target {
+                    return x;
+                }
+            }
+            v[v.len() - 1].0
+        };
+        (at(trim), at(1.0 - trim))
+    };
+    let (x0, x1) = q(pts.iter().map(|p| (p.0, p.2)).collect());
+    let (y0, y1) = q(pts.iter().map(|p| (p.1, p.2)).collect());
     Some((x0 - 0.5, y0 - 0.5, x1 + 0.5, y1 + 0.5))
 }
