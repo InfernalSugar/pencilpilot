@@ -476,3 +476,16 @@ fn grading_800x600_is_fast() {
     eprintln!("grade 800x600: {ms:.1} ms");
     assert!(ms < 300.0, "{ms} ms");
 }
+
+#[test]
+fn faint_pencil_lines_count_as_ink() {
+    // A light-grey circle (like a mouse-drawn pencil stroke) must not read as blank.
+    let mut d = white();
+    let pts = ellipse_points((400.0, 300.0), 150.0, 150.0, 0.0, 0.0);
+    for w in pts.windows(2) {
+        line(&mut d, w[0], w[1], 2.0, 215);
+    }
+    let g = run("faint circle", &d, &disc_ref());
+    assert!(!g.flags.iter().any(|f| f == "blank"), "{:?}", g.flags);
+    assert!(g.score >= 8.0, "{}", g.score);
+}

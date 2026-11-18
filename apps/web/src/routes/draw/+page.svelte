@@ -79,7 +79,8 @@
 			referenceId: reference?.id ?? null,
 			strokes: d.strokes.length,
 			points: d.strokes.reduce((n, s) => n + s.points.length, 0),
-			brushes: [...new Set(d.strokes.map((s) => s.brushId))]
+			brushes: [...new Set(d.strokes.map((s) => s.brushId))],
+			strokeData: d.strokes
 		});
 		await goto('/results');
 	}

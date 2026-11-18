@@ -58,7 +58,8 @@ test('draw, undo, redo, switch brush, submit', async ({ page }) => {
 	await page.getByRole('button', { name: /Submit drawing/ }).click();
 	await expect(page).toHaveURL(/\/results$/);
 	await expect(page.getByRole('img', { name: 'Your submitted drawing' })).toBeVisible();
-	await expect(page.getByText('Brushes used')).toBeVisible();
+	await expect(page.getByText('Time · strokes')).toBeVisible();
+	await expect(page.getByText(/Free drawings aren/)).toBeVisible();
 });
 
 test('brush search finds brushes across categories', async ({ page }) => {
