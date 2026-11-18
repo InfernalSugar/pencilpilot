@@ -73,3 +73,12 @@ test('progress API needs a session, and exports require sign-in', async ({ reque
 	expect((await request.get('/api/progress')).status()).toBe(401);
 	expect((await request.get('/account/export')).status()).toBe(401);
 });
+
+test('tip votes: guests can vote, bad votes are rejected', async ({ request }) => {
+	const ok = await request.post('/api/tip-vote', {
+		data: { ruleId: 'too-big', vote: 1, category: 'animals' }
+	});
+	expect(ok.status()).toBe(200);
+	const bad = await request.post('/api/tip-vote', { data: { ruleId: 'too-big', vote: 5 } });
+	expect(bad.status()).toBe(400);
+});

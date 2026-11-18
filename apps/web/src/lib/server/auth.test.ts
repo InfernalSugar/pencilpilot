@@ -112,3 +112,25 @@ describe('progress sync', () => {
 		expect(snapshot(db, id)).toEqual({ attempts: [], drills: [], thumbs: {} });
 	});
 });
+
+describe('tip votes', async () => {
+	const { cleanVote, recordVote, voteStats, wilson } = await import('./tip-votes');
+	it('validates, de-duplicates per signed-in attempt and ranks by Wilson bound', async () => {
+		const db = openDb(':memory:');
+		const id = await createPasswordUser(db, 'v@b.co', 'longenough');
+		expect(cleanVote({ ruleId: 'Bad Id!', vote: 1 })).toBeNull();
+		expect(cleanVote({ ruleId: 'too-big', vote: 2 })).toBeNull();
+		const v = cleanVote({ ruleId: 'too-big', vote: -1, attemptAt: 5, category: 'animals' })!;
+		recordVote(db, v, id);
+		recordVote(db, { ...v, vote: 1 }, id); // changed mind → replaces
+		recordVote(db, { ruleId: 'too-big', vote: -1 }, null); // guest
+		for (let i = 0; i < 8; i++) recordVote(db, { ruleId: 'shaky-lines', vote: 1 }, null);
+		const s = voteStats(db);
+		expect(s.find((r) => r.ruleId === 'too-big')).toMatchObject({ up: 1, down: 1 });
+		expect(s[0].ruleId).toBe('too-big'); // least helpful first
+		expect(wilson(0, 0)).toBe(0);
+		expect(wilson(10, 10)).toBeGreaterThan(wilson(1, 1));
+		deleteUser(db, id);
+		expect(voteStats(db).find((r) => r.ruleId === 'too-big')).toMatchObject({ up: 0, down: 1 });
+	});
+});
