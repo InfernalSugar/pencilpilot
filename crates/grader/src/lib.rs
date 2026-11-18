@@ -5,19 +5,28 @@
 //! returns a 1–10 score plus named measurements for the feedback engine.
 //!
 //! Pipeline (see [`grade_with`]):
-//! 1. **Prep** — downsample to ≈200 px on the long side. Drawing: ink mask
-//!    (darker than [`edges::INK_THRESHOLD`]) and its outline. Reference:
-//!    Canny-style edge map (the reference is a photo or illustration, so we
-//!    compare the student's lines to its *edges*).
-//! 2. **Placement & proportion** — bounding boxes and centres, before
-//!    alignment.
-//! 3. **Auto-alignment** — similarity transform from moments, refined by a
+//! 1. **Prep** — downsample to ≈200 px on the long side. Reference:
+//!    Canny-style edge maps (the reference is a photo or illustration, so we
+//!    compare the student's lines to its *edges*): a *strict* map of the
+//!    strongest edges and a denser *detail* map that adds clearly visible
+//!    detail (fur, folds, features). A letterbox frame around the picture is
+//!    ignored in both images. Drawing: ink mask (darker than
+//!    [`edges::INK_THRESHOLD`]), its outline, and `shading` (share of ink in
+//!    filled areas).
+//! 2. **Auto-alignment** — similarity transform from moments, refined by a
 //!    bounded search (scale ±15 %, rotation ±10°, shift).
-//! 4. **outline** — symmetric chamfer distance → `exp(-d/σ)`.
+//! 3. **Placement & proportion** — the drawing's box as drawn vs the box of
+//!    the part of the reference it depicts (edge-energy weighted, trimmed),
+//!    so background clutter can't stretch it.
+//! 4. **outline** — chamfer distance → `exp(-d/σ)`: precision against the
+//!    detail map (correct detail is not "extra"), recall against the strict
+//!    map weighted by edge strength (missing a strong edge costs more).
 //! 5. **silhouette** — IoU of filled, dilated shapes.
 //! 6. **grid** — outline similarity per cell (4×3).
 //! 7. **tone** — correlation of heavily blurred tone maps + contrast ratio.
 //! 8. **ssim** — structural similarity on the aligned low-res images.
+//!    Tone and SSIM count in proportion to `shading`: pure line art has no
+//!    tone to compare, so it is not marked down for it.
 //! 9. **line_confidence** — stroke smoothness, retraces, speed (optional).
 //! 10. **keypoints** — Procrustes fit of tapped points (optional).
 //!
@@ -46,6 +55,15 @@ pub const WORK_SIZE: u32 = 200;
 /// Grid used for the per-region comparison.
 pub const GRID_COLS: usize = 4;
 pub const GRID_ROWS: usize = 3;
+/// Share of ink in filled areas (`shading`) at or below which a drawing
+/// counts as pure line art, and from which tone counts in full.
+const SHADING_NONE: f32 = 0.10;
+const SHADING_FULL: f32 = 0.35;
+/// Reference boxes ignore this share of edge energy on each side.
+const REF_BOX_TRIM: f32 = 0.02;
+/// Reference edges within this many outline σ of the aligned drawing are
+/// the part of the picture the drawing depicts (for placement).
+const SUBJECT_RADIUS: f32 = 3.0;
 /// Fewer low-res ink pixels than this = blank drawing.
 const BLANK_INK: usize = 4;
 
@@ -105,7 +123,7 @@ pub const MEASUREMENT_DOCS: &[(&str, &str)] = &[
     ),
     (
         "scale_ratio",
-        "raw: drawing bbox size ÷ reference bbox size (1 = same)",
+        "raw: drawing bbox size ÷ bbox of the part of the reference it depicts (1 = same)",
     ),
     (
         "aspect_error",
@@ -122,11 +140,11 @@ pub const MEASUREMENT_DOCS: &[(&str, &str)] = &[
     ),
     (
         "outline_precision",
-        "0–1: drawn lines lie on reference edges (low = extra/misplaced lines)",
+        "0–1: drawn lines lie on reference edges, detail included (low = extra/misplaced lines)",
     ),
     (
         "outline_recall",
-        "0–1: reference edges are covered by the drawing (low = missing parts)",
+        "0–1: the strongest reference edges are covered by the drawing, weighted by edge strength (low = missing parts)",
     ),
     (
         "outline_distance",
@@ -153,6 +171,10 @@ pub const MEASUREMENT_DOCS: &[(&str, &str)] = &[
     (
         "ink_coverage",
         "raw: fraction of the canvas covered by ink (working resolution)",
+    ),
+    (
+        "shading",
+        "raw 0–1: share of the ink in filled/shaded areas (0 = pure line art); tone and ssim count in proportion",
     ),
     (
         "line_confidence",
@@ -322,12 +344,18 @@ pub fn grade_with(
 
     // 1. Prep.
     let f = factor_for(drawing.width, drawing.height, WORK_SIZE);
+    let ref_tone = downsample_mean(reference, f);
+    let edges::ReferenceEdges {
+        strict: ref_edges,
+        detail: ref_detail,
+        strength: ref_strength,
+        frame,
+    } = edges::reference_edge_maps(&ref_tone);
+    let drawing = &without_frame(drawing, &frame, f);
     let ink = edges::ink_mask(&downsample_min(drawing, f));
     let (w, h) = (ink.w, ink.h);
     let line = edges::ink_outline(&ink);
-    let ref_tone = downsample_mean(reference, f);
-    let ref_edges = edges::reference_edges(&ref_tone);
-    let dt_ref = distance_transform(&ref_edges);
+    let dt_detail = distance_transform(&ref_detail);
     let ref_pts = ref_edges.points();
     if ref_pts.is_empty() {
         flags.push("reference_blank".to_string());
@@ -339,20 +367,64 @@ pub fn grade_with(
         w: (b.2 - b.0) * f as f32 / cw,
         h: (b.3 - b.1) * f as f32 / ch,
     };
-    let ref_bbox = metrics::robust_bbox(&ref_pts);
+    // Edge energy (strength²) per reference edge pixel: boxes are taken
+    // over edge mass, so faint clutter weighs little.
+    let energy = img::Plane {
+        w,
+        h,
+        d: ref_strength.d.iter().map(|v| v * v).collect(),
+    };
+    let whole_ref_bbox = metrics::mass_bbox(&weighted(&ref_detail, Some(&energy)), REF_BOX_TRIM);
 
     let ink_count = ink.count();
     if ink_count < BLANK_INK {
         flags.push("blank".to_string());
         let mut g = blank_grade(opts.category, &mut out, &mut flags);
-        g.bbox.reference = ref_bbox.map(to_bbox);
+        g.bbox.reference = whole_ref_bbox.map(to_bbox);
         return Ok(g);
     }
     let line_pts = line.points();
     let dt_line = distance_transform(&line);
+    let shading = ink
+        .d
+        .iter()
+        .zip(&line.d)
+        .filter(|(a, b)| **a && !**b)
+        .count() as f32
+        / ink_count as f32;
+    let shading_weight = ((shading - SHADING_NONE) / (SHADING_FULL - SHADING_NONE)).clamp(0.0, 1.0);
 
-    // 2. Placement & proportion (before alignment).
+    // 2. Alignment.
+    let al = align::align(&line_pts, &ref_pts, &dt_line, &dt_detail);
+    if al.clamped {
+        flags.push("alignment_at_limit".to_string());
+    }
+    let full_t = al.t.scaled(f as f32);
+    let aligned = align::warp(drawing, &full_t);
+    let a_ink = edges::ink_mask(&downsample_min(&aligned, f));
+    let a_line = edges::ink_outline(&a_ink);
+    let a_tone = downsample_mean(&aligned, f);
+    let dt_a_line = distance_transform(&a_line);
+    let sigma = metrics::sigma_px(w, h);
+
+    // 3. Placement & proportion: the drawing's box as drawn (before
+    // alignment) vs the box of the part of the reference it depicts, i.e.
+    // the reference edges near the aligned drawing. Background clutter the
+    // student rightly left out can't stretch the reference box.
     let draw_bbox = metrics::robust_bbox(&line_pts);
+    let near = SUBJECT_RADIUS * sigma;
+    let depicted = img::Mask {
+        w,
+        h,
+        d: ref_detail
+            .d
+            .iter()
+            .zip(&dt_a_line.d)
+            .map(|(&e, &d)| e && d <= near)
+            .collect(),
+    };
+    let ref_bbox =
+        metrics::mass_bbox(&weighted(&depicted, Some(&energy)), REF_BOX_TRIM).or(whole_ref_bbox);
     let placement = match (draw_bbox.map(to_bbox), ref_bbox.map(to_bbox)) {
         (Some(d), Some(r)) => {
             let size = |b: &BBox| (b.w * cw * b.h * ch).max(1.0).sqrt();
@@ -378,23 +450,11 @@ pub fn grade_with(
         }
     };
 
-    // 3. Alignment.
-    let al = align::align(&line_pts, &ref_pts, &dt_line, &dt_ref);
-    if al.clamped {
-        flags.push("alignment_at_limit".to_string());
-    }
-    let full_t = al.t.scaled(f as f32);
-    let aligned = align::warp(drawing, &full_t);
-    let a_ink = edges::ink_mask(&downsample_min(&aligned, f));
-    let a_line = edges::ink_outline(&a_ink);
-    let a_tone = downsample_mean(&aligned, f);
-    let dt_a_line = distance_transform(&a_line);
-
     // 4. Outline.
-    let sigma = metrics::sigma_px(w, h);
     let diag = ((w * w + h * h) as f32).sqrt();
-    let fwd = metrics::mean_distance(&a_line, &dt_ref).unwrap_or(metrics::CAP);
-    let bwd = metrics::mean_distance(&ref_edges, &dt_a_line).unwrap_or(metrics::CAP);
+    let fwd = metrics::mean_distance(&a_line, &dt_detail).unwrap_or(metrics::CAP);
+    let bwd = metrics::weighted_mean_distance(&ref_edges, &ref_strength, &dt_a_line)
+        .unwrap_or(metrics::CAP);
     let d = 0.5 * (fwd + bwd);
     let outline = (-d / sigma).exp();
     out.push("outline", outline);
@@ -408,7 +468,7 @@ pub fn grade_with(
 
     // 6. Grid.
     let gs = metrics::grid_scores(
-        &a_line, &ref_edges, &dt_a_line, &dt_ref, GRID_COLS, GRID_ROWS,
+        &a_line, &ref_edges, &dt_a_line, &dt_detail, GRID_COLS, GRID_ROWS,
     );
     let content: Vec<(usize, f32)> = gs
         .cells
@@ -456,6 +516,7 @@ pub fn grade_with(
     let ssim = metrics::ssim(&a_tone, &ref_tone, &img::dilate(&content, 0.04 * diag));
     out.push("ssim", ssim);
     out.push("ink_coverage", ink_count as f32 / (w * h) as f32);
+    out.push("shading", shading);
 
     // 9. Strokes.
     let mut parts: Vec<(f32, f32)> = vec![
@@ -463,8 +524,8 @@ pub fn grade_with(
         (weights.outline, outline),
         (weights.silhouette, silhouette),
         (weights.grid, grid_mean),
-        (weights.tone, tone.similarity),
-        (weights.ssim, ssim),
+        (weights.tone * shading_weight, tone.similarity),
+        (weights.ssim * shading_weight, ssim),
     ];
     if let Some(s) = stroke_metrics(&opts.strokes, drawing.width, drawing.height) {
         out.push("line_confidence", s.line_confidence);
@@ -517,11 +578,48 @@ pub fn grade_with(
     })
 }
 
+/// Set pixels of `m` as `(x, y, weight)` (pixel centres; weight 1 without
+/// a weight plane).
+fn weighted(m: &img::Mask, weight: Option<&img::Plane>) -> Vec<(f32, f32, f32)> {
+    let mut out = Vec::new();
+    for y in 0..m.h {
+        for x in 0..m.w {
+            let i = y * m.w + x;
+            if m.d[i] {
+                out.push((
+                    x as f32 + 0.5,
+                    y as f32 + 0.5,
+                    weight.map_or(1.0, |p| p.d[i]),
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// The drawing with the reference's letterbox frame band painted white
+/// (see [`edges::letterbox_frame`]).
+fn without_frame<'a>(drawing: &'a Gray, frame: &img::Mask, f: usize) -> std::borrow::Cow<'a, Gray> {
+    if !frame.d.iter().any(|&b| b) {
+        return std::borrow::Cow::Borrowed(drawing);
+    }
+    let mut g = drawing.clone();
+    let w = g.width as usize;
+    for (i, p) in g.pixels.iter_mut().enumerate() {
+        let (x, y) = ((i % w) / f, (i / w) / f);
+        if frame.d[y * frame.w + x] {
+            *p = 255;
+        }
+    }
+    std::borrow::Cow::Owned(g)
+}
+
 fn blank_grade(category: Category, out: &mut Out, flags: &mut Vec<String>) -> Grade {
     for name in ["placement", "outline", "silhouette", "grid", "tone", "ssim"] {
         out.push(name, 0.0);
     }
     out.push("ink_coverage", 0.0);
+    out.push("shading", 0.0);
     Grade {
         score: 1.0,
         similarity: 0.0,

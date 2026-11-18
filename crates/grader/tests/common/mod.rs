@@ -230,3 +230,88 @@ pub fn scribble(seed: u64, n: usize) -> Gray {
     }
     g
 }
+
+/// Smooth value noise in -1..1 with features about `cell` px across.
+pub fn value_noise(x: f32, y: f32, cell: f32, seed: u32) -> f32 {
+    let (gx, gy) = (x / cell, y / cell);
+    let (x0, y0) = (gx.floor(), gy.floor());
+    let (tx, ty) = (gx - x0, gy - y0);
+    let s = |t: f32| t * t * (3.0 - 2.0 * t);
+    let (sx, sy) = (s(tx), s(ty));
+    let n = |dx: i32, dy: i32| noise(x0 as i32 + dx, y0 as i32 + dy, seed);
+    let a = n(0, 0) + (n(1, 0) - n(0, 0)) * sx;
+    let b = n(0, 1) + (n(1, 1) - n(0, 1)) * sx;
+    a + (b - a) * sy
+}
+
+/// Photo-like background over the whole canvas: soft light falloff,
+/// blotchy mid-scale texture (out-of-focus foliage) and grain.
+pub fn textured_background(g: &mut Gray, seed: u32) {
+    for y in 0..H as i32 {
+        for x in 0..W as i32 {
+            let (fx, fy) = (x as f32, y as f32);
+            let v = 195.0 - 0.03 * fy
+                + 14.0 * value_noise(fx, fy, 60.0, seed)
+                + 7.0 * value_noise(fx, fy, 14.0, seed + 1)
+                + 4.0 * noise(x, y, seed + 2);
+            put(g, x, y, v.clamp(0.0, 255.0) as u8);
+        }
+    }
+}
+
+const G0: f32 = 120.0;
+const G1: f32 = 40.0;
+/// Busy background: many short, mid-contrast strokes all over the canvas
+/// (grass, twigs), on top of [`textured_background`].
+pub fn busy_background(g: &mut Gray, seed: u64) {
+    textured_background(g, seed as u32);
+    let mut r = Lcg(seed);
+    for _ in 0..260 {
+        let p = (r.next() * W as f32, r.next() * H as f32);
+        let a = r.next() * std::f32::consts::TAU;
+        let len = 15.0 + 30.0 * r.next();
+        let q = (p.0 + len * a.cos(), p.1 + len * a.sin());
+        line(g, p, q, 2.0, (G0 + G1 * r.next()) as u8);
+    }
+}
+
+/// Inner detail lines of [`shaded_subject`] (fold / fur / feature lines),
+/// as polylines.
+pub fn subject_details() -> Vec<Vec<(f32, f32)>> {
+    let arc = |cx: f32, cy: f32, r: f32, a0: f32, a1: f32| -> Vec<(f32, f32)> {
+        (0..=24)
+            .map(|i| {
+                let a = a0 + (a1 - a0) * i as f32 / 24.0;
+                (cx + r * a.cos(), cy + r * a.sin())
+            })
+            .collect()
+    };
+    vec![
+        arc(400.0, 300.0, 95.0, 0.3, 1.9),
+        arc(400.0, 300.0, 60.0, 3.4, 4.9),
+        vec![(340.0, 240.0), (370.0, 250.0), (395.0, 275.0)],
+        vec![(430.0, 360.0), (455.0, 330.0), (470.0, 290.0)],
+    ]
+}
+
+/// Photo-like subject: shaded disc (r 150 at the centre) with darker inner
+/// detail lines of moderate contrast (folds, fur), on `g`.
+pub fn shaded_subject(g: &mut Gray) {
+    shaded_disc(g, (400.0, 300.0), 150.0, 4);
+    for d in subject_details() {
+        for w in d.windows(2) {
+            // darker than the disc around it, but much fainter than its rim
+            line(g, w[0], w[1], 5.0, 55);
+        }
+    }
+}
+
+/// A careful line copy of [`shaded_subject`]: outline plus detail lines.
+pub fn subject_line_art() -> Gray {
+    let mut d = white();
+    circle(&mut d, (400.0, 300.0), 150.0, 3.0);
+    for p in subject_details() {
+        polyline(&mut d, &p, 3.0, false);
+    }
+    d
+}

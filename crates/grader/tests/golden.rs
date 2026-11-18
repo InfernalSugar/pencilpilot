@@ -431,7 +431,9 @@ fn output_serialises_to_camel_case_json() {
 #[test]
 fn category_weights_change_the_score() {
     use grader::Category;
-    let (d, r) = (circle_drawing((400.0, 300.0), 150.0), disc_ref());
+    // A shaded drawing with the light coming from the wrong side: the
+    // outline is right, the tone is not. Tone-heavy categories rate it lower.
+    let (d, r) = (two_tone_disc(false), two_tone_disc(true));
     let score = |category| {
         grade_with(
             &d,
@@ -444,8 +446,50 @@ fn category_weights_change_the_score() {
         .unwrap()
         .similarity
     };
-    // Line art has no shading, so tone-heavy categories rate it lower.
     assert!(score(Category::Anime) > score(Category::Environment));
+}
+
+/// A disc (r 150, centred) shaded dark on one half and light on the other.
+fn two_tone_disc(dark_left: bool) -> Gray {
+    let mut g = white();
+    for y in 150..450 {
+        for x in 250..550 {
+            let (px, py) = (x as f32 + 0.5 - 400.0, y as f32 + 0.5 - 300.0);
+            if px * px + py * py <= 150.0 * 150.0 {
+                let dark = (px < 0.0) == dark_left;
+                g.pixels[y * 800 + x] = if dark { 50 } else { 190 };
+            }
+        }
+    }
+    g
+}
+
+/// M8-T01: tone counts in proportion to how much the student shaded. Pure
+/// line art is not marked down for having no shading, but shading drawn the
+/// wrong way round is.
+#[test]
+fn tone_counts_in_proportion_to_shading() {
+    use grader::Category;
+    let r = two_tone_disc(true);
+    let opts = GradeOptions {
+        category: Category::RealLife,
+        ..Default::default()
+    };
+    let g = |d: &Gray, name: &str| {
+        let g = grade_with(d, &r, &opts).unwrap();
+        show(name, &g);
+        g
+    };
+    let line = g(&circle_drawing((400.0, 300.0), 150.0), "tone: line art");
+    let right = g(&r, "tone: shaded right");
+    let wrong = g(&two_tone_disc(false), "tone: shaded wrong");
+    let m = |g: &Grade, n: &str| g.measurement(n).unwrap();
+    assert!(m(&line, "shading") < 0.1, "{}", m(&line, "shading"));
+    assert!(m(&right, "shading") > 0.5, "{}", m(&right, "shading"));
+    assert!(m(&wrong, "tone") < m(&right, "tone") - 0.3);
+    assert!(line.score >= 8.5, "{}", line.score);
+    assert!(right.similarity > wrong.similarity + 0.05);
+    assert!(line.similarity > wrong.similarity);
 }
 
 #[test]
@@ -488,4 +532,67 @@ fn faint_pencil_lines_count_as_ink() {
     let g = run("faint circle", &d, &disc_ref());
     assert!(!g.flags.iter().any(|f| f == "blank"), "{:?}", g.flags);
     assert!(g.score >= 8.0, "{}", g.score);
+}
+
+/// M8-T01: a careful line copy of a shaded, photo-like reference (texture in
+/// the background, moderate-contrast detail lines inside the subject) is a
+/// good drawing. It has no shading, so tone must not drag it down, and its
+/// correct detail lines must not count as "extra".
+#[test]
+fn line_copy_of_shaded_textured_photo_scores_high() {
+    use grader::Category;
+    let mut r = white();
+    textured_background(&mut r, 5);
+    shaded_subject(&mut r);
+    let d = subject_line_art();
+    for category in [Category::RealLife, Category::Animals, Category::Anime] {
+        let g = grade_with(
+            &d,
+            &r,
+            &GradeOptions {
+                category,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        show(&format!("line copy of photo {category:?}"), &g);
+        assert!(g.score >= 8.0, "{category:?}: {}", g.score);
+        assert!(g.measurement("shading").unwrap() < 0.1);
+        assert!(g.measurement("outline_precision").unwrap() >= 0.8);
+    }
+    // The same copy without its detail lines is still decent but not better.
+    let mut outline_only = white();
+    circle(&mut outline_only, (400.0, 300.0), 150.0, 3.0);
+    let full = grade(&d, &r).unwrap();
+    let bare = run("outline only of photo", &outline_only, &r);
+    assert!(bare.similarity <= full.similarity + 0.01);
+}
+
+/// M8-T01: the subject drawn right, on a reference whose background is busy
+/// (grass, twigs): placement compares the subject, not the clutter.
+#[test]
+fn busy_reference_background_still_places_correctly() {
+    let mut r = white();
+    busy_background(&mut r, 11);
+    shaded_disc(&mut r, (400.0, 300.0), 150.0, 4);
+    let g = run(
+        "circle vs busy background",
+        &circle_drawing((400.0, 300.0), 150.0),
+        &r,
+    );
+    let m = |n: &str| g.measurement(n).unwrap();
+    assert!(m("placement") >= 0.85, "placement {}", m("placement"));
+    assert!((m("scale_ratio") - 1.0).abs() < 0.1, "{}", m("scale_ratio"));
+    assert!(m("offset_x").abs() < 0.03 && m("offset_y").abs() < 0.03);
+    assert!(g.score >= 7.5, "{}", g.score);
+    // Drawn small and off-centre on the same busy reference: placement sees it.
+    let off = run(
+        "small+shifted vs busy bg",
+        &circle_drawing((480.0, 340.0), 110.0),
+        &r,
+    );
+    let mo = |n: &str| off.measurement(n).unwrap();
+    assert!(mo("scale_ratio") < 0.85, "{}", mo("scale_ratio"));
+    assert!(mo("offset_x") > 0.07, "{}", mo("offset_x"));
+    assert!(mo("placement") < m("placement") - 0.3);
 }

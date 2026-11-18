@@ -45,13 +45,73 @@ pub(crate) fn ink_outline(ink: &Mask) -> Mask {
     }
 }
 
-/// Edge map of the reference (low-res tone plane, 0–255).
+/// Edge maps of the reference at two strictness levels.
+pub(crate) struct ReferenceEdges {
+    /// The strongest edges (hysteresis relative to the strongest edge): the
+    /// lines every copy is expected to contain. Used for recall.
+    pub strict: Mask,
+    /// Strict edges plus clearly visible detail (fur, folds, features):
+    /// lines a careful copy *may* contain. Used for precision, so correct
+    /// detail is not counted as "extra".
+    pub detail: Mask,
+    /// Non-maximum-suppressed gradient magnitude (0 off the edge ridges).
+    pub strength: Plane,
+    /// Band along a letterbox border (the picture's frame), empty if the
+    /// reference was not letterboxed.
+    pub frame: Mask,
+}
+
+/// Edge map of the reference (low-res tone plane, 0–255): the strict map.
 pub(crate) fn reference_edges(tone: &Plane) -> Mask {
+    reference_edge_maps(tone).strict
+}
+
+/// Thresholds of the strict map, relative to the strongest edge (with an
+/// absolute floor so flat or noisy-but-faint images give no edges).
+const STRICT_HIGH: f32 = 0.22;
+const STRICT_LOW: f32 = 0.4;
+/// Thresholds of the detail map.
+const DETAIL_HIGH: f32 = 0.10;
+const DETAIL_LOW: f32 = 0.5;
+
+/// Strict and detail edge maps of the reference.
+pub(crate) fn reference_edge_maps(tone: &Plane) -> ReferenceEdges {
     let (w, h) = (tone.w, tone.h);
-    let mut out = Mask::new(w, h);
     if w < 3 || h < 3 {
-        return out;
+        return ReferenceEdges {
+            strict: Mask::new(w, h),
+            detail: Mask::new(w, h),
+            strength: Plane::filled(w, h, 0.0),
+            frame: Mask::new(w, h),
+        };
     }
+    let thin = gradient_ridges(tone);
+    let (_, max) = thin.min_max();
+    let high = (STRICT_HIGH * max).max(6.0);
+    let mut strict = hysteresis(&thin, high, (STRICT_LOW * high).max(3.0));
+    let dhigh = (DETAIL_HIGH * max).max(6.0).min(high);
+    let mut detail = hysteresis(&thin, dhigh, (DETAIL_LOW * dhigh).max(3.0));
+    let frame = letterbox_frame(tone);
+    for m in [&mut strict, &mut detail] {
+        for (e, f) in m.d.iter_mut().zip(&frame.d) {
+            *e &= !*f;
+        }
+    }
+    for (e, s) in detail.d.iter_mut().zip(&strict.d) {
+        *e |= *s;
+    }
+    ReferenceEdges {
+        strict,
+        detail,
+        strength: thin,
+        frame,
+    }
+}
+
+/// Sobel gradient magnitude after a light blur, thinned to one-pixel ridges
+/// by non-maximum suppression.
+fn gradient_ridges(tone: &Plane) -> Plane {
+    let (w, h) = (tone.w, tone.h);
     let b = blur(tone, 1.0);
     let mut mag = Plane::filled(w, h, 0.0);
     let mut dir = vec![0u8; w * h];
@@ -97,11 +157,13 @@ pub(crate) fn reference_edges(tone: &Plane) -> Mask {
             }
         }
     }
-    let (_, max) = thin.min_max();
-    // Thresholds: relative to the strongest edges, never below an absolute
-    // floor so flat or noisy-but-faint images give no edges.
-    let high = (0.22 * max).max(6.0);
-    let low = (0.4 * high).max(3.0);
+    thin
+}
+
+/// Ridges ≥ `high`, grown along connected ridges ≥ `low`.
+fn hysteresis(thin: &Plane, high: f32, low: f32) -> Mask {
+    let (w, h) = (thin.w, thin.h);
+    let mut out = Mask::new(w, h);
     let mut stack: Vec<usize> = Vec::new();
     for (i, &m) in thin.d.iter().enumerate() {
         if m >= high {
@@ -125,26 +187,28 @@ pub(crate) fn reference_edges(tone: &Plane) -> Mask {
             }
         }
     }
-    suppress_letterbox(tone, &mut out);
     out
 }
 
 /// If the picture was letterboxed onto white, the border between the white
-/// bars and the picture is a strong straight edge no student should draw.
-/// Detect bars (all-white margin rows/columns ending in a row/column that
-/// is mostly non-white) and clear edges along that border.
-fn suppress_letterbox(tone: &Plane, edges: &mut Mask) {
+/// bars and the picture is a strong straight edge that is not part of the
+/// subject. Detect bars (all-white margin rows/columns ending in a
+/// row/column that is mostly non-white) and return a band along that
+/// border: its edges are ignored in the reference, and a student who traces
+/// the picture's frame is neither rewarded nor penalised for it.
+pub(crate) fn letterbox_frame(tone: &Plane) -> Mask {
     let (w, h) = (tone.w, tone.h);
+    let mut frame = Mask::new(w, h);
     let white = |v: f32| v >= 248.0;
     let row_white = |y: usize| (0..w).all(|x| white(tone.at(x, y)));
     let col_white = |x: usize| (0..h).all(|y| white(tone.at(x, y)));
     let row_solid = |y: usize| (0..w).filter(|&x| !white(tone.at(x, y))).count() * 10 >= w * 8;
     let col_solid = |x: usize| (0..h).filter(|&y| !white(tone.at(x, y))).count() * 10 >= h * 8;
     const BAND: usize = 2;
-    let clear_rows = |y0: usize, edges: &mut Mask| {
+    let rows = |y0: usize, frame: &mut Mask| {
         for y in y0.saturating_sub(BAND)..(y0 + BAND + 1).min(h) {
             for x in 0..w {
-                edges.d[y * w + x] = false;
+                frame.d[y * w + x] = true;
             }
         }
     };
@@ -152,18 +216,18 @@ fn suppress_letterbox(tone: &Plane, edges: &mut Mask) {
         && top >= 2
         && row_solid(top)
     {
-        clear_rows(top, edges);
+        rows(top, &mut frame);
     }
     if let Some(bot) = (0..h).rev().find(|&y| !row_white(y))
         && bot + 3 <= h
         && row_solid(bot)
     {
-        clear_rows(bot, edges);
+        rows(bot, &mut frame);
     }
-    let clear_cols = |x0: usize, edges: &mut Mask| {
+    let cols = |x0: usize, frame: &mut Mask| {
         for x in x0.saturating_sub(BAND)..(x0 + BAND + 1).min(w) {
             for y in 0..h {
-                edges.d[y * w + x] = false;
+                frame.d[y * w + x] = true;
             }
         }
     };
@@ -171,14 +235,15 @@ fn suppress_letterbox(tone: &Plane, edges: &mut Mask) {
         && left >= 2
         && col_solid(left)
     {
-        clear_cols(left, edges);
+        cols(left, &mut frame);
     }
     if let Some(right) = (0..w).rev().find(|&x| !col_white(x))
         && right + 3 <= w
         && col_solid(right)
     {
-        clear_cols(right, edges);
+        cols(right, &mut frame);
     }
+    frame
 }
 
 #[cfg(test)]

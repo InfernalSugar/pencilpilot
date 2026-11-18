@@ -65,6 +65,7 @@ export type MeasurementName =
 	| 'contrast_ratio'
 	| 'ssim'
 	| 'ink_coverage'
+	| 'shading'
 	| 'line_confidence'
 	| 'smoothness'
 	| 'curvature_jitter'
