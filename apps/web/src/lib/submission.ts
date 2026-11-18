@@ -2,12 +2,18 @@ import type { Stroke } from './paint/strokes';
 
 /** The last submitted drawing, handed from /draw to /results for this browser tab. */
 export interface Submission {
+	/** when it was submitted (ms epoch); identifies the attempt */
+	at?: number;
 	png: string;
 	width: number;
 	height: number;
 	seconds: number;
 	category: string | null;
 	referenceId: string | null;
+	/** topic filter the student chose (null = any) */
+	topic?: string | null;
+	/** tier of the reference drawn */
+	tier?: number | null;
 	strokes: number;
 	points: number;
 	brushes: string[];

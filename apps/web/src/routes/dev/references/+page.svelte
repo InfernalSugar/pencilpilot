@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
-	import { imageUrl } from '#lib/references.js';
+	import { TIERS, imageUrl } from '#lib/references.js';
 	import type { PageProps } from './$types';
 
 	let { data }: PageProps = $props();
@@ -32,10 +32,11 @@
 					<img src={imageUrl(r)} alt={r.tags.join(', ')} loading="lazy" />
 				</a>
 				<div class="meta">
-					<b>{r.author}</b> · {r.id} · “{r.query}”
+					<b>{r.author}</b> · {r.id} · “{r.query}” · difficulty {r.difficulty ?? '?'} (auto tier {r.tier ??
+						'?'})
 					<span class="tags">{r.tags.join(', ')}</span>
 				</div>
-				<form method="POST" action="?/approve" use:enhance class="row">
+				<form id="approve-{r.id}" method="POST" action="?/approve" use:enhance class="row">
 					<input type="hidden" name="id" value={r.id} />
 					<select name="category" aria-label="Category">
 						{#each data.categories as c (c)}
@@ -45,6 +46,24 @@
 					<input name="title" placeholder="Title (optional)" aria-label="Title" />
 					<button class="ok">Approve</button>
 				</form>
+				<div class="row small">
+					<label>
+						Topic
+						<select name="topic" form="approve-{r.id}" aria-label="Topic">
+							{#each data.topics[r.category] ?? [] as t (t.id)}
+								<option value={t.id} selected={t.id === r.topic}>{t.name}</option>
+							{/each}
+						</select>
+					</label>
+					<label>
+						Tier
+						<select name="tier" form="approve-{r.id}" aria-label="Tier">
+							{#each TIERS as t (t.id)}
+								<option value={t.id} selected={t.id === r.tier}>{t.name}</option>
+							{/each}
+						</select>
+					</label>
+				</div>
 				<form method="POST" action="?/reject" use:enhance>
 					<input type="hidden" name="id" value={r.id} />
 					<button class="no">Reject</button>
@@ -98,6 +117,10 @@
 	.row {
 		display: flex;
 		gap: 6px;
+	}
+	.small {
+		font-size: 13px;
+		gap: 12px;
 	}
 	.row input {
 		flex: 1;

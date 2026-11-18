@@ -3,7 +3,8 @@
 	import Tile from '#lib/ui/Tile.svelte';
 	import Button from '#lib/ui/Button.svelte';
 	import { loadSubmission, type Submission } from '#lib/submission.js';
-	import { byId, imageUrl, referencePixels, titleOf } from '#lib/references.js';
+	import { byId, imageUrl, referencePixels, tierName, tierOf, titleOf } from '#lib/references.js';
+	import { recommendedTier, recordAttempt } from '#lib/progress.js';
 	import {
 		gradeImages,
 		measurement,
@@ -83,13 +84,48 @@
 				referencePixels(ref, sub.width, sub.height)
 			]);
 			grade = await gradeImages(sub.width, sub.height, drawing, toGray(refData.data), {
-				category: ref.category as GradeCategory,
+				// Cartoons are graded like anime: clean outlines matter most.
+				category: (ref.category === 'cartoon' ? 'anime' : ref.category) as GradeCategory,
 				strokes: sub.strokeData ?? []
 			});
+			const tier = sub.tier ?? tierOf(ref);
+			const before = recommendedTier(ref.category);
+			if (!alreadyRecorded(sub.at)) {
+				recordAttempt({
+					category: ref.category,
+					topic: sub.topic ?? null,
+					tier,
+					score: grade.score,
+					at: sub.at ?? Date.now()
+				});
+			}
+			const after = recommendedTier(ref.category);
+			if (after > before) levelUp = after;
 		} catch (e) {
 			gradeError = `Could not grade this drawing: ${e}`;
 		}
 	});
+
+	let levelUp = $state(0);
+
+	/** Reloading the results page must not count the same drawing twice. */
+	function alreadyRecorded(at: number | undefined) {
+		if (!at) return false;
+		try {
+			const seen: number[] = JSON.parse(sessionStorage.getItem('pp.recorded') ?? '[]');
+			if (seen.includes(at)) return true;
+			sessionStorage.setItem('pp.recorded', JSON.stringify([...seen, at].slice(-50)));
+		} catch {
+			/* storage blocked: may double count on reload, harmless */
+		}
+		return false;
+	}
+
+	const nextUrl = $derived(
+		reference
+			? `/draw?category=${reference.category}${sub?.topic ? `&topic=${sub.topic}` : ''}&tier=${sub?.tier ?? tierOf(reference)}`
+			: '/draw'
+	);
 
 	const pct = (v: number) => `${Math.round(v * 100)}%`;
 	const worstCell = $derived(
@@ -119,9 +155,7 @@
 					<Button href="/draw?category={reference.category}&ref={reference.id}" variant="outline">
 						Try again
 					</Button>
-					<Button href="/draw?category={reference.category}" variant="dark">
-						Next reference →
-					</Button>
+					<Button href={nextUrl} variant="dark">Next reference →</Button>
 				{:else}
 					<Button href="/draw" variant="outline">Draw another</Button>
 				{/if}
@@ -192,6 +226,19 @@
 					<span class="mid">{best?.label}</span>
 					<span class="note">{best ? pct(best.value) : ''} match</span>
 				</Tile>
+				{#if levelUp && reference}
+					<Tile tone="accent" span={2}>
+						<span class="pp-eyebrow on-accent">Level up!</span>
+						<p class="tip light">
+							Three strong drawings in a row. You’re ready for {tierName(levelUp)}.
+						</p>
+						<div>
+							<Button href="/practice/{reference.category}?tier={levelUp}" variant="dark">
+								Try {tierName(levelUp)} →
+							</Button>
+						</div>
+					</Tile>
+				{/if}
 				<Tile tone="lilac" span={2}>
 					<span class="pp-eyebrow lilac">Tip</span>
 					<p class="tip">{hint}</p>
@@ -311,6 +358,12 @@
 	.note {
 		font-size: 14px;
 		opacity: 0.85;
+	}
+	.on-accent {
+		color: rgba(255, 255, 255, 0.85);
+	}
+	.tip.light {
+		color: #fff;
 	}
 	.tip {
 		margin: 0;

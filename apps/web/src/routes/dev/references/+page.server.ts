@@ -4,11 +4,12 @@ import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import type { Actions, PageServerLoad } from './$types';
 import type { Reference } from '#lib/references.js';
+import { topicsFor } from '#lib/topics.js';
 
 // Dev-only review queue for reference candidates (ADR-0003: nothing goes live unapproved).
 const DIR = resolve(process.cwd(), '../../content/references');
 const IMAGES = resolve(process.cwd(), 'static/references');
-const CATEGORIES = ['anime', 'real-life', 'animals', 'environment', 'fundamentals'];
+const CATEGORIES = ['anime', 'real-life', 'animals', 'environment', 'cartoon', 'fundamentals'];
 
 type List = { references: Reference[] };
 const read = <T>(f: string, empty: T): T => {
@@ -28,7 +29,8 @@ export const load: PageServerLoad = () => {
 	const approved = Object.fromEntries(
 		CATEGORIES.map((c) => [c, read<List>(`${c}.json`, { references: [] }).references.length])
 	);
-	return { candidates, approved, categories: CATEGORIES };
+	const topics = Object.fromEntries(CATEGORIES.map((c) => [c, topicsFor(c)]));
+	return { candidates, approved, categories: CATEGORIES, topics };
 };
 
 function take(id: string) {
@@ -50,7 +52,15 @@ export const actions: Actions = {
 		const ref = take(id);
 		if (!ref) return fail(404, { message: 'not a candidate' });
 		const list = read<List>(`${category}.json`, { references: [] });
-		list.references.push({ ...ref, category, title: String(f.get('title') ?? '').trim() });
+		const topic = String(f.get('topic') ?? '');
+		const tierOverride = Number(f.get('tier')) || undefined;
+		list.references.push({
+			...ref,
+			category,
+			title: String(f.get('title') ?? '').trim(),
+			topic: topicsFor(category).some((t) => t.id === topic) ? topic : ref.topic,
+			...(tierOverride && tierOverride !== ref.tier ? { tierOverride } : {})
+		});
 		write(`${category}.json`, list);
 		return { ok: id };
 	},
