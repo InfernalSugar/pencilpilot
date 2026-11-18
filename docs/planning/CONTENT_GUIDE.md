@@ -12,7 +12,7 @@ span = 0.3                    # how far past the threshold counts as "as bad as 
 min = 0.2                     # optional window: only fire between min and max
 severity = 4                  # 1 (minor) – 5 (major); scaled up by how far past the threshold
 skill = "placement"           # one fix per skill is shown
-number = "ratio_pct"          # how {n} is computed: ratio_pct | abs_pct | pct | deg
+number = "ratio_pct"          # how {n} is computed: ratio_pct | abs_pct | pct | deg | rad_deg | count
 dir_pos = "wide"              # optional words for {dir} by the value's sign
 dir_neg = "narrow"
 overlay = "bbox"              # what "Show me" highlights: bbox | offset | grid | missing | extra
@@ -23,17 +23,39 @@ categories = ["real-life"]    # optional: only for these categories
 The engine (`crates/feedback`) shows the top 3 fixes (one per skill) plus praise for the strongest skill.
 Content is embedded at build time, so run `pnpm wasm` after editing.
 
+- `above`/`below` are strict (`>`/`<`); `min`/`max` are inclusive. `rad_deg` turns radians into
+  degrees (`curvature_jitter`), `count` prints the value as-is (`stroke_count`).
+- **Graded bands.** Split one mistake into a mild and a strong rule that never overlap: the mild one
+  uses `above = 1.15` + `max = 1.3`, the strong one `above = 1.3` (for `below`: `below = 0.85` +
+  `min = 0.7`, then `below = 0.7`). Give the mild band the lower severity and gentler wording.
+- **Category overrides.** To tune a rule for a category (anime, cartoon, real-life, animals,
+  environment, fundamentals), add a rule with `categories = ["<that one>"]` and list every *other*
+  category on the generic rule, so both can't fire. Line-art categories (anime, cartoon) are stricter
+  on precision and line quality; cartoon is looser on size, placement and proportions; environment
+  uses composition, perspective and atmospheric-perspective wording; real life and environment allow
+  more retracing (shading).
+- Rules on linked measurements must not overlap either: `smoothness = exp(−curvature_jitter ÷ 0.35)`
+  and `speed_consistency = exp(−speed_cv)`.
+- `lesson` and `drill` must be ids from the M8 plan (`docs/planning/M8_CONTENT_PLAN.md`).
+- `cargo test -p pencilpilot-feedback` checks all of this: one rule per (measurement, category,
+  value), bands without gaps, links, tip length and placeholders, and per-category sample drawings.
+
 ## Tips (`content/feedback/tips.toml`)
 ```toml
 [tip.too-big]
 title = "Your drawing is {n}% too big"
 variants = ["…{n}%…", "…"]     # 2–4 wordings; picked per attempt so repeats differ
 ```
-- Use `{n}` (the rule's number) and `{dir}` (only if the rule has dir words).
-- Structure: **what happened** (with the number) → **why it happens** → **one concrete fix**. Under ~60 words.
+- Use `{n}` (the rule's number) in every variant and `{dir}` (only if the rule has dir words).
+  Exception: `ink_coverage` rules, whose number is too small to quote.
+- Structure: **what happened** (with the number) → **why it happens** → **one concrete fix**. At most 60 words.
+- Titles may use `{n}`, but the lesson and progress pages show titles with the number removed, so
+  keep them readable without it (no `({n}%)` endings).
 
 ## Praise
 `[tip.praise-<skill>]` for placement, outline, silhouette, tone, line_confidence, proportions: shown for the strongest skill at ≥ 70%.
+An optional `[tip.praise-<skill>-<category>]` (e.g. `praise-outline-anime`) replaces it for that
+category; the item id stays `praise-<skill>`.
 
 ## Lessons and drills (`content/lessons/`)
 Short (2–3 minute read), picture-first, ending with a drill the site can grade.

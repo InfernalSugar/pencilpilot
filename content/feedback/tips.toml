@@ -1,12 +1,32 @@
 # Tip text for each rule (and praise per skill). Licensed CC BY-SA 4.0.
 # Placeholders: {n} = the measured number (see rules.toml `number`), {dir} = direction word.
 # Structure: what happened (with the number) → why it happens → one concrete fix.
+# 2–3 variants per rule, each under ~60 words.
+
+# ════════════════════════════════════════════════════════════════════
+# PLACEMENT
+# ════════════════════════════════════════════════════════════════════
+
+[tip.a-bit-too-big]
+title = "A little too big"
+variants = [
+  "Your drawing came out about {n}% bigger than the reference. Close! It usually creeps up because the first shape you draw sets the size of everything after it. Next time, make two light ticks for the top and bottom before that first shape.",
+  "Only about {n}% too big, so your eye is nearly there. Before you commit, hold the pencil up to the reference and compare the height of your first big shape with the space it should fill.",
+]
 
 [tip.too-big]
 title = "Your drawing is {n}% too big"
 variants = [
   "The whole drawing came out about {n}% bigger than the reference. We all tend to draw what we care about larger. Before any detail, mark the top, bottom, left and right edges lightly, then fit everything inside them.",
   "You ran out of room: your drawing is roughly {n}% larger than the reference. Try a quick box first: tap four light marks for the outer edges, then build inside that box.",
+  "At {n}% too big, the drawing outgrew its space. Pick one part (the head works well) as your unit, check how many units tall the subject is, and mark that height before drawing.",
+]
+
+[tip.a-bit-too-small]
+title = "A little too small"
+variants = [
+  "Your drawing is about {n}% smaller than the reference. Nearly right! Drawings shrink when we start with a careful detail and build outwards from it. Mark the top and bottom first, then reach for them.",
+  "About {n}% small. Give yourself permission to use the space: two light ticks for the outer edges before anything else, and stretch your first big shape to touch them.",
 ]
 
 [tip.too-small]
@@ -14,6 +34,35 @@ title = "Your drawing is {n}% too small"
 variants = [
   "Your drawing is about {n}% smaller than the reference. Small drawings hide mistakes and are harder to correct. Mark the outer edges first and use the space they give you.",
   "Go bigger! It came out roughly {n}% smaller than the reference. Start with four light marks for the top, bottom and sides, and stretch your big shapes to reach them.",
+  "At {n}% too small, everything gets cramped. Draw from your elbow, not your fingertips: small hand movements make small drawings. Block the whole height in one sweep first.",
+]
+
+[tip.cartoon-too-big]
+title = "Your cartoon is {n}% too big"
+variants = [
+  "Cartoons get some wiggle room, but this one is about {n}% bigger than the reference. Big heads tend to start big and push everything else off the page. Mark the top of the head and the feet first, then fit the character between them.",
+  "About {n}% too big. Draw the character as a quick bean first, sized to the reference, and only then add the fun stuff.",
+]
+
+[tip.cartoon-too-small]
+title = "Your cartoon is {n}% too small"
+variants = [
+  "Your character came out about {n}% smaller than the reference. Small cartoons lose their punchy shapes. Put a light mark for the top and bottom first and make the first bean fill that space.",
+  "About {n}% too small. Cartoons read best when they’re bold, so draw from your elbow and let the first shapes be big. You can always tighten later.",
+]
+
+[tip.scene-cropped]
+title = "The scene is {n}% too big for the frame"
+variants = [
+  "Your scene is about {n}% bigger than the reference, so things get cropped at the edges. Scenes grow because we draw the nearest object first and big. Mark where the horizon and the outer edges land before anything else.",
+  "About {n}% too big: parts of the view fall off the page. Make a stamp-sized thumbnail first to see where the edges cut, then copy that framing.",
+]
+
+[tip.scene-too-small]
+title = "The scene is {n}% too small"
+variants = [
+  "Your scene came out about {n}% smaller than the reference, leaving empty paper around it. A scene should fill the frame the way the reference does. Lightly mark the horizon and the four outer edges first.",
+  "About {n}% too small. Try a quick border box with the reference’s proportions, then make the big masses (sky, ground, trees) touch its edges.",
 ]
 
 [tip.wrong-width]
@@ -23,11 +72,32 @@ variants = [
   "Width and height don’t quite match: the drawing is around {n}% too {dir}. Draw a light box around the subject first and compare its shape (tall, square or wide) with the reference.",
 ]
 
+[tip.width-way-off]
+title = "Much too {dir}"
+variants = [
+  "Your drawing is about {n}% too {dir} for its height, so the whole subject looks squashed or stretched. This happens when height and width are guessed separately. Measure the width in ‘heights’ on the reference and mark both before you draw.",
+  "At {n}% too {dir}, the shape changes character. Start with a light box: is the reference twice as tall as wide, or the same? Copy that box first and keep everything inside it.",
+]
+
+[tip.cartoon-stretched]
+title = "Stretched too {dir}"
+variants = [
+  "Cartoons love squash and stretch, but this is about {n}% too {dir} compared with the reference. If you meant it, great: push one part on purpose and keep the rest steady. If not, check the width against the height before drawing.",
+  "About {n}% too {dir}. Exaggeration works best when it’s a choice. Draw the character’s box at the reference’s shape first, then decide what to push.",
+]
+
 [tip.off-sideways]
 title = "It sits too far {dir}"
 variants = [
   "The drawing is shifted about {n}% of the page to the {dir}. It still counts, but planning the page helps: find the middle of the subject in the reference and put a light mark there first.",
   "Your drawing drifted {dir} by about {n}% of the page. Start by marking where the centre of the subject should go, then the outer edges around it.",
+]
+
+[tip.far-off-sideways]
+title = "It sits far to the {dir}"
+variants = [
+  "The whole drawing landed about {n}% of the page to the {dir}, so it nearly runs off the edge. That usually means the first shape went down without a plan. Do a tiny thumbnail of where the subject sits, then copy that placement.",
+  "Shifted {dir} by about {n}% of the page. Before drawing, mark the left and right edges of the subject where they sit in the reference, then build between them.",
 ]
 
 [tip.off-vertically]
@@ -37,11 +107,57 @@ variants = [
   "Everything slid {dir} by roughly {n}% of the page. A quick tip: two light marks for the top and bottom before you draw anything else.",
 ]
 
+[tip.far-off-vertically]
+title = "It sits far too {dir}"
+variants = [
+  "The drawing landed about {n}% of the page too {dir}, so part of the subject is crowded against the edge. Plan the page with a stamp-sized thumbnail first and copy where the subject sits.",
+  "About {n}% too {dir}. Find where the top and bottom of the subject are in the reference, put two ticks there on your page, and draw between them.",
+]
+
+[tip.cartoon-off-sideways]
+title = "Your character drifted {dir}"
+variants = [
+  "Cartoons can be placed loosely, but this one sits about {n}% of the page to the {dir}. Put a light mark for the middle of the character first and grow the shapes out from it.",
+  "About {n}% of the page too far {dir}. Start with the character’s centre line where the reference has it, then build left and right of it.",
+]
+
+[tip.cartoon-off-vertically]
+title = "Your character sits too {dir}"
+variants = [
+  "The character sits about {n}% of the page too {dir}. Cartoons get some slack, but a quick tick for the top of the head and one for the feet keeps it on stage.",
+  "About {n}% too {dir}. Mark the head and feet first, then draw the character between them.",
+]
+
+# ════════════════════════════════════════════════════════════════════
+# OUTLINE
+# ════════════════════════════════════════════════════════════════════
+
+[tip.a-few-parts-missing]
+title = "A few parts are missing"
+variants = [
+  "Your drawing covers about {n}% of the reference’s main lines, so a few pieces were skipped. That happens when we zoom in on one part and forget the rest. Before finishing, run your eye around the whole reference and tick off each part.",
+  "About {n}% of the outlines are there. Check the red areas: they show what got left out. A quick last pass comparing edge by edge catches most of them.",
+]
+
 [tip.missing-parts]
 title = "Some parts are missing"
 variants = [
   "Only about {n}% of the reference’s main lines show up in your drawing. Before details, sketch every big part (head, body, legs, tail…) as simple shapes so nothing gets left out.",
   "Your drawing covers about {n}% of the reference’s outlines. Squint at the reference, name each big part out loud, and make sure each one gets at least a simple shape.",
+]
+
+[tip.scene-a-few-missing]
+title = "A few things in the scene are missing"
+variants = [
+  "Your scene covers about {n}% of the reference’s main edges. Scenes are busy, so it’s easy to skip a rooftop or a tree. Before details, list the big things you see and give each one a quick shape.",
+  "About {n}% of the scene’s edges are there. Look at the red areas, then check the reference corner by corner: did anything get left out?",
+]
+
+[tip.scene-elements-missing]
+title = "Big parts of the scene are missing"
+variants = [
+  "Only about {n}% of the scene’s main edges made it in. In a busy view we often draw one favourite thing and stop. Start with a tiny thumbnail: horizon, sky, ground and the three biggest shapes.",
+  "Your scene covers about {n}% of the reference. Block the whole view in first (horizon, big masses, paths), then add details where you like.",
 ]
 
 [tip.extra-lines]
@@ -51,6 +167,42 @@ variants = [
   "Some lines don’t appear in the reference (only {n}% line up). Look back at the reference after every few strokes and erase guide lines once the shape is right.",
 ]
 
+[tip.lots-of-extra-lines]
+title = "Lots of lines that aren’t in the reference"
+variants = [
+  "Only about {n}% of your lines sit on edges in the reference. Lots of the rest come from drawing what we expect to see. Compare one small square of your drawing with the same square of the reference, then the next.",
+  "About {n}% of your lines match. Try a light construction pass, then erase everything that isn’t a real edge before you go darker.",
+]
+
+[tip.anime-stray-lines]
+title = "Stray lines in the line art"
+variants = [
+  "About {n}% of your lines sit on the reference’s edges. In anime line art every extra mark shows. Sketch lightly, then ink one clean line per edge and erase the rest.",
+  "Line match is {n}%. Anime art is all about clean edges, so ghost each curve twice, draw it once, and erase the guides when you’re done.",
+  "Only {n}% of the lines are on target, so the line art looks busy. Work in two layers: a rough sketch, then a slow, clean trace of just the final lines.",
+]
+
+[tip.anime-messy-lineart]
+title = "The line art is messy"
+variants = [
+  "Only about {n}% of your lines match the reference, so it’s hard to read the character. Anime style needs every line to mean something. Draw only what you can point to in the reference, one edge at a time.",
+  "About {n}% of the lines land on the reference. Slow down: look at the reference, draw one curve, look again. Leave out anything you can’t find there.",
+]
+
+[tip.cartoon-stray-lines]
+title = "Extra lines around the outline"
+variants = [
+  "About {n}% of your lines match the reference. Cartoons look best with one bold outline, not lots of thin attempts. Sketch lightly, then go over it once with a heavier line.",
+  "Line match is {n}%. Try thick outer lines and thinner inner ones: it hides nothing, so you’ll naturally draw fewer, surer strokes.",
+]
+
+[tip.cartoon-messy-lines]
+title = "The outline is messy"
+variants = [
+  "Only about {n}% of your lines match the reference, so the cartoon’s shapes get lost. Cartoons are mostly simple, clear curves. Ghost each curve in the air, then draw it in one stroke.",
+  "About {n}% of the lines land on target. Cut down the number of attempts: one stroke per curve, and erase guide lines before you finish.",
+]
+
 [tip.outlines-drift]
 title = "Outlines drift from the reference"
 variants = [
@@ -58,18 +210,39 @@ variants = [
   "Outline match is {n}%. Try comparing one edge at a time: where does it start, where does it end, and is it straight or curved?",
 ]
 
-[tip.big-shapes-off]
-title = "The big shapes don’t match yet"
+[tip.outlines-far-off]
+title = "Outlines are far from the reference"
 variants = [
-  "The overall silhouette only matches about {n}%. Before any detail, block in the biggest shapes (circles, boxes, triangles) and compare them to the reference.",
-  "Big-shape match: {n}%. Squint until the reference becomes a blurry blob, draw that blob first, then refine.",
+  "Your outlines match about {n}%, so the shapes are quite different from the reference. That happens when details go down before the big shapes. Block in the largest shapes first, check them, then draw the edges.",
+  "Outline match: {n}%. Try a light grid over the reference in your head (halves and quarters) and copy what’s in each part, one square at a time.",
 ]
 
-[tip.one-area-off]
-title = "One area needs the most work"
+[tip.anime-outlines-drift]
+title = "The line art drifts a little"
 variants = [
-  "The area marked in red differs most from the reference (only about {n}% match). Compare just that part: what’s its shape, size and angle?",
-  "The red box shows your weakest area ({n}% match). Fix that one area next time and your score jumps the most.",
+  "Your line art matches the reference about {n}%. In anime, tiny shifts show: a chin slightly lower or eyes slightly wider changes the character. Place the guide lines (centre and eye line) first and hang the features on them.",
+  "Outline match is {n}%. Anime faces depend on exact curves, so check the jaw, eyes and hair against the guide lines after each part.",
+]
+
+[tip.anime-outlines-far-off]
+title = "The outlines are far from the reference"
+variants = [
+  "Your outlines match about {n}%. Clean anime lines can’t rescue shapes that are off underneath. Block in the head, body and hair as simple shapes first, then do the line art over them.",
+  "Outline match: {n}%. Start with boxes and circles for each big part, check them against the reference, and only then draw the final lines.",
+]
+
+[tip.lines-off-target]
+title = "Lines land off target"
+variants = [
+  "Your lines sit about {n}% of the page away from where they should be on average. Lines miss when we start drawing before aiming. Put a dot where the line starts and one where it ends, then ghost the path and draw.",
+  "On average your lines are {n}% of the page off. Check every line’s start and end against the reference before you draw it.",
+]
+
+[tip.several-areas-drift]
+title = "Several areas drift"
+variants = [
+  "Across the grid, your areas match the reference only about {n}% on average. When lots of small regions drift, it’s usually because we stopped comparing midway. Look back at the reference after every few strokes.",
+  "Area match is {n}%. Split the reference into four quarters in your mind and copy one quarter at a time, checking where lines cross the halfway marks.",
 ]
 
 [tip.too-sparse]
@@ -79,11 +252,104 @@ variants = [
   "Your drawing is quite sparse. Try a one-minute pass that only puts down the main outline, then build on it.",
 ]
 
+[tip.scene-too-sparse]
+title = "The scene is mostly empty"
+variants = [
+  "There’s very little on the page for a whole scene. Scenes need the big masses before anything else: horizon, sky, ground and the largest shapes. Spend one minute blocking those in, then add detail.",
+  "A scene needs more than a few lines. Try a quick three-value thumbnail of the view first (light, mid, dark), then build the drawing on it.",
+]
+
+[tip.blank-canvas]
+title = "The canvas looks empty"
+variants = [
+  "We couldn’t find any lines to compare. Draw the main outline of the reference, even roughly, and submit again!",
+  "Nothing to grade yet! Put down a quick outline of the reference, even a wobbly one, and try again.",
+]
+
+# ════════════════════════════════════════════════════════════════════
+# SILHOUETTE
+# ════════════════════════════════════════════════════════════════════
+
+[tip.big-shapes-off]
+title = "The big shapes don’t match yet"
+variants = [
+  "The overall silhouette only matches about {n}%. Before any detail, block in the biggest shapes (circles, boxes, triangles) and compare them to the reference.",
+  "Big-shape match: {n}%. Squint until the reference becomes a blurry blob, draw that blob first, then refine.",
+]
+
+[tip.big-shapes-way-off]
+title = "The overall shape is quite different"
+variants = [
+  "The silhouette matches only about {n}%, so the overall shape reads differently from the reference. Details can’t fix that. Simplify the subject into three or four basic shapes and get those right first.",
+  "Big-shape match: {n}%. Fill in the reference’s outline in your head like a shadow puppet, draw that solid shape lightly, and build inside it.",
+]
+
+[tip.animal-shape-off]
+title = "The animal’s body shape is off"
+variants = [
+  "The animal’s silhouette matches about {n}%. Fur and details often pull us away from the body underneath. Start with a bean for the chest and hips, a circle for the head, then join them.",
+  "Body-shape match: {n}%. Look for the big masses first (chest, belly, hips, head) and draw them as simple ovals before any legs or fur.",
+  "About {n}% silhouette match. Would someone recognise the animal from its shadow alone? Draw that shadow shape first, then the details.",
+]
+
+[tip.animal-shape-way-off]
+title = "The animal’s shape is quite different"
+variants = [
+  "The silhouette matches only about {n}%, so the animal reads differently from the reference. Build it like a toy: one bean for the body, one circle for the head, sticks for the legs. Check each against the reference.",
+  "Body-shape match: {n}%. Squint at the reference until only the outline is left, then copy that shape with three or four simple pieces.",
+]
+
+[tip.cartoon-shape-off]
+title = "The cartoon’s shape reads differently"
+variants = [
+  "The silhouette matches about {n}%. Cartoons can be pushed, but the main shape should still read at a glance. Find the character’s one big shape (pear, bean, box) and get that right first.",
+  "Big-shape match: {n}%. Strong cartoons have a clear silhouette. Fill your first sketch in solid in your head: does it look like the reference’s shadow?",
+]
+
+[tip.cartoon-shape-way-off]
+title = "The cartoon’s shapes are far off"
+variants = [
+  "The silhouette matches only about {n}%. Cartoons are built from a few simple shapes, so match those first: head, body, hands and feet as circles and beans.",
+  "Big-shape match: {n}%. Draw the character as three or four basic shapes the size of the reference’s, then add the personality on top.",
+]
+
+[tip.scene-masses-off]
+title = "The big masses in the scene are off"
+variants = [
+  "The scene’s big masses match about {n}%. Look at the shapes of the sky between trees or roofs: those gaps are easier to judge than the objects themselves. Draw the gaps and the objects appear.",
+  "Mass match: {n}%. Squint until the scene is just a few dark and light shapes, then copy those shapes before drawing any single object.",
+]
+
+[tip.scene-masses-way-off]
+title = "The scene’s layout is quite different"
+variants = [
+  "The big masses match only about {n}%, so the layout of the scene differs from the reference. Start with a three-value thumbnail: where are the darkest masses, where is the sky?",
+  "Layout match: {n}%. Draw the horizon first, then the three largest shapes as flat blocks. Check them against the reference before any detail.",
+]
+
+[tip.one-area-off]
+title = "One area needs the most work"
+variants = [
+  "The area marked in red differs most from the reference (only about {n}% match). Compare just that part: what’s its shape, size and angle?",
+  "The red box shows your weakest area ({n}% match). Fix that one area next time and your score jumps the most.",
+]
+
+[tip.one-area-way-off]
+title = "One area is very different"
+variants = [
+  "The red area matches only about {n}%, so something there went missing or moved. Look at the empty shapes around it in the reference and copy those gaps: they show where the edges should be.",
+  "The red box is your weakest spot ({n}% match). Compare the gaps between parts there, not the parts themselves; gaps are easier to judge.",
+]
+
+# ════════════════════════════════════════════════════════════════════
+# TONE
+# ════════════════════════════════════════════════════════════════════
+
 [tip.no-shading]
 title = "Next step: add some shading"
 variants = [
-  "Your outlines are down, and that’s the hardest part. When you’re ready, add light and dark: squint at the reference, find the darkest areas and fill those in first.",
-  "Nice line work! The reference also has light and dark areas. Try adding the three darkest shapes you can see; it makes drawings look solid.",
+  "Your outlines are down, and that’s the hardest part. Your shading range is about {n}% short of the reference. When you’re ready, squint at the reference, find the darkest areas and fill those in first.",
+  "Nice line work! The reference also has light and dark areas (your range is {n}% smaller). Try adding the three darkest shapes you can see; it makes drawings look solid.",
 ]
 
 [tip.flat-shading]
@@ -93,11 +359,46 @@ variants = [
   "Your values are bunched together ({n}% less range than the reference). Push the shadows darker and leave the brightest areas clean white paper.",
 ]
 
+[tip.a-bit-flat]
+title = "Darks could go a bit darker"
+variants = [
+  "Your shading is close, with about {n}% less range than the reference. The darkest darks usually stay too timid. Build them with a second layer of hatching across the first.",
+  "About {n}% less contrast than the reference. Pick the three darkest spots and hatch over them again in a new direction; the drawing will pop.",
+]
+
 [tip.too-dark]
 title = "Shading is heavier than the reference"
 variants = [
   "Your shading is about {n}% more contrasty than the reference. Keep the very darkest tones for the few spots that really are that dark.",
   "Lots of very dark areas: about {n}% more contrast than the reference. Build darks slowly in layers so you can stop at the right point.",
+]
+
+[tip.scene-no-shading]
+title = "Next step: light and dark in the scene"
+variants = [
+  "Your scene’s lines are in! Its value range is about {n}% short of the reference. Squint at the view: which big areas are dark (trees, shadows) and which are light (sky)? Shade just those masses.",
+  "Good start on the scene. The reference has big light and dark areas your drawing doesn’t yet ({n}% less range). Try a three-value pass: white sky, grey middle, dark foreground.",
+]
+
+[tip.scene-flat]
+title = "The scene looks flat"
+variants = [
+  "Your scene has about {n}% less range from dark to light than the reference, so near and far blend together. Make the closest things darkest and let the distance fade to light grey.",
+  "Values are bunched ({n}% less range). In a landscape, contrast is depth: strong darks up front, softer greys in the middle, almost nothing at the horizon.",
+]
+
+[tip.scene-too-contrasty]
+title = "The distance is too strong"
+variants = [
+  "Your scene is about {n}% more contrasty than the reference. Air softens far-away things, so if hills on the horizon are as dark as the foreground, the scene loses depth. Lighten everything far away.",
+  "About {n}% more contrast than the reference. Keep your darkest darks for the nearest objects and shade each layer further back a step lighter.",
+]
+
+[tip.lineart-heavy-shading]
+title = "Shading is heavier than the art style"
+variants = [
+  "Your drawing has about {n}% more contrast than the reference. Anime and cartoon shading is usually one flat shadow tone on the side away from the light. Pick the light direction and shade only the shadow side.",
+  "About {n}% more contrast than the reference. Try one shadow value instead of many: find the light, then put a single flat tone where the form turns away.",
 ]
 
 [tip.lights-and-darks-misplaced]
@@ -107,11 +408,85 @@ variants = [
   "Light/dark match: {n}%. Try a tiny three-value thumbnail (white, grey, black) of the reference before you start shading.",
 ]
 
+[tip.shadows-on-wrong-side]
+title = "The shadows don’t match the light"
+variants = [
+  "Your light and dark pattern matches only about {n}%, so the shadows seem to fall somewhere else. Find where the light comes from in the reference first; cast shadows always point away from it.",
+  "Light/dark match: {n}%. Before shading, draw a little arrow showing the light’s direction. Every shadow, on the object and on the ground, falls on the far side.",
+]
+
+[tip.animal-light-wrong]
+title = "The light on the animal doesn’t match"
+variants = [
+  "Your light and dark pattern matches only about {n}%. Animals are round forms, so light falls like it does on a ball: bright on top, a darker band where the body turns away. Find the light side first.",
+  "Light/dark match: {n}%. Dark markings and shadows are easy to mix up. Shade the body’s shadow side first, then add the markings on top.",
+]
+
+[tip.scene-values-misplaced]
+title = "The scene’s lights and darks are shuffled"
+variants = [
+  "The scene’s light and dark pattern matches about {n}%. Squint until the view becomes three flat shapes: light, middle, dark. Put those down first, then the details.",
+  "Light/dark match: {n}%. A quick thumbnail the size of a stamp shows where the dark masses sit. Copy that before shading the real drawing.",
+]
+
+[tip.scene-values-scrambled]
+title = "The scene’s values don’t match"
+variants = [
+  "The scene’s lights and darks match only about {n}%. Without a value plan, scenes turn into noise. Do a tiny three-value sketch first: what is darkest, what is lightest?",
+  "Light/dark match: {n}%. Decide the darkest mass and the lightest area of the reference before you start, and keep them that way.",
+]
+
+[tip.value-steps-misplaced]
+title = "Values land in the wrong places"
+variants = [
+  "Your light and dark pattern matches the target about {n}%. In value drills it’s easy to make every step the same grey. Put down the darkest and the lightest first, then the middle grey exactly halfway between.",
+  "Light/dark match: {n}%. Squint at the target and compare one patch at a time: is yours lighter or darker? Adjust before moving on.",
+]
+
+[tip.edges-dont-match]
+title = "Edges and transitions look different"
+variants = [
+  "The structure of your shading matches about {n}%. Edges are probably all the same: all crisp or all fuzzy. Look for where the reference has sharp edges (shadows) and where it blends (round forms), and copy that.",
+  "Structure match: {n}%. Keep hard edges for cast shadows and outlines in the light, and blend where a form turns slowly.",
+]
+
+# ════════════════════════════════════════════════════════════════════
+# LINE CONFIDENCE
+# ════════════════════════════════════════════════════════════════════
+
 [tip.shaky-lines]
 title = "Lines look shaky"
 variants = [
   "Line smoothness is about {n}%. Short, careful strokes from the wrist wobble. Move from your elbow and shoulder, and draw a little faster.",
   "Your lines wobble a bit ({n}% smooth). Before each line, hover over the path two or three times (“ghosting”), then draw it in one go.",
+]
+
+[tip.a-bit-wobbly]
+title = "Curves wobble a little"
+variants = [
+  "Your lines turn about {n}° back and forth every few pixels, so curves look slightly bumpy. Slow, careful drawing causes it. Practise ellipses at a steady pace and let the motion come from your elbow.",
+  "A small wobble of about {n}° keeps sneaking into your curves. Draw each curve a touch faster, after ghosting it once or twice.",
+]
+
+[tip.shaky-lineart]
+title = "Line art looks shaky"
+variants = [
+  "Line smoothness is about {n}%. Clean line art is the heart of anime and cartoon styles, and wobbles show. Draw from the shoulder, ghost each curve, then commit to one stroke.",
+  "Your lines are {n}% smooth. Zoom out and rotate the canvas so each stroke follows your arm’s natural swing, then draw at a steady speed.",
+]
+
+[tip.lineart-a-bit-wobbly]
+title = "Line art wobbles a little"
+variants = [
+  "Your lines wiggle about {n}° every few pixels. In line art that reads as a slight tremble. Warm up with a page of ellipses, then draw each curve a bit faster than feels safe.",
+  "A wobble of about {n}° creeps into the curves. Ghost the stroke twice, then draw it in one smooth motion from the elbow.",
+]
+
+[tip.sketchy-lines]
+title = "Lines are a bit sketchy"
+variants = [
+  "About {n}% of your strokes go over earlier ones. A little sketching is fine, but it can blur the edges. Try placing each line once and moving on.",
+  "Around {n}% of your lines are retraced. Do a light first pass, then one clean line per edge instead of several feathery ones.",
 ]
 
 [tip.hairy-lines]
@@ -121,6 +496,20 @@ variants = [
   "Many strokes overlap ({n}%). Sketch lightly, then do one clean final line instead of many small ones.",
 ]
 
+[tip.lineart-retraced]
+title = "Lines go over themselves"
+variants = [
+  "About {n}% of your strokes trace over earlier ones, which makes the line art fuzzy. Instead of going over a line to make it darker, press harder in one stroke: thick where it matters, thin elsewhere.",
+  "Around {n}% retraced. One stroke per edge, with more pressure for the outer line and less for the inner details, looks cleaner than layers.",
+]
+
+[tip.overworked-shading]
+title = "Shading is overworked"
+variants = [
+  "About {n}% of your strokes go over earlier ink. Scribbled layers get muddy. Lay hatching in one direction per layer and add a second direction only where it needs to be darker.",
+  "Around {n}% of strokes are on top of others. Plan your darks: build them in two or three tidy hatching layers rather than scrubbing.",
+]
+
 [tip.hesitant-speed]
 title = "Pen speed is uneven"
 variants = [
@@ -128,11 +517,141 @@ variants = [
   "Uneven speed (consistency {n}%) usually means hesitating mid-line. Ghost the motion first, then draw at an even pace.",
 ]
 
+[tip.stop-start-strokes]
+title = "Strokes keep stopping and starting"
+variants = [
+  "Your pen speed swings by about {n}% within a stroke, so you’re pausing mid-line a lot. Pauses happen when we look back at the reference mid-stroke. Look first, ghost the line, then draw it without stopping.",
+  "Speed varies by about {n}% inside each stroke. Think of the whole line’s flow before you start, then draw it in one go.",
+]
+
+[tip.animal-stiff-strokes]
+title = "Strokes look stiff"
+variants = [
+  "Your pen speed swings by about {n}% within a stroke, so lines stop and start. Animals look alive when lines flow. Try a 30-second gesture first: one sweeping line from head to tail.",
+  "Speed varies by about {n}% inside your strokes. Find the animal’s action line, draw it in one fast motion, then hang the body shapes on it.",
+]
+
+[tip.many-tiny-strokes]
+title = "Lots of short strokes"
+variants = [
+  "You used {n} strokes, many of them short. Lots of tiny strokes make line art look scratchy. Aim for long, single strokes that cover a whole edge.",
+  "{n} strokes is a lot for line art. Try halving it next time: ghost each edge, then draw it in one go.",
+]
+
+[tip.fur-hair-by-hair]
+title = "Fur drawn hair by hair?"
+variants = [
+  "You used {n} strokes. Drawing fur hair by hair takes ages and often flattens the form. Group it instead: a few clumps that follow the body, darker where the form turns away.",
+  "{n} strokes! Suggest fur with grouped patches of hatching along the body’s direction, and let a few edge tufts do the rest.",
+]
+
+[tip.many-strokes-simple-shape]
+title = "Many strokes for a simple shape"
+variants = [
+  "You used {n} strokes for a fairly simple subject. Lots of short strokes usually means drawing from the wrist. Use your whole arm and aim for one stroke per line.",
+  "{n} strokes is a lot here. Before each line, ghost it twice, then draw it once. Fewer, longer strokes look surer.",
+]
+
+# ════════════════════════════════════════════════════════════════════
+# PROPORTIONS & ANGLES
+# ════════════════════════════════════════════════════════════════════
+
 [tip.proportions-off]
 title = "Proportions are off"
 variants = [
   "Your key points are off by about {n}% of the drawing’s size. Pick one part as a unit (like the head) and measure everything else in those units.",
   "Proportions drift by roughly {n}%. Compare distances: is the body twice the head, or three times? Check the same on your drawing.",
+]
+
+[tip.proportions-way-off]
+title = "Proportions are quite far off"
+variants = [
+  "Your key points are off by about {n}% of the drawing’s size, so parts are clearly too long or too short. That comes from guessing sizes one part at a time. Block the whole subject in boxes first and measure them against each other.",
+  "Proportions drift by about {n}%. Choose a unit, count how many fit in the whole subject, and mark those divisions before drawing.",
+]
+
+[tip.anime-proportions-off]
+title = "Anime proportions are a little off"
+variants = [
+  "Your key points are off by about {n}% of the drawing’s size. Anime faces are precise: eyes sit on a line about halfway down the head, with the chin small and close. Draw the guide lines first.",
+  "Proportions drift by about {n}%. Check the eyes first: how far apart are they, and how big compared with the face? Those two numbers set the whole character.",
+]
+
+[tip.anime-proportions-way-off]
+title = "Anime proportions are far off"
+variants = [
+  "Your key points are off by about {n}%, so the character looks different. Start with a circle for the skull, a line for the jaw, and cross lines for the centre and eyes. Place features only on those guides.",
+  "Proportions drift by about {n}%. Build the face on a grid: eye line, nose line, mouth line. Compare the spacing with the reference before drawing details.",
+]
+
+[tip.face-proportions-off]
+title = "Face proportions are a little off"
+variants = [
+  "Your key points are off by about {n}% of the drawing’s size. On real faces the eyes sit about halfway down the head, which feels surprisingly low. Draw that line first and place the features on it.",
+  "Proportions drift by about {n}%. Split the face into thirds (hairline to brows, brows to nose, nose to chin) and check each third against the reference.",
+]
+
+[tip.face-proportions-way-off]
+title = "Proportions are quite far off"
+variants = [
+  "Your key points are off by about {n}%, so the figure reads differently. Use the head as your ruler: how many heads tall is the person, and where do the shoulders and hips land?",
+  "Proportions drift by about {n}%. Mark the head’s height, then count head lengths down the body, ticking where each landmark falls.",
+]
+
+[tip.animal-proportions-off]
+title = "The animal’s proportions are a little off"
+variants = [
+  "Your key points are off by about {n}% of the drawing’s size. Animal legs and necks are easy to stretch. Build the body from beans first, then check the leg length against the body depth.",
+  "Proportions drift by about {n}%. Compare the head with the body: how many heads long is the torso? Do the same check for legs.",
+]
+
+[tip.animal-proportions-way-off]
+title = "The animal’s proportions are far off"
+variants = [
+  "Your key points are off by about {n}%, so the animal looks like a different breed. Use the head as a unit: count how many heads the body is, and how many the legs are.",
+  "Proportions drift by about {n}%. Measure in head lengths on the reference first, mark those divisions on the page, then draw.",
+]
+
+[tip.cartoon-proportions-off]
+title = "Cartoon proportions drift"
+variants = [
+  "Your key points are off by about {n}%. Cartoons can exaggerate, but it should look deliberate. If the head is bigger, make it clearly bigger and keep the rest consistent.",
+  "Proportions drift by about {n}%. Choose one thing to exaggerate on purpose, and keep the other proportions close to the reference.",
+]
+
+[tip.cartoon-proportions-way-off]
+title = "Cartoon proportions are far off"
+variants = [
+  "Your key points are off by about {n}%, beyond what cartoon exaggeration can explain. Measure the head first, then count how many heads tall the character is.",
+  "Proportions drift by about {n}%. Before stylising, copy the reference’s proportions with simple shapes, then push one or two parts on purpose.",
+]
+
+[tip.scene-landmarks-off]
+title = "Landmarks in the scene are shifted"
+variants = [
+  "Your key points are off by about {n}% of the scene. Scenes hang on the horizon and vanishing points. Draw the horizon first, then check every corner and roofline against it.",
+  "Landmarks drift by about {n}%. Find the horizon in the reference, put it on your page, and place each big object relative to it.",
+]
+
+[tip.scene-landmarks-way-off]
+title = "The scene’s layout is far off"
+variants = [
+  "Your key points are off by about {n}% of the scene, so things sit in very different places. Block the scene in with a few boxes and measure their sizes against each other first.",
+  "Landmarks drift by about {n}%. Pick one object as a unit and measure the others with it: how many fit between it and the edge?",
+]
+
+[tip.one-point-way-off]
+title = "One point is far off"
+variants = [
+  "Most of your drawing is fine, but one key point is about {n}% of the drawing’s size away from where it belongs. Find it and check how it lines up with its neighbours: what’s directly above or below it?",
+  "Your worst point is off by about {n}%. Fixing that single spot usually lifts the whole drawing. Check it with vertical and horizontal lines from nearby features.",
+]
+
+[tip.hand-or-foot-off]
+title = "One point is far off"
+variants = [
+  "One key point is about {n}% of the drawing’s size out of place. Hands and feet are the usual suspects: we draw them too small. Block a hand as a mitten plus a palm box, about the size of the face.",
+  "Your worst point is off by about {n}%. If it’s a hand or foot, try the mitten shape first and check its size against the head.",
 ]
 
 [tip.angles-off]
@@ -142,18 +661,66 @@ variants = [
   "Angle check: about {n}° off. Compare each main line with a perfectly vertical or horizontal line. Is it tilted more or less?",
 ]
 
-[tip.blank-canvas]
-title = "The canvas looks empty"
+[tip.angles-way-off]
+title = "Angles are quite far off"
 variants = [
-  "We couldn’t find any lines to compare. Draw the main outline of the reference, even roughly, and submit again!",
+  "Lines are tilted about {n}° away from the reference on average. That much usually means we drew the angle we expected, not the one we saw. Wrap the subject in a few straight lines first and copy their tilt.",
+  "About {n}° off on average. Compare every main line with a vertical or horizontal, and say the angle out loud (‘a bit less than 45°’) before you draw it.",
 ]
 
-# Praise for the student's strongest skill.
+[tip.perspective-angles-off]
+title = "Perspective lines are off"
+variants = [
+  "Lines in your scene are about {n}° off. In perspective, receding lines all point at a vanishing point on the horizon. Find that point in the reference and run your edges toward it.",
+  "About {n}° off. Draw the horizon and mark the vanishing point first, then every roofline and road edge heads toward it.",
+]
+
+[tip.perspective-angles-way-off]
+title = "Perspective is far off"
+variants = [
+  "Lines in your scene are about {n}° off on average, so buildings look like they tip over. Boxes seen at a corner have two vanishing points. Mark both on the horizon and run every edge to one of them.",
+  "About {n}° off. Start with the horizon and two vanishing points, then draw each building as a box before adding windows and doors.",
+]
+
+[tip.animal-pose-off]
+title = "The pose is a little off"
+variants = [
+  "The animal’s main lines are about {n}° off. That changes the pose: a neck that’s too upright looks alert, too low looks tired. Find the action line from head to tail and copy its curve first.",
+  "Pose angle: about {n}° off. Do a 30-second gesture of the spine and legs, then build the body on it.",
+]
+
+[tip.animal-pose-way-off]
+title = "The pose is quite different"
+variants = [
+  "The animal’s main lines are about {n}° off, so the pose reads differently. Build the skeleton first: beans for the chest and hips, then sticks for the neck and legs at the reference’s angles.",
+  "About {n}° off. Check the angle of the spine, the neck and each leg against a vertical line before adding any body shapes.",
+]
+
+[tip.cartoon-angles-off]
+title = "The pose tilts differently"
+variants = [
+  "The main lines are about {n}° off. Cartoon poses can be pushed, but this changes the action. Compare the tilt of the body and head with a vertical line in the reference.",
+  "About {n}° off. Copy the angle of the action line first, then push the pose further on purpose if you like.",
+]
+
+# ════════════════════════════════════════════════════════════════════
+# PRAISE: `praise-<skill>` for each skill; `praise-<skill>-<category>`
+# (optional) replaces it for that category.
+# ════════════════════════════════════════════════════════════════════
+
 [tip.praise-placement]
 title = "Great size and placement"
 variants = [
   "Your drawing sits right where the reference does, at the right size. That’s the foundation everything else builds on.",
   "Size and position are spot on. You planned the page well.",
+  "Right size, right spot. Planning the page first is clearly working for you.",
+]
+
+[tip.praise-placement-environment]
+title = "Well-framed scene"
+variants = [
+  "Your scene fills the frame just like the reference. Good framing makes every later step easier.",
+  "Horizon and edges land in the right places. That’s a well-planned page.",
 ]
 
 [tip.praise-outline]
@@ -161,6 +728,21 @@ title = "Clean, accurate outlines"
 variants = [
   "Your outlines follow the reference closely. Great observation!",
   "Your edges land right on the reference’s edges. Keep looking that carefully.",
+  "Accurate outlines all round. You’re drawing what you see, not what you expect.",
+]
+
+[tip.praise-outline-anime]
+title = "Crisp line art"
+variants = [
+  "Your line art follows the reference closely: clean edges are exactly what anime style needs.",
+  "Lovely, precise lines. The character reads clearly because every line is where it belongs.",
+]
+
+[tip.praise-outline-cartoon]
+title = "Clean cartoon lines"
+variants = [
+  "Your outlines are clean and right on target. That’s what makes cartoons pop.",
+  "Crisp, accurate outlines. The character reads at a glance.",
 ]
 
 [tip.praise-silhouette]
@@ -168,6 +750,21 @@ title = "The big shapes are right"
 variants = [
   "The overall shape matches the reference really well. Getting the big shapes right first is the most important habit.",
   "Your silhouette is a close match. Squint at both and they look alike!",
+  "Strong big shapes. Everything you add on top of those will sit right.",
+]
+
+[tip.praise-silhouette-animals]
+title = "Recognisable at a glance"
+variants = [
+  "The animal’s silhouette matches really well. You could tell what it is from its shadow alone.",
+  "Great body shape! The chest, hips and head masses all sit right.",
+]
+
+[tip.praise-silhouette-cartoon]
+title = "A strong, readable silhouette"
+variants = [
+  "Your cartoon’s silhouette matches really well. A clear shape is half of a good character.",
+  "The big shapes are spot on, so the character reads instantly.",
 ]
 
 [tip.praise-tone]
@@ -175,6 +772,21 @@ title = "Great light and dark"
 variants = [
   "Your lights and darks sit in the right places. That’s what makes drawings look solid.",
   "Nice values! Your shading pattern matches the reference well.",
+  "Your value pattern matches the reference closely. Squinting is paying off.",
+]
+
+[tip.praise-tone-environment]
+title = "Great sense of depth"
+variants = [
+  "Your scene’s lights and darks match the reference, so near and far read clearly.",
+  "Lovely values! The masses of light and dark make the scene feel deep.",
+]
+
+[tip.praise-tone-real-life]
+title = "Solid, believable shading"
+variants = [
+  "Your shading matches the reference closely; the forms look solid and real.",
+  "Great values. The light and shadow sides sit right where they should.",
 ]
 
 [tip.praise-line_confidence]
@@ -182,10 +794,26 @@ title = "Confident lines"
 variants = [
   "Your strokes are smooth and steady. Confident lines make everything look more finished.",
   "Lovely line quality: few retraces and a steady hand.",
+  "Smooth, single strokes. Your lines look sure of themselves.",
+]
+
+[tip.praise-line_confidence-anime]
+title = "Clean, confident line art"
+variants = [
+  "Smooth, steady strokes with almost no retracing. That’s real line-art control.",
+  "Your lines flow in single, confident strokes. Anime artists practise for ages to get that.",
 ]
 
 [tip.praise-proportions]
 title = "Strong proportions"
 variants = [
   "Your proportions and angles are close to the reference. Measuring is paying off.",
+  "Parts are the right size relative to each other. Nicely measured!",
+]
+
+[tip.praise-proportions-real-life]
+title = "Believable proportions"
+variants = [
+  "Your proportions are close to the reference, so the subject looks natural. Great measuring.",
+  "Features and parts land in the right places. That careful measuring shows.",
 ]

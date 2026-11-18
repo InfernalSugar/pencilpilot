@@ -28,6 +28,10 @@ pub enum NumberFormat {
     Pct,
     /// value as-is (degrees)
     Deg,
+    /// value × 180 / π (radians → degrees)
+    RadDeg,
+    /// value as-is (a count, e.g. strokes)
+    Count,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -108,6 +112,11 @@ impl Library {
             if r.above.is_none() == r.below.is_none() {
                 return Err(format!("rule {} needs exactly one of above/below", r.id));
             }
+            if let (Some(lo), Some(hi)) = (r.min, r.max)
+                && lo > hi
+            {
+                return Err(format!("rule {} has min > max", r.id));
+            }
             let tip = self
                 .tips
                 .get(&r.id)
@@ -162,7 +171,9 @@ pub const PRAISE_SKILLS: &[(&str, &str)] = &[
     ("line_confidence", "line_confidence"),
     ("proportions", "keypoints"),
 ];
-/// A skill needs at least this similarity to be praised.
+/// A skill needs at least this similarity to be praised. The praise text
+/// comes from `praise-<skill>-<category>` when that tip exists, else from
+/// `praise-<skill>`; the item id is always `praise-<skill>`.
 pub const PRAISE_MIN: f32 = 0.7;
 pub const MAX_FIXES: usize = 3;
 
@@ -185,7 +196,8 @@ fn fill(template: &str, rule: &Rule, v: f32) -> String {
         NumberFormat::RatioPct => (v - 1.0).abs() * 100.0,
         NumberFormat::AbsPct => v.abs() * 100.0,
         NumberFormat::Pct => v * 100.0,
-        NumberFormat::Deg => v,
+        NumberFormat::Deg | NumberFormat::Count => v,
+        NumberFormat::RadDeg => v.to_degrees(),
     };
     let dir = if v >= 0.0 {
         rule.dir_pos.as_deref()
@@ -264,7 +276,10 @@ pub fn feedback(
         .filter(|(_, _, v)| *v >= PRAISE_MIN)
         .max_by(|a, b| a.2.total_cmp(&b.2))
         .and_then(|(skill, m, v)| {
-            let tip = lib.tips.get(&format!("praise-{skill}"))?;
+            let tip = lib
+                .tips
+                .get(&format!("praise-{skill}-{category}"))
+                .or_else(|| lib.tips.get(&format!("praise-{skill}")))?;
             Some(Item {
                 id: format!("praise-{skill}"),
                 skill: skill.to_string(),
@@ -302,6 +317,9 @@ fn item(r: &Rule, tip: &Tip, v: f32, s: f32, seed: u32, salt: usize) -> Item {
         drill: r.drill.clone(),
     }
 }
+
+#[cfg(test)]
+mod content_tests;
 
 #[cfg(test)]
 mod tests {

@@ -1,54 +1,156 @@
 # Diagnosis rules: measurement → mistake. See docs/planning/CONTENT_GUIDE.md.
 #
 # A rule fires when its measurement is `above` / `below` the threshold (with
-# `abs = true` the absolute value is compared). `severity` (1–5) is scaled up
-# by how far past the threshold the value is; the top 2–3 fixes are shown,
-# at most one per `skill`.
+# `abs = true` the absolute value is compared). `above`/`below` are strict
+# (>, <); `min`/`max` are inclusive (≥, ≤). `severity` (1–5) is scaled up by
+# how far past the threshold the value is; the top 2–3 fixes are shown, at
+# most one per `skill`.
 #
 # `span` (optional): how far past the threshold counts as maximally bad
 # (default: the threshold itself). Severity = severity × (1 + min(1, excess / span)).
 # `number` turns the value into the {n} placeholder:
 #   ratio_pct = |value − 1| × 100   (scale_ratio, contrast_ratio)
-#   abs_pct   = |value| × 100       (aspect_error, offsets, retrace_ratio)
-#   pct       = value × 100         (0–1 similarities)
+#   abs_pct   = |value| × 100       (aspect_error, offsets, retrace_ratio, keypoint errors)
+#   pct       = value × 100         (0–1 similarities, speed_cv)
 #   deg       = value               (angles)
+#   rad_deg   = value × 180 / π     (curvature_jitter, radians → degrees)
+#   count     = value               (stroke_count)
 # `dir_pos` / `dir_neg` fill {dir} from the sign of the value.
 # `overlay` tells the results screen what to draw: bbox, offset, grid, missing, extra.
 # `min` / `max` (optional): the rule only fires when the value is inside them.
 # `categories` (optional) limits a rule to some categories.
+#
+# Conventions (checked by the tests in crates/feedback):
+# - Graded bands: a mild band uses `above = a` + `max = b`, the strong band
+#   `above = b`, so exactly one band fires for any value (same for `below` +
+#   `min`). Mild bands get a lower severity.
+# - Category overrides: when a category gets its own version of a rule, the
+#   generic rule lists every *other* category in `categories`, so for any
+#   (measurement, category, value) at most one rule fires.
+# - Categories: anime, cartoon, real-life, animals, environment, fundamentals.
 
-# ── Size & placement ────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════
+# PLACEMENT
+# ════════════════════════════════════════════════════════════════════
+
+# ── Size: generic (cartoon and environment have their own) ──────────
 [[rule]]
-id = "too-big"
-span = 0.3
+id = "a-bit-too-big"
 measurement = "scale_ratio"
 above = 1.15
-severity = 4
+max = 1.3
+span = 0.15
+severity = 2.5
+skill = "placement"
+number = "ratio_pct"
+overlay = "bbox"
+lesson = "planning-the-page"
+drill = "four-corner-marks"
+categories = ["anime", "real-life", "animals", "fundamentals"]
+
+[[rule]]
+id = "too-big"
+measurement = "scale_ratio"
+above = 1.3
+span = 0.4
+severity = 5
 skill = "placement"
 number = "ratio_pct"
 overlay = "bbox"
 lesson = "measuring-with-units"
 drill = "block-in-boxes"
+categories = ["anime", "real-life", "animals", "fundamentals"]
+
+[[rule]]
+id = "a-bit-too-small"
+measurement = "scale_ratio"
+below = 0.85
+min = 0.7
+span = 0.15
+severity = 2.5
+skill = "placement"
+number = "ratio_pct"
+overlay = "bbox"
+lesson = "planning-the-page"
+drill = "four-corner-marks"
+categories = ["anime", "real-life", "animals", "fundamentals"]
 
 [[rule]]
 id = "too-small"
-span = 0.3
 measurement = "scale_ratio"
-below = 0.85
-severity = 4
+below = 0.7
+span = 0.35
+severity = 5
 skill = "placement"
 number = "ratio_pct"
 overlay = "bbox"
 lesson = "measuring-with-units"
 drill = "block-in-boxes"
+categories = ["anime", "real-life", "animals", "fundamentals"]
+
+# ── Size: cartoon (looser: a little squash and stretch is fine) ─────
+[[rule]]
+id = "cartoon-too-big"
+measurement = "scale_ratio"
+above = 1.25
+span = 0.4
+severity = 3.5
+skill = "placement"
+number = "ratio_pct"
+overlay = "bbox"
+lesson = "planning-the-page"
+drill = "four-corner-marks"
+categories = ["cartoon"]
 
 [[rule]]
+id = "cartoon-too-small"
+measurement = "scale_ratio"
+below = 0.75
+span = 0.35
+severity = 3.5
+skill = "placement"
+number = "ratio_pct"
+overlay = "bbox"
+lesson = "planning-the-page"
+drill = "four-corner-marks"
+categories = ["cartoon"]
+
+# ── Size: environment (a scene is about the frame) ──────────────────
+[[rule]]
+id = "scene-cropped"
+measurement = "scale_ratio"
+above = 1.2
+span = 0.4
+severity = 3.5
+skill = "placement"
+number = "ratio_pct"
+overlay = "bbox"
+lesson = "composition-and-cropping"
+drill = "thumbnail-composition"
+categories = ["environment"]
+
+[[rule]]
+id = "scene-too-small"
+measurement = "scale_ratio"
+below = 0.8
+span = 0.35
+severity = 3.5
+skill = "placement"
+number = "ratio_pct"
+overlay = "bbox"
+lesson = "composition-and-cropping"
+drill = "thumbnail-composition"
+categories = ["environment"]
+
+# ── Width vs height ─────────────────────────────────────────────────
+[[rule]]
 id = "wrong-width"
-span = 0.2
 measurement = "aspect_error"
 above = 0.12
+max = 0.25
 abs = true
-severity = 4
+span = 0.13
+severity = 3
 skill = "placement"
 number = "abs_pct"
 dir_pos = "wide"
@@ -56,13 +158,48 @@ dir_neg = "narrow"
 overlay = "bbox"
 lesson = "comparing-width-and-height"
 drill = "envelope-shapes"
+categories = ["anime", "real-life", "animals", "environment", "fundamentals"]
 
 [[rule]]
+id = "width-way-off"
+measurement = "aspect_error"
+above = 0.25
+abs = true
+span = 0.3
+severity = 4.5
+skill = "placement"
+number = "abs_pct"
+dir_pos = "wide"
+dir_neg = "narrow"
+overlay = "bbox"
+lesson = "comparing-width-and-height"
+drill = "block-in-boxes"
+categories = ["anime", "real-life", "animals", "environment", "fundamentals"]
+
+[[rule]]
+id = "cartoon-stretched"
+measurement = "aspect_error"
+above = 0.2
+abs = true
+span = 0.3
+severity = 2.5
+skill = "placement"
+number = "abs_pct"
+dir_pos = "wide"
+dir_neg = "narrow"
+overlay = "bbox"
+lesson = "cartoon-exaggeration"
+drill = "exaggerate-shapes"
+categories = ["cartoon"]
+
+# ── Position on the page ────────────────────────────────────────────
+[[rule]]
 id = "off-sideways"
-span = 0.15
 measurement = "offset_x"
 above = 0.12
+max = 0.25
 abs = true
+span = 0.13
 severity = 2
 skill = "placement"
 number = "abs_pct"
@@ -71,13 +208,31 @@ dir_neg = "left"
 overlay = "offset"
 lesson = "planning-the-page"
 drill = "four-corner-marks"
+categories = ["anime", "real-life", "animals", "environment", "fundamentals"]
+
+[[rule]]
+id = "far-off-sideways"
+measurement = "offset_x"
+above = 0.25
+abs = true
+span = 0.2
+severity = 3
+skill = "placement"
+number = "abs_pct"
+dir_pos = "right"
+dir_neg = "left"
+overlay = "offset"
+lesson = "composition-and-cropping"
+drill = "thumbnail-composition"
+categories = ["anime", "real-life", "animals", "environment", "fundamentals"]
 
 [[rule]]
 id = "off-vertically"
-span = 0.15
 measurement = "offset_y"
 above = 0.12
+max = 0.25
 abs = true
+span = 0.13
 severity = 2
 skill = "placement"
 number = "abs_pct"
@@ -86,8 +241,75 @@ dir_neg = "high"
 overlay = "offset"
 lesson = "planning-the-page"
 drill = "four-corner-marks"
+categories = ["anime", "real-life", "animals", "environment", "fundamentals"]
 
-# ── Outlines & shapes ───────────────────────────────────────────────
+[[rule]]
+id = "far-off-vertically"
+measurement = "offset_y"
+above = 0.25
+abs = true
+span = 0.2
+severity = 3
+skill = "placement"
+number = "abs_pct"
+dir_pos = "low"
+dir_neg = "high"
+overlay = "offset"
+lesson = "composition-and-cropping"
+drill = "thumbnail-composition"
+categories = ["anime", "real-life", "animals", "environment", "fundamentals"]
+
+[[rule]]
+id = "cartoon-off-sideways"
+measurement = "offset_x"
+above = 0.18
+abs = true
+span = 0.2
+severity = 1.5
+skill = "placement"
+number = "abs_pct"
+dir_pos = "right"
+dir_neg = "left"
+overlay = "offset"
+lesson = "planning-the-page"
+drill = "four-corner-marks"
+categories = ["cartoon"]
+
+[[rule]]
+id = "cartoon-off-vertically"
+measurement = "offset_y"
+above = 0.18
+abs = true
+span = 0.2
+severity = 1.5
+skill = "placement"
+number = "abs_pct"
+dir_pos = "low"
+dir_neg = "high"
+overlay = "offset"
+lesson = "planning-the-page"
+drill = "four-corner-marks"
+categories = ["cartoon"]
+
+# ════════════════════════════════════════════════════════════════════
+# OUTLINE
+# ════════════════════════════════════════════════════════════════════
+
+# ── Missing parts (recall) ──────────────────────────────────────────
+[[rule]]
+id = "a-few-parts-missing"
+measurement = "outline_recall"
+below = 0.68
+min = 0.55
+span = 0.13
+severity = 2
+skill = "outline"
+number = "pct"
+overlay = "missing"
+lesson = "checking-as-you-go"
+drill = "grid-copy"
+categories = ["anime", "cartoon", "real-life", "animals", "fundamentals"]
+
 [[rule]]
 id = "missing-parts"
 measurement = "outline_recall"
@@ -98,44 +320,352 @@ number = "pct"
 overlay = "missing"
 lesson = "seeing-the-whole-subject"
 drill = "contour-in-one-minute"
+categories = ["anime", "cartoon", "real-life", "animals", "fundamentals"]
 
+# Scenes have many more edges, so a little less coverage is normal.
+[[rule]]
+id = "scene-a-few-missing"
+measurement = "outline_recall"
+below = 0.58
+min = 0.45
+span = 0.13
+severity = 2
+skill = "outline"
+number = "pct"
+overlay = "missing"
+lesson = "checking-as-you-go"
+drill = "grid-copy"
+categories = ["environment"]
+
+[[rule]]
+id = "scene-elements-missing"
+measurement = "outline_recall"
+below = 0.45
+severity = 3.5
+skill = "outline"
+number = "pct"
+overlay = "missing"
+lesson = "seeing-the-whole-subject"
+drill = "thumbnail-composition"
+categories = ["environment"]
+
+# ── Extra lines (precision): stricter for line-art categories ──────
 [[rule]]
 id = "extra-lines"
 measurement = "outline_precision"
 below = 0.5
+min = 0.3
+span = 0.2
 severity = 3
 skill = "outline"
 number = "pct"
 overlay = "extra"
 lesson = "draw-what-you-see"
 drill = "blind-contour"
+categories = ["real-life", "animals", "environment", "fundamentals"]
 
+[[rule]]
+id = "lots-of-extra-lines"
+measurement = "outline_precision"
+below = 0.3
+span = 0.3
+severity = 4
+skill = "outline"
+number = "pct"
+overlay = "extra"
+lesson = "draw-what-you-see"
+drill = "grid-copy"
+categories = ["real-life", "animals", "environment", "fundamentals"]
+
+[[rule]]
+id = "anime-stray-lines"
+measurement = "outline_precision"
+below = 0.65
+min = 0.4
+span = 0.25
+severity = 3
+skill = "outline"
+number = "pct"
+overlay = "extra"
+lesson = "one-confident-stroke"
+drill = "ghosted-lines"
+categories = ["anime"]
+
+[[rule]]
+id = "anime-messy-lineart"
+measurement = "outline_precision"
+below = 0.4
+span = 0.4
+severity = 4
+skill = "outline"
+number = "pct"
+overlay = "extra"
+lesson = "draw-what-you-see"
+drill = "contour-in-one-minute"
+categories = ["anime"]
+
+[[rule]]
+id = "cartoon-stray-lines"
+measurement = "outline_precision"
+below = 0.62
+min = 0.38
+span = 0.24
+severity = 3
+skill = "outline"
+number = "pct"
+overlay = "extra"
+lesson = "line-weight"
+drill = "line-weight-pressure"
+categories = ["cartoon"]
+
+[[rule]]
+id = "cartoon-messy-lines"
+measurement = "outline_precision"
+below = 0.38
+span = 0.38
+severity = 4
+skill = "outline"
+number = "pct"
+overlay = "extra"
+lesson = "one-confident-stroke"
+drill = "ghosted-lines"
+categories = ["cartoon"]
+
+# ── Overall outline match ───────────────────────────────────────────
 [[rule]]
 id = "outlines-drift"
 measurement = "outline"
 below = 0.6
+min = 0.4
+span = 0.2
 severity = 3
 skill = "outline"
 number = "pct"
 overlay = "grid"
 lesson = "draw-what-you-see"
 drill = "contour-in-one-minute"
+categories = ["cartoon", "real-life", "animals", "environment", "fundamentals"]
+
+[[rule]]
+id = "outlines-far-off"
+measurement = "outline"
+below = 0.4
+span = 0.4
+severity = 3.5
+skill = "outline"
+number = "pct"
+overlay = "grid"
+lesson = "big-shapes-first"
+drill = "grid-copy"
+categories = ["cartoon", "real-life", "animals", "environment", "fundamentals"]
+
+[[rule]]
+id = "anime-outlines-drift"
+measurement = "outline"
+below = 0.7
+min = 0.45
+span = 0.25
+severity = 3
+skill = "outline"
+number = "pct"
+overlay = "grid"
+lesson = "anime-faces"
+drill = "eye-placement"
+categories = ["anime"]
+
+[[rule]]
+id = "anime-outlines-far-off"
+measurement = "outline"
+below = 0.45
+span = 0.45
+severity = 4
+skill = "outline"
+number = "pct"
+overlay = "grid"
+lesson = "big-shapes-first"
+drill = "block-in-boxes"
+categories = ["anime"]
+
+# ── Line distance (fundamentals: lines, boxes, gesture) ─────────────
+[[rule]]
+id = "lines-off-target"
+measurement = "outline_distance"
+above = 0.03
+span = 0.05
+severity = 2.5
+skill = "outline"
+number = "abs_pct"
+overlay = "grid"
+lesson = "checking-as-you-go"
+drill = "ghosted-lines"
+categories = ["fundamentals"]
+
+[[rule]]
+id = "several-areas-drift"
+measurement = "grid"
+below = 0.45
+span = 0.25
+severity = 2.5
+skill = "outline"
+number = "pct"
+overlay = "grid"
+lesson = "checking-as-you-go"
+drill = "grid-copy"
+
+# ── How much is on the page ─────────────────────────────────────────
+[[rule]]
+id = "too-sparse"
+measurement = "ink_coverage"
+below = 0.008
+min = 0.0005
+severity = 3
+skill = "outline"
+number = "pct"
+lesson = "seeing-the-whole-subject"
+drill = "contour-in-one-minute"
+categories = ["anime", "cartoon", "real-life", "animals", "fundamentals"]
+
+[[rule]]
+id = "scene-too-sparse"
+measurement = "ink_coverage"
+below = 0.015
+min = 0.0005
+severity = 3
+skill = "outline"
+number = "pct"
+lesson = "big-shapes-first"
+drill = "thumbnail-composition"
+categories = ["environment"]
+
+[[rule]]
+id = "blank-canvas"
+measurement = "ink_coverage"
+below = 0.0005
+severity = 5
+skill = "outline"
+number = "pct"
+lesson = "seeing-the-whole-subject"
+drill = "contour-in-one-minute"
+
+# ════════════════════════════════════════════════════════════════════
+# SILHOUETTE (big shapes)
+# ════════════════════════════════════════════════════════════════════
 
 [[rule]]
 id = "big-shapes-off"
 measurement = "silhouette"
 below = 0.55
+min = 0.35
+span = 0.2
 severity = 4
 skill = "silhouette"
 number = "pct"
 overlay = "grid"
 lesson = "big-shapes-first"
 drill = "silhouette-fill"
+categories = ["anime", "real-life", "fundamentals"]
 
+[[rule]]
+id = "big-shapes-way-off"
+measurement = "silhouette"
+below = 0.35
+span = 0.35
+severity = 4.5
+skill = "silhouette"
+number = "pct"
+overlay = "grid"
+lesson = "simplifying-into-shapes"
+drill = "silhouette-fill"
+categories = ["anime", "real-life", "fundamentals"]
+
+[[rule]]
+id = "animal-shape-off"
+measurement = "silhouette"
+below = 0.55
+min = 0.35
+span = 0.2
+severity = 4
+skill = "silhouette"
+number = "pct"
+overlay = "grid"
+lesson = "animal-construction"
+drill = "animal-bean-construction"
+categories = ["animals"]
+
+[[rule]]
+id = "animal-shape-way-off"
+measurement = "silhouette"
+below = 0.35
+span = 0.35
+severity = 4.5
+skill = "silhouette"
+number = "pct"
+overlay = "grid"
+lesson = "simplifying-into-shapes"
+drill = "animal-bean-construction"
+categories = ["animals"]
+
+[[rule]]
+id = "cartoon-shape-off"
+measurement = "silhouette"
+below = 0.5
+min = 0.3
+span = 0.2
+severity = 3.5
+skill = "silhouette"
+number = "pct"
+overlay = "grid"
+lesson = "cartoon-exaggeration"
+drill = "exaggerate-shapes"
+categories = ["cartoon"]
+
+[[rule]]
+id = "cartoon-shape-way-off"
+measurement = "silhouette"
+below = 0.3
+span = 0.3
+severity = 4
+skill = "silhouette"
+number = "pct"
+overlay = "grid"
+lesson = "simplifying-into-shapes"
+drill = "exaggerate-shapes"
+categories = ["cartoon"]
+
+[[rule]]
+id = "scene-masses-off"
+measurement = "silhouette"
+below = 0.5
+min = 0.3
+span = 0.2
+severity = 3.5
+skill = "silhouette"
+number = "pct"
+overlay = "grid"
+lesson = "negative-space"
+drill = "negative-space-shapes"
+categories = ["environment"]
+
+[[rule]]
+id = "scene-masses-way-off"
+measurement = "silhouette"
+below = 0.3
+span = 0.3
+severity = 4
+skill = "silhouette"
+number = "pct"
+overlay = "grid"
+lesson = "big-shapes-first"
+drill = "three-value-thumbnail"
+categories = ["environment"]
+
+# ── The weakest area ────────────────────────────────────────────────
 [[rule]]
 id = "one-area-off"
 measurement = "worst_cell"
 below = 0.45
+min = 0.25
+span = 0.2
 severity = 2
 skill = "silhouette"
 number = "pct"
@@ -144,16 +674,22 @@ lesson = "checking-as-you-go"
 drill = "grid-copy"
 
 [[rule]]
-id = "too-sparse"
-measurement = "ink_coverage"
-below = 0.008
-severity = 3
-skill = "outline"
+id = "one-area-way-off"
+measurement = "worst_cell"
+below = 0.25
+span = 0.25
+severity = 2.5
+skill = "silhouette"
 number = "pct"
-lesson = "seeing-the-whole-subject"
-drill = "contour-in-one-minute"
+overlay = "grid"
+lesson = "negative-space"
+drill = "negative-space-shapes"
 
-# ── Light & dark ────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════
+# TONE (light & dark)
+# ════════════════════════════════════════════════════════════════════
+
+# ── Range of values: real life and animals ──────────────────────────
 [[rule]]
 id = "no-shading"
 measurement = "contrast_ratio"
@@ -163,7 +699,7 @@ skill = "tone"
 number = "ratio_pct"
 lesson = "value-range"
 drill = "five-step-value-scale"
-categories = ["real-life", "animals", "environment"]
+categories = ["real-life", "animals"]
 
 [[rule]]
 id = "flat-shading"
@@ -176,7 +712,20 @@ skill = "tone"
 number = "ratio_pct"
 lesson = "value-range"
 drill = "five-step-value-scale"
-categories = ["real-life", "animals", "environment"]
+categories = ["real-life", "animals"]
+
+[[rule]]
+id = "a-bit-flat"
+measurement = "contrast_ratio"
+below = 0.78
+min = 0.6
+span = 0.18
+severity = 1.5
+skill = "tone"
+number = "ratio_pct"
+lesson = "hatching"
+drill = "hatching-patches"
+categories = ["real-life"]
 
 [[rule]]
 id = "too-dark"
@@ -188,20 +737,153 @@ skill = "tone"
 number = "ratio_pct"
 lesson = "value-range"
 drill = "five-step-value-scale"
-categories = ["real-life", "animals", "environment"]
+categories = ["real-life", "animals"]
 
+# ── Range of values: environment (atmospheric perspective) ─────────
+[[rule]]
+id = "scene-no-shading"
+measurement = "contrast_ratio"
+below = 0.2
+severity = 1.5
+skill = "tone"
+number = "ratio_pct"
+lesson = "squint-for-values"
+drill = "three-value-thumbnail"
+categories = ["environment"]
+
+[[rule]]
+id = "scene-flat"
+measurement = "contrast_ratio"
+below = 0.6
+min = 0.2
+span = 0.4
+severity = 3
+skill = "tone"
+number = "ratio_pct"
+lesson = "atmospheric-perspective"
+drill = "thumbnail-composition"
+categories = ["environment"]
+
+[[rule]]
+id = "scene-too-contrasty"
+measurement = "contrast_ratio"
+above = 1.4
+span = 0.5
+severity = 2.5
+skill = "tone"
+number = "ratio_pct"
+lesson = "atmospheric-perspective"
+drill = "atmospheric-layers"
+categories = ["environment"]
+
+# ── Anime & cartoon: shading is usually one flat shadow tone ────────
+[[rule]]
+id = "lineart-heavy-shading"
+measurement = "contrast_ratio"
+above = 1.6
+span = 0.6
+severity = 1.5
+skill = "tone"
+number = "ratio_pct"
+lesson = "light-and-form-shadow"
+drill = "form-shading-spheres"
+categories = ["anime", "cartoon"]
+
+# ── Where the lights and darks are ──────────────────────────────────
 [[rule]]
 id = "lights-and-darks-misplaced"
 measurement = "tone"
 below = 0.35
+min = 0.15
+span = 0.2
 severity = 3
 skill = "tone"
 number = "pct"
 lesson = "squint-for-values"
 drill = "three-value-thumbnail"
+categories = ["real-life", "animals"]
+
+[[rule]]
+id = "shadows-on-wrong-side"
+measurement = "tone"
+below = 0.15
+span = 0.15
+severity = 3.5
+skill = "tone"
+number = "pct"
+lesson = "cast-shadows"
+drill = "cast-shadow-blocks"
+categories = ["real-life"]
+
+[[rule]]
+id = "animal-light-wrong"
+measurement = "tone"
+below = 0.15
+span = 0.15
+severity = 3.5
+skill = "tone"
+number = "pct"
+lesson = "light-and-form-shadow"
+drill = "form-shading-spheres"
+categories = ["animals"]
+
+[[rule]]
+id = "scene-values-misplaced"
+measurement = "tone"
+below = 0.4
+min = 0.15
+span = 0.25
+severity = 3
+skill = "tone"
+number = "pct"
+lesson = "squint-for-values"
+drill = "thumbnail-composition"
+categories = ["environment"]
+
+[[rule]]
+id = "scene-values-scrambled"
+measurement = "tone"
+below = 0.15
+span = 0.15
+severity = 3.5
+skill = "tone"
+number = "pct"
+lesson = "composition-and-cropping"
+drill = "three-value-thumbnail"
+categories = ["environment"]
+
+# Value drills (five-step scale, thumbnails) are graded as fundamentals.
+[[rule]]
+id = "value-steps-misplaced"
+measurement = "tone"
+below = 0.35
+span = 0.35
+severity = 2.5
+skill = "tone"
+number = "pct"
+lesson = "value-range"
+drill = "five-step-value-scale"
+categories = ["fundamentals"]
+
+# ── Edges and transitions (structural similarity) ───────────────────
+[[rule]]
+id = "edges-dont-match"
+measurement = "ssim"
+below = 0.3
+span = 0.3
+severity = 2
+skill = "tone"
+number = "pct"
+lesson = "hard-and-soft-edges"
+drill = "soft-edge-blend"
 categories = ["real-life", "environment"]
 
-# ── Line confidence ─────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════
+# LINE CONFIDENCE (needs recorded strokes)
+# ════════════════════════════════════════════════════════════════════
+
+# smoothness = exp(−curvature_jitter ÷ 0.35), so the jitter bands below
+# stop just before the matching smoothness rule starts.
 [[rule]]
 id = "shaky-lines"
 measurement = "smoothness"
@@ -211,6 +893,59 @@ skill = "line_confidence"
 number = "pct"
 lesson = "drawing-from-the-shoulder"
 drill = "ghosted-lines"
+categories = ["real-life", "animals", "environment", "fundamentals"]
+
+[[rule]]
+id = "a-bit-wobbly"
+measurement = "curvature_jitter"
+above = 0.17
+max = 0.242
+span = 0.07
+severity = 1.5
+skill = "line_confidence"
+number = "rad_deg"
+lesson = "drawing-ellipses"
+drill = "ellipse-in-boxes"
+categories = ["real-life", "animals", "environment", "fundamentals"]
+
+[[rule]]
+id = "shaky-lineart"
+measurement = "smoothness"
+below = 0.6
+span = 0.6
+severity = 3.5
+skill = "line_confidence"
+number = "pct"
+lesson = "drawing-from-the-shoulder"
+drill = "line-weight-pressure"
+categories = ["anime", "cartoon"]
+
+[[rule]]
+id = "lineart-a-bit-wobbly"
+measurement = "curvature_jitter"
+above = 0.12
+max = 0.178
+span = 0.06
+severity = 2
+skill = "line_confidence"
+number = "rad_deg"
+lesson = "drawing-ellipses"
+drill = "ellipse-pages"
+categories = ["anime", "cartoon"]
+
+# ── Retracing ───────────────────────────────────────────────────────
+[[rule]]
+id = "sketchy-lines"
+measurement = "retrace_ratio"
+above = 0.2
+max = 0.35
+span = 0.15
+severity = 1.5
+skill = "line_confidence"
+number = "abs_pct"
+lesson = "one-confident-stroke"
+drill = "contour-in-one-minute"
+categories = ["animals", "fundamentals"]
 
 [[rule]]
 id = "hairy-lines"
@@ -222,46 +957,373 @@ skill = "line_confidence"
 number = "abs_pct"
 lesson = "one-confident-stroke"
 drill = "ghosted-lines"
+categories = ["anime", "cartoon", "animals", "fundamentals"]
 
+[[rule]]
+id = "lineart-retraced"
+measurement = "retrace_ratio"
+above = 0.12
+max = 0.35
+span = 0.23
+severity = 2.5
+skill = "line_confidence"
+number = "abs_pct"
+lesson = "line-weight"
+drill = "line-weight-pressure"
+categories = ["anime", "cartoon"]
+
+# Shading lays strokes over strokes, so real life and scenes get more room.
+[[rule]]
+id = "overworked-shading"
+measurement = "retrace_ratio"
+above = 0.5
+span = 0.3
+severity = 2
+skill = "line_confidence"
+number = "abs_pct"
+lesson = "hatching"
+drill = "hatching-patches"
+categories = ["real-life", "environment"]
+
+# ── Pen speed ───────────────────────────────────────────────────────
+# speed_consistency = exp(−speed_cv), so 0.205 ≈ speed_cv 1.585: the two
+# rules below never fire together.
 [[rule]]
 id = "hesitant-speed"
 measurement = "speed_consistency"
 below = 0.4
+min = 0.205
 severity = 2
 skill = "line_confidence"
 number = "pct"
 lesson = "drawing-from-the-shoulder"
 drill = "ellipse-pages"
 
-# ── Proportions & angles (with keypoints) ───────────────────────────
+[[rule]]
+id = "stop-start-strokes"
+measurement = "speed_cv"
+above = 1.6
+span = 1.0
+severity = 3
+skill = "line_confidence"
+number = "pct"
+lesson = "gesture-and-flow"
+drill = "ghosted-lines"
+categories = ["anime", "cartoon", "real-life", "environment", "fundamentals"]
+
+[[rule]]
+id = "animal-stiff-strokes"
+measurement = "speed_cv"
+above = 1.6
+span = 1.0
+severity = 3
+skill = "line_confidence"
+number = "pct"
+lesson = "gesture-and-flow"
+drill = "gesture-30-second"
+categories = ["animals"]
+
+# ── Stroke count ────────────────────────────────────────────────────
+[[rule]]
+id = "many-tiny-strokes"
+measurement = "stroke_count"
+above = 300
+span = 300
+severity = 1.5
+skill = "line_confidence"
+number = "count"
+lesson = "one-confident-stroke"
+drill = "ghosted-lines"
+categories = ["anime", "cartoon"]
+
+[[rule]]
+id = "fur-hair-by-hair"
+measurement = "stroke_count"
+above = 400
+span = 400
+severity = 1.2
+skill = "line_confidence"
+number = "count"
+lesson = "simplifying-into-shapes"
+drill = "hatching-patches"
+categories = ["animals"]
+
+[[rule]]
+id = "many-strokes-simple-shape"
+measurement = "stroke_count"
+above = 60
+span = 90
+severity = 1.5
+skill = "line_confidence"
+number = "count"
+lesson = "drawing-from-the-shoulder"
+drill = "ghosted-lines"
+categories = ["fundamentals"]
+
+# ════════════════════════════════════════════════════════════════════
+# PROPORTIONS & ANGLES (needs tapped keypoints)
+# ════════════════════════════════════════════════════════════════════
+
+# ── Keypoint error (RMS, fraction of the subject's size) ────────────
 [[rule]]
 id = "proportions-off"
-span = 0.1
 measurement = "keypoint_error"
 above = 0.06
+max = 0.12
+span = 0.06
+severity = 3.5
+skill = "proportions"
+number = "abs_pct"
+lesson = "measuring-with-units"
+drill = "head-units"
+categories = ["fundamentals"]
+
+[[rule]]
+id = "proportions-way-off"
+measurement = "keypoint_error"
+above = 0.12
+span = 0.12
+severity = 4.5
+skill = "proportions"
+number = "abs_pct"
+lesson = "measuring-with-units"
+drill = "block-in-boxes"
+categories = ["fundamentals"]
+
+[[rule]]
+id = "anime-proportions-off"
+measurement = "keypoint_error"
+above = 0.05
+max = 0.1
+span = 0.05
+severity = 3.5
+skill = "proportions"
+number = "abs_pct"
+lesson = "anime-faces"
+drill = "eye-placement"
+categories = ["anime"]
+
+[[rule]]
+id = "anime-proportions-way-off"
+measurement = "keypoint_error"
+above = 0.1
+span = 0.1
+severity = 4.5
+skill = "proportions"
+number = "abs_pct"
+lesson = "anime-faces"
+drill = "face-proportion-grid"
+categories = ["anime"]
+
+[[rule]]
+id = "face-proportions-off"
+measurement = "keypoint_error"
+above = 0.06
+max = 0.12
+span = 0.06
+severity = 3.5
+skill = "proportions"
+number = "abs_pct"
+lesson = "proportions-of-the-face"
+drill = "face-proportion-grid"
+categories = ["real-life"]
+
+[[rule]]
+id = "face-proportions-way-off"
+measurement = "keypoint_error"
+above = 0.12
+span = 0.12
+severity = 4.5
+skill = "proportions"
+number = "abs_pct"
+lesson = "measuring-with-units"
+drill = "head-units"
+categories = ["real-life"]
+
+[[rule]]
+id = "animal-proportions-off"
+measurement = "keypoint_error"
+above = 0.07
+max = 0.13
+span = 0.06
+severity = 3.5
+skill = "proportions"
+number = "abs_pct"
+lesson = "animal-construction"
+drill = "animal-bean-construction"
+categories = ["animals"]
+
+[[rule]]
+id = "animal-proportions-way-off"
+measurement = "keypoint_error"
+above = 0.13
+span = 0.13
+severity = 4.5
+skill = "proportions"
+number = "abs_pct"
+lesson = "measuring-with-units"
+drill = "head-units"
+categories = ["animals"]
+
+[[rule]]
+id = "cartoon-proportions-off"
+measurement = "keypoint_error"
+above = 0.1
+max = 0.2
+span = 0.1
+severity = 3
+skill = "proportions"
+number = "abs_pct"
+lesson = "cartoon-exaggeration"
+drill = "exaggerate-shapes"
+categories = ["cartoon"]
+
+[[rule]]
+id = "cartoon-proportions-way-off"
+measurement = "keypoint_error"
+above = 0.2
+span = 0.2
 severity = 4
 skill = "proportions"
 number = "abs_pct"
 lesson = "measuring-with-units"
 drill = "head-units"
+categories = ["cartoon"]
 
 [[rule]]
+id = "scene-landmarks-off"
+measurement = "keypoint_error"
+above = 0.06
+max = 0.12
+span = 0.06
+severity = 3
+skill = "proportions"
+number = "abs_pct"
+lesson = "perspective-basics"
+drill = "cube-in-perspective"
+categories = ["environment"]
+
+[[rule]]
+id = "scene-landmarks-way-off"
+measurement = "keypoint_error"
+above = 0.12
+span = 0.12
+severity = 4
+skill = "proportions"
+number = "abs_pct"
+lesson = "measuring-with-units"
+drill = "block-in-boxes"
+categories = ["environment"]
+
+# ── The single worst keypoint ───────────────────────────────────────
+[[rule]]
+id = "one-point-way-off"
+measurement = "keypoint_max_error"
+above = 0.2
+span = 0.2
+severity = 2.5
+skill = "proportions"
+number = "abs_pct"
+lesson = "checking-as-you-go"
+drill = "grid-copy"
+categories = ["anime", "cartoon", "animals", "environment", "fundamentals"]
+
+[[rule]]
+id = "hand-or-foot-off"
+measurement = "keypoint_max_error"
+above = 0.2
+span = 0.2
+severity = 2.5
+skill = "proportions"
+number = "abs_pct"
+lesson = "drawing-hands-simply"
+drill = "hand-mitten-shapes"
+categories = ["real-life"]
+
+# ── Angles (mean absolute segment angle error, degrees) ─────────────
+[[rule]]
 id = "angles-off"
-span = 15
+span = 7
 measurement = "angle_error"
 above = 8.0
+max = 15.0
 severity = 3
 skill = "proportions"
 number = "deg"
 lesson = "finding-angles"
 drill = "angle-matching"
+categories = ["anime", "real-life", "fundamentals"]
 
 [[rule]]
-id = "blank-canvas"
-measurement = "ink_coverage"
-below = 0.0005
-severity = 5
-skill = "outline"
-number = "pct"
-lesson = "seeing-the-whole-subject"
-drill = "contour-in-one-minute"
+id = "angles-way-off"
+measurement = "angle_error"
+above = 15.0
+span = 15
+severity = 4
+skill = "proportions"
+number = "deg"
+lesson = "finding-angles"
+drill = "envelope-shapes"
+categories = ["anime", "real-life", "fundamentals"]
+
+[[rule]]
+id = "perspective-angles-off"
+measurement = "angle_error"
+above = 6.0
+max = 14.0
+span = 8
+severity = 3
+skill = "proportions"
+number = "deg"
+lesson = "perspective-basics"
+drill = "cube-in-perspective"
+categories = ["environment"]
+
+[[rule]]
+id = "perspective-angles-way-off"
+measurement = "angle_error"
+above = 14.0
+span = 14
+severity = 4
+skill = "proportions"
+number = "deg"
+lesson = "two-point-perspective"
+drill = "two-point-boxes"
+categories = ["environment"]
+
+[[rule]]
+id = "animal-pose-off"
+measurement = "angle_error"
+above = 10.0
+max = 20.0
+span = 10
+severity = 3
+skill = "proportions"
+number = "deg"
+lesson = "gesture-and-flow"
+drill = "gesture-30-second"
+categories = ["animals"]
+
+[[rule]]
+id = "animal-pose-way-off"
+measurement = "angle_error"
+above = 20.0
+span = 20
+severity = 4
+skill = "proportions"
+number = "deg"
+lesson = "animal-construction"
+drill = "animal-bean-construction"
+categories = ["animals"]
+
+[[rule]]
+id = "cartoon-angles-off"
+measurement = "angle_error"
+above = 12.0
+span = 15
+severity = 2.5
+skill = "proportions"
+number = "deg"
+lesson = "finding-angles"
+drill = "angle-matching"
+categories = ["cartoon"]
