@@ -7,7 +7,31 @@
  * metrics in `drill-metrics.ts` (see docs/planning/CONTENT_GUIDE.md → Drills).
  */
 import { queueSync } from './sync';
-import type { GradeWeights } from './grader';
+import type { GradeWeights, ScoreCurve } from './grader';
+import {
+	DOT,
+	GUIDE,
+	INK,
+	PALE,
+	bbox,
+	between,
+	blobPoints,
+	convexHull,
+	cross,
+	ellipse,
+	line,
+	n,
+	pick,
+	polyPath,
+	smoothPath,
+	svgDoc,
+	type Pt,
+	type Rng
+} from './drill/svg';
+import * as m8 from './drill/targets';
+
+export { blobPoints, convexHull, seeded, svgDoc } from './drill/svg';
+export type { Pt, Rng } from './drill/svg';
 
 export type DrillKind =
 	'lines' | 'ellipses' | 'boxes' | 'shapes' | 'values' | 'figure' | 'reference';
@@ -15,11 +39,6 @@ export type DrillKind =
 /** Same skill ids as `content/feedback/rules.toml`. */
 export type DrillSkill =
 	'line_confidence' | 'proportions' | 'placement' | 'outline' | 'silhouette' | 'tone';
-
-export interface Pt {
-	x: number;
-	y: number;
-}
 
 /** One round's target. */
 export interface DrillTarget {
@@ -33,9 +52,9 @@ export interface DrillTarget {
 	segment?: { a: Pt; b: Pt };
 	/** angle-matching: the line's angle, degrees in [0, 180). */
 	angle?: number;
+	/** line-weight-pressure: the thick end `a` and the thin end `b`, canvas pixels. */
+	taper?: { a: Pt; b: Pt };
 }
-
-export type Rng = () => number;
 
 export interface Drill {
 	id: string;
@@ -51,8 +70,12 @@ export interface Drill {
 	brush: DrillBrush;
 	/** Grader weight overrides (missing fields use the fundamentals defaults). */
 	weights?: Partial<GradeWeights>;
+	/** Score curve override, for loosely graded drills (missing fields use the grader default). */
+	curve?: Partial<ScoreCurve>;
 	/** Draw "blind": canvas ink is hidden until the round ends; scored on line confidence only. */
 	blind?: boolean;
+	/** A creative exercise: there is no single right answer, so it is graded loosely. */
+	creative?: boolean;
 	/** Seeded target. Reference drills use it as the fallback when no picture loads. */
 	target: (rng: Rng, w?: number, h?: number) => DrillTarget;
 	/** The prompt picture as an SVG string: `target(rng, w, h).prompt`. */
@@ -77,80 +100,6 @@ export const SKILL_NAMES: Record<DrillSkill, string> = {
 	tone: 'Light & dark'
 };
 
-// ---------------------------------------------------------------- randomness
-
-/** Small, fast seeded PRNG (mulberry32). Returns floats in [0, 1). */
-export function seeded(seed: number): Rng {
-	let a = seed >>> 0;
-	return () => {
-		a = (a + 0x6d2b79f5) >>> 0;
-		let t = a;
-		t = Math.imul(t ^ (t >>> 15), t | 1);
-		t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-		return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-	};
-}
-
-const between = (rng: Rng, a: number, b: number) => a + rng() * (b - a);
-const pick = <T>(rng: Rng, xs: readonly T[]) => xs[Math.floor(rng() * xs.length)];
-const n = (v: number) => +v.toFixed(1);
-
-// ---------------------------------------------------------------- svg helpers
-
-const INK = '#16161a';
-const PALE = '#d9d5cc';
-const GUIDE = '#8a7fd0';
-const DOT = '#e8492f';
-
-export function svgDoc(w: number, h: number, body: string, background = true) {
-	const bg = background ? `<rect width="${w}" height="${h}" fill="#fff"/>` : '';
-	return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">${bg}${body}</svg>`;
-}
-
-const line = (a: Pt, b: Pt, attrs = `stroke="${INK}" stroke-width="4"`) =>
-	`<line x1="${n(a.x)}" y1="${n(a.y)}" x2="${n(b.x)}" y2="${n(b.y)}" ${attrs} stroke-linecap="round"/>`;
-
-const polyPath = (pts: Pt[]) => 'M' + pts.map((p) => `${n(p.x)} ${n(p.y)}`).join(' L') + ' Z';
-
-/** Closed Catmull-Rom spline through the points, as cubic Béziers. */
-function smoothPath(pts: Pt[]) {
-	const k = pts.length;
-	let d = `M${n(pts[0].x)} ${n(pts[0].y)}`;
-	for (let i = 0; i < k; i++) {
-		const p0 = pts[(i - 1 + k) % k];
-		const p1 = pts[i];
-		const p2 = pts[(i + 1) % k];
-		const p3 = pts[(i + 2) % k];
-		const c1 = { x: p1.x + (p2.x - p0.x) / 6, y: p1.y + (p2.y - p0.y) / 6 };
-		const c2 = { x: p2.x - (p3.x - p1.x) / 6, y: p2.y - (p3.y - p1.y) / 6 };
-		d += ` C${n(c1.x)} ${n(c1.y)} ${n(c2.x)} ${n(c2.y)} ${n(p2.x)} ${n(p2.y)}`;
-	}
-	return d + ' Z';
-}
-
-const ellipse = (c: Pt, rx: number, ry: number, deg: number, attrs: string) =>
-	`<ellipse cx="${n(c.x)}" cy="${n(c.y)}" rx="${n(rx)}" ry="${n(ry)}" transform="rotate(${n(deg)} ${n(c.x)} ${n(c.y)})" ${attrs}/>`;
-
-// ---------------------------------------------------------------- shapes
-
-/** A smooth organic blob: polar radius with a few low-frequency bumps. */
-export function blobPoints(rng: Rng, c: Pt, rx: number, ry: number, count = 40): Pt[] {
-	const waves = [2, 3, 5].map((f) => ({ f, amp: between(rng, 0.04, 0.16), ph: rng() * 6.283 }));
-	const turn = rng() * 6.283;
-	const pts: Pt[] = [];
-	for (let i = 0; i < count; i++) {
-		const t = (i / count) * Math.PI * 2;
-		const r = 1 + waves.reduce((s, w) => s + w.amp * Math.sin(w.f * t + w.ph), 0);
-		const x = Math.cos(t) * rx * r;
-		const y = Math.sin(t) * ry * r;
-		pts.push({
-			x: c.x + x * Math.cos(turn * 0.15) - y * Math.sin(turn * 0.15),
-			y: c.y + x * Math.sin(turn * 0.15) + y * Math.cos(turn * 0.15)
-		});
-	}
-	return pts;
-}
-
 /** Random non-convex polygon (a "star-ish" shape), clockwise. */
 function randomPolygon(rng: Rng, c: Pt, r: number, sides: number): Pt[] {
 	const pts: Pt[] = [];
@@ -161,27 +110,6 @@ function randomPolygon(rng: Rng, c: Pt, r: number, sides: number): Pt[] {
 		pts.push({ x: c.x + Math.cos(t) * rr, y: c.y + Math.sin(t) * rr * 0.85 });
 	}
 	return pts;
-}
-
-const cross = (o: Pt, a: Pt, b: Pt) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
-
-/** Convex hull (monotone chain). */
-export function convexHull(points: Pt[]): Pt[] {
-	const p = [...points].sort((a, b) => a.x - b.x || a.y - b.y);
-	if (p.length < 3) return p;
-	const lower: Pt[] = [];
-	for (const q of p) {
-		while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], q) <= 0)
-			lower.pop();
-		lower.push(q);
-	}
-	const upper: Pt[] = [];
-	for (const q of [...p].reverse()) {
-		while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], q) <= 0)
-			upper.pop();
-		upper.push(q);
-	}
-	return [...lower.slice(0, -1), ...upper.slice(0, -1)];
 }
 
 /** Hull reduced to `max` corners by dropping the corner that adds the least area. */
@@ -197,17 +125,6 @@ function envelope(points: Pt[], max: number): Pt[] {
 		h.splice(best, 1);
 	}
 	return h;
-}
-
-function bbox(pts: Pt[]) {
-	const xs = pts.map((p) => p.x);
-	const ys = pts.map((p) => p.y);
-	return {
-		x0: Math.min(...xs),
-		y0: Math.min(...ys),
-		x1: Math.max(...xs),
-		y1: Math.max(...ys)
-	};
 }
 
 /** A blob of random size and proportions, somewhere near the middle of the canvas. */
@@ -538,6 +455,307 @@ const VALUE_WEIGHTS: Partial<GradeWeights> = {
 	keypoints: 0
 };
 
+/** Grader weights in field order: placement, outline, silhouette, grid, tone, ssim, lineConfidence. */
+const W = (
+	placement: number,
+	outline: number,
+	silhouette: number,
+	grid: number,
+	tone: number,
+	ssim: number,
+	lineConfidence: number
+): Partial<GradeWeights> => ({
+	placement,
+	outline,
+	silhouette,
+	grid,
+	tone,
+	ssim,
+	lineConfidence,
+	keypoints: 0
+});
+
+/** The 17 drills added in M8 (ids fixed by docs/planning/M8_CONTENT_PLAN.md). */
+const M8_DRILLS: DrillDef[] = [
+	{
+		id: 'gesture-30-second',
+		name: '30-second gesture',
+		skill: 'line_confidence',
+		kind: 'reference',
+		blurb: 'Catch the action of a real figure or animal in one flowing line.',
+		howTo: [
+			'Find the line of action: one long curve from the head through the body to the weight-bearing foot.',
+			'Draw that curve first, in one fast stroke.',
+			'Hang the head and limbs on it with a few quick lines. No details; the timer is short.'
+		],
+		rounds: 5,
+		secondsPerRound: 30,
+		brush: 'pen',
+		weights: W(0.15, 0.1, 0.25, 0.1, 0, 0, 0.4),
+		curve: { floor: 0.3, pass: 0.75 },
+		target: m8.gestureFigure
+	},
+	{
+		id: 'negative-space-shapes',
+		name: 'Negative space',
+		skill: 'silhouette',
+		kind: 'shapes',
+		blurb: 'Draw only the gaps around an object, never the object itself.',
+		howTo: [
+			'The dashed frame on your canvas matches the frame in the target.',
+			'Look at the purple gaps between the legs, rails and edges. Those are your shapes.',
+			'Fill each gap solid with the marker and leave the object as bare paper.'
+		],
+		rounds: 4,
+		brush: 'marker',
+		weights: W(0.1, 0.1, 0.4, 0.2, 0.15, 0.05, 0),
+		target: m8.negativeSpace
+	},
+	{
+		id: 'face-proportion-grid',
+		name: 'Face proportions',
+		skill: 'proportions',
+		kind: 'figure',
+		blurb: 'Copy a face using the eye line and the thirds of the face.',
+		howTo: [
+			'The two ticks on your canvas are the top of the head and the chin.',
+			'Mark the eye line halfway between them, then split hairline to chin into thirds: brow, nose, chin.',
+			'Draw the head shape, then the eyes (one eye apart), nose, mouth and ears on those lines.'
+		],
+		rounds: 3,
+		brush: 'pencil',
+		weights: W(0.2, 0.35, 0.15, 0.2, 0, 0.05, 0.05),
+		target: m8.faceProportions
+	},
+	{
+		id: 'eye-placement',
+		name: 'Eye placement',
+		skill: 'proportions',
+		kind: 'figure',
+		blurb: 'Put big anime eyes in exactly the right place on a face guide.',
+		howTo: [
+			'Your canvas already has the head, the centre line and the eye line.',
+			'Check the target: how far from the centre line is each eye, and how wide?',
+			'Draw both eyes on the eye line, the same size and the same distance from the centre.'
+		],
+		rounds: 4,
+		brush: 'pen',
+		weights: W(0.35, 0.2, 0.1, 0.25, 0.05, 0.05, 0),
+		target: m8.animeEyes
+	},
+	{
+		id: 'hand-mitten-shapes',
+		name: 'Mitten hands',
+		skill: 'proportions',
+		kind: 'shapes',
+		blurb: 'Build a hand from a palm box, a finger mitten and a thumb.',
+		howTo: [
+			'Start with the palm as a box. The fingers together are about as long as the palm.',
+			'Add the fingers as one mitten shape, then split it into finger tubes.',
+			'The thumb grows from the lower side of the palm, not from the knuckles.'
+		],
+		rounds: 4,
+		brush: 'pencil',
+		weights: W(0.1, 0.35, 0.25, 0.15, 0, 0.05, 0.1),
+		target: m8.handMitten
+	},
+	{
+		id: 'animal-bean-construction',
+		name: 'Animal beans',
+		skill: 'silhouette',
+		kind: 'shapes',
+		blurb: 'Construct an animal from a body bean, circles and jointed legs.',
+		howTo: [
+			'Draw the chest and hip circles first, then wrap the body bean around them.',
+			'Add the head circle and muzzle, joined by the neck.',
+			'Legs last: tubes with small circles at the joints. Watch which way each joint bends.'
+		],
+		rounds: 3,
+		brush: 'pencil',
+		weights: W(0.1, 0.3, 0.3, 0.15, 0, 0.05, 0.1),
+		target: m8.animalBeans
+	},
+	{
+		id: 'cube-in-perspective',
+		name: 'Cube in perspective',
+		skill: 'placement',
+		kind: 'boxes',
+		blurb: 'Draw a cube whose edges run to one vanishing point.',
+		howTo: [
+			'Your canvas shows the horizon and the vanishing point (VP).',
+			'Draw the front square, then a line from each visible corner towards the VP.',
+			'Close the back of the cube where the depth looks right. Hidden edges are optional; keep them light.'
+		],
+		rounds: 5,
+		brush: 'pen',
+		weights: W(0.25, 0.4, 0.1, 0.15, 0, 0, 0.1),
+		target: m8.cubePerspective
+	},
+	{
+		id: 'two-point-boxes',
+		name: 'Two-point boxes',
+		skill: 'placement',
+		kind: 'boxes',
+		blurb: 'Draw a box at an angle, with edges running to two vanishing points.',
+		howTo: [
+			'Start with the nearest vertical edge.',
+			'Run its top and bottom towards both VPs, then cut the sides off with two more verticals.',
+			'Close the top (or bottom) by crossing lines back to the opposite VPs.'
+		],
+		rounds: 5,
+		brush: 'pen',
+		weights: W(0.25, 0.4, 0.1, 0.15, 0, 0, 0.1),
+		target: m8.twoPointBox
+	},
+	{
+		id: 'ellipse-in-boxes',
+		name: 'Ellipses in boxes',
+		skill: 'line_confidence',
+		kind: 'ellipses',
+		blurb: 'Fit a circle into a square seen in perspective.',
+		howTo: [
+			'The ellipse touches each side of the square once, where the dashed centre lines meet it.',
+			'The nearer half of the ellipse is a little fuller than the far half.',
+			'Ghost the loop, then draw it in one or two smooth passes. No pointy ends.'
+		],
+		rounds: 6,
+		brush: 'pen',
+		weights: W(0.15, 0.45, 0.1, 0.1, 0, 0, 0.2),
+		target: m8.ellipseInBox
+	},
+	{
+		id: 'form-shading-spheres',
+		name: 'Shading a sphere',
+		skill: 'tone',
+		kind: 'values',
+		blurb: 'Light side, core shadow, reflected light and cast shadow on a ball.',
+		howTo: [
+			'Find the light (the sun mark), then lightly outline the ball and its cast shadow.',
+			'Shade the shadow side, darkest in the core band next to the light. Leave a little reflected light at the edge.',
+			'Make the cast shadow the darkest value of all, and keep the light side pale.'
+		],
+		rounds: 3,
+		brush: 'pencil',
+		weights: W(0.05, 0.05, 0.15, 0.1, 0.5, 0.15, 0),
+		target: m8.shadedSphere
+	},
+	{
+		id: 'cast-shadow-blocks',
+		name: 'Cast shadow blocks',
+		skill: 'tone',
+		kind: 'values',
+		blurb: 'Shade a block in three values and drop its shadow on the ground.',
+		howTo: [
+			'Draw the block, then find where its shadow falls: away from the sun mark.',
+			'Give each face one flat value: lit faces light, the face turned away dark.',
+			'Fill the cast shadow darker than any face, with a crisp edge.'
+		],
+		rounds: 3,
+		brush: 'pencil',
+		weights: W(0.05, 0.1, 0.15, 0.15, 0.4, 0.15, 0),
+		target: m8.castShadowBlock
+	},
+	{
+		id: 'hatching-patches',
+		name: 'Hatching patches',
+		skill: 'tone',
+		kind: 'values',
+		blurb: 'Build darker and darker patches with lines alone.',
+		howTo: [
+			'Copy each patch inside its dashed box, left to right.',
+			'Keep your lines parallel and evenly spaced; closer lines make a darker patch.',
+			'Cross-hatch the dark patches with a second (and third) layer at a new angle.'
+		],
+		rounds: 3,
+		brush: 'pen',
+		weights: W(0.05, 0, 0.1, 0.15, 0.5, 0.1, 0.1),
+		target: m8.hatchingPatches
+	},
+	{
+		id: 'soft-edge-blend',
+		name: 'Soft blend',
+		skill: 'tone',
+		kind: 'values',
+		blurb: 'One smooth gradient from dark to paper white, with no steps.',
+		howTo: [
+			'Start at the dark end with firm pressure.',
+			'Ease off gradually as you move along, overlapping your strokes.',
+			'Squint: if you can see bands, go back and soften where they meet.'
+		],
+		rounds: 3,
+		brush: 'pencil',
+		weights: W(0.05, 0, 0.15, 0.1, 0.55, 0.15, 0),
+		target: m8.softBlend
+	},
+	{
+		id: 'thumbnail-composition',
+		name: 'Thumbnail composition',
+		skill: 'placement',
+		kind: 'values',
+		blurb: 'Copy a small three-value scene placed on the thirds.',
+		howTo: [
+			'Use the dashed thirds lines on your canvas: the horizon and the main shape sit on them.',
+			'Lay in the mid-grey mass first, flat.',
+			'Place the darkest shape last, right where it sits in the target.'
+		],
+		rounds: 3,
+		secondsPerRound: 120,
+		brush: 'marker',
+		weights: W(0.25, 0.05, 0.15, 0.25, 0.25, 0.05, 0),
+		target: m8.thirdsThumbnail
+	},
+	{
+		id: 'line-weight-pressure',
+		name: 'Line weight',
+		skill: 'line_confidence',
+		kind: 'lines',
+		blurb: 'One straight line that tapers from thick to thin.',
+		howTo: [
+			'Start on the big dot pressing firmly, and draw towards the small ring.',
+			'Lift off gradually so the line ends thin. Keep it straight.',
+			'Needs a pen or stylus with pressure. With a mouse only straightness and the end points count.'
+		],
+		rounds: 6,
+		brush: 'pen',
+		weights: W(0.15, 0.35, 0.2, 0.1, 0.1, 0, 0.1),
+		target: m8.taperedLine
+	},
+	{
+		id: 'exaggerate-shapes',
+		name: 'Exaggerate it',
+		skill: 'silhouette',
+		kind: 'shapes',
+		blurb: 'Redraw a simple object with its proportions pushed on purpose.',
+		howTo: [
+			'Read the instruction at the top: which part gets bigger or smaller?',
+			'Push it further than feels comfortable. Timid changes don’t read.',
+			'There is no single right answer; it is scored loosely on the big shape and confident lines.'
+		],
+		rounds: 4,
+		brush: 'pencil',
+		creative: true,
+		weights: W(0.05, 0.05, 0.5, 0.05, 0, 0, 0.35),
+		curve: { floor: 0.2, pass: 0.7 },
+		target: m8.exaggerateShapes
+	},
+	{
+		id: 'atmospheric-layers',
+		name: 'Atmospheric layers',
+		skill: 'tone',
+		kind: 'values',
+		blurb: 'Four hill layers: near ones dark, far ones light.',
+		howTo: [
+			'Shade the farthest hills first, very lightly.',
+			'Each layer in front gets one step darker.',
+			'Make the nearest hills the darkest, with the clearest edge.'
+		],
+		rounds: 3,
+		brush: 'pencil',
+		weights: W(0.05, 0.05, 0.1, 0.2, 0.5, 0.1, 0),
+		target: m8.atmosphericLayers
+	}
+];
+
 const defs: DrillDef[] = [
 	{
 		id: 'ghosted-lines',
@@ -750,7 +968,8 @@ const defs: DrillDef[] = [
 		brush: 'pen',
 		blind: true,
 		target: contourSubject
-	}
+	},
+	...M8_DRILLS
 ];
 
 export const drills: Drill[] = defs.map((d) => ({

@@ -259,6 +259,7 @@
 						<div class="tile-head">
 							<h2>{drill.kind === 'reference' ? 'Picture' : 'Target'}</h2>
 							{#if drill.blind}<span class="badge">Looking exercise</span>{/if}
+							{#if drill.creative}<span class="badge">Creative exercise</span>{/if}
 						</div>
 						{#if loading || !target}
 							<div class="target skeleton" aria-busy="true">Getting the next one…</div>
