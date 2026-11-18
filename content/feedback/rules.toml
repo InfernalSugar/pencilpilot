@@ -1,0 +1,267 @@
+# Diagnosis rules: measurement → mistake. See docs/planning/CONTENT_GUIDE.md.
+#
+# A rule fires when its measurement is `above` / `below` the threshold (with
+# `abs = true` the absolute value is compared). `severity` (1–5) is scaled up
+# by how far past the threshold the value is; the top 2–3 fixes are shown,
+# at most one per `skill`.
+#
+# `span` (optional): how far past the threshold counts as maximally bad
+# (default: the threshold itself). Severity = severity × (1 + min(1, excess / span)).
+# `number` turns the value into the {n} placeholder:
+#   ratio_pct = |value − 1| × 100   (scale_ratio, contrast_ratio)
+#   abs_pct   = |value| × 100       (aspect_error, offsets, retrace_ratio)
+#   pct       = value × 100         (0–1 similarities)
+#   deg       = value               (angles)
+# `dir_pos` / `dir_neg` fill {dir} from the sign of the value.
+# `overlay` tells the results screen what to draw: bbox, offset, grid, missing, extra.
+# `min` / `max` (optional): the rule only fires when the value is inside them.
+# `categories` (optional) limits a rule to some categories.
+
+# ── Size & placement ────────────────────────────────────────────────
+[[rule]]
+id = "too-big"
+span = 0.3
+measurement = "scale_ratio"
+above = 1.15
+severity = 4
+skill = "placement"
+number = "ratio_pct"
+overlay = "bbox"
+lesson = "measuring-with-units"
+drill = "block-in-boxes"
+
+[[rule]]
+id = "too-small"
+span = 0.3
+measurement = "scale_ratio"
+below = 0.85
+severity = 4
+skill = "placement"
+number = "ratio_pct"
+overlay = "bbox"
+lesson = "measuring-with-units"
+drill = "block-in-boxes"
+
+[[rule]]
+id = "wrong-width"
+span = 0.2
+measurement = "aspect_error"
+above = 0.12
+abs = true
+severity = 4
+skill = "placement"
+number = "abs_pct"
+dir_pos = "wide"
+dir_neg = "narrow"
+overlay = "bbox"
+lesson = "comparing-width-and-height"
+drill = "envelope-shapes"
+
+[[rule]]
+id = "off-sideways"
+span = 0.15
+measurement = "offset_x"
+above = 0.12
+abs = true
+severity = 2
+skill = "placement"
+number = "abs_pct"
+dir_pos = "right"
+dir_neg = "left"
+overlay = "offset"
+lesson = "planning-the-page"
+drill = "four-corner-marks"
+
+[[rule]]
+id = "off-vertically"
+span = 0.15
+measurement = "offset_y"
+above = 0.12
+abs = true
+severity = 2
+skill = "placement"
+number = "abs_pct"
+dir_pos = "low"
+dir_neg = "high"
+overlay = "offset"
+lesson = "planning-the-page"
+drill = "four-corner-marks"
+
+# ── Outlines & shapes ───────────────────────────────────────────────
+[[rule]]
+id = "missing-parts"
+measurement = "outline_recall"
+below = 0.55
+severity = 4
+skill = "outline"
+number = "pct"
+overlay = "missing"
+lesson = "seeing-the-whole-subject"
+drill = "contour-in-one-minute"
+
+[[rule]]
+id = "extra-lines"
+measurement = "outline_precision"
+below = 0.5
+severity = 3
+skill = "outline"
+number = "pct"
+overlay = "extra"
+lesson = "draw-what-you-see"
+drill = "blind-contour"
+
+[[rule]]
+id = "outlines-drift"
+measurement = "outline"
+below = 0.6
+severity = 3
+skill = "outline"
+number = "pct"
+overlay = "grid"
+lesson = "draw-what-you-see"
+drill = "contour-in-one-minute"
+
+[[rule]]
+id = "big-shapes-off"
+measurement = "silhouette"
+below = 0.55
+severity = 4
+skill = "silhouette"
+number = "pct"
+overlay = "grid"
+lesson = "big-shapes-first"
+drill = "silhouette-fill"
+
+[[rule]]
+id = "one-area-off"
+measurement = "worst_cell"
+below = 0.45
+severity = 2
+skill = "silhouette"
+number = "pct"
+overlay = "grid"
+lesson = "checking-as-you-go"
+drill = "grid-copy"
+
+[[rule]]
+id = "too-sparse"
+measurement = "ink_coverage"
+below = 0.008
+severity = 3
+skill = "outline"
+number = "pct"
+lesson = "seeing-the-whole-subject"
+drill = "contour-in-one-minute"
+
+# ── Light & dark ────────────────────────────────────────────────────
+[[rule]]
+id = "no-shading"
+measurement = "contrast_ratio"
+below = 0.2
+severity = 1.5
+skill = "tone"
+number = "ratio_pct"
+lesson = "value-range"
+drill = "five-step-value-scale"
+categories = ["real-life", "animals", "environment"]
+
+[[rule]]
+id = "flat-shading"
+span = 0.4
+measurement = "contrast_ratio"
+below = 0.6
+min = 0.2
+severity = 3
+skill = "tone"
+number = "ratio_pct"
+lesson = "value-range"
+drill = "five-step-value-scale"
+categories = ["real-life", "animals", "environment"]
+
+[[rule]]
+id = "too-dark"
+span = 0.5
+measurement = "contrast_ratio"
+above = 1.45
+severity = 2
+skill = "tone"
+number = "ratio_pct"
+lesson = "value-range"
+drill = "five-step-value-scale"
+categories = ["real-life", "animals", "environment"]
+
+[[rule]]
+id = "lights-and-darks-misplaced"
+measurement = "tone"
+below = 0.35
+severity = 3
+skill = "tone"
+number = "pct"
+lesson = "squint-for-values"
+drill = "three-value-thumbnail"
+categories = ["real-life", "environment"]
+
+# ── Line confidence ─────────────────────────────────────────────────
+[[rule]]
+id = "shaky-lines"
+measurement = "smoothness"
+below = 0.5
+severity = 3
+skill = "line_confidence"
+number = "pct"
+lesson = "drawing-from-the-shoulder"
+drill = "ghosted-lines"
+
+[[rule]]
+id = "hairy-lines"
+span = 0.3
+measurement = "retrace_ratio"
+above = 0.35
+severity = 3
+skill = "line_confidence"
+number = "abs_pct"
+lesson = "one-confident-stroke"
+drill = "ghosted-lines"
+
+[[rule]]
+id = "hesitant-speed"
+measurement = "speed_consistency"
+below = 0.4
+severity = 2
+skill = "line_confidence"
+number = "pct"
+lesson = "drawing-from-the-shoulder"
+drill = "ellipse-pages"
+
+# ── Proportions & angles (with keypoints) ───────────────────────────
+[[rule]]
+id = "proportions-off"
+span = 0.1
+measurement = "keypoint_error"
+above = 0.06
+severity = 4
+skill = "proportions"
+number = "abs_pct"
+lesson = "measuring-with-units"
+drill = "head-units"
+
+[[rule]]
+id = "angles-off"
+span = 15
+measurement = "angle_error"
+above = 8.0
+severity = 3
+skill = "proportions"
+number = "deg"
+lesson = "finding-angles"
+drill = "angle-matching"
+
+[[rule]]
+id = "blank-canvas"
+measurement = "ink_coverage"
+below = 0.0005
+severity = 5
+skill = "outline"
+number = "pct"
+lesson = "seeing-the-whole-subject"
+drill = "contour-in-one-minute"
