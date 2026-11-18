@@ -18,6 +18,8 @@
 # `dir_pos` / `dir_neg` fill {dir} from the sign of the value.
 # `overlay` tells the results screen what to draw: bbox, offset, grid, missing, extra.
 # `min` / `max` (optional): the rule only fires when the value is inside them.
+# `gate` / `gate_min` / `gate_max` (optional): a second measurement that must be in range,
+#   e.g. tone rules use gate = "shading", gate_min = 0.1 so line art isn't judged on shading.
 # `categories` (optional) limits a rule to some categories.
 #
 # Conventions (checked by the tests in crates/feedback):
@@ -703,6 +705,8 @@ categories = ["real-life", "animals"]
 
 [[rule]]
 id = "flat-shading"
+gate = "shading"
+gate_min = 0.1
 span = 0.4
 measurement = "contrast_ratio"
 below = 0.6
@@ -716,6 +720,8 @@ categories = ["real-life", "animals"]
 
 [[rule]]
 id = "a-bit-flat"
+gate = "shading"
+gate_min = 0.1
 measurement = "contrast_ratio"
 below = 0.78
 min = 0.6
@@ -729,6 +735,8 @@ categories = ["real-life"]
 
 [[rule]]
 id = "too-dark"
+gate = "shading"
+gate_min = 0.1
 span = 0.5
 measurement = "contrast_ratio"
 above = 1.45
@@ -753,6 +761,8 @@ categories = ["environment"]
 
 [[rule]]
 id = "scene-flat"
+gate = "shading"
+gate_min = 0.1
 measurement = "contrast_ratio"
 below = 0.6
 min = 0.2
@@ -766,6 +776,8 @@ categories = ["environment"]
 
 [[rule]]
 id = "scene-too-contrasty"
+gate = "shading"
+gate_min = 0.1
 measurement = "contrast_ratio"
 above = 1.4
 span = 0.5
@@ -792,6 +804,8 @@ categories = ["anime", "cartoon"]
 # ── Where the lights and darks are ──────────────────────────────────
 [[rule]]
 id = "lights-and-darks-misplaced"
+gate = "shading"
+gate_min = 0.1
 measurement = "tone"
 below = 0.35
 min = 0.15
@@ -805,6 +819,8 @@ categories = ["real-life", "animals"]
 
 [[rule]]
 id = "shadows-on-wrong-side"
+gate = "shading"
+gate_min = 0.1
 measurement = "tone"
 below = 0.15
 span = 0.15
@@ -817,6 +833,8 @@ categories = ["real-life"]
 
 [[rule]]
 id = "animal-light-wrong"
+gate = "shading"
+gate_min = 0.1
 measurement = "tone"
 below = 0.15
 span = 0.15
@@ -829,6 +847,8 @@ categories = ["animals"]
 
 [[rule]]
 id = "scene-values-misplaced"
+gate = "shading"
+gate_min = 0.1
 measurement = "tone"
 below = 0.4
 min = 0.15
@@ -842,6 +862,8 @@ categories = ["environment"]
 
 [[rule]]
 id = "scene-values-scrambled"
+gate = "shading"
+gate_min = 0.1
 measurement = "tone"
 below = 0.15
 span = 0.15
@@ -855,6 +877,8 @@ categories = ["environment"]
 # Value drills (five-step scale, thumbnails) are graded as fundamentals.
 [[rule]]
 id = "value-steps-misplaced"
+gate = "shading"
+gate_min = 0.1
 measurement = "tone"
 below = 0.35
 span = 0.35
@@ -868,6 +892,8 @@ categories = ["fundamentals"]
 # ── Edges and transitions (structural similarity) ───────────────────
 [[rule]]
 id = "edges-dont-match"
+gate = "shading"
+gate_min = 0.1
 measurement = "ssim"
 below = 0.3
 span = 0.3

@@ -58,6 +58,11 @@ pub struct Rule {
     pub drill: Option<String>,
     #[serde(default)]
     pub categories: Vec<String>,
+    /// Optional second measurement that must be in range for the rule to apply,
+    /// e.g. `gate = "shading"`, `gate_min = 0.1` (only judge shading that exists).
+    pub gate: Option<String>,
+    pub gate_min: Option<f32>,
+    pub gate_max: Option<f32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -111,6 +116,9 @@ impl Library {
             }
             if r.above.is_none() == r.below.is_none() {
                 return Err(format!("rule {} needs exactly one of above/below", r.id));
+            }
+            if r.gate.is_some() && r.gate_min.is_none() && r.gate_max.is_none() {
+                return Err(format!("rule {} has a gate but no gate_min/gate_max", r.id));
             }
             if let (Some(lo), Some(hi)) = (r.min, r.max)
                 && lo > hi
@@ -238,6 +246,13 @@ pub fn feedback(
     for (i, r) in lib.rules.iter().enumerate() {
         if !r.categories.is_empty() && !r.categories.iter().any(|c| c == category) {
             continue;
+        }
+        if let Some(g) = &r.gate {
+            // the gate measurement must exist and be inside [gate_min, gate_max]
+            let Some(gv) = get(g) else { continue };
+            if r.gate_min.is_some_and(|m| gv < m) || r.gate_max.is_some_and(|m| gv > m) {
+                continue;
+            }
         }
         let Some(v) = get(&r.measurement) else {
             continue;
@@ -413,7 +428,7 @@ mod tests {
 
     #[test]
     fn category_limited_rules() {
-        let flat = m(&[("contrast_ratio", 0.3)]);
+        let flat = m(&[("contrast_ratio", 0.3), ("shading", 0.5)]);
         assert_eq!(
             ids(&feedback(lib(), &flat, "real-life", 0)),
             ["flat-shading"]
@@ -462,5 +477,29 @@ mod tests {
             "dir without words"
         );
         assert!(Library::parse(rules, "[tip.x]\ntitle='t'\nvariants=['v']").is_ok());
+    }
+
+    #[test]
+    fn shading_rules_only_judge_drawings_that_are_shaded() {
+        let lib = Library::builtin();
+        // pure line art: flat contrast, no fill → no "flat shading" verdict
+        let line_art = m(&[("contrast_ratio", 0.4), ("tone", 0.1), ("shading", 0.02)]);
+        let f = feedback(lib, &line_art, "real-life", 0);
+        assert!(
+            !f.fixes.iter().any(|x| x.id.contains("flat")
+                || x.id.contains("misplaced")
+                || x.id.contains("wrong")),
+            "{:?}",
+            f.fixes.iter().map(|x| &x.id).collect::<Vec<_>>()
+        );
+        // the same numbers on a shaded drawing are judged
+        let shaded = m(&[("contrast_ratio", 0.4), ("tone", 0.1), ("shading", 0.6)]);
+        assert!(!feedback(lib, &shaded, "real-life", 0).fixes.is_empty());
+    }
+
+    #[test]
+    fn gate_needs_bounds() {
+        let rules = "[[rule]]\nid='x'\nmeasurement='m'\nabove=1\nseverity=1\nskill='s'\nnumber='pct'\ngate='g'\n";
+        assert!(Library::parse(rules, "[tip.x]\ntitle='t'\nvariants=['v {n}','w {n}']").is_err());
     }
 }

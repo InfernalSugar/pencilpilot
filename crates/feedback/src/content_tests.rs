@@ -495,7 +495,8 @@ fn category_overrides_replace_the_generic_rule() {
     ];
     for (meas, v, expect) in cases {
         for (cat, id) in *expect {
-            let f = feedback(lib(), &m(&[(meas, *v)]), cat, 0);
+            // a shaded drawing, so shading rules (gated on `shading`) are judged too
+            let f = feedback(lib(), &m(&[(meas, *v), ("shading", 0.5)]), cat, 0);
             assert_eq!(ids(&f), [*id], "{meas}={v} in {cat}");
         }
     }
@@ -649,6 +650,8 @@ fn radians_and_counts_are_formatted() {
 /// A decent drawing: nothing here should fire anywhere.
 fn decent() -> Vec<(&'static str, f32)> {
     vec![
+        // a shaded drawing, so shading rules (gated on `shading`) are judged
+        ("shading", 0.5),
         ("placement", 0.85),
         ("scale_ratio", 1.06),
         ("aspect_error", -0.05),

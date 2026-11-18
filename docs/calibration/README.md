@@ -80,3 +80,9 @@ that change alone is switched off, measured while developing):
   relative to the part of the reference the drawing depicts. Leaving parts out no longer reads as
   "too small" (that's `missing-parts`). Perfect copies: `scale_ratio` 1.01–1.25 (median ≈ 1.05; the
   2 % trim of the reference box reads a few percent large), so the 0.85 / 1.15 thresholds still fit.
+
+## Follow-up: shading tips are gated
+After the fairness fix, line art isn't marked down for missing shading, so tips that *judge*
+shading (flat, too dark, values misplaced, edges, …) now require `shading ≥ 0.1` via the
+engine's new `gate` field. The gentle "add some shading" nudges (`no-shading`,
+`scene-no-shading`) still appear for line art.
