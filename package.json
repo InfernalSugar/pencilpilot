@@ -4,13 +4,14 @@
   "packageManager": "pnpm@10.34.9",
   "scripts": {
     "wasm": "pnpm wasm:grader && pnpm wasm:brush",
-    "dev": "pnpm wasm && pnpm --filter @pencilpilot/web dev",
+    "dev": "pnpm wasm && (cargo run -q --release -p pencilpilot-ref-service & pnpm --filter @pencilpilot/web dev)",
     "build": "pnpm wasm && pnpm --filter @pencilpilot/web build",
     "lint": "pnpm --filter @pencilpilot/web lint",
     "check": "pnpm --filter @pencilpilot/web check",
     "test": "pnpm --filter @pencilpilot/web test:unit -- --run",
     "wasm:grader": "wasm-pack build crates/grader-wasm --target web --out-dir pkg --out-name grader",
     "wasm:brush": "wasm-pack build crates/brush-wasm --target web --out-dir pkg --out-name brush",
-    "refs": "cargo run -q -p ref-importer --"
+    "refs": "cargo run -q -p ref-importer --",
+    "refs:serve": "cargo run -q --release -p pencilpilot-ref-service"
   }
 }

@@ -45,6 +45,12 @@ Each heading is a GitHub milestone, and each bullet is an issue titled `Mx-Tyy �
 - **M5-T05** Attribution display on the site + licensing check script in CI `web` `legal`
 - **M5-T06** Deploy a static preview (guest mode, browser storage); ADR-0004 hosting `infra`
 
+## M5b — Endless references (user request, 2026-11-18)
+- **M5b-T01** `crates/ref-service` (Rust/axum): ready-made pool of vetted Pixabay pictures per category × topic × tier, refilled in the background by demand; 24 h search cache, rate budget, parallel downloads, slot back-off; `/api/ref`, `/refimg`, `/api/report` `infra` `content`
+- **M5b-T02** `crates/ref-filters`: blank / text-heavy / too busy-faint / pHash duplicates + NSFW guard (open-source model, **safety only**) `content` `legal`
+- **M5b-T03** Web: canvas opens instantly, reference fades in (< 1 s), curated fallback, Beginner prefers hand-approved, Report button `web`
+- **M5b-T04** Hosting for the Node site + ref-service (see ADR-0004) `infra`
+
 ## M6 — Lessons, drills, progress (≈4–6 weeks)
 - **M6-T01** Lesson pages + 10 mini-lessons; each rule links to a lesson + drill `content` `web`
 - **M6-T02** Drill mode / "Fundamentals": timed figures, lines, ellipses, perspective boxes `web` `grader`

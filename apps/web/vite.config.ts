@@ -6,7 +6,14 @@ import { sveltekit } from '@sveltejs/kit/vite';
 export default defineConfig({
 	server: {
 		// The WASM packages live in crates/*/pkg, outside apps/web; let the dev server serve them.
-		fs: { allow: [searchForWorkspaceRoot(process.cwd())] }
+		fs: { allow: [searchForWorkspaceRoot(process.cwd())] },
+		// Endless references: the Rust ref-service (cargo run -p pencilpilot-ref-service).
+		proxy: Object.fromEntries(
+			['/api/ref', '/api/report', '/api/health', '/api/pool', '/refimg'].map((p) => [
+				p,
+				process.env.REF_SERVICE_URL ?? 'http://127.0.0.1:8787'
+			])
+		)
 	},
 	plugins: [
 		sveltekit({
