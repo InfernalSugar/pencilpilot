@@ -29,6 +29,16 @@ pnpm test         # web unit tests
 pnpm --filter @pencilpilot/web test:e2e   # browser tests
 ```
 
+## Configuration
+
+One git-ignored `.env` at the repo root:
+
+| Variable | What for |
+|---|---|
+| `PIXABAY_API_KEY` | reference importer + Endless reference service |
+| `DATABASE_PATH` | optional; SQLite file for accounts (default `data/pencilpilot.db`) |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | optional; enables "Continue with Google" (redirect URI: `<site>/auth/google/callback`) |
+
 ## Licences
 
 - Code: [MIT](LICENSE)
