@@ -3,9 +3,11 @@
 	import Tile from '#lib/ui/Tile.svelte';
 	import Button from '#lib/ui/Button.svelte';
 	import { loadSubmission, type Submission } from '#lib/submission.js';
+	import { byId, imageUrl } from '#lib/references.js';
 
 	let sub = $state<Submission | null>(null);
 	let loaded = $state(false);
+	const reference = $derived(byId(sub?.referenceId));
 	onMount(() => {
 		sub = loadSubmission();
 		loaded = true;
@@ -43,7 +45,18 @@
 				<span class="note">Scoring arrives with the grader (milestone M3).</span>
 			</Tile>
 			<Tile span={2} rows={2}>
-				<img src={sub.png} alt="Your submitted drawing" width={sub.width} height={sub.height} />
+				<div class="pair" class:single={!reference}>
+					{#if reference}
+						<figure>
+							<img src={imageUrl(reference)} alt="The reference" />
+							<figcaption>Reference</figcaption>
+						</figure>
+					{/if}
+					<figure>
+						<img src={sub.png} alt="Your submitted drawing" width={sub.width} height={sub.height} />
+						<figcaption>Your drawing</figcaption>
+					</figure>
+				</div>
 			</Tile>
 			<Tile tone="yellow">
 				<span class="pp-eyebrow ink">Time</span>
@@ -77,7 +90,30 @@
 	.grid {
 		grid-auto-rows: minmax(220px, auto);
 	}
+	.pair {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 12px;
+		height: 100%;
+	}
+	.pair.single {
+		grid-template-columns: 1fr;
+	}
+	figure {
+		margin: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		min-height: 0;
+	}
+	figcaption {
+		font-size: 13px;
+		font-weight: 600;
+		color: var(--pp-muted);
+	}
 	img {
+		min-height: 0;
+		flex: 1;
 		width: 100%;
 		height: 100%;
 		object-fit: contain;

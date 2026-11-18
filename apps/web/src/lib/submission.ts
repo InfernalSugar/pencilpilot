@@ -5,6 +5,7 @@ export interface Submission {
 	height: number;
 	seconds: number;
 	category: string | null;
+	referenceId: string | null;
 	strokes: number;
 	points: number;
 	brushes: string[];

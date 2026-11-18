@@ -9,8 +9,19 @@
 	import { DEFAULT_BRUSH, loadManifest, type BrushManifest } from '#lib/paint/brushes.js';
 	import { categories } from '#lib/categories.js';
 	import { saveSubmission } from '#lib/submission.js';
+	import { byId, imageUrl, pickReference, titleOf } from '#lib/references.js';
 
 	const category = categories.find((c) => c.id === page.url.searchParams.get('category'));
+	let reference = $state(
+		byId(page.url.searchParams.get('ref')) ?? (category ? pickReference(category.id) : undefined)
+	);
+	let peek = $state(false);
+
+	function nextReference() {
+		if (!category || !status.blank) return;
+		reference = pickReference(category.id, reference?.id);
+		peek = false;
+	}
 
 	let manifest = $state<BrushManifest>();
 	let brushId = $state(DEFAULT_BRUSH);
@@ -65,6 +76,7 @@
 			height: d.height,
 			seconds,
 			category: category?.id ?? null,
+			referenceId: reference?.id ?? null,
 			strokes: d.strokes.length,
 			points: d.strokes.reduce((n, s) => n + s.points.length, 0),
 			brushes: [...new Set(d.strokes.map((s) => s.brushId))]
@@ -79,8 +91,10 @@
 <div class="pp-page">
 	<div class="top">
 		<div>
-			<span class="pp-eyebrow">{category ? `${category.name} · ` : ''}Free draw</span>
-			<h1>Draw anything</h1>
+			<span class="pp-eyebrow">
+				{category ? `${category.name} · ` : ''}{reference ? 'Copy the reference' : 'Free draw'}
+			</span>
+			<h1>{reference ? titleOf(reference) : 'Draw anything'}</h1>
 		</div>
 		<div class="top-actions">
 			<button
@@ -109,17 +123,51 @@
 	</div>
 
 	<div class="layout">
-		<Tile as="section" label="Brushes">
-			<div class="tile-head">
-				<h2>Brushes</h2>
-				<span class="current">{brushName}</span>
-			</div>
-			{#if manifest}
-				<BrushPicker {manifest} bind:selected={brushId} />
-			{:else}
-				<p class="muted">Loading brushes…</p>
+		<div class="side">
+			{#if reference}
+				<Tile as="section" label="Reference">
+					<div class="tile-head">
+						<h2>Reference</h2>
+						{#if category}
+							<button
+								type="button"
+								class="link-btn"
+								disabled={!status.blank}
+								title={status.blank ? 'Show a different reference' : 'Clear the canvas to switch'}
+								onclick={nextReference}
+							>
+								New one ↻
+							</button>
+						{/if}
+					</div>
+					<a class="ref-img" href={imageUrl(reference)} target="_blank" rel="noreferrer">
+						<img src={imageUrl(reference)} alt="Reference: {reference.tags.join(', ')}" />
+					</a>
+					<p class="credit">
+						By <a href={reference.authorUrl} target="_blank" rel="noreferrer">{reference.author}</a>
+						via
+						<a href={reference.pageUrl} target="_blank" rel="noreferrer">Pixabay</a> ·
+						<a href={reference.licenseUrl} target="_blank" rel="noreferrer">{reference.license}</a>
+					</p>
+				</Tile>
+			{:else if category}
+				<Tile tone="lilac" as="section" label="Reference">
+					<h2>No {category.name.toLowerCase()} references yet</h2>
+					<p class="muted-dark">Free draw for now. References are being curated.</p>
+				</Tile>
 			{/if}
-		</Tile>
+			<Tile as="section" label="Brushes">
+				<div class="tile-head">
+					<h2>Brushes</h2>
+					<span class="current">{brushName}</span>
+				</div>
+				{#if manifest}
+					<BrushPicker {manifest} bind:selected={brushId} />
+				{:else}
+					<p class="muted">Loading brushes…</p>
+				{/if}
+			</Tile>
+		</div>
 
 		<div class="canvas-col">
 			<div class="canvas-tile">
@@ -132,6 +180,9 @@
 					{color}
 					onchange={(s) => (status = s)}
 				/>
+				{#if reference && peek}
+					<img class="peek" src={imageUrl(reference)} alt="" />
+				{/if}
 			</div>
 
 			<div class="toolbar" role="toolbar" aria-label="Drawing tools">
@@ -278,6 +329,17 @@
 					<span>Opacity <b>{Math.round(opacity * 100)}%</b></span>
 					<input type="range" min="0.05" max="1" step="0.05" bind:value={opacity} />
 				</label>
+				{#if reference}
+					<button
+						type="button"
+						class="tool"
+						aria-pressed={peek}
+						title="Show the reference faintly over your canvas"
+						onclick={() => (peek = !peek)}
+					>
+						Peek
+					</button>
+				{/if}
 				<div class="group swatches" role="radiogroup" aria-label="Colour">
 					{#each SWATCHES as c (c)}
 						<button
@@ -354,9 +416,6 @@
 		.layout {
 			grid-template-columns: minmax(0, 1fr);
 		}
-		.layout > :global(:first-child) {
-			order: 2;
-		}
 	}
 	.tile-head {
 		display: flex;
@@ -381,7 +440,52 @@
 		gap: var(--pp-gap);
 		min-width: 0;
 	}
+	.side {
+		display: flex;
+		flex-direction: column;
+		gap: var(--pp-gap);
+		min-width: 0;
+	}
+	.ref-img img {
+		display: block;
+		width: 100%;
+		max-height: 320px;
+		object-fit: contain;
+		border-radius: 18px;
+		background: var(--pp-surface-sunk);
+	}
+	.credit {
+		margin: 0;
+		font-size: 12px;
+		color: var(--pp-muted);
+	}
+	.muted-dark {
+		margin: 0;
+		color: var(--pp-lilac-ink);
+	}
+	.link-btn {
+		border: 0;
+		background: none;
+		font: 600 14px var(--pp-font-body);
+		color: var(--pp-accent-ink);
+		cursor: pointer;
+		padding: 6px 0;
+	}
+	.link-btn:disabled {
+		color: var(--pp-muted);
+		cursor: not-allowed;
+	}
+	.peek {
+		position: absolute;
+		inset: 0;
+		width: 100%;
+		height: 100%;
+		object-fit: contain;
+		opacity: 0.3;
+		pointer-events: none;
+	}
 	.canvas-tile {
+		position: relative;
 		background: #fff;
 		border-radius: var(--pp-radius-tile);
 		overflow: hidden;
