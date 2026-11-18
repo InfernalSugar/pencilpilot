@@ -1,5 +1,6 @@
 [package]
 name = "pencilpilot-feedback"
+description = "Turns grader measurements into ranked, human-written tips (no AI)"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -10,3 +11,4 @@ name = "feedback"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
+toml = { version = "0.9", default-features = false, features = ["parse", "serde"] }
