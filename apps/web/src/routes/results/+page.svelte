@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { dev } from '$app/env';
 	import Tile from '#lib/ui/Tile.svelte';
 	import Button from '#lib/ui/Button.svelte';
 	import OverlayViewer, { type OverlayMode } from '#lib/results/OverlayViewer.svelte';
@@ -37,6 +38,25 @@
 	let focused = $state<string | null>(null);
 	let patterns = $state<Pattern[]>([]);
 	let votes = $state<Record<string, 1 | -1>>({});
+	let calSaved = $state(false);
+
+	/** Dev only: keep this drawing + grade as a calibration sample for /dev/rate. */
+	async function saveForCalibration() {
+		if (!sub || !reference || !grade) return;
+		const res = await fetch('/dev/calibration', {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({
+				category: reference.category,
+				refId: reference.id,
+				refUrl: imageUrl(reference),
+				similarity: grade.similarity,
+				score: grade.score,
+				png: sub.png
+			})
+		});
+		calSaved = res.ok;
+	}
 
 	async function vote(f: FeedbackItem, v: 1 | -1) {
 		votes[f.id] = v;
@@ -359,6 +379,14 @@
 				via <a href={reference.pageUrl} target="_blank" rel="noreferrer">Pixabay</a> ·
 				<a href={reference.licenseUrl} target="_blank" rel="noreferrer">{reference.license}</a> ·
 				{time}, {sub.strokes} strokes
+			</p>
+		{/if}
+		{#if dev && grade && reference}
+			<p class="credit">
+				<button type="button" class="chip" onclick={saveForCalibration} disabled={calSaved}>
+					{calSaved ? 'Saved for calibration ✓' : 'Save for calibration (dev)'}
+				</button>
+				· <a href="/dev/rate">Rate drawings</a> · <a href="/dev/feedback">Tip ratings</a>
 			</p>
 		{/if}
 	{/if}
