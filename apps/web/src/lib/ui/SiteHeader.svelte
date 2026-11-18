@@ -5,6 +5,7 @@
 	const links = [
 		{ href: '/', label: 'Practice' },
 		{ href: '/lessons', label: 'Lessons' },
+		{ href: '/drills', label: 'Drills' },
 		{ href: '/progress', label: 'Progress' }
 	];
 	const current = (href: string) =>

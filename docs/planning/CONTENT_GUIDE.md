@@ -62,6 +62,33 @@ Short paragraphs. 3–5 steps in all.
 - No `<script>`, event handlers or `javascript:` links (they are stripped, and a test fails on them).
 - `src/lib/lessons.test.ts` checks ids, drill/next links, step counts and diagrams.
 
+### Drills (`apps/web/src/lib/drills.ts`, pages `/drills` and `/drills/<id>`)
+Each drill has a fixed id (the `drill = …` ids in `rules.toml`), a few how-to steps, a round count, an
+optional countdown, and a **seeded procedural target generator** (`target(rng, w, h)` → prompt SVG,
+answer SVG, optional canvas guide). No pictures to license, endless rounds, deterministic tests.
+Only the two contour drills use real references (Endless first, then curated, then a generated
+subject if no picture loads).
+
+Scoring is maths only (ADR-0002). Each round renders the answer SVG (or the reference) to an 800×600
+white canvas and runs `gradeImages(…, { category: 'fundamentals', strokes })`, then:
+
+| Drills | Round score (1–10) |
+|---|---|
+| `ghosted-lines` | 40% grader + 60% line maths: ½ straightness + ½ endpoint error |
+| `angle-matching` | 40% grader + 60% line maths: 65% angle error + 35% straightness |
+| `blind-contour` | `1 + 9 × line_confidence` only (a "looking" exercise; the drawing isn't compared) |
+| `five-step-value-scale`, `three-value-thumbnail` | grader with tone-heavy weights (tone 0.45) |
+| `silhouette-fill` | grader with silhouette-heavy weights (silhouette 0.5) |
+| everything else | grader, fundamentals weights |
+
+Line maths (`drill-metrics.ts`, on the longest non-eraser stroke): straightness = max distance from
+the end-to-end chord ÷ chord length (1% → full marks, 8% → none); endpoint error = mean distance of the
+stroke's ends to the dots ÷ dot distance (2% → full, 22% → none); angle error = least-squares stroke
+direction vs the target, 0–90° (1° → full, 20° → none).
+
+Finished sessions are saved in `localStorage['pp.drills']` as `{ id, at, avg, rounds: number[] }[]`
+(last 200; `at` is ms since epoch, scores are 1–10 with one decimal).
+
 ## References (how to add pictures)
 1. **Fetch candidates** (needs `PIXABAY_API_KEY` in the git-ignored `.env`):
    `pnpm refs fetch animals "horse" --count 8` (`--type illustration` or `--type vector` for anime/cartoon).
