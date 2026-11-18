@@ -6,3 +6,4 @@ crates/grader-wasm/pkg/
 !.env.example
 .DS_Store
 reference-cache/
+crates/brush-wasm/pkg/
