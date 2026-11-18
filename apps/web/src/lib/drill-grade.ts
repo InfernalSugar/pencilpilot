@@ -40,7 +40,7 @@ const blank: RoundResult = { score: 1, graderScore: 1, lineConfidence: null, lin
 /**
  * Score one round:
  * - blind drills: `1 + 9 × line confidence` only (it's a looking exercise);
- * - line drills: grader score blended with straightness / endpoints / angle (`roundScore`);
+ * - line drills: grader score blended with straightness / endpoints / angle / taper (`roundScore`);
  * - everything else: the grader's fundamentals score (with the drill's weight overrides).
  */
 export async function gradeRound(
@@ -57,7 +57,8 @@ export async function gradeRound(
 	const g = await gradeImages(w, h, drawing.gray, ref, {
 		category: 'fundamentals',
 		strokes: drawing.strokes,
-		weights: drill.weights
+		weights: drill.weights,
+		curve: drill.curve
 	});
 	if (g.flags.includes('blank')) return blank;
 	const lineConfidence = measurement(g, 'line_confidence') ?? null;
