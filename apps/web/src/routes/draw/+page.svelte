@@ -9,7 +9,17 @@
 	import { DEFAULT_BRUSH, loadManifest, type BrushManifest } from '#lib/paint/brushes.js';
 	import { categories } from '#lib/categories.js';
 	import { saveSubmission } from '#lib/submission.js';
-	import { byId, imageUrl, pickReference, tierName, tierOf, titleOf } from '#lib/references.js';
+	import {
+		byId,
+		filtered,
+		imageUrl,
+		tierName,
+		tierOf,
+		titleOf,
+		type RefFilter,
+		type Reference
+	} from '#lib/references.js';
+	import { fetchLiveReference, recentRefs, rememberRef, reportReference } from '#lib/live.js';
 	import { topicName } from '#lib/topics.js';
 
 	const category = categories.find((c) => c.id === page.url.searchParams.get('category'));
@@ -17,16 +27,60 @@
 		topic: page.url.searchParams.get('topic'),
 		tier: Number(page.url.searchParams.get('tier')) || null
 	};
-	let reference = $state(
-		byId(page.url.searchParams.get('ref')) ??
-			(category ? pickReference(category.id, undefined, Math.random, filter) : undefined)
-	);
+	let reference = $state<Reference | undefined>(byId(page.url.searchParams.get('ref')));
+	let refLoading = $state(false);
 	let peek = $state(false);
+	let reportOpen = $state(false);
+	let reported = $state(false);
+
+	/** A hand-approved reference the student hasn't seen recently (or any, if all were seen). */
+	function pickCurated(avoid: string[], f: RefFilter = filter) {
+		if (!category) return undefined;
+		const pool = filtered(category.id, f);
+		const unseen = pool.filter((r) => !avoid.includes(r.id));
+		const from = unseen.length ? unseen : pool;
+		return from[Math.floor(Math.random() * from.length)];
+	}
+
+	/**
+	 * Beginners get hand-approved pictures first; everyone else (and beginners who have
+	 * seen them all) gets Endless pictures from the ref-service, falling back to curated
+	 * ones if the service has nothing ready within ~1.5 s.
+	 */
+	async function loadReference(skip?: string) {
+		if (!category) return;
+		refLoading = true;
+		peek = false;
+		reported = false;
+		reportOpen = false;
+		const avoid = [...recentRefs(), ...(skip ? [skip] : [])];
+		const unseenCurated = filtered(category.id, filter).filter((r) => !avoid.includes(r.id));
+		let r: Reference | undefined =
+			filter.tier === 1 && unseenCurated.length ? pickCurated(avoid) : undefined;
+		r ??=
+			(await fetchLiveReference({
+				category: category.id,
+				topic: filter.topic,
+				tier: filter.tier,
+				exclude: avoid
+			})) ?? undefined;
+		r ??= pickCurated(avoid) ?? pickCurated(avoid, { tier: filter.tier });
+		reference = r;
+		refLoading = false;
+		if (r) rememberRef(r.id);
+	}
 
 	function nextReference() {
 		if (!category || !status.blank) return;
-		reference = pickReference(category.id, reference?.id, Math.random, filter);
-		peek = false;
+		loadReference(reference?.id);
+	}
+
+	async function report(reason: string) {
+		if (!reference) return;
+		await reportReference(reference.id, reason).catch(() => false);
+		reported = true;
+		reportOpen = false;
+		if (status.blank) loadReference(reference.id);
 	}
 
 	let manifest = $state<BrushManifest>();
@@ -49,6 +103,7 @@
 
 	onMount(() => {
 		loadManifest().then((m) => (manifest = m));
+		if (!reference) loadReference();
 		const id = setInterval(() => {
 			if (timerOn && !status.blank) seconds++;
 		}, 1000);
@@ -84,6 +139,7 @@
 			seconds,
 			category: category?.id ?? null,
 			referenceId: reference?.id ?? null,
+			reference: reference ? $state.snapshot(reference) : null,
 			topic: filter.topic,
 			tier: reference ? tierOf(reference) : null,
 			strokes: d.strokes.length,
@@ -154,15 +210,44 @@
 							</button>
 						{/if}
 					</div>
-					<a class="ref-img" href={imageUrl(reference)} target="_blank" rel="noreferrer">
-						<img src={imageUrl(reference)} alt="Reference: {reference.tags.join(', ')}" />
-					</a>
+					{#key reference.id}
+						<a class="ref-img" href={imageUrl(reference)} target="_blank" rel="noreferrer">
+							<img
+								class="fade-in"
+								src={imageUrl(reference)}
+								alt="Reference: {reference.tags.join(', ')}"
+							/>
+						</a>
+					{/key}
 					<p class="credit">
 						By <a href={reference.authorUrl} target="_blank" rel="noreferrer">{reference.author}</a>
 						via
 						<a href={reference.pageUrl} target="_blank" rel="noreferrer">Pixabay</a> ·
 						<a href={reference.licenseUrl} target="_blank" rel="noreferrer">{reference.license}</a>
+						{#if reference.live}· <span class="badge-live">Endless</span>{/if}
 					</p>
+					{#if reported}
+						<p class="credit" role="status">Thanks! That picture is blocked for everyone.</p>
+					{:else if reportOpen}
+						<div class="report" role="group" aria-label="Report this picture">
+							<span>What’s wrong?</span>
+							<button type="button" onclick={() => report('unsafe')}>Not safe</button>
+							<button type="button" onclick={() => report('ai_made')}>Looks AI-made</button>
+							<button type="button" onclick={() => report('not_drawable')}>Can’t draw this</button>
+							<button type="button" class="cancel" onclick={() => (reportOpen = false)}>
+								Cancel
+							</button>
+						</div>
+					{:else}
+						<button type="button" class="link-btn small" onclick={() => (reportOpen = true)}>
+							Report picture
+						</button>
+					{/if}
+				</Tile>
+			{:else if refLoading}
+				<Tile as="section" label="Reference">
+					<div class="tile-head"><h2>Reference</h2></div>
+					<div class="ref-skeleton" aria-busy="true">Finding a picture…</div>
 				</Tile>
 			{:else if category}
 				<Tile tone="lilac" as="section" label="Reference">
@@ -488,6 +573,67 @@
 	.link-btn:disabled {
 		color: var(--pp-muted);
 		cursor: not-allowed;
+	}
+	.fade-in {
+		animation: fade 0.35s ease-out;
+	}
+	@keyframes fade {
+		from {
+			opacity: 0;
+			transform: scale(0.98);
+		}
+	}
+	.ref-skeleton {
+		height: 240px;
+		border-radius: 18px;
+		display: grid;
+		place-items: center;
+		color: var(--pp-muted);
+		font-weight: 600;
+		background: linear-gradient(
+			90deg,
+			var(--pp-surface-sunk),
+			var(--pp-ground),
+			var(--pp-surface-sunk)
+		);
+		background-size: 200% 100%;
+		animation: shimmer 1.2s linear infinite;
+	}
+	@keyframes shimmer {
+		to {
+			background-position: -200% 0;
+		}
+	}
+	.badge-live {
+		padding: 1px 8px;
+		border-radius: 999px;
+		background: var(--pp-lilac);
+		color: var(--pp-lilac-ink);
+		font-weight: 600;
+	}
+	.link-btn.small {
+		align-self: flex-start;
+		font-size: 12px;
+		color: var(--pp-muted);
+		padding: 0;
+	}
+	.report {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
+		align-items: center;
+		font-size: 13px;
+	}
+	.report button {
+		padding: 6px 10px;
+		border: 0;
+		border-radius: 999px;
+		background: var(--pp-ground);
+		font: 600 12px var(--pp-font-body);
+		cursor: pointer;
+	}
+	.report button:not(.cancel) {
+		color: var(--pp-accent-ink);
 	}
 	.peek {
 		position: absolute;

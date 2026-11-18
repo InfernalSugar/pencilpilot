@@ -368,8 +368,21 @@ fn fitted_gray(path: &Path) -> Result<grader::Gray, String> {
         .and_then(|r| r.with_guessed_format())
         .map_err(|e| e.to_string())?
         .decode()
-        .map_err(|e| e.to_string())?
-        .to_luma8();
+        .map_err(|e| e.to_string())?;
+    // transparent backgrounds (common in vectors) are white paper, not black
+    let img = if img.color().has_alpha() {
+        let mut rgba = img.to_rgba8();
+        for p in rgba.pixels_mut() {
+            let a = p[3] as u32;
+            for c in 0..3 {
+                p[c] = ((p[c] as u32 * a + 255 * (255 - a)) / 255) as u8;
+            }
+            p[3] = 255;
+        }
+        image::DynamicImage::ImageRgba8(rgba).to_luma8()
+    } else {
+        img.to_luma8()
+    };
     let (w, h) = CANVAS;
     let s = (w as f32 / img.width() as f32).min(h as f32 / img.height() as f32);
     let (dw, dh) = (

@@ -1,4 +1,5 @@
 import type { Stroke } from './paint/strokes';
+import type { Reference } from './references';
 
 /** The last submitted drawing, handed from /draw to /results for this browser tab. */
 export interface Submission {
@@ -10,6 +11,8 @@ export interface Submission {
 	seconds: number;
 	category: string | null;
 	referenceId: string | null;
+	/** the full reference (needed for Endless references, which aren't in the curated lists) */
+	reference?: Reference | null;
 	/** topic filter the student chose (null = any) */
 	topic?: string | null;
 	/** tier of the reference drawn */

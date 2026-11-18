@@ -1,7 +1,15 @@
 <script lang="ts">
 	import Tile from '#lib/ui/Tile.svelte';
 	import Button from '#lib/ui/Button.svelte';
+	import { onMount } from 'svelte';
 	import { categories } from '#lib/categories.js';
+	import { liveAvailable } from '#lib/live.js';
+
+	/** With Endless references every category is drawable. */
+	let live = $state(false);
+	onMount(() => {
+		liveAvailable().then((ok) => (live = ok));
+	});
 
 	const days = [0, 1, 2, 3, 4, 5, 6];
 </script>
@@ -71,13 +79,13 @@
 			<a
 				class="cat"
 				class:dark={c.dark}
-				href={c.available ? `/practice/${c.id}` : undefined}
-				aria-disabled={!c.available}
+				href={c.available || live ? `/practice/${c.id}` : undefined}
+				aria-disabled={!c.available && !live}
 			>
 				<span class="dot" style="background: {c.color}"></span>
 				<span class="cat-text">
 					<span class="cat-name">{c.name}</span>
-					<span class="cat-blurb">{c.available ? c.blurb : 'Coming soon'}</span>
+					<span class="cat-blurb">{c.available || live ? c.blurb : 'Coming soon'}</span>
 				</span>
 			</a>
 		{/each}
