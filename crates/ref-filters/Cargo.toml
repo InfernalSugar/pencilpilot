@@ -1,0 +1,20 @@
+[package]
+name = "pencilpilot-ref-filters"
+description = "Auto-vetting of live reference pictures: blank/text/busy/pHash checks (plain maths) + NSFW safety guard"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+publish = false
+
+[lib]
+name = "ref_filters"
+
+[dependencies]
+pencilpilot-grader = { path = "../grader" }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "bmp", "webp"] }
+serde = { version = "1", features = ["derive"] }
+tract-onnx = "0.23"
+
+[dev-dependencies]
+serde_json = "1"

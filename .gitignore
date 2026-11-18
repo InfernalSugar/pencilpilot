@@ -10,3 +10,4 @@ crates/brush-wasm/pkg/
 apps/web/static/references/
 .claude/worktrees/
 data/
+crates/ref-filters/models/
