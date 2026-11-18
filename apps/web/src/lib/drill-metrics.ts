@@ -7,11 +7,14 @@
  *   (best pairing, mean distance), divided by the dot-to-dot distance.
  * - **angle error**: degrees between the stroke's direction (least-squares line
  *   through all its points) and the target line, ignoring direction (0–90°).
+ * - **taper**: how the stroke's pressure (≈ its width) changes from the thick end
+ *   to the thin end: the drop from the first quarter to the last quarter, and how
+ *   steadily it falls (see `taperMetrics`).
  *
  * Each is turned into a 0–1 score with a fixed, documented tolerance, then blended
  * with the grader's 1–10 score in `roundScore`.
  */
-import type { Stroke } from './paint/strokes';
+import type { Stroke, StrokePoint } from './paint/strokes';
 import type { Pt } from './drills';
 
 const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
@@ -23,16 +26,21 @@ export function pathLength(pts: readonly Pt[]) {
 	return s;
 }
 
-/** The longest visible (non-eraser) stroke: the one the student meant as "the line". */
-export function mainStroke(strokes: readonly Stroke[]): Pt[] | null {
-	let best: Pt[] | null = null;
+/** The longest visible (non-eraser) stroke's points, with pressure. */
+export function mainStrokePoints(strokes: readonly Stroke[]): StrokePoint[] | null {
+	let best: StrokePoint[] | null = null;
 	let bestLen = 0;
 	for (const s of strokes) {
 		if (s.eraser || s.points.length < 2) continue;
 		const len = pathLength(s.points);
-		if (len > bestLen) [best, bestLen] = [s.points.map(({ x, y }) => ({ x, y })), len];
+		if (len > bestLen) [best, bestLen] = [s.points, len];
 	}
 	return best;
+}
+
+/** The longest visible (non-eraser) stroke: the one the student meant as "the line". */
+export function mainStroke(strokes: readonly Stroke[]): Pt[] | null {
+	return mainStrokePoints(strokes)?.map(({ x, y }) => ({ x, y })) ?? null;
 }
 
 /** Max deviation from the end-to-end chord ÷ chord length (0 = perfectly straight). */
@@ -88,16 +96,74 @@ export function angleError(a: number, b: number): number {
 export const TOLERANCE = {
 	straightness: { good: 0.01, bad: 0.08 },
 	endpoint: { good: 0.02, bad: 0.22 },
-	angle: { good: 1, bad: 20 }
+	angle: { good: 1, bad: 20 },
+	/** pressure drop, first quarter → last quarter, as a share of the start pressure (higher is better) */
+	taperDrop: { good: 0.6, bad: 0.05 }
 } as const;
 
 const fromTolerance = (v: number, t: { good: number; bad: number }) =>
 	clamp01(1 - (v - t.good) / (t.bad - t.good));
 
+export interface TaperMetrics {
+	/** (mean start pressure − mean end pressure) ÷ mean start pressure; ≤ 0 means no taper (or the wrong way) */
+	drop: number;
+	/** 0–1: share of the smoothed pressure changes that go down (1 = it only ever gets lighter) */
+	steadiness: number;
+	/** 0–1: 75% drop + 25% steadiness */
+	score: number;
+}
+
+/** Pressures that barely change (a mouse reports a flat 0.5) can't show a taper. */
+export const MIN_PRESSURE_RANGE = 0.03;
+
+/**
+ * Taper of one stroke, read from its recorded pen pressure (the brush width follows it).
+ * The stroke is oriented so it starts at the end nearest `thick` (when given), then split
+ * by length: the drop compares the mean pressure of the first and last quarters, and the
+ * steadiness looks at every step of a 5-point moving average. Returns null when the
+ * pressure is flat (no pressure-sensitive device).
+ */
+export function taperMetrics(points: readonly StrokePoint[], thick?: Pt): TaperMetrics | null {
+	if (points.length < 4) return null;
+	let pts = [...points];
+	if (thick && dist(pts.at(-1)!, thick) < dist(pts[0], thick)) pts = pts.reverse();
+	const ps = pts.map((p) => p.pressure);
+	if (Math.max(...ps) - Math.min(...ps) < MIN_PRESSURE_RANGE) return null;
+	// arc length at each point, to split the stroke into quarters by distance, not sample count
+	const along = [0];
+	for (let i = 1; i < pts.length; i++) along.push(along[i - 1] + dist(pts[i - 1], pts[i]));
+	const total = along.at(-1)! || 1;
+	const mean = (from: number, to: number) => {
+		const v = ps.filter((_, i) => along[i] / total >= from && along[i] / total <= to);
+		return v.length ? v.reduce((s, x) => s + x, 0) / v.length : 0;
+	};
+	const start = mean(0, 0.25);
+	const end = mean(0.75, 1);
+	const drop = start > 0 ? (start - end) / start : 0;
+	const smooth = ps.map((_, i) => {
+		const win = ps.slice(Math.max(0, i - 2), i + 3);
+		return win.reduce((s, x) => s + x, 0) / win.length;
+	});
+	let down = 0;
+	let up = 0;
+	for (let i = 1; i < smooth.length; i++) {
+		const d = smooth[i] - smooth[i - 1];
+		if (d < 0) down -= d;
+		else up += d;
+	}
+	const steadiness = down + up > 0 ? down / (down + up) : 0;
+	const dropScore = clamp01(
+		(drop - TOLERANCE.taperDrop.bad) / (TOLERANCE.taperDrop.good - TOLERANCE.taperDrop.bad)
+	);
+	return { drop, steadiness, score: 0.75 * dropScore + 0.25 * steadiness };
+}
+
 export interface LineMetrics {
 	straightness: number;
 	endpointError?: number;
 	angleError?: number;
+	/** line-weight drills: null when the device reports no pressure */
+	taper?: TaperMetrics | null;
 	/** 0–1 blend of the above */
 	score: number;
 }
@@ -105,15 +171,29 @@ export interface LineMetrics {
 /**
  * Line drill metrics for the main stroke.
  * ghosted-lines: 50% straightness + 50% endpoints. angle-matching: 65% angle + 35% straightness.
+ * line-weight-pressure: 50% taper + 25% straightness + 25% endpoints; without pressure data
+ * (a mouse) it falls back to 50% straightness + 50% endpoints.
  */
 export function lineMetrics(
 	strokes: readonly Stroke[],
-	target: { segment?: { a: Pt; b: Pt }; angle?: number }
+	target: { segment?: { a: Pt; b: Pt }; angle?: number; taper?: { a: Pt; b: Pt } }
 ): LineMetrics | null {
-	const pts = mainStroke(strokes);
-	if (!pts) return null;
+	const raw = mainStrokePoints(strokes);
+	if (!raw) return null;
+	const pts = raw.map(({ x, y }) => ({ x, y }));
 	const s = straightness(pts);
 	const sScore = fromTolerance(s, TOLERANCE.straightness);
+	if (target.taper) {
+		const e = endpointError(pts, target.taper.a, target.taper.b);
+		const eScore = fromTolerance(e, TOLERANCE.endpoint);
+		const taper = taperMetrics(raw, target.taper.a);
+		return {
+			straightness: s,
+			endpointError: e,
+			taper,
+			score: taper ? 0.5 * taper.score + 0.25 * sScore + 0.25 * eScore : 0.5 * sScore + 0.5 * eScore
+		};
+	}
 	if (target.segment) {
 		const e = endpointError(pts, target.segment.a, target.segment.b);
 		return {
