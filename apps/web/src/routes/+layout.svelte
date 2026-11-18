@@ -1,5 +1,7 @@
 <script lang="ts">
+	import '#lib/ui/theme.css';
 	import favicon from '#lib/assets/favicon.svg';
+	import SiteHeader from '#lib/ui/SiteHeader.svelte';
 	import type { LayoutProps } from './$types';
 
 	let { children }: LayoutProps = $props();
@@ -7,7 +9,9 @@
 
 <svelte:head>
 	<link rel="icon" href={favicon} />
-	<title>PencilPilot</title>
 </svelte:head>
 
-{@render children()}
+<SiteHeader />
+<main>
+	{@render children()}
+</main>
