@@ -18,7 +18,7 @@
 	let loaded = $state(false);
 	let grade = $state<Grade | null>(null);
 	let gradeError = $state('');
-	const reference = $derived(byId(sub?.referenceId));
+	const reference = $derived(sub?.reference ?? byId(sub?.referenceId));
 
 	const time = $derived(
 		sub ? `${Math.floor(sub.seconds / 60)}m ${String(sub.seconds % 60).padStart(2, '0')}s` : ''
@@ -76,7 +76,7 @@
 	onMount(async () => {
 		sub = loadSubmission();
 		loaded = true;
-		const ref = byId(sub?.referenceId);
+		const ref = sub?.reference ?? byId(sub?.referenceId);
 		if (!sub || !ref) return;
 		try {
 			const [drawing, refData] = await Promise.all([

@@ -17,6 +17,12 @@
 				"katana",
 				"combat",
 				"hero"
+			],
+			"queries": [
+				"anime warrior",
+				"samurai illustration",
+				"anime fight",
+				"ninja illustration"
 			]
 		},
 		{
@@ -28,6 +34,11 @@
 				"kawaii",
 				"cute",
 				"mascot"
+			],
+			"queries": [
+				"chibi",
+				"kawaii character",
+				"cute anime"
 			]
 		},
 		{
@@ -44,6 +55,11 @@
 				"sunset",
 				"night",
 				"nature"
+			],
+			"queries": [
+				"anime landscape",
+				"anime city",
+				"anime sky"
 			]
 		},
 		{
@@ -58,6 +74,11 @@
 				"dance",
 				"skateboard",
 				"sitting"
+			],
+			"queries": [
+				"anime girl full body",
+				"anime boy standing",
+				"manga character pose"
 			]
 		},
 		{
@@ -74,6 +95,12 @@
 				"man",
 				"character",
 				"avatar"
+			],
+			"queries": [
+				"anime girl",
+				"anime boy",
+				"manga face",
+				"anime portrait"
 			]
 		}
 	],
@@ -89,6 +116,11 @@
 				"gesture",
 				"pose",
 				"feet"
+			],
+			"queries": [
+				"hand",
+				"hands gesture",
+				"fingers"
 			]
 		},
 		{
@@ -105,6 +137,12 @@
 				"vegetable",
 				"drink",
 				"cup"
+			],
+			"queries": [
+				"fruit",
+				"bread",
+				"coffee cup",
+				"vegetables"
 			]
 		},
 		{
@@ -120,6 +158,12 @@
 				"train",
 				"vehicle",
 				"truck"
+			],
+			"queries": [
+				"bicycle",
+				"vintage car",
+				"motorcycle",
+				"sailboat"
 			]
 		},
 		{
@@ -142,6 +186,13 @@
 				"shells",
 				"decoration",
 				"lantern"
+			],
+			"queries": [
+				"still life",
+				"vase",
+				"teapot",
+				"old books",
+				"shoes"
 			]
 		},
 		{
@@ -158,6 +209,12 @@
 				"people",
 				"face",
 				"child"
+			],
+			"queries": [
+				"portrait woman",
+				"portrait man",
+				"person sitting",
+				"elderly portrait"
 			]
 		}
 	],
@@ -177,6 +234,12 @@
 				"duck",
 				"chicken",
 				"pigeon"
+			],
+			"queries": [
+				"bird",
+				"owl",
+				"parrot",
+				"sparrow"
 			]
 		},
 		{
@@ -193,6 +256,12 @@
 				"jellyfish",
 				"sea",
 				"underwater"
+			],
+			"queries": [
+				"goldfish",
+				"sea turtle",
+				"whale",
+				"jellyfish"
 			]
 		},
 		{
@@ -208,6 +277,12 @@
 				"dragonfly",
 				"ant",
 				"spider"
+			],
+			"queries": [
+				"butterfly",
+				"bee",
+				"ladybug",
+				"dragonfly"
 			]
 		},
 		{
@@ -224,6 +299,13 @@
 				"hamster",
 				"pet",
 				"guinea pig"
+			],
+			"queries": [
+				"cat",
+				"dog",
+				"rabbit",
+				"kitten",
+				"puppy"
 			]
 		},
 		{
@@ -244,6 +326,14 @@
 				"squirrel",
 				"wildlife",
 				"animal"
+			],
+			"queries": [
+				"fox",
+				"deer",
+				"lion",
+				"bear",
+				"elephant",
+				"squirrel"
 			]
 		}
 	],
@@ -260,6 +350,12 @@
 				"library",
 				"stairs",
 				"living room"
+			],
+			"queries": [
+				"room interior",
+				"cafe interior",
+				"staircase",
+				"kitchen interior"
 			]
 		},
 		{
@@ -275,6 +371,12 @@
 				"town",
 				"house",
 				"road"
+			],
+			"queries": [
+				"street",
+				"old town",
+				"bridge",
+				"building facade"
 			]
 		},
 		{
@@ -289,6 +391,12 @@
 				"leaf",
 				"forest",
 				"garden"
+			],
+			"queries": [
+				"tree",
+				"flower",
+				"leaf",
+				"succulent"
 			]
 		},
 		{
@@ -305,6 +413,12 @@
 				"lake",
 				"waterfall",
 				"sunset"
+			],
+			"queries": [
+				"clouds",
+				"sea waves",
+				"lake",
+				"waterfall"
 			]
 		},
 		{
@@ -319,6 +433,12 @@
 				"valley",
 				"nature",
 				"scenery"
+			],
+			"queries": [
+				"mountains",
+				"hills landscape",
+				"field",
+				"valley"
 			]
 		}
 	],
@@ -336,6 +456,12 @@
 				"fox",
 				"rabbit",
 				"fish"
+			],
+			"queries": [
+				"cartoon animal",
+				"cartoon cat",
+				"cartoon dog",
+				"cartoon bird"
 			]
 		},
 		{
@@ -351,6 +477,11 @@
 				"house",
 				"cup",
 				"icon"
+			],
+			"queries": [
+				"cartoon food",
+				"cartoon object",
+				"cartoon fruit"
 			]
 		},
 		{
@@ -367,6 +498,12 @@
 				"monster",
 				"robot",
 				"person"
+			],
+			"queries": [
+				"cartoon character",
+				"cartoon boy",
+				"cartoon girl",
+				"cartoon monster"
 			]
 		}
 	],
@@ -380,6 +517,11 @@
 				"cube",
 				"box",
 				"cylinder"
+			],
+			"queries": [
+				"cube perspective",
+				"geometric shapes 3d",
+				"cylinder"
 			]
 		},
 		{
@@ -391,6 +533,11 @@
 				"pose",
 				"figure",
 				"silhouette"
+			],
+			"queries": [
+				"dancer silhouette",
+				"running silhouette",
+				"pose silhouette"
 			]
 		},
 		{
@@ -402,6 +549,11 @@
 				"circle",
 				"geometric",
 				"line"
+			],
+			"queries": [
+				"geometric shapes",
+				"circle shapes",
+				"simple shapes"
 			]
 		}
 	]

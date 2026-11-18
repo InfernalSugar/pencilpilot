@@ -5,6 +5,7 @@
 	import { TIERS, filtered, inCategory, tierOf } from '#lib/references.js';
 	import { topicsFor } from '#lib/topics.js';
 	import { recommendedTier } from '#lib/progress.js';
+	import { liveAvailable } from '#lib/live.js';
 	import type { PageProps } from './$types';
 
 	let { data }: PageProps = $props();
@@ -13,9 +14,12 @@
 	const all = $derived(inCategory(category.id));
 
 	let recommended = $state(1);
+	/** Endless references available (ref-service up): every topic/tier is drawable. */
+	let live = $state(false);
 	let tier = $state(Number(page.url.searchParams.get('tier')) || 0);
 
 	onMount(() => {
+		liveAvailable().then((ok) => (live = ok));
 		recommended = recommendedTier(category.id);
 		if (!tier) {
 			// Start at the recommended tier, or the nearest easier one that has pictures.
@@ -27,6 +31,14 @@
 	const tierCount = (t: number) => all.filter((r) => tierOf(r) === t).length;
 	const topicCount = (topic: string) => filtered(category.id, { topic, tier }).length;
 	const anyCount = $derived(filtered(category.id, { tier }).length);
+	const countLabel = (n: number) =>
+		live
+			? n
+				? `Endless + ${n} hand-picked`
+				: 'Endless'
+			: n
+				? `${n} at this level`
+				: 'None at this level yet';
 	const drawUrl = (topic?: string) =>
 		`/draw?category=${category.id}${topic ? `&topic=${topic}` : ''}&tier=${tier}`;
 </script>
@@ -40,7 +52,7 @@
 		<p class="lede">Pick how hard you want it, then what to draw.</p>
 	</div>
 
-	{#if !all.length}
+	{#if !all.length && !live}
 		<div class="pp-bento">
 			<Tile span={4} tone="lilac">
 				<h2>No {category.name.toLowerCase()} references yet</h2>
@@ -56,7 +68,7 @@
 					role="radio"
 					aria-checked={tier === t.id}
 					class="tier"
-					disabled={!tierCount(t.id)}
+					disabled={!live && !tierCount(t.id)}
 					onclick={() => (tier = t.id)}
 				>
 					<span class="tier-top">
@@ -67,24 +79,24 @@
 					</span>
 					<span class="tier-name">{t.name}</span>
 					<span class="tier-blurb">{t.blurb}</span>
-					<span class="count">{tierCount(t.id)} pictures</span>
+					<span class="count">{live ? 'Endless pictures' : `${tierCount(t.id)} pictures`}</span>
 				</button>
 			{/each}
 		</div>
 
 		<h2 class="section">2. What to draw</h2>
 		<div class="topics">
-			<a class="topic dark" href={drawUrl()} aria-disabled={!anyCount}>
+			<a class="topic dark" href={drawUrl()} aria-disabled={!live && !anyCount}>
 				<span class="topic-name">Surprise me</span>
 				<span class="topic-blurb">Any {category.name.toLowerCase()} picture</span>
-				<span class="count">{anyCount} at this level</span>
+				<span class="count">{countLabel(anyCount)}</span>
 			</a>
 			{#each topics as t (t.id)}
 				{@const n = topicCount(t.id)}
-				<a class="topic" href={n ? drawUrl(t.id) : undefined} aria-disabled={!n}>
+				<a class="topic" href={n || live ? drawUrl(t.id) : undefined} aria-disabled={!n && !live}>
 					<span class="topic-name">{t.name}</span>
 					<span class="topic-blurb">{t.blurb}</span>
-					<span class="count">{n ? `${n} at this level` : 'None at this level yet'}</span>
+					<span class="count">{countLabel(n)}</span>
 				</a>
 			{/each}
 		</div>

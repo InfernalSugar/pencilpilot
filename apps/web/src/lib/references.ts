@@ -24,6 +24,10 @@ export interface Reference {
 	tier?: number;
 	/** reviewer's tier, wins over `tier` */
 	tierOverride?: number;
+	/** set for Endless (live) references: where the ref-service serves the image */
+	imageUrl?: string;
+	/** true for Endless references fetched live from the ref-service */
+	live?: boolean;
 }
 
 const files = import.meta.glob<{ references: Reference[] }>(
@@ -39,7 +43,8 @@ export const references: Reference[] = Object.entries(files)
 	.filter(([path]) => !/\/(candidates|rejected)\.json$/.test(path))
 	.flatMap(([, f]) => f.references ?? []);
 
-export const imageUrl = (r: Pick<Reference, 'id'>) => `/references/${r.id}.jpg`;
+export const imageUrl = (r: Pick<Reference, 'id' | 'imageUrl'>) =>
+	r.imageUrl ?? `/references/${r.id}.jpg`;
 
 export const byId = (id: string | null | undefined) => references.find((r) => r.id === id);
 
