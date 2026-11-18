@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 pencilpilot-grader = { path = "../grader" }
+pencilpilot-ref-filters = { path = "../ref-filters" }
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "signal"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
