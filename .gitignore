@@ -7,3 +7,5 @@ crates/grader-wasm/pkg/
 .DS_Store
 reference-cache/
 crates/brush-wasm/pkg/
+apps/web/static/references/
+.claude/worktrees/

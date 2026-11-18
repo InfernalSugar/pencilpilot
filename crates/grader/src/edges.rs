@@ -10,8 +10,10 @@
 
 use crate::img::{Mask, Plane, blur, distance_transform};
 
-/// Pixels darker than this (0–255) count as drawing ink.
-pub(crate) const INK_THRESHOLD: f32 = 150.0;
+/// Pixels darker than this (0–255) count as drawing ink. The canvas paper is
+/// pure white (255), so any visible mark counts, including light pencil
+/// strokes made with a mouse, which MyPaint treats as half pressure.
+pub(crate) const INK_THRESHOLD: f32 = 232.0;
 
 /// Ink pixels deeper than this (low-res px) inside a filled area are not
 /// part of the outline.

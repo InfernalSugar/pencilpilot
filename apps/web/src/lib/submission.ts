@@ -1,3 +1,5 @@
+import type { Stroke } from './paint/strokes';
+
 /** The last submitted drawing, handed from /draw to /results for this browser tab. */
 export interface Submission {
 	png: string;
@@ -5,9 +7,12 @@ export interface Submission {
 	height: number;
 	seconds: number;
 	category: string | null;
+	referenceId: string | null;
 	strokes: number;
 	points: number;
 	brushes: string[];
+	/** raw pen input, for the grader's line-confidence metrics */
+	strokeData: Stroke[];
 }
 
 const KEY = 'pp.lastSubmission';
