@@ -20,7 +20,8 @@
 		type Reference
 	} from '#lib/references.js';
 	import { fetchLiveReference, recentRefs, rememberRef, reportReference } from '#lib/live.js';
-	import { topicName } from '#lib/topics.js';
+	import { topicName, topicsFor } from '#lib/topics.js';
+	import { suggestTopic } from '#lib/progress.js';
 
 	const category = categories.find((c) => c.id === page.url.searchParams.get('category'));
 	const filter = {
@@ -54,17 +55,26 @@
 		reported = false;
 		reportOpen = false;
 		const avoid = [...recentRefs(), ...(skip ? [skip] : [])];
-		const unseenCurated = filtered(category.id, filter).filter((r) => !avoid.includes(r.id));
+		// "Surprise me": lean towards topics the student finds hardest (or hasn't tried).
+		const topic =
+			filter.topic ??
+			suggestTopic(
+				category.id,
+				topicsFor(category.id).map((t) => t.id)
+			) ??
+			null;
+		const f: RefFilter = { topic, tier: filter.tier };
+		const unseenCurated = filtered(category.id, f).filter((r) => !avoid.includes(r.id));
 		let r: Reference | undefined =
-			filter.tier === 1 && unseenCurated.length ? pickCurated(avoid) : undefined;
+			filter.tier === 1 && unseenCurated.length ? pickCurated(avoid, f) : undefined;
 		r ??=
 			(await fetchLiveReference({
 				category: category.id,
-				topic: filter.topic,
+				topic,
 				tier: filter.tier,
 				exclude: avoid
 			})) ?? undefined;
-		r ??= pickCurated(avoid) ?? pickCurated(avoid, { tier: filter.tier });
+		r ??= pickCurated(avoid, f) ?? pickCurated(avoid) ?? pickCurated(avoid, { tier: filter.tier });
 		reference = r;
 		refLoading = false;
 		if (r) rememberRef(r.id);
