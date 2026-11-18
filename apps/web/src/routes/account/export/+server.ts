@@ -13,7 +13,16 @@ export const GET: RequestHandler = ({ locals }) => {
 		)
 		.get(locals.user.id);
 	const body = JSON.stringify(
-		{ exportedAt: new Date().toISOString(), user, ...snapshot(db, locals.user.id) },
+		{
+			exportedAt: new Date().toISOString(),
+			user,
+			...snapshot(db, locals.user.id),
+			tipVotes: db
+				.prepare(
+					'SELECT rule_id, vote, category, score, attempt_at, created_at FROM tip_votes WHERE user_id = ?'
+				)
+				.all(locals.user.id)
+		},
 		null,
 		2
 	);

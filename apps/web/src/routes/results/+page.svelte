@@ -36,6 +36,22 @@
 	let mode = $state<OverlayMode>('fade');
 	let focused = $state<string | null>(null);
 	let patterns = $state<Pattern[]>([]);
+	let votes = $state<Record<string, 1 | -1>>({});
+
+	async function vote(f: FeedbackItem, v: 1 | -1) {
+		votes[f.id] = v;
+		await fetch('/api/tip-vote', {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({
+				ruleId: f.id,
+				vote: v,
+				category: reference?.category,
+				score: grade?.score,
+				attemptAt: sub?.at
+			})
+		}).catch(() => {});
+	}
 	const reference = $derived(sub?.reference ?? byId(sub?.referenceId));
 
 	const time = $derived(
@@ -314,6 +330,17 @@
 								<a class="chip" href="/drills/{f.drill}">Drill: {humanize(f.drill)}</a>
 							{/if}
 						</div>
+						<div class="vote" role="group" aria-label="Was this tip helpful?">
+							{#if votes[f.id]}
+								<span class="thanks" role="status">Thanks for the feedback!</span>
+							{:else}
+								<span>Helpful?</span>
+								<button type="button" aria-label="Helpful" onclick={() => vote(f, 1)}>👍</button>
+								<button type="button" aria-label="Not helpful" onclick={() => vote(f, -1)}>
+									👎
+								</button>
+							{/if}
+						</div>
 					</Tile>
 				{:else}
 					{#if !grade?.flags.includes('blank')}
@@ -480,6 +507,29 @@
 	}
 	.lilac-ink {
 		color: var(--pp-lilac-ink);
+	}
+	.vote {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		font-size: 13px;
+		color: var(--pp-muted);
+	}
+	.vote button {
+		width: 36px;
+		height: 36px;
+		border: 0;
+		border-radius: 999px;
+		background: var(--pp-ground);
+		cursor: pointer;
+		font-size: 16px;
+	}
+	.vote button:hover {
+		background: var(--pp-lilac);
+	}
+	.thanks {
+		color: var(--pp-cat-env);
+		font-weight: 600;
 	}
 	.chip.dark {
 		background: var(--pp-ink);

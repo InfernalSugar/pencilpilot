@@ -41,7 +41,19 @@ const MIGRATIONS: string[] = [
 		at INTEGER NOT NULL,
 		data_url TEXT NOT NULL,
 		PRIMARY KEY (user_id, at)
-	);`
+	);`,
+	`CREATE TABLE tip_votes (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		rule_id TEXT NOT NULL,
+		vote INTEGER NOT NULL CHECK (vote IN (-1, 1)),
+		category TEXT NOT NULL DEFAULT '',
+		score REAL,
+		attempt_at INTEGER,
+		user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+		created_at INTEGER NOT NULL
+	);
+	CREATE INDEX tip_votes_rule ON tip_votes(rule_id);
+	CREATE UNIQUE INDEX tip_votes_once ON tip_votes(user_id, attempt_at, rule_id) WHERE user_id IS NOT NULL;`
 ];
 
 export function openDb(path: string): DB {
