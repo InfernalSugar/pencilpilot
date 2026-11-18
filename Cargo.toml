@@ -1,0 +1,13 @@
+[workspace]
+resolver = "3"
+members = ["crates/grader", "crates/grader-wasm", "crates/feedback"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/InfernalSugar/pencilpilot"
+version = "0.1.0"
+
+[profile.release]
+opt-level = "s"
+lto = true

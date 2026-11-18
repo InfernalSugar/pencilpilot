@@ -1,0 +1,12 @@
+[package]
+name = "pencilpilot-grader"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[lib]
+name = "grader"

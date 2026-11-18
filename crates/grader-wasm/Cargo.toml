@@ -1,0 +1,17 @@
+[package]
+name = "pencilpilot-grader-wasm"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pencilpilot-grader = { path = "../grader" }
+wasm-bindgen = "0.2"
+serde-wasm-bindgen = "0.6"
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false

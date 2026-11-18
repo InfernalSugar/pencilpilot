@@ -1,0 +1,12 @@
+[package]
+name = "pencilpilot-feedback"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[lib]
+name = "feedback"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
