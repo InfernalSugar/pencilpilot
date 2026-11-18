@@ -120,7 +120,7 @@
 				category: (ref.category === 'cartoon' ? 'anime' : ref.category) as GradeCategory,
 				strokes: sub.strokeData ?? []
 			});
-			fb = await getFeedback(grade, sub.at ?? 0);
+			fb = await getFeedback(grade, sub.at ?? 0, ref.category);
 			const tier = sub.tier ?? tierOf(ref);
 			const before = recommendedTier(ref.category);
 			if (!alreadyRecorded(sub.at)) {
