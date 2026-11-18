@@ -8,7 +8,7 @@ learn:
   - The start dot, end dot method
   - What to do when a line goes wrong
 drill: ghosted-lines
-next: planning-the-page
+next: gesture-and-flow
 ---
 
 ## Why lines get hairy
