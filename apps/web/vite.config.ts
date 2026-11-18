@@ -1,8 +1,13 @@
 import { defineConfig } from 'vitest/config';
+import { searchForWorkspaceRoot } from 'vite';
 import adapter from '@sveltejs/adapter-auto';
 import { sveltekit } from '@sveltejs/kit/vite';
 
 export default defineConfig({
+	server: {
+		// The WASM packages live in crates/*/pkg, outside apps/web; let the dev server serve them.
+		fs: { allow: [searchForWorkspaceRoot(process.cwd())] }
+	},
 	plugins: [
 		sveltekit({
 			compilerOptions: {
