@@ -2,26 +2,38 @@
 
 The voice is **Fun, kind, specific**: a cheerful coach, not a judge.
 
-## Rules (`content/rules/*.toml`)
+## Rules (`content/feedback/rules.toml`)
 ```toml
 [[rule]]
-id = "head-too-large"
-measurement = "head_body_ratio_error"   # produced by the grader
-above = 0.20                            # fire when the head is 20%+ too big
-severity = 4                            # 1 (minor) – 5 (major); used for ranking
-tip = "head-too-large"                  # tips/head-too-large.md
-lesson = "measuring-proportions"
-drill = "head-units-gesture"
+id = "too-big"
+measurement = "scale_ratio"   # a grader measurement (crates/grader MEASUREMENT_DOCS)
+above = 1.15                  # or below = …; abs = true compares |value|
+span = 0.3                    # how far past the threshold counts as "as bad as it gets"
+min = 0.2                     # optional window: only fire between min and max
+severity = 4                  # 1 (minor) – 5 (major); scaled up by how far past the threshold
+skill = "placement"           # one fix per skill is shown
+number = "ratio_pct"          # how {n} is computed: ratio_pct | abs_pct | pct | deg
+dir_pos = "wide"              # optional words for {dir} by the value's sign
+dir_neg = "narrow"
+overlay = "bbox"              # what "Show me" highlights: bbox | offset | grid | missing | extra
+lesson = "measuring-with-units"
+drill = "block-in-boxes"
+categories = ["real-life"]    # optional: only for these categories
 ```
+The engine (`crates/feedback`) shows the top 3 fixes (one per skill) plus praise for the strongest skill.
+Content is embedded at build time, so run `pnpm wasm` after editing.
 
-## Tips (`content/tips/<id>.md`)
-- 2–4 variants separated by `---`, so repeat users don't read the same sentence.
-- Use placeholders with real numbers: `{percent}`, `{degrees}`, `{direction}`.
-- Structure: **what happened** (with the number) → **why it happens** → **one concrete fix**.
-- Keep each variant under ~60 words. Beginners get the simple variants; `level = "advanced"` variants are optional.
+## Tips (`content/feedback/tips.toml`)
+```toml
+[tip.too-big]
+title = "Your drawing is {n}% too big"
+variants = ["…{n}%…", "…"]     # 2–4 wordings; picked per attempt so repeats differ
+```
+- Use `{n}` (the rule's number) and `{dir}` (only if the rule has dir words).
+- Structure: **what happened** (with the number) → **why it happens** → **one concrete fix**. Under ~60 words.
 
 ## Praise
-Each measurement also has a "nice job" line, used for the student's best area.
+`[tip.praise-<skill>]` for placement, outline, silhouette, tone, line_confidence, proportions: shown for the strongest skill at ≥ 70%.
 
 ## Lessons and drills (`content/lessons/`)
 Short (2–3 minute read), picture-first, ending with a drill the site can grade.

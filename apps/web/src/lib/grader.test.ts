@@ -1,8 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { initSync, grade, defaultWeights } from 'pencilpilot-grader-wasm';
-import { measurement, toGray, type Grade } from './grader';
+import { initSync, grade, defaultWeights, feedback } from 'pencilpilot-grader-wasm';
+import { humanize, measurement, toGray, type Feedback, type Grade } from './grader';
 
 describe('toGray', () => {
 	it('maps black, white and transparent pixels', () => {
@@ -68,6 +68,32 @@ describe('grader wasm', () => {
 		) as Grade;
 		expect(g.score).toBe(1);
 		expect(g.flags).toContain('blank');
+	});
+
+	it('turns measurements into ranked tips with real numbers', () => {
+		const fb = feedback(
+			[
+				{ name: 'scale_ratio', value: 1.4 },
+				{ name: 'outline_recall', value: 0.3 },
+				{ name: 'line_confidence', value: 0.9 },
+				{ name: 'smoothness', value: 0.9 }
+			],
+			'animals',
+			7
+		) as Feedback;
+		expect(fb.fixes.map((f) => f.id)).toEqual(['too-big', 'missing-parts']);
+		expect(fb.fixes[0].title).toBe('Your drawing is 40% too big');
+		expect(fb.fixes[0].lesson).toBe('measuring-with-units');
+		expect(fb.praise?.skill).toBe('line_confidence');
+		expect(humanize('measuring-with-units')).toBe('Measuring with units');
+	});
+
+	it('the real grade → feedback path has no unfilled placeholders', () => {
+		const g = grade(W, H, disc(true), disc(false), { category: 'animals' }) as Grade;
+		const fb = feedback(g.measurements, g.category, 1) as Feedback;
+		for (const f of [...fb.fixes, ...(fb.praise ? [fb.praise] : [])]) {
+			expect(f.title + f.text).not.toMatch(/[{}]/);
+		}
 	});
 
 	it('rejects unknown categories', () => {

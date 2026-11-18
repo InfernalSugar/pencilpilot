@@ -1,0 +1,191 @@
+# Tip text for each rule (and praise per skill). Licensed CC BY-SA 4.0.
+# Placeholders: {n} = the measured number (see rules.toml `number`), {dir} = direction word.
+# Structure: what happened (with the number) → why it happens → one concrete fix.
+
+[tip.too-big]
+title = "Your drawing is {n}% too big"
+variants = [
+  "The whole drawing came out about {n}% bigger than the reference. We all tend to draw what we care about larger. Before any detail, mark the top, bottom, left and right edges lightly, then fit everything inside them.",
+  "You ran out of room: your drawing is roughly {n}% larger than the reference. Try a quick box first: tap four light marks for the outer edges, then build inside that box.",
+]
+
+[tip.too-small]
+title = "Your drawing is {n}% too small"
+variants = [
+  "Your drawing is about {n}% smaller than the reference. Small drawings hide mistakes and are harder to correct. Mark the outer edges first and use the space they give you.",
+  "Go bigger! It came out roughly {n}% smaller than the reference. Start with four light marks for the top, bottom and sides, and stretch your big shapes to reach them.",
+]
+
+[tip.wrong-width]
+title = "It’s {n}% too {dir}"
+variants = [
+  "Compared to its height, your drawing is about {n}% too {dir}. Hold your pencil at arm’s length: how many times does the width fit into the height? Check that on your drawing too.",
+  "Width and height don’t quite match: the drawing is around {n}% too {dir}. Draw a light box around the subject first and compare its shape (tall, square or wide) with the reference.",
+]
+
+[tip.off-sideways]
+title = "It sits too far {dir}"
+variants = [
+  "The drawing is shifted about {n}% of the page to the {dir}. It still counts, but planning the page helps: find the middle of the subject in the reference and put a light mark there first.",
+  "Your drawing drifted {dir} by about {n}% of the page. Start by marking where the centre of the subject should go, then the outer edges around it.",
+]
+
+[tip.off-vertically]
+title = "It sits too {dir} on the page"
+variants = [
+  "The drawing sits about {n}% of the page too {dir}. Mark the top and bottom of the subject first so it lands where it should.",
+  "Everything slid {dir} by roughly {n}% of the page. A quick tip: two light marks for the top and bottom before you draw anything else.",
+]
+
+[tip.missing-parts]
+title = "Some parts are missing"
+variants = [
+  "Only about {n}% of the reference’s main lines show up in your drawing. Before details, sketch every big part (head, body, legs, tail…) as simple shapes so nothing gets left out.",
+  "Your drawing covers about {n}% of the reference’s outlines. Squint at the reference, name each big part out loud, and make sure each one gets at least a simple shape.",
+]
+
+[tip.extra-lines]
+title = "Lines that aren’t in the reference"
+variants = [
+  "About {n}% of your lines match edges in the reference; the rest are guesses or extra marks. Draw what you see, not what you know: if you can’t find a line in the reference, leave it out.",
+  "Some lines don’t appear in the reference (only {n}% line up). Look back at the reference after every few strokes and erase guide lines once the shape is right.",
+]
+
+[tip.outlines-drift]
+title = "Outlines drift from the reference"
+variants = [
+  "Your outlines match the reference about {n}%. The shapes are there but wander. Slow down on edges: look at the reference, draw a short section, look again.",
+  "Outline match is {n}%. Try comparing one edge at a time: where does it start, where does it end, and is it straight or curved?",
+]
+
+[tip.big-shapes-off]
+title = "The big shapes don’t match yet"
+variants = [
+  "The overall silhouette only matches about {n}%. Before any detail, block in the biggest shapes (circles, boxes, triangles) and compare them to the reference.",
+  "Big-shape match: {n}%. Squint until the reference becomes a blurry blob, draw that blob first, then refine.",
+]
+
+[tip.one-area-off]
+title = "One area needs the most work"
+variants = [
+  "The area marked in red differs most from the reference (only about {n}% match). Compare just that part: what’s its shape, size and angle?",
+  "The red box shows your weakest area ({n}% match). Fix that one area next time and your score jumps the most.",
+]
+
+[tip.too-sparse]
+title = "Very few lines so far"
+variants = [
+  "There’s very little on the page yet. Even a rough version helps: get every big shape down quickly before slowing down.",
+  "Your drawing is quite sparse. Try a one-minute pass that only puts down the main outline, then build on it.",
+]
+
+[tip.no-shading]
+title = "Next step: add some shading"
+variants = [
+  "Your outlines are down, and that’s the hardest part. When you’re ready, add light and dark: squint at the reference, find the darkest areas and fill those in first.",
+  "Nice line work! The reference also has light and dark areas. Try adding the three darkest shapes you can see; it makes drawings look solid.",
+]
+
+[tip.flat-shading]
+title = "Shading is too flat"
+variants = [
+  "Your shading covers about {n}% less of the range from dark to light than the reference. Find the darkest spot in the reference and make it truly dark on your drawing, then work everything else between.",
+  "Your values are bunched together ({n}% less range than the reference). Push the shadows darker and leave the brightest areas clean white paper.",
+]
+
+[tip.too-dark]
+title = "Shading is heavier than the reference"
+variants = [
+  "Your shading is about {n}% more contrasty than the reference. Keep the very darkest tones for the few spots that really are that dark.",
+  "Lots of very dark areas: about {n}% more contrast than the reference. Build darks slowly in layers so you can stop at the right point.",
+]
+
+[tip.lights-and-darks-misplaced]
+title = "Lights and darks are in different places"
+variants = [
+  "Your light and dark pattern matches only about {n}%. Squint at the reference: where are the three darkest shapes? Put those in first.",
+  "Light/dark match: {n}%. Try a tiny three-value thumbnail (white, grey, black) of the reference before you start shading.",
+]
+
+[tip.shaky-lines]
+title = "Lines look shaky"
+variants = [
+  "Line smoothness is about {n}%. Short, careful strokes from the wrist wobble. Move from your elbow and shoulder, and draw a little faster.",
+  "Your lines wobble a bit ({n}% smooth). Before each line, hover over the path two or three times (“ghosting”), then draw it in one go.",
+]
+
+[tip.hairy-lines]
+title = "Lots of lines drawn over each other"
+variants = [
+  "About {n}% of your strokes go over lines you already drew, which makes edges hairy. Plan each line, then commit to one confident stroke.",
+  "Many strokes overlap ({n}%). Sketch lightly, then do one clean final line instead of many small ones.",
+]
+
+[tip.hesitant-speed]
+title = "Pen speed is uneven"
+variants = [
+  "Your pen speeds up and stops a lot (consistency {n}%). Steady, medium-speed strokes give smoother lines. Try drawing each line in one breath.",
+  "Uneven speed (consistency {n}%) usually means hesitating mid-line. Ghost the motion first, then draw at an even pace.",
+]
+
+[tip.proportions-off]
+title = "Proportions are off"
+variants = [
+  "Your key points are off by about {n}% of the drawing’s size. Pick one part as a unit (like the head) and measure everything else in those units.",
+  "Proportions drift by roughly {n}%. Compare distances: is the body twice the head, or three times? Check the same on your drawing.",
+]
+
+[tip.angles-off]
+title = "Angles are off by {n}°"
+variants = [
+  "Some angles are off by about {n}°. Hold your pencil along a line in the reference, freeze that angle, and move it over your drawing to compare.",
+  "Angle check: about {n}° off. Compare each main line with a perfectly vertical or horizontal line. Is it tilted more or less?",
+]
+
+[tip.blank-canvas]
+title = "The canvas looks empty"
+variants = [
+  "We couldn’t find any lines to compare. Draw the main outline of the reference, even roughly, and submit again!",
+]
+
+# Praise for the student's strongest skill.
+[tip.praise-placement]
+title = "Great size and placement"
+variants = [
+  "Your drawing sits right where the reference does, at the right size. That’s the foundation everything else builds on.",
+  "Size and position are spot on. You planned the page well.",
+]
+
+[tip.praise-outline]
+title = "Clean, accurate outlines"
+variants = [
+  "Your outlines follow the reference closely. Great observation!",
+  "Your edges land right on the reference’s edges. Keep looking that carefully.",
+]
+
+[tip.praise-silhouette]
+title = "The big shapes are right"
+variants = [
+  "The overall shape matches the reference really well. Getting the big shapes right first is the most important habit.",
+  "Your silhouette is a close match. Squint at both and they look alike!",
+]
+
+[tip.praise-tone]
+title = "Great light and dark"
+variants = [
+  "Your lights and darks sit in the right places. That’s what makes drawings look solid.",
+  "Nice values! Your shading pattern matches the reference well.",
+]
+
+[tip.praise-line_confidence]
+title = "Confident lines"
+variants = [
+  "Your strokes are smooth and steady. Confident lines make everything look more finished.",
+  "Lovely line quality: few retraces and a steady hand.",
+]
+
+[tip.praise-proportions]
+title = "Strong proportions"
+variants = [
+  "Your proportions and angles are close to the reference. Measuring is paying off.",
+]

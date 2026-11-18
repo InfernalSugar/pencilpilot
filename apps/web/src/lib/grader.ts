@@ -1,4 +1,4 @@
-import init, { grade, defaultWeights } from 'pencilpilot-grader-wasm';
+import init, { feedback as wasmFeedback, grade, defaultWeights } from 'pencilpilot-grader-wasm';
 import type { Stroke } from './paint/strokes';
 
 /** Category ids, same as `categories.ts`. */
@@ -184,3 +184,34 @@ export function toGray(rgba: Uint8ClampedArray): Uint8Array {
 	}
 	return out;
 }
+
+/** One tip from the feedback engine (crates/feedback, content/feedback/*.toml). */
+export interface FeedbackItem {
+	/** rule id, or `praise-<skill>` */
+	id: string;
+	skill: string;
+	title: string;
+	text: string;
+	/** 0–10 ranking weight (praise: 0) */
+	severity: number;
+	measurement: string;
+	value: number;
+	/** what the results overlay should highlight */
+	overlay: 'bbox' | 'offset' | 'grid' | 'missing' | 'extra' | null;
+	lesson: string | null;
+	drill: string | null;
+}
+
+export interface Feedback {
+	fixes: FeedbackItem[];
+	praise: FeedbackItem | null;
+}
+
+/** Ranked fixes (max 3, one per skill) + praise for a graded drawing. */
+export async function getFeedback(g: Grade, seed: number): Promise<Feedback> {
+	await load();
+	return wasmFeedback(g.measurements, g.category, seed >>> 0) as Feedback;
+}
+
+/** "measuring-with-units" → "Measuring with units" */
+export const humanize = (id: string) => id.replace(/-/g, ' ').replace(/^./, (c) => c.toUpperCase());

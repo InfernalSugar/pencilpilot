@@ -2,13 +2,19 @@
 	import { onMount } from 'svelte';
 	import Tile from '#lib/ui/Tile.svelte';
 	import Button from '#lib/ui/Button.svelte';
+	import OverlayViewer, { type OverlayMode } from '#lib/results/OverlayViewer.svelte';
+	import ScoreReveal from '#lib/results/ScoreReveal.svelte';
 	import { loadSubmission, type Submission } from '#lib/submission.js';
 	import { byId, imageUrl, referencePixels, tierName, tierOf, titleOf } from '#lib/references.js';
 	import { recommendedTier, recordAttempt } from '#lib/progress.js';
 	import {
+		getFeedback,
 		gradeImages,
+		humanize,
 		measurement,
 		toGray,
+		type Feedback,
+		type FeedbackItem,
 		type Grade,
 		type GradeCategory,
 		type MeasurementName
@@ -17,7 +23,11 @@
 	let sub = $state<Submission | null>(null);
 	let loaded = $state(false);
 	let grade = $state<Grade | null>(null);
+	let fb = $state<Feedback | null>(null);
 	let gradeError = $state('');
+	let levelUp = $state(0);
+	let mode = $state<OverlayMode>('fade');
+	let focused = $state<string | null>(null);
 	const reference = $derived(sub?.reference ?? byId(sub?.referenceId));
 
 	const time = $derived(
@@ -25,12 +35,12 @@
 	);
 
 	/** The skills shown in the breakdown, in plain words. */
-	const SKILLS: { name: MeasurementName; label: string }[] = [
-		{ name: 'placement', label: 'Size & placement' },
-		{ name: 'outline', label: 'Outlines' },
-		{ name: 'silhouette', label: 'Big shapes' },
-		{ name: 'tone', label: 'Light & dark' },
-		{ name: 'line_confidence', label: 'Line confidence' }
+	const SKILLS: { name: MeasurementName; label: string; skill: string }[] = [
+		{ name: 'placement', label: 'Size & placement', skill: 'placement' },
+		{ name: 'outline', label: 'Outlines', skill: 'outline' },
+		{ name: 'silhouette', label: 'Big shapes', skill: 'silhouette' },
+		{ name: 'tone', label: 'Light & dark', skill: 'tone' },
+		{ name: 'line_confidence', label: 'Line confidence', skill: 'line_confidence' }
 	];
 	const skills = $derived(
 		grade
@@ -39,29 +49,7 @@
 				)
 			: []
 	);
-	const best = $derived(
-		skills.length ? skills.reduce((a, b) => (b.value > a.value ? b : a)) : null
-	);
-	const worst = $derived(
-		skills.length ? skills.reduce((a, b) => (b.value < a.value ? b : a)) : null
-	);
-
-	/** A first, simple hint until the full feedback engine (M4) lands. */
-	const hint = $derived.by(() => {
-		if (!grade) return '';
-		if (grade.flags.includes('blank')) return 'The canvas looks empty. Give it another go!';
-		const scale = measurement(grade, 'scale_ratio');
-		if (scale !== undefined && scale > 1.15)
-			return `Your drawing is about ${Math.round((scale - 1) * 100)}% bigger than the reference. Block in the outer edges first, then fill in.`;
-		if (scale !== undefined && scale < 0.85)
-			return `Your drawing is about ${Math.round((1 - scale) * 100)}% smaller than the reference. Try using more of the canvas.`;
-		const aspect = measurement(grade, 'aspect_error');
-		if (aspect !== undefined && Math.abs(aspect) > 0.12)
-			return `Your drawing is ${aspect > 0 ? 'wider' : 'narrower'} than the reference. Compare its width to its height before adding detail.`;
-		if (worst && worst.value < 0.6)
-			return `${worst.label} is your weakest area this time. Slow down there and compare with the reference often.`;
-		return 'Nice work! Try a harder reference or a shorter time next.';
-	});
+	const fixSkills = $derived(new Set(fb?.fixes.map((f) => f.skill) ?? []));
 
 	async function decodeGray(png: string, w: number, h: number) {
 		const img = new Image();
@@ -88,6 +76,7 @@
 				category: (ref.category === 'cartoon' ? 'anime' : ref.category) as GradeCategory,
 				strokes: sub.strokeData ?? []
 			});
+			fb = await getFeedback(grade, sub.at ?? 0);
 			const tier = sub.tier ?? tierOf(ref);
 			const before = recommendedTier(ref.category);
 			if (!alreadyRecorded(sub.at)) {
@@ -106,8 +95,6 @@
 		}
 	});
 
-	let levelUp = $state(0);
-
 	/** Reloading the results page must not count the same drawing twice. */
 	function alreadyRecorded(at: number | undefined) {
 		if (!at) return false;
@@ -121,16 +108,19 @@
 		return false;
 	}
 
+	/** "Show me": switch the viewer to the view that explains a fix. */
+	function showMe(f: FeedbackItem) {
+		focused = f.id;
+		mode = f.overlay === 'bbox' || f.overlay === 'offset' ? 'size' : f.overlay ? 'heatmap' : 'fade';
+		document.getElementById('compare')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+	}
+
 	const nextUrl = $derived(
 		reference
 			? `/draw?category=${reference.category}${sub?.topic ? `&topic=${sub.topic}` : ''}&tier=${sub?.tier ?? tierOf(reference)}`
 			: '/draw'
 	);
-
 	const pct = (v: number) => `${Math.round(v * 100)}%`;
-	const worstCell = $derived(
-		grade?.grid.worst && grade.grid.cells[grade.grid.worst.index] < 0.75 ? grade.grid.worst : null
-	);
 </script>
 
 <svelte:head><title>Results · PencilPilot</title></svelte:head>
@@ -147,7 +137,9 @@
 	{:else if sub}
 		<div class="top">
 			<div>
-				<span class="pp-eyebrow">Results{reference ? ` · ${reference.category}` : ''}</span>
+				<span class="pp-eyebrow">
+					Results{reference ? ` · ${reference.category} · ${tierName(tierOf(reference))}` : ''}
+				</span>
 				<h1>{reference ? titleOf(reference) : 'Your drawing'}</h1>
 			</div>
 			<div class="actions">
@@ -166,7 +158,7 @@
 			<Tile tone="ink">
 				<span class="pp-eyebrow on-ink">Your score</span>
 				{#if grade}
-					<span class="big" data-testid="score">{grade.score.toFixed(1)}</span>
+					<ScoreReveal score={grade.score} />
 					<span class="note">{grade.passed ? 'Passed! Great match.' : 'out of 10'}</span>
 				{:else if reference && !gradeError}
 					<span class="big">…</span>
@@ -179,33 +171,35 @@
 				{/if}
 			</Tile>
 
-			<Tile span={2} rows={2}>
-				<div class="pair" class:single={!reference}>
+			<Tile span={2} rows={2} as="section" label="Compare">
+				<div id="compare">
 					{#if reference}
-						<figure>
-							<div class="frame"><img src={imageUrl(reference)} alt="The reference" /></div>
-							<figcaption>Reference</figcaption>
-						</figure>
+						<OverlayViewer
+							referenceSrc={imageUrl(reference)}
+							drawingSrc={sub.png}
+							{grade}
+							bind:mode
+							highlight={focused}
+						/>
+					{:else}
+						<div class="frame"><img src={sub.png} alt="Your submitted drawing" /></div>
 					{/if}
-					<figure>
-						<div class="frame">
-							<img src={sub.png} alt="Your submitted drawing" />
-							{#if grade && worstCell}
-								<span
-									class="cell"
-									title="The area that differs most from the reference"
-									style="left: {(worstCell.col / grade.grid.cols) * 100}%; top: {(worstCell.row /
-										grade.grid.rows) *
-										100}%; width: {100 / grade.grid.cols}%; height: {100 / grade.grid.rows}%"
-								></span>
-							{/if}
-						</div>
-						<figcaption>
-							Your drawing{worstCell ? ' · red box = biggest difference' : ''}
-						</figcaption>
-					</figure>
 				</div>
 			</Tile>
+
+			{#if fb?.praise}
+				<Tile tone="yellow">
+					<span class="pp-eyebrow ink">You nailed it</span>
+					<span class="mid">{fb.praise.title}</span>
+					<span class="note">{fb.praise.text}</span>
+				</Tile>
+			{:else}
+				<Tile>
+					<span class="pp-eyebrow">Time · strokes</span>
+					<span class="mid">{time}</span>
+					<span class="note">{sub.strokes} strokes, {sub.brushes.length} brush(es)</span>
+				</Tile>
+			{/if}
 
 			{#if grade}
 				<Tile>
@@ -215,54 +209,81 @@
 							<li>
 								<span class="row"><span>{s.label}</span><b>{pct(s.value)}</b></span>
 								<span class="track">
-									<span class="fill" class:low={s === worst} style="width: {pct(s.value)}"></span>
+									<span
+										class="fill"
+										class:low={fixSkills.has(s.skill)}
+										style="width: {pct(s.value)}"
+									></span>
 								</span>
 							</li>
 						{/each}
 					</ul>
 				</Tile>
-				<Tile tone="yellow">
-					<span class="pp-eyebrow ink">You nailed</span>
-					<span class="mid">{best?.label}</span>
-					<span class="note">{best ? pct(best.value) : ''} match</span>
-				</Tile>
-				{#if levelUp && reference}
-					<Tile tone="accent" span={2}>
-						<span class="pp-eyebrow on-accent">Level up!</span>
-						<p class="tip light">
-							Three strong drawings in a row. You’re ready for {tierName(levelUp)}.
-						</p>
-						<div>
-							<Button href="/practice/{reference.category}?tier={levelUp}" variant="dark">
-								Try {tierName(levelUp)} →
-							</Button>
-						</div>
-					</Tile>
-				{/if}
-				<Tile tone="lilac" span={2}>
-					<span class="pp-eyebrow lilac">Tip</span>
-					<p class="tip">{hint}</p>
-					<span class="note">
-						Detailed tips, lessons and drills arrive in the next update (M4).
-					</span>
+			{/if}
+			{#if fb?.praise}
+				<Tile>
+					<span class="pp-eyebrow">Time · strokes</span>
+					<span class="mid">{time}</span>
+					<span class="note">{sub.strokes} strokes, {sub.brushes.length} brush(es)</span>
 				</Tile>
 			{/if}
-			<Tile>
-				<span class="pp-eyebrow">Time · strokes</span>
-				<span class="mid">{time}</span>
-				<span class="note">
-					{sub.strokes} strokes, {sub.points.toLocaleString()} pen samples, {sub.brushes.length}
-					brush(es)
-				</span>
-			</Tile>
 		</div>
+
+		{#if levelUp && reference}
+			<div class="pp-bento levelup">
+				<Tile tone="accent" span={4}>
+					<span class="pp-eyebrow on-accent">Level up!</span>
+					<p class="big-line light">
+						Three strong drawings in a row. You’re ready for {tierName(levelUp)}.
+					</p>
+					<div>
+						<Button href="/practice/{reference.category}?tier={levelUp}" variant="dark">
+							Try {tierName(levelUp)} →
+						</Button>
+					</div>
+				</Tile>
+			</div>
+		{/if}
+
+		{#if fb}
+			<h2 class="section">{fb.fixes.length ? 'What to work on next' : 'Nothing big to fix'}</h2>
+			<div class="fixes">
+				{#each fb.fixes as f, i (f.id)}
+					<Tile as="article" label="Fix {i + 1}">
+						<div class="fix-head">
+							<span class="num" class:first={i === 0}>{i + 1}</span>
+							<h3>{f.title}</h3>
+						</div>
+						<p class="fix-text">{f.text}</p>
+						<div class="fix-actions">
+							{#if f.overlay}
+								<button type="button" class="chip dark" onclick={() => showMe(f)}>Show me</button>
+							{/if}
+							{#if f.lesson}
+								<span class="chip" title="Lessons arrive in M6">Lesson: {humanize(f.lesson)}</span>
+							{/if}
+							{#if f.drill}
+								<span class="chip" title="Drills arrive in M6">Drill: {humanize(f.drill)}</span>
+							{/if}
+						</div>
+					</Tile>
+				{:else}
+					{#if !grade?.flags.includes('blank')}
+						<Tile tone="lilac">
+							<p class="big-line">Great match! Try a harder level or a shorter time next.</p>
+						</Tile>
+					{/if}
+				{/each}
+			</div>
+		{/if}
 		{#if reference}
 			<p class="credit">
 				Reference by <a href={reference.authorUrl} target="_blank" rel="noreferrer">
 					{reference.author}
 				</a>
 				via <a href={reference.pageUrl} target="_blank" rel="noreferrer">Pixabay</a> ·
-				<a href={reference.licenseUrl} target="_blank" rel="noreferrer">{reference.license}</a>
+				<a href={reference.licenseUrl} target="_blank" rel="noreferrer">{reference.license}</a> ·
+				{time}, {sub.strokes} strokes
 			</p>
 		{/if}
 	{/if}
@@ -286,33 +307,15 @@
 		font-size: 30px;
 	}
 	h2 {
-		font-size: 20px;
+		font-size: 22px;
 		font-weight: 700;
+		letter-spacing: -0.4px;
+		line-height: 1.15;
 	}
 	.grid {
-		grid-auto-rows: minmax(220px, auto);
-	}
-	.pair {
-		display: grid;
-		grid-template-columns: 1fr 1fr;
-		gap: 12px;
-	}
-	.pair.single {
-		grid-template-columns: 1fr;
-	}
-	figure {
-		margin: 0;
-		display: flex;
-		flex-direction: column;
-		gap: 6px;
-	}
-	figcaption {
-		font-size: 13px;
-		font-weight: 600;
-		color: var(--pp-muted);
+		grid-auto-rows: minmax(200px, auto);
 	}
 	.frame {
-		position: relative;
 		aspect-ratio: 4 / 3;
 		background: #fff;
 		border-radius: 20px;
@@ -323,13 +326,6 @@
 		width: 100%;
 		height: 100%;
 		object-fit: contain;
-		display: block;
-	}
-	.cell {
-		position: absolute;
-		border: 3px solid var(--pp-accent);
-		border-radius: 10px;
-		pointer-events: none;
 	}
 	.big {
 		font-family: var(--pp-font-display);
@@ -342,36 +338,95 @@
 	.mid {
 		font-family: var(--pp-font-display);
 		font-weight: 700;
-		font-size: 30px;
-		line-height: 1.05;
+		font-size: 26px;
+		line-height: 1.1;
 		margin-top: auto;
 	}
 	.on-ink {
 		color: var(--pp-on-ink-muted);
 	}
-	.ink {
-		color: var(--pp-ink);
-	}
-	.lilac {
-		color: var(--pp-lilac-ink);
-	}
-	.note {
-		font-size: 14px;
-		opacity: 0.85;
-	}
 	.on-accent {
 		color: rgba(255, 255, 255, 0.85);
 	}
-	.tip.light {
-		color: #fff;
+	.ink {
+		color: var(--pp-ink);
 	}
-	.tip {
+	.note {
+		font-size: 14px;
+		line-height: 1.45;
+		opacity: 0.9;
+	}
+	.big-line {
 		margin: 0;
 		font-family: var(--pp-font-display);
 		font-weight: 700;
 		font-size: 24px;
 		line-height: 1.2;
 		color: var(--pp-ink);
+	}
+	.big-line.light {
+		color: #fff;
+	}
+	.section {
+		margin: 32px 0 12px;
+	}
+	.levelup {
+		margin-top: var(--pp-gap);
+	}
+	.fixes {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+		gap: var(--pp-gap);
+	}
+	h3 {
+		font-size: 22px;
+		font-weight: 700;
+		letter-spacing: -0.4px;
+		line-height: 1.15;
+	}
+	.fix-head {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+	}
+	.num {
+		flex: none;
+		width: 36px;
+		height: 36px;
+		display: grid;
+		place-items: center;
+		border-radius: 999px;
+		background: var(--pp-ink);
+		color: #fff;
+		font-weight: 700;
+	}
+	.num.first {
+		background: var(--pp-accent);
+	}
+	.fix-text {
+		margin: 0;
+		font-size: 16px;
+		line-height: 1.55;
+		color: var(--pp-ink-2);
+	}
+	.fix-actions {
+		margin-top: auto;
+		display: flex;
+		flex-wrap: wrap;
+		gap: 8px;
+	}
+	.chip {
+		padding: 8px 14px;
+		border-radius: 12px;
+		border: 0;
+		background: var(--pp-ground);
+		font: 600 13px var(--pp-font-body);
+		color: var(--pp-ink);
+	}
+	.chip.dark {
+		background: var(--pp-ink);
+		color: #fff;
+		cursor: pointer;
 	}
 	.bars {
 		list-style: none;
@@ -409,6 +464,5 @@
 	}
 	p {
 		margin: 0;
-		color: var(--pp-ink-2);
 	}
 </style>
