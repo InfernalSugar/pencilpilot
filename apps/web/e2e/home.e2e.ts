@@ -5,7 +5,7 @@ test('home page shows the hero and categories', async ({ page }) => {
 	await expect(page.getByRole('heading', { level: 1 })).toContainText('Score it.');
 	await expect(page.getByRole('link', { name: /Anime/ })).toHaveAttribute(
 		'href',
-		'/draw?category=anime'
+		'/practice/anime'
 	);
 });
 

@@ -25,6 +25,7 @@
 //! through a [`ScoreCurve`] to give the 1–10 score.
 
 mod align;
+pub mod difficulty;
 mod edges;
 mod img;
 pub mod keypoints;

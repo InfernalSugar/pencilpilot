@@ -9,17 +9,23 @@
 	import { DEFAULT_BRUSH, loadManifest, type BrushManifest } from '#lib/paint/brushes.js';
 	import { categories } from '#lib/categories.js';
 	import { saveSubmission } from '#lib/submission.js';
-	import { byId, imageUrl, pickReference, titleOf } from '#lib/references.js';
+	import { byId, imageUrl, pickReference, tierName, tierOf, titleOf } from '#lib/references.js';
+	import { topicName } from '#lib/topics.js';
 
 	const category = categories.find((c) => c.id === page.url.searchParams.get('category'));
+	const filter = {
+		topic: page.url.searchParams.get('topic'),
+		tier: Number(page.url.searchParams.get('tier')) || null
+	};
 	let reference = $state(
-		byId(page.url.searchParams.get('ref')) ?? (category ? pickReference(category.id) : undefined)
+		byId(page.url.searchParams.get('ref')) ??
+			(category ? pickReference(category.id, undefined, Math.random, filter) : undefined)
 	);
 	let peek = $state(false);
 
 	function nextReference() {
 		if (!category || !status.blank) return;
-		reference = pickReference(category.id, reference?.id);
+		reference = pickReference(category.id, reference?.id, Math.random, filter);
 		peek = false;
 	}
 
@@ -71,12 +77,15 @@
 		const d = canvas?.exportDrawing();
 		if (!d) return;
 		saveSubmission({
+			at: Date.now(),
 			png: d.png,
 			width: d.width,
 			height: d.height,
 			seconds,
 			category: category?.id ?? null,
 			referenceId: reference?.id ?? null,
+			topic: filter.topic,
+			tier: reference ? tierOf(reference) : null,
 			strokes: d.strokes.length,
 			points: d.strokes.reduce((n, s) => n + s.points.length, 0),
 			brushes: [...new Set(d.strokes.map((s) => s.brushId))],
@@ -93,7 +102,11 @@
 	<div class="top">
 		<div>
 			<span class="pp-eyebrow">
-				{category ? `${category.name} · ` : ''}{reference ? 'Copy the reference' : 'Free draw'}
+				{category ? `${category.name} · ` : ''}{reference
+					? [topicName(reference.category, reference.topic), tierName(tierOf(reference))]
+							.filter(Boolean)
+							.join(' · ')
+					: 'Free draw'}
 			</span>
 			<h1>{reference ? titleOf(reference) : 'Draw anything'}</h1>
 		</div>
