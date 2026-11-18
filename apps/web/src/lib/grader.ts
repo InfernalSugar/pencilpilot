@@ -1,22 +1,177 @@
-import init, { grade } from 'pencilpilot-grader-wasm';
+import init, { grade, defaultWeights } from 'pencilpilot-grader-wasm';
+import type { Stroke } from './paint/strokes';
+
+/** Category ids, same as `categories.ts`. */
+export type GradeCategory = 'anime' | 'real-life' | 'animals' | 'environment' | 'fundamentals';
+
+/** How much each measurement counts towards the score (normalised over what was measured). */
+export interface GradeWeights {
+	placement: number;
+	outline: number;
+	silhouette: number;
+	grid: number;
+	tone: number;
+	ssim: number;
+	lineConfidence: number;
+	keypoints: number;
+}
+
+/** `t = clamp((m - floor) / (pass - floor), 0, 1)`, `score = 1 + 9 * t^gamma`. */
+export interface ScoreCurve {
+	floor: number;
+	pass: number;
+	gamma: number;
+}
+
+export interface Point {
+	x: number;
+	y: number;
+}
+
+/** A reference keypoint and where the student put the same feature (canvas pixels). */
+export interface KeypointPair {
+	reference: Point;
+	drawing: Point;
+}
+
+export interface GradeOptions {
+	category?: GradeCategory;
+	/** Overrides the category's default weights (missing fields use the fundamentals defaults). */
+	weights?: Partial<GradeWeights>;
+	curve?: Partial<ScoreCurve>;
+	/** Recorded strokes, for line-confidence metrics. */
+	strokes?: readonly Stroke[];
+	keypoints?: KeypointPair[];
+}
+
+/**
+ * Stable measurement names. Similarities are 0–1 (1 = matches the reference);
+ * the others are raw numbers. See `MEASUREMENT_DOCS` in `crates/grader/src/lib.rs`.
+ */
+export type MeasurementName =
+	| 'placement'
+	| 'scale_ratio'
+	| 'aspect_error'
+	| 'offset_x'
+	| 'offset_y'
+	| 'outline'
+	| 'outline_precision'
+	| 'outline_recall'
+	| 'outline_distance'
+	| 'silhouette'
+	| 'grid'
+	| 'worst_cell'
+	| 'tone'
+	| 'contrast_ratio'
+	| 'ssim'
+	| 'ink_coverage'
+	| 'line_confidence'
+	| 'smoothness'
+	| 'curvature_jitter'
+	| 'retrace_ratio'
+	| 'speed_consistency'
+	| 'speed_cv'
+	| 'stroke_count'
+	| 'keypoints'
+	| 'keypoint_error'
+	| 'keypoint_max_error'
+	| 'angle_error';
+
+export interface Measurement {
+	name: MeasurementName;
+	value: number;
+}
+
+export interface CellRef {
+	col: number;
+	row: number;
+	index: number;
+}
+
+/** Outline similarity per region, row-major: `cells[row * cols + col]`. Empty cells score 1. */
+export interface GridResult {
+	cols: number;
+	rows: number;
+	cells: number[];
+	worst: CellRef | null;
+}
+
+/**
+ * Drawing → reference transform in canvas pixels:
+ * `p_ref = c + scale * R(rotation) * (p_drawing - c) + (dx, dy)`, `c` = canvas centre.
+ */
+export interface Alignment {
+	scale: number;
+	dx: number;
+	dy: number;
+	/** degrees, clockwise on screen */
+	rotation: number;
+}
+
+/** Fractions of the canvas, 0–1. */
+export interface BBox {
+	x: number;
+	y: number;
+	w: number;
+	h: number;
+}
+
+export interface KeypointResult {
+	keypointError: number;
+	maxError: number;
+	pairs: { error: number; fitted: Point }[];
+	/** degrees, per consecutive keypoint pair */
+	angleErrors: number[];
+	meanAngleError: number;
+	scale: number;
+	rotation: number;
+}
+
+export type GradeFlag = 'blank' | 'reference_blank' | 'alignment_at_limit';
 
 export interface Grade {
+	/** 1–10 */
 	score: number;
-	measurements: [string, number][];
+	/** weighted mean similarity before the curve, 0–1 */
+	similarity: number;
+	passed: boolean;
+	category: GradeCategory;
+	measurements: Measurement[];
+	grid: GridResult;
+	alignment: Alignment;
+	bbox: { drawing: BBox | null; reference: BBox | null };
+	keypoints: KeypointResult | null;
+	flags: GradeFlag[];
 }
 
 let ready: Promise<unknown> | undefined;
+
+async function load() {
+	ready ??= init();
+	await ready;
+}
 
 /** Grade a grayscale drawing against a grayscale reference (both width*height bytes). */
 export async function gradeImages(
 	width: number,
 	height: number,
 	drawing: Uint8Array,
-	reference: Uint8Array
+	reference: Uint8Array,
+	options: GradeOptions = {}
 ): Promise<Grade> {
-	ready ??= init();
-	await ready;
-	return grade(width, height, drawing, reference) as Grade;
+	await load();
+	return grade(width, height, drawing, reference, options) as Grade;
+}
+
+/** The built-in weights for a category. */
+export async function categoryWeights(category: GradeCategory): Promise<GradeWeights> {
+	await load();
+	return defaultWeights(category) as GradeWeights;
+}
+
+/** Look up one measurement by name. */
+export function measurement(g: Grade, name: MeasurementName): number | undefined {
+	return g.measurements.find((m) => m.name === name)?.value;
 }
 
 /** Convert RGBA canvas pixels to grayscale bytes (luma, transparent = white). */

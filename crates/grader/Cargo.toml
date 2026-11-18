@@ -10,3 +10,6 @@ serde = { version = "1", features = ["derive"] }
 
 [lib]
 name = "grader"
+
+[dev-dependencies]
+serde_json = "1"
