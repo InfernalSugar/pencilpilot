@@ -19,7 +19,7 @@ Each heading is a GitHub milestone, and each bullet is an issue titled `Mx-Tyy �
 - **M2-T02** Record stroke data (points, pressure, timestamps) for stroke-quality grading `web`
 - **M2-T03** Draw screen layout: reference beside the canvas, optional timer, submit `web`
 - **M2-T04** Export drawing bitmap + stroke data to the grader `web` `grader`
-- **M2-T05** Brush engine: libmypaint (ISC, the engine Krita also ships) compiled to WASM + the mypaint-brushes pack (CC0, 100+ brushes: pencils, inks, markers, charcoal, airbrush, watercolour, smudge…); brush picker grouped by category, favourites `web` `legal`
+- **M2-T05** Brush engine: [hokusai](https://github.com/reearth/hokusai) (MIT/Apache, pure-Rust port of libmypaint, the engine Krita also ships) in WASM + the mypaint-brushes pack (CC0, 100+ brushes: pencils, inks, markers, charcoal, airbrush, watercolour, smudge…); brush picker grouped by category, favourites `web` `legal`
 
 ## M3 — Grader v1, Rust → WASM (≈2–3 weeks)
 - **M3-T01** Image preparation: grayscale, normalise, auto-alignment (scale/translate/rotate) `grader`
