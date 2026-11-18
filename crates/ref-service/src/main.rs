@@ -39,7 +39,7 @@ use tracing::{info, warn};
 use model::{CATEGORIES, LiveRef, Slot, Topic, image_type};
 use pixabay::Pixabay;
 use pool::PoolState;
-use vet::{BasicVetter, Vetter, pixabay_flags_ok};
+use vet::{FiltersVetter, Vetter, pixabay_flags_ok};
 
 const LICENSE: &str = "Pixabay Content License";
 const LICENSE_URL: &str = "https://pixabay.com/service/license-summary/";
@@ -124,6 +124,24 @@ async fn main() {
     let port: u16 = env_or_dotenv("REF_PORT")
         .and_then(|p| p.parse().ok())
         .unwrap_or(8787);
+    // NSFW safety guard (ADR-0005). Refuse to run without it unless explicitly allowed.
+    let model = env_or_dotenv("REF_NSFW_MODEL")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo_root().join("crates/ref-filters/models/open_nsfw.onnx"));
+    let filters = match ref_filters::Filters::new(&model) {
+        Ok(f) => {
+            info!(model = %model.display(), "NSFW guard loaded");
+            f
+        }
+        Err(e) if env_or_dotenv("REF_ALLOW_NO_NSFW").as_deref() == Some("1") => {
+            warn!("NSFW guard NOT loaded ({e}); REF_ALLOW_NO_NSFW=1, dev only!");
+            ref_filters::Filters::without_nsfw()
+        }
+        Err(e) => panic!(
+            "NSFW model not available ({e}). Run crates/ref-filters/fetch-model.sh \
+             (or set REF_ALLOW_NO_NSFW=1 for local experiments)."
+        ),
+    };
     let target = env_or_dotenv("REF_TARGET")
         .and_then(|t| t.parse().ok())
         .unwrap_or(6);
@@ -138,7 +156,7 @@ async fn main() {
         pool: Mutex::new(pool),
         wake: Notify::new(),
         pixabay: Pixabay::new(key, data.join("search-cache")),
-        vetter: Box::new(BasicVetter),
+        vetter: Box::new(FiltersVetter(filters)),
         topics: load_topics(&topics_path),
         data,
         target,
@@ -258,6 +276,7 @@ async fn pool_status(State(app): State<Arc<App>>) -> Json<Value> {
         "refs": p.refs.len(),
         "blocked": p.blocked.len(),
         "seen": p.seen.len(),
+        "rejected": p.rejected,
         "slots": p.summary().into_iter().map(|(k, (f, l))| (k, json!({"fresh": f, "served": l}))).collect::<serde_json::Map<_, _>>(),
     }))
 }
@@ -412,6 +431,10 @@ async fn refill_step(app: &App, slot: &Slot) -> Result<(), String> {
             Ok(x) => x,
             Err(why) => {
                 tracing::debug!(sid, why, "rejected");
+                let mut p = app.pool.lock().await;
+                for r in why.split(',') {
+                    *p.rejected.entry(r.to_string()).or_insert(0) += 1;
+                }
                 continue;
             }
         };
@@ -476,7 +499,7 @@ mod tests {
             pool: Mutex::new(PoolState::default()),
             wake: Notify::new(),
             pixabay: Pixabay::new("test".into(), dir.join("cache")),
-            vetter: Box::new(BasicVetter),
+            vetter: Box::new(FiltersVetter(ref_filters::Filters::without_nsfw())),
             topics: load_topics(&repo_root().join("content/topics.json")),
             data: dir,
             target: 3,

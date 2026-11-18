@@ -1,16 +1,11 @@
 //! Vetting: decide whether a downloaded picture may be shown, and how hard it is.
 //!
-//! Hard rules applied here (plain maths + Pixabay's own flags). The richer
-//! checks (text-heavy, near-duplicates, NSFW model) come from the
-//! `ref-filters` crate and plug in through [`Vetter`].
+//! Pixabay's own flags are checked here; the image checks (blank, text-heavy,
+//! too faint/busy, size, near-duplicates, NSFW guard) come from `ref-filters`.
 
-use grader::Gray;
-use grader::difficulty::{Difficulty, difficulty};
+use grader::difficulty::Difficulty;
 use image::DynamicImage;
 use serde_json::Value;
-
-/// Canvas size references are fitted into (keep in sync with the web app).
-pub const CANVAS: (u32, u32) = (800, 600);
 
 #[derive(Debug, Clone)]
 pub struct Vetted {
@@ -92,50 +87,21 @@ pub fn on_white(img: DynamicImage) -> DynamicImage {
     DynamicImage::ImageRgba8(rgba)
 }
 
-/// Fit an image into the canvas (contain, centred, white) as grayscale.
-pub fn fitted_gray(img: &DynamicImage) -> Gray {
-    let g = img.to_luma8();
-    let (w, h) = CANVAS;
-    let s = (w as f32 / g.width() as f32).min(h as f32 / g.height() as f32);
-    let (dw, dh) = (
-        ((g.width() as f32 * s).round() as u32).clamp(1, w),
-        ((g.height() as f32 * s).round() as u32).clamp(1, h),
-    );
-    let small = image::imageops::resize(&g, dw, dh, image::imageops::FilterType::Triangle);
-    let mut canvas = image::GrayImage::from_pixel(w, h, image::Luma([255]));
-    image::imageops::overlay(
-        &mut canvas,
-        &small,
-        ((w - dw) / 2) as i64,
-        ((h - dh) / 2) as i64,
-    );
-    Gray::new(w, h, canvas.into_raw()).expect("sizes match")
-}
+/// The full check from `ref-filters`: blank, text-heavy, too faint/busy,
+/// size/aspect, near-duplicate hash and the NSFW safety guard (ADR-0005).
+pub struct FiltersVetter(pub ref_filters::Filters);
 
-/// Baseline vetter: size/aspect checks and difficulty bounds (too faint / too busy).
-pub struct BasicVetter;
-
-impl Vetter for BasicVetter {
+impl Vetter for FiltersVetter {
     fn vet(&self, img: &DynamicImage) -> Result<Vetted, String> {
-        let (w, h) = (img.width(), img.height());
-        if w.min(h) < 400 {
-            return Err("tiny".into());
+        let v = self.0.check(img);
+        if v.ok {
+            Ok(Vetted {
+                difficulty: v.difficulty,
+                phash: Some(v.phash),
+            })
+        } else {
+            Err(v.reasons.join(","))
         }
-        let aspect = w.max(h) as f32 / w.min(h) as f32;
-        if aspect > 3.0 {
-            return Err("extreme_aspect".into());
-        }
-        let d = difficulty(&fitted_gray(img));
-        if d.score < 12.0 {
-            return Err("too_faint".into());
-        }
-        if d.score > 82.0 {
-            return Err("too_busy".into());
-        }
-        Ok(Vetted {
-            difficulty: d,
-            phash: None,
-        })
     }
 }
 
@@ -160,6 +126,31 @@ mod tests {
     }
 
     #[test]
+    fn filters_vetter_rejects_blank_and_hashes_good_images() {
+        let v = FiltersVetter(ref_filters::Filters::without_nsfw());
+        let blank = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            800,
+            600,
+            image::Rgb([255, 255, 255]),
+        ));
+        assert!(v.vet(&blank).unwrap_err().contains("blank"));
+        // a drawable picture: a dark disc with a lighter ring
+        let disc = DynamicImage::ImageRgb8(image::RgbImage::from_fn(800, 600, |x, y| {
+            let d = ((x as f32 - 400.0).powi(2) + (y as f32 - 300.0).powi(2)).sqrt();
+            let g = if d < 150.0 {
+                40
+            } else if d < 200.0 {
+                160
+            } else {
+                255
+            };
+            image::Rgb([g, g, g])
+        }));
+        let ok = v.vet(&disc).expect("a simple disc is drawable");
+        assert!(ok.phash.is_some());
+    }
+
+    #[test]
     fn transparent_becomes_white() {
         let clear = DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
             4,
@@ -177,13 +168,17 @@ mod tests {
     }
 
     #[test]
-    fn basic_vetter_rejects_blank_and_tiny() {
-        let blank = DynamicImage::new_luma8(800, 600);
-        // all-black image has no edges at all
-        assert_eq!(BasicVetter.vet(&blank).unwrap_err(), "too_faint");
-        let tiny = DynamicImage::new_luma8(200, 200);
-        assert_eq!(BasicVetter.vet(&tiny).unwrap_err(), "tiny");
-        let wide = DynamicImage::new_luma8(2000, 500);
-        assert_eq!(BasicVetter.vet(&wide).unwrap_err(), "extreme_aspect");
+    fn filters_vetter_rejects_tiny_and_extreme_aspect() {
+        let v = FiltersVetter(ref_filters::Filters::without_nsfw());
+        assert!(
+            v.vet(&DynamicImage::new_luma8(200, 200))
+                .unwrap_err()
+                .contains("tiny")
+        );
+        assert!(
+            v.vet(&DynamicImage::new_luma8(2000, 500))
+                .unwrap_err()
+                .contains("extreme_aspect")
+        );
     }
 }

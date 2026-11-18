@@ -29,6 +29,9 @@ pub struct PoolState {
     /// Pixabay ids already looked at (accepted or rejected): never re-download.
     pub seen: HashSet<u64>,
     pub phashes: Vec<(String, u64)>,
+    /// reason code → number of pictures rejected for it (monitoring)
+    #[serde(default)]
+    pub rejected: BTreeMap<String, u32>,
     /// slot key → (slot, request count)
     #[serde(skip)]
     pub demand: HashMap<String, (Slot, u32)>,
