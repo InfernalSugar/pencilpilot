@@ -2,3 +2,7 @@ packages:
   - apps/*
   - crates/grader-wasm/pkg
   - crates/brush-wasm/pkg
+onlyBuiltDependencies:
+  - better-sqlite3
+  - "@node-rs/argon2"
+  - esbuild

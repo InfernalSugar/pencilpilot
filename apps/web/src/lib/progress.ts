@@ -1,3 +1,5 @@
+import { queueSync } from './sync';
+
 /**
  * Per-browser practice history (until accounts arrive in M7), used to suggest
  * when to move up a difficulty tier. Stored in localStorage; every access is
@@ -33,6 +35,7 @@ export function recordAttempt(a: Attempt) {
 	try {
 		const list = [...attempts(), a].slice(-MAX);
 		localStorage.setItem(KEY, JSON.stringify(list));
+		queueSync();
 	} catch {
 		/* storage unavailable: history is skipped */
 	}
@@ -203,6 +206,7 @@ export async function saveThumb(at: number, png: string) {
 			.sort((a, b) => b - a)
 			.slice(0, 24);
 		localStorage.setItem(THUMBS, JSON.stringify(Object.fromEntries(keep.map((k) => [k, all[k]]))));
+		queueSync();
 	} catch {
 		/* storage full or blocked: thumbnails are optional */
 	}
