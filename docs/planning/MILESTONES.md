@@ -14,11 +14,12 @@ Each heading is a GitHub milestone, and each bullet is an issue titled `Mx-Tyy �
 - **M1-T02** Mock up key screens: home/category picker, draw screen, results (score dial, overlay, tips), lesson page, progress page `design`
 - **M1-T03** Turn the approved mockup into design tokens + Svelte components in `apps/web/src/lib/ui` `design` `web`
 
-## M2 — Canvas and drawing core (≈1–2 weeks)
-- **M2-T01** Fixed-size canvas: pointer events, pen pressure, smoothing, brush, eraser, undo/redo, clear `web`
+## M2 — Canvas and drawing core (≈2–3 weeks)
+- **M2-T01** Fixed-size canvas: pointer events, pen pressure/tilt, smoothing, eraser, undo/redo, clear `web`
 - **M2-T02** Record stroke data (points, pressure, timestamps) for stroke-quality grading `web`
 - **M2-T03** Draw screen layout: reference beside the canvas, optional timer, submit `web`
 - **M2-T04** Export drawing bitmap + stroke data to the grader `web` `grader`
+- **M2-T05** Brush engine: libmypaint (ISC, the engine Krita also ships) compiled to WASM + the mypaint-brushes pack (CC0, 100+ brushes: pencils, inks, markers, charcoal, airbrush, watercolour, smudge…); brush picker grouped by category, favourites `web` `legal`
 
 ## M3 — Grader v1, Rust → WASM (≈2–3 weeks)
 - **M3-T01** Image preparation: grayscale, normalise, auto-alignment (scale/translate/rotate) `grader`
