@@ -1,0 +1,122 @@
+/* PencilPilot "Studio Pop — Bento" theme.
+   Source of truth: the Bento boards in the design artifact (docs/planning/README.md). */
+@import '@fontsource-variable/bricolage-grotesque';
+@import '@fontsource-variable/inter';
+
+:root {
+	/* colour */
+	--pp-ground: #f6f4ef;
+	--pp-surface: #ffffff;
+	--pp-surface-sunk: #e9e6de;
+	--pp-ink: #16161a;
+	--pp-ink-2: #44434a;
+	--pp-muted: #6b6a70;
+	--pp-on-ink: #f6f4ef;
+	--pp-on-ink-muted: #a9a7b0;
+	--pp-accent: #e8492f;
+	--pp-accent-ink: #c2391f; /* accent text on light grounds (passes 4.5:1) */
+	--pp-yellow: #ffd84d;
+	--pp-lilac: #d9d2ff;
+	--pp-lilac-ink: #4a3f8c;
+	--pp-track: #efece4;
+	--pp-cat-anime: #e8492f;
+	--pp-cat-real: #3d6bff;
+	--pp-cat-animals: #f2a93b;
+	--pp-cat-env: #1f9d74;
+	--pp-cat-fund: #ffd84d;
+
+	/* type */
+	--pp-font-display: 'Bricolage Grotesque Variable', 'Bricolage Grotesque', system-ui, sans-serif;
+	--pp-font-body: 'Inter Variable', Inter, system-ui, sans-serif;
+
+	/* shape + space */
+	--pp-radius-tile: 32px;
+	--pp-radius-card: 24px;
+	--pp-radius-btn: 16px;
+	--pp-gap: 16px;
+	--pp-page-pad: clamp(16px, 4vw, 56px);
+	--pp-max: 1280px;
+
+	/* motion */
+	--pp-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+*,
+*::before,
+*::after {
+	box-sizing: border-box;
+}
+
+html,
+body {
+	margin: 0;
+	background: var(--pp-ground);
+	color: var(--pp-ink);
+	font-family: var(--pp-font-body);
+	-webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3 {
+	font-family: var(--pp-font-display);
+	font-weight: 800;
+	letter-spacing: -0.03em;
+	margin: 0;
+}
+
+a {
+	color: inherit;
+}
+
+a:hover {
+	color: var(--pp-accent);
+}
+
+:focus-visible {
+	outline: 3px solid var(--pp-accent);
+	outline-offset: 3px;
+}
+
+.pp-eyebrow {
+	font-size: 13px;
+	font-weight: 600;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--pp-muted);
+}
+
+.pp-page {
+	max-width: var(--pp-max);
+	margin: 0 auto;
+	padding: 0 var(--pp-page-pad) 40px;
+}
+
+.pp-bento {
+	display: grid;
+	gap: var(--pp-gap);
+	grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+@media (max-width: 900px) {
+	.pp-bento {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+}
+
+@media (max-width: 560px) {
+	.pp-bento {
+		grid-template-columns: minmax(0, 1fr);
+	}
+	.pp-bento > * {
+		grid-column: auto !important;
+		grid-row: auto !important;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	* {
+		transition: none !important;
+		animation: none !important;
+	}
+}
