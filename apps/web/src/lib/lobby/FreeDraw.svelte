@@ -12,7 +12,7 @@
 	import Swatches from '../paint/Swatches.svelte';
 	import BrushPicker from '../paint/BrushPicker.svelte';
 	import ColorPanel from '../paint/ColorPanel.svelte';
-	import { DEFAULT_BRUSH, loadManifest, type BrushManifest } from '../paint/brushes';
+	import { DEFAULT_BRUSH, brushLabel, loadManifest, type BrushManifest } from '../paint/brushes';
 	import { onMount } from 'svelte';
 	import { pickRefs } from './refs';
 	import RefCredit from '../RefCredit.svelte';
@@ -45,7 +45,7 @@
 	onMount(() => {
 		loadManifest().then((m) => (manifest = m));
 	});
-	const brushName = $derived(manifest?.brushes.find((b) => b.id === brushId)?.name ?? '…');
+	const brushName = $derived(brushLabel(manifest, brushId));
 	let picking = $state(false);
 
 	const host = $derived(lobby.players.some((p) => p.id === you && p.host));
