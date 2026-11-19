@@ -86,6 +86,16 @@ student's drawing (ADR-0002). The sorter never sees drawings.
   server first.
 - `ref-importer sort [--dry-run]` re-checks the committed manifests. Removed
   ids go to `rejected.json`.
+- The site owner reviews the live pool on `/dev/pictures` (dev only; the
+  ref-service's `/api/admin/*` is on only with `REF_ADMIN=1`, which
+  `pnpm dev` sets, and only for requests from this computer). Keep, reject
+  or move each picture; decisions go to `data/ref-service/reviews.jsonl`
+  with the sorter's verdict at the time. Reviewed pictures are never
+  re-sorted or removed by later rule changes. Rejected files move to
+  `data/ref-service/review-labels/` (never served) so the sorter can still be
+  measured on them: `ref-service recheck --labels data/ref-service/reviews.jsonl`
+  prints a confusion table per topic (owner vs sorter), to compare prompt or
+  cut-off changes.
 - ref-service refuses to start without the model unless
   `REF_ALLOW_NO_SORTER=1` (dev only). CI has no model: the tests use a fake
   scorer, and tests that need the real files skip when they are missing.

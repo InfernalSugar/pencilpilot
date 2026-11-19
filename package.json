@@ -4,7 +4,7 @@
   "packageManager": "pnpm@10.34.9",
   "scripts": {
     "wasm": "pnpm wasm:grader && pnpm wasm:brush",
-    "dev": "pnpm wasm && pnpm refs:model && (cargo run -q --release -p pencilpilot-ref-service & pnpm --filter @pencilpilot/web dev)",
+    "dev": "pnpm wasm && pnpm refs:model && (REF_ADMIN=1 cargo run -q --release -p pencilpilot-ref-service & pnpm --filter @pencilpilot/web dev)",
     "build": "pnpm wasm && pnpm --filter @pencilpilot/web build",
     "lint": "pnpm --filter @pencilpilot/web lint",
     "check": "pnpm --filter @pencilpilot/web check",
