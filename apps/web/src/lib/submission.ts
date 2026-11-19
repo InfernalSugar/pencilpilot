@@ -22,6 +22,8 @@ export interface Submission {
 	brushes: string[];
 	/** raw pen input, for the grader's line-confidence metrics */
 	strokeData: Stroke[];
+	/** seconds, for timed drawings */
+	timeLimit?: number;
 	/** drawn with a tracing picture showing: tips only, never scored or counted */
 	traced?: boolean;
 	/** how the tracing picture was placed, so the comparison matches what was traced */

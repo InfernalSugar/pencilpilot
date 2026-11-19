@@ -9,12 +9,13 @@
 	import LayersPanel from '#lib/paint/LayersPanel.svelte';
 	import CanvasSizePicker from '#lib/paint/CanvasSizePicker.svelte';
 	import RefViewer from '#lib/paint/RefViewer.svelte';
+	import { addToSession, clockOf, startSession, timeLabel } from '#lib/timed.js';
 	import TracePanel, { TRACE_DEFAULTS, type TraceState } from '#lib/paint/TracePanel.svelte';
 	import { savedSize, saveSize, type CanvasSize } from '#lib/paint/canvas-size.js';
 	import BrushPicker from '#lib/paint/BrushPicker.svelte';
 	import { DEFAULT_BRUSH, loadManifest, type BrushManifest } from '#lib/paint/brushes.js';
 	import { categories } from '#lib/categories.js';
-	import { saveSubmission } from '#lib/submission.js';
+	import { saveSubmission, type Submission } from '#lib/submission.js';
 	import {
 		byId,
 		filtered,
@@ -188,6 +189,48 @@
 	let canvas: ReturnType<typeof PaintCanvas> | undefined = $state();
 	let seconds = $state(0);
 	let timerOn = $state(true);
+
+	// Timed rounds (?time=120) and gesture sessions (?session=gesture&count=10&time=60).
+	const timeLimit = Math.max(0, Math.min(3600, Number(page.url.searchParams.get('time')) || 0));
+	const sessionMode =
+		page.url.searchParams.get('session') === 'gesture' && timeLimit > 0 && !!category;
+	const sessionCount = Math.max(1, Math.min(50, Number(page.url.searchParams.get('count')) || 10));
+	/** gesture session: which picture (also refreshes the canvas between pictures) */
+	let round = $state(0);
+	/** seconds used in this timed round */
+	let used = $state(0);
+	let timeUp = $state(false);
+	const remaining = $derived(timeLimit - used);
+	const canvasReady = $derived(status.layers.length > 0);
+	/** the clock runs once the canvas and the picture are there */
+	const roundLive = $derived(canvasReady && !refLoading && (!!reference || !category));
+
+	function tickTimed() {
+		if (!timeLimit || timeUp || !roundLive) return;
+		used++;
+		if (used >= timeLimit) onTimeUp();
+	}
+
+	function onTimeUp() {
+		timeUp = true;
+		if (sessionMode) {
+			const done = addToSession(status.blank ? null : buildSubmission());
+			setTimeout(async () => {
+				if (done >= sessionCount) return goto('/session');
+				round++;
+				used = 0;
+				traced = false;
+				status = BLANK_STATUS;
+				timeUp = false;
+				await loadReference(reference?.id);
+			}, 1200);
+		} else if (!status.blank) setTimeout(submit, 1200);
+	}
+
+	function tryAgain() {
+		used = 0;
+		timeUp = false;
+	}
 	let confirmClear = $state(false);
 
 	const SWATCHES = ['#16161a', '#6b6a70', '#b9b6ae', '#e8492f', '#3d6bff', '#1f9d74', '#f2a93b'];
@@ -204,8 +247,17 @@
 		floatBox = recall('pp.refFloat', floatBox);
 		loadManifest().then((m) => (manifest = m));
 		if (!reference) loadReference();
+		if (sessionMode && category)
+			startSession({
+				count: sessionCount,
+				time: timeLimit,
+				category: category.id,
+				topic: filter.topic,
+				tier: filter.tier
+			});
 		const id = setInterval(() => {
 			if (timerOn && !status.blank) seconds++;
+			tickTimed();
 		}, 1000);
 		return () => clearInterval(id);
 	});
@@ -235,10 +287,10 @@
 		else if (!mod && k === 'm') canvas?.toggleMirror();
 	}
 
-	async function submit() {
+	function buildSubmission(): Submission | null {
 		const d = canvas?.exportDrawing();
-		if (!d) return;
-		saveSubmission({
+		if (!d) return null;
+		return {
 			at: Date.now(),
 			png: d.png,
 			width: d.width,
@@ -260,8 +312,15 @@
 						transform: { x: trace.x, y: trace.y, scale: trace.scale, rotate: trace.rotate },
 						ownUrl: trace.source === 'own' ? (trace.ownUrl ?? undefined) : undefined
 					}
-				: undefined
-		});
+				: undefined,
+			...(timeLimit ? { timeLimit } : {})
+		};
+	}
+
+	async function submit() {
+		const sub = buildSubmission();
+		if (!sub) return;
+		saveSubmission(sub);
 		await goto('/results');
 	}
 </script>
@@ -282,31 +341,61 @@
 			<h1>{reference ? titleOf(reference) : 'Draw anything'}</h1>
 		</div>
 		<div class="top-actions">
-			<button
-				type="button"
-				class="timer"
-				aria-pressed={timerOn}
-				title={timerOn ? 'Pause timer' : 'Resume timer'}
-				onclick={() => (timerOn = !timerOn)}
-			>
-				<svg
-					width="20"
-					height="20"
-					viewBox="0 0 24 24"
-					fill="none"
-					stroke="currentColor"
-					stroke-width="2.4"
-					stroke-linecap="round"
-					aria-hidden="true"
+			{#if sessionMode}
+				<span class="round" aria-label="Picture {round + 1} of {sessionCount}">
+					{round + 1} / {sessionCount}
+				</span>
+			{/if}
+			{#if timeLimit}
+				<span
+					class="timer"
+					class:urgent={remaining <= 10}
+					role="timer"
+					aria-label="Time left {clockOf(remaining)}"
 				>
-					<circle cx="12" cy="13" r="8" /><path d="M12 9v4l2.5 2M9 2h6" />
-				</svg>
-				<span aria-label="Time spent">{clock}</span>
-			</button>
-			<CanvasSizePicker size={canvasSize} blank={status.blank} onpick={pickSize} />
-			<Button onclick={submit} disabled={status.blank}>
-				{traced ? 'Get tips →' : 'Submit drawing →'}
-			</Button>
+					<svg
+						width="20"
+						height="20"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2.4"
+						stroke-linecap="round"
+						aria-hidden="true"
+					>
+						<circle cx="12" cy="13" r="8" /><path d="M12 9v4l2.5 2M9 2h6" />
+					</svg>
+					{clockOf(remaining)}
+				</span>
+			{:else}
+				<button
+					type="button"
+					class="timer"
+					aria-pressed={timerOn}
+					title={timerOn ? 'Pause timer' : 'Resume timer'}
+					onclick={() => (timerOn = !timerOn)}
+				>
+					<svg
+						width="20"
+						height="20"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2.4"
+						stroke-linecap="round"
+						aria-hidden="true"
+					>
+						<circle cx="12" cy="13" r="8" /><path d="M12 9v4l2.5 2M9 2h6" />
+					</svg>
+					<span aria-label="Time spent">{clock}</span>
+				</button>
+			{/if}
+			{#if !sessionMode}
+				<CanvasSizePicker size={canvasSize} blank={status.blank} onpick={pickSize} />
+				<Button onclick={submit} disabled={status.blank || timeUp}>
+					{traced ? 'Get tips →' : timeLimit ? 'Done early →' : 'Submit drawing →'}
+				</Button>
+			{/if}
 		</div>
 	</div>
 
@@ -451,7 +540,7 @@
 
 		<div class="canvas-col">
 			<div class="canvas-tile">
-				{#key `${canvasSize.width}x${canvasSize.height}`}
+				{#key `${canvasSize.width}x${canvasSize.height}-${round}`}
 					<PaintCanvas
 						bind:this={canvas}
 						width={canvasSize.width}
@@ -468,8 +557,22 @@
 						onoverlaymove={(dx, dy) => (trace = { ...trace, x: trace.x + dx, y: trace.y + dy })}
 						onchange={(s) => (status = s)}
 						onblocked={onBlocked}
+						locked={timeUp}
 					/>
 				{/key}
+				{#if timeUp}
+					<div class="times-up" role="alert">
+						<b>Time’s up!</b>
+						{#if sessionMode}
+							<span>{round + 1 >= sessionCount ? 'Grading your session…' : 'Next picture…'}</span>
+						{:else if status.blank}
+							<span>Nothing drawn this time.</span>
+							<button type="button" onclick={tryAgain}>Try again</button>
+						{:else}
+							<span>Grading your {timeLabel(timeLimit)} drawing…</span>
+						{/if}
+					</div>
+				{/if}
 				{#if blocked}
 					<p class="blocked" role="status">
 						{blocked === 'hidden'
@@ -823,6 +926,51 @@
 		background: var(--pp-ink);
 		color: #fff;
 		font: 600 13px var(--pp-font-body);
+		cursor: pointer;
+	}
+	.round {
+		display: flex;
+		align-items: center;
+		min-height: 48px;
+		padding: 10px 16px;
+		border-radius: var(--pp-radius-btn);
+		background: var(--pp-lilac);
+		color: var(--pp-lilac-ink);
+		font: 700 20px var(--pp-font-display);
+	}
+	span.timer {
+		cursor: default;
+	}
+	.timer.urgent {
+		background: var(--pp-accent-strong);
+		color: #fff;
+	}
+	.times-up {
+		position: absolute;
+		inset: 0;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		gap: 8px;
+		background: color-mix(in srgb, var(--pp-ink) 55%, transparent);
+		color: #fff;
+		font-size: 18px;
+		font-weight: 600;
+		text-align: center;
+	}
+	.times-up b {
+		font: 800 48px var(--pp-font-display);
+		letter-spacing: -1px;
+	}
+	.times-up button {
+		min-height: 44px;
+		padding: 8px 20px;
+		border: 0;
+		border-radius: 999px;
+		background: #fff;
+		color: var(--pp-ink);
+		font: 600 16px var(--pp-font-body);
 		cursor: pointer;
 	}
 	.blocked {
