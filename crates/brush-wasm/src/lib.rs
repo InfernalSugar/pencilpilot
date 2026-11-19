@@ -2385,6 +2385,38 @@ impl Painter {
         out
     }
 
+    /// A layer's own pixels at full size (straight-alpha sRGB RGBA8, no mask
+    /// applied); empty if there's no such layer. For exporting with layers.
+    pub fn layer_rgba(&self, id: u32) -> Vec<u8> {
+        let Some(l) = self.layers.iter().find(|l| l.id == id) else {
+            return Vec::new();
+        };
+        let (w, h) = (self.width as i64, self.height as i64);
+        let ts = TILE_SIZE as i64;
+        let mut out = vec![0u8; (w * h * 4) as usize];
+        for (&(tx, ty), tile) in &l.colour().tiles {
+            for (py, row) in tile.iter().enumerate() {
+                let y = ty as i64 * ts + py as i64;
+                if y < 0 || y >= h {
+                    continue;
+                }
+                for (px, p) in row.iter().enumerate() {
+                    let x = tx as i64 * ts + px as i64;
+                    if x < 0 || x >= w || p[3] == 0 {
+                        continue;
+                    }
+                    let (c, a) = unpremul_srgb(*p);
+                    let i = ((y * w + x) * 4) as usize;
+                    out[i] = (c[0] * 255.0).round() as u8;
+                    out[i + 1] = (c[1] * 255.0).round() as u8;
+                    out[i + 2] = (c[2] * 255.0).round() as u8;
+                    out[i + 3] = (a * 255.0).round() as u8;
+                }
+            }
+        }
+        out
+    }
+
     /// A small greyscale preview of a layer's mask (RGBA, `tw`×`th`; empty if it has none).
     pub fn mask_thumbnail(&self, id: u32, tw: u32, th: u32) -> Vec<u8> {
         let Some(m) = self
@@ -3561,6 +3593,26 @@ mod tests {
         assert!(!p.layers_json().contains(r#""imported":true"#));
         p.flush();
         assert_eq!(px(&p, 50, 45), [255, 255, 255]);
+    }
+
+    #[test]
+    fn layer_rgba_is_full_size_and_straight() {
+        let mut p = Painter::new(100, 70);
+        let mut rgba = vec![0u8; 100 * 70 * 4];
+        let i = (35 * 100 + 50) * 4;
+        rgba[i..i + 4].copy_from_slice(&[200, 100, 50, 128]);
+        let id = p.add_image_layer("x", &rgba);
+        let out = p.layer_rgba(id);
+        assert_eq!(out.len(), rgba.len());
+        for k in 0..4 {
+            assert!(
+                out[i + k].abs_diff(rgba[i + k]) <= 2,
+                "{:?}",
+                &out[i..i + 4]
+            );
+        }
+        assert_eq!(out[0..4], [0, 0, 0, 0]);
+        assert!(p.layer_rgba(999).is_empty());
     }
 
     #[test]

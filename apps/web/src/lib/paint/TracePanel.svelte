@@ -60,13 +60,22 @@
 </script>
 
 <section class="trace" aria-label="Tracing">
-	<div class="head">
-		<h2>Tracing</h2>
-		<p>Traced drawings get tips but no score, and don’t count toward your progress.</p>
-		<button type="button" class="close" onclick={onclose}>Stop tracing</button>
-	</div>
-
 	<div class="row">
+		<span
+			class="label"
+			title="Traced drawings get tips but no score, and don’t count toward your progress."
+		>
+			Tracing <small>no score</small>
+		</span>
+		<button
+			type="button"
+			class="close"
+			aria-label="Stop tracing"
+			title="Stop tracing"
+			onclick={onclose}
+		>
+			×
+		</button>
 		{#if hasReference}
 			<div class="seg" role="radiogroup" aria-label="Picture to trace">
 				<button
@@ -88,7 +97,7 @@
 			</div>
 		{/if}
 		<button type="button" class="chip" onclick={() => fileInput.click()}>
-			{trace.ownUrl ? 'Choose another picture…' : 'Use my own picture…'}
+			{trace.ownUrl ? 'Another picture…' : 'Use my own picture…'}
 		</button>
 		<input
 			bind:this={fileInput}
@@ -107,17 +116,7 @@
 		>
 			{trace.adjusting ? 'Done moving' : 'Move picture'}
 		</button>
-		{#if placed}
-			<button type="button" class="chip" onclick={resetPlacement}>Reset position</button>
-		{/if}
-	</div>
-	{#if error}<p class="err" role="alert">{error}</p>{/if}
-	{#if trace.adjusting}
-		<p class="hint" role="status">Drag on the canvas to line the picture up. Drawing is paused.</p>
-	{/if}
-
-	<div class="sliders">
-		<label>
+		<label class="mini">
 			<span>Opacity <b>{Math.round(trace.opacity * 100)}%</b></span>
 			<input
 				type="range"
@@ -128,7 +127,7 @@
 				oninput={(e) => (trace = { ...trace, opacity: +e.currentTarget.value / 100 })}
 			/>
 		</label>
-		<label>
+		<label class="mini">
 			<span>Size <b>{Math.round(trace.scale * 100)}%</b></span>
 			<input
 				type="range"
@@ -139,7 +138,7 @@
 				oninput={(e) => (trace = { ...trace, scale: +e.currentTarget.value / 100 })}
 			/>
 		</label>
-		<label>
+		<label class="mini">
 			<span>Rotate <b>{Math.round(trace.rotate)}°</b></span>
 			<input
 				type="range"
@@ -150,96 +149,103 @@
 				oninput={(e) => (trace = { ...trace, rotate: +e.currentTarget.value })}
 			/>
 		</label>
+		{#if placed}
+			<button type="button" class="chip" onclick={resetPlacement}>Reset</button>
+		{/if}
 	</div>
+	{#if error}<p class="note err" role="alert">{error}</p>{/if}
+	{#if trace.adjusting}
+		<p class="note" role="status">Drag on the canvas to line the picture up. Drawing is paused.</p>
+	{/if}
 </section>
 
 <style>
+	/* one compact row, like the options bar (it scrolls sideways if the window is narrow) */
 	.trace {
 		display: flex;
 		flex-direction: column;
-		gap: 12px;
-		padding: 20px;
-		border-radius: var(--pp-radius-tile);
-		background: var(--pp-lilac);
-		color: var(--pp-lilac-ink);
-	}
-	.head {
-		display: flex;
-		flex-wrap: wrap;
-		align-items: center;
-		gap: 4px 16px;
-	}
-	h2 {
-		margin: 0;
-		font-size: 20px;
-		color: var(--pp-ink);
-	}
-	.head p {
-		flex: 1 1 260px;
-		margin: 0;
-		font-size: 14px;
+		gap: 4px;
+		min-width: 0;
+		color: var(--pp-on-ink);
 	}
 	.row {
 		display: flex;
-		flex-wrap: wrap;
-		gap: 8px;
 		align-items: center;
+		gap: 8px 12px;
+		overflow-x: auto;
+		scrollbar-width: thin;
+	}
+	.row > * {
+		flex: none;
+	}
+	.label {
+		font: 700 15px var(--pp-font-display);
+		white-space: nowrap;
+	}
+	.label small {
+		margin-left: 4px;
+		padding: 2px 6px;
+		border-radius: 999px;
+		background: var(--pp-lilac);
+		color: var(--pp-lilac-ink);
+		font: 700 11px var(--pp-font-body);
 	}
 	.seg {
 		display: flex;
 		gap: 2px;
-		padding: 3px;
-		border-radius: 999px;
-		background: var(--pp-surface);
+		padding: 2px;
+		border-radius: 12px;
+		background: #2a2a30;
 	}
 	.seg button,
 	.chip,
 	.close {
-		min-height: 36px;
-		padding: 6px 14px;
+		height: 34px;
+		padding: 0 12px;
 		border: 0;
-		border-radius: 999px;
-		font: 600 14px var(--pp-font-body);
-		cursor: pointer;
-		color: var(--pp-ink);
-	}
-	.seg button {
+		border-radius: 10px;
 		background: transparent;
+		color: var(--pp-on-ink);
+		font: 600 13px var(--pp-font-body);
+		white-space: nowrap;
+		cursor: pointer;
 	}
 	.seg button[aria-checked='true'],
 	.chip[aria-pressed='true'] {
-		background: var(--pp-ink);
+		background: var(--pp-accent-strong);
 		color: #fff;
 	}
 	.chip {
-		background: var(--pp-surface);
+		background: #2a2a30;
 	}
 	.close {
-		background: var(--pp-ink);
-		color: #fff;
+		width: 34px;
+		padding: 0;
+		background: #2a2a30;
+		font-size: 20px;
+		line-height: 1;
 	}
-	.sliders {
-		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-		gap: 10px 16px;
-	}
-	.sliders label {
+	.mini {
 		display: flex;
 		flex-direction: column;
-		gap: 4px;
-		font-size: 13px;
-		font-weight: 600;
-		color: var(--pp-ink);
+		gap: 2px;
+		width: 110px;
+		font-size: 11px;
+		color: var(--pp-on-ink-muted);
 	}
-	input[type='range'] {
-		accent-color: var(--pp-ink);
+	.mini b {
+		color: var(--pp-on-ink);
 	}
-	.hint,
-	.err {
+	.mini input {
+		accent-color: var(--pp-yellow);
+	}
+	.note {
 		margin: 0;
-		font-size: 14px;
-		font-weight: 600;
-		color: var(--pp-ink);
+		font-size: 12px;
+		color: var(--pp-on-ink-muted);
+	}
+	.err {
+		color: #ffb4a4;
 	}
 	.visually-hidden {
 		position: absolute;

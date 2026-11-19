@@ -350,6 +350,12 @@ impl PaintCanvas {
         self.inner.move_layer_to(id, to, group)
     }
 
+    /// A layer's own pixels, full size (straight-alpha sRGB RGBA8, mask not applied).
+    #[wasm_bindgen(js_name = layerRgba)]
+    pub fn layer_rgba(&self, id: u32) -> Vec<u8> {
+        self.inner.layer_rgba(id)
+    }
+
     /// Greyscale RGBA8 preview of a layer's mask (empty if it has none).
     #[wasm_bindgen(js_name = maskThumbnail)]
     pub fn mask_thumbnail(&self, id: u32, w: u32, h: u32) -> Vec<u8> {
