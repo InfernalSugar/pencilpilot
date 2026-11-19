@@ -1,5 +1,13 @@
 <script lang="ts">
-	import { CANVAS_PRESETS, checkSize, presetOf, type CanvasSize } from './canvas-size';
+	import {
+		CANVAS_PRESETS,
+		checkSize,
+		presetOf,
+		sizeNote,
+		SIDE_MAX,
+		SIDE_MIN,
+		type CanvasSize
+	} from './canvas-size';
 
 	let {
 		size,
@@ -87,13 +95,18 @@
 				</label>
 				{#if choice === 'custom'}
 					<div class="custom-row">
-						<label>Width <input type="number" min="256" max="2048" bind:value={customW} /></label>
+						<label>
+							Width <input type="number" min={SIDE_MIN} max={SIDE_MAX} bind:value={customW} />
+						</label>
 						<span aria-hidden="true">×</span>
-						<label>Height <input type="number" min="256" max="2048" bind:value={customH} /></label>
+						<label>
+							Height <input type="number" min={SIDE_MIN} max={SIDE_MAX} bind:value={customH} />
+						</label>
 					</div>
 				{/if}
 			</fieldset>
 			{#if !picked.ok && picked.why}<p class="why" role="alert">{picked.why}</p>{/if}
+			{#if picked.ok && sizeNote(picked.size)}<p class="note">{sizeNote(picked.size)}</p>{/if}
 			{#if confirming}
 				<p class="warn" role="alert">
 					A new size means a fresh, empty canvas. Your drawing will be cleared.
@@ -228,6 +241,11 @@
 		background: var(--pp-surface);
 		color: var(--pp-ink);
 		font: 500 14px var(--pp-font-body);
+	}
+	.note {
+		margin: 0;
+		font-size: 13px;
+		color: var(--pp-ink-2);
 	}
 	.why,
 	.warn {

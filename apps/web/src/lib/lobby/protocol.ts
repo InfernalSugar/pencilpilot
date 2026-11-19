@@ -155,7 +155,8 @@ export function cleanSettings(s: Partial<LobbySettings>, base: LobbySettings): L
 				? s.category
 				: base.category,
 		tier: int(s.tier, 1, 4, base.tier),
-		width: int(s.width, 256, 2048, base.width),
-		height: int(s.height, 256, 2048, base.height)
+		// a shared canvas holds a layer per player, so it stays smaller than solo canvases
+		width: int(s.width, 256, 4096, base.width),
+		height: int(s.height, 256, 4096, base.height)
 	};
 }
