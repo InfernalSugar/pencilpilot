@@ -519,3 +519,74 @@ test('pen pressure can be switched off', async ({ page }) => {
 		'false'
 	);
 });
+
+/** a wobbly mouse stroke from (x0,y0) to (x1,y1), canvas fractions */
+async function wobbly(page: Page, from: [number, number], to: [number, number], amp = 0.03) {
+	const b = await box(page);
+	await page.mouse.move(b.x + b.width * from[0], b.y + b.height * from[1]);
+	await page.mouse.down();
+	for (let i = 1; i <= 30; i++) {
+		const t = i / 30;
+		const w = (i % 2 ? amp : -amp) * (i < 30 ? 1 : 0);
+		await page.mouse.move(
+			b.x + b.width * (from[0] + (to[0] - from[0]) * t),
+			b.y + b.height * (from[1] + (to[1] - from[1]) * t + w)
+		);
+	}
+	await page.mouse.up();
+}
+
+test('guides: grid, ruler and perspective assist straighten strokes; vanishing points move', async ({
+	page
+}) => {
+	await ready(page);
+	await page.getByRole('button', { name: 'Guides' }).click();
+	const g = page.getByRole('group', { name: 'Guides' });
+	await g.getByRole('radio', { name: 'Square' }).click();
+	await expect(page.locator('svg.guides line.grid').first()).toBeAttached();
+	const n = await page.locator('svg.guides line.grid').count();
+	await g.getByLabel(/^Grid size/).fill('40');
+	await expect.poll(() => page.locator('svg.guides line.grid').count()).toBeGreaterThan(n);
+	await g.getByRole('radio', { name: 'Off' }).first().click();
+	await expect(page.locator('svg.guides line.grid')).toHaveCount(0);
+
+	// ruler (default: across the middle, y 0.5): a wobbly stroke started by it runs straight
+	await g.getByRole('button', { name: 'Ruler' }).click();
+	await wobbly(page, [0.25, 0.51], [0.75, 0.51]);
+	await expect.poll(async () => (await inkFrac(page)).w).toBeGreaterThan(0.4);
+	expect((await inkFrac(page)).h).toBeLessThan(0.02);
+	await g.getByRole('button', { name: 'Ruler' }).click();
+	await page.getByRole('button', { name: /Undo/ }).click();
+
+	// one-point perspective (vanishing point at 0.5, 0.4): a stroke heading for it goes straight there
+	await g.getByRole('radio', { name: '1-point' }).click();
+	await expect(page.locator('svg.guides line.horizon')).toBeAttached();
+	await wobbly(page, [0.1, 0.9], [0.3, 0.75], 0.008);
+	const ink = await inkFrac(page);
+	// on the line from (0.1, 0.9) towards (0.5, 0.4): slope dy/dx = -1.25 (in canvas px, 4:3)
+	expect(ink.h / ink.w).toBeGreaterThan(0.6);
+	const straight = await canvas(page).evaluate((c: HTMLCanvasElement) => {
+		const d = c.getContext('2d')!.getImageData(0, 0, c.width, c.height).data;
+		let [n, off] = [0, 0];
+		const [x0, y0, x1, y1] = [0.1 * c.width, 0.9 * c.height, 0.5 * c.width, 0.4 * c.height];
+		const [dx, dy] = [x1 - x0, y1 - y0];
+		const l = Math.hypot(dx, dy);
+		for (let i = 0; i < d.length; i += 4)
+			if (d[i] < 225) {
+				const [x, y] = [(i / 4) % c.width, Math.floor(i / 4 / c.width)];
+				const dist = Math.abs(dy * (x - x0) - dx * (y - y0)) / l;
+				n++;
+				if (dist > 6) off++;
+			}
+		return off / n;
+	});
+	expect(straight).toBeLessThan(0.05);
+
+	// move the vanishing point
+	const before = await page.locator('svg.guides line.horizon').getAttribute('y1');
+	await g.getByRole('button', { name: 'Move guides' }).click();
+	await drag(page, [0.5, 0.4], [0.5, 0.2], 6);
+	await expect
+		.poll(() => page.locator('svg.guides line.horizon').getAttribute('y1'))
+		.not.toBe(before);
+});

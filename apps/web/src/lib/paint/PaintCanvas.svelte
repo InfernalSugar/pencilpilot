@@ -71,6 +71,16 @@
 	import { loadBrush, loadEngine, PaintCanvas, type PaintBrush } from './brushes';
 	import { StrokeLog, type Stroke } from './strokes';
 	import { recognise, resample } from './quickshape';
+	import {
+		closestDirection,
+		gridLines,
+		perspectiveRays,
+		project,
+		rulerLine,
+		snapDirections,
+		type GuideSettings,
+		type Pt
+	} from './guides';
 	import { toGray } from '../grader';
 
 	let {
@@ -102,6 +112,8 @@
 		wandTolerance = 0.15,
 		ontransformend,
 		penPressure = true,
+		guides = null,
+		onguides,
 		liquifySize = 60,
 		liquifyStrength = 0.6,
 		maxHeight = '78vh',
@@ -132,7 +144,12 @@
 			| 'select-lasso'
 			| 'select-wand'
 			| 'transform'
-			| 'liquify';
+			| 'liquify'
+			| 'guides';
+		/** grid, perspective and ruler guides (null = none) */
+		guides?: GuideSettings | null;
+		/** guides moved (vanishing points or the ruler dragged with the 'guides' tool) */
+		onguides?: (g: GuideSettings) => void;
 		/** liquify: brush radius in canvas px, and how hard it pushes (0–1) */
 		liquifySize?: number;
 		liquifyStrength?: number;
@@ -983,6 +1000,88 @@
 		xfShow();
 	}
 
+	// ---- guides: assist while drawing, and dragging them with the 'guides' tool ----
+
+	/** the line a stroke is held to (ruler, or a perspective direction) */
+	let snapLine: { origin: Pt; u: Pt } | null = null;
+	/** perspective: directions on offer until the stroke has shown which way it goes */
+	let snapPending: { start: Pt; dirs: Pt[] } | null = null;
+	let guideDrag: {
+		what: 'vp' | 'a' | 'b' | 'ruler';
+		i: number;
+		start: Pt;
+		from: GuideSettings;
+	} | null = null;
+
+	function startSnap(p: Pt) {
+		snapLine = null;
+		snapPending = null;
+		heldBack = [];
+		if (!guides) return;
+		const reach = 24 / Math.max(0.01, fit * zoom);
+		const r = rulerLine(guides, p, reach);
+		if (r) {
+			snapLine = r;
+			return;
+		}
+		const dirs = snapDirections(guides, p);
+		if (dirs.length) snapPending = { start: p, dirs };
+	}
+
+	/** where a raw input point goes once guides have had their say */
+	function guided(p: Pt): Pt {
+		if (snapPending) {
+			const d: Pt = [p[0] - snapPending.start[0], p[1] - snapPending.start[1]];
+			if (Math.hypot(d[0], d[1]) > 20 / Math.max(0.01, fit * zoom)) {
+				const u = closestDirection(snapPending.dirs, d);
+				if (u) snapLine = { origin: snapPending.start, u };
+				snapPending = null;
+			}
+		}
+		return snapLine ? project(snapLine.origin, snapLine.u, p) : p;
+	}
+
+	function guideHit(p: Pt): typeof guideDrag {
+		if (!guides) return null;
+		const r = 16 / Math.max(0.01, fit * zoom);
+		const near = (q: Pt) => Math.hypot(p[0] - q[0], p[1] - q[1]) <= r;
+		const n = guides.perspective.points;
+		for (let i = 0; i < n; i++)
+			if (near(guides.perspective.vps[i]))
+				return { what: 'vp', i, start: p, from: $state.snapshot(guides) as GuideSettings };
+		if (guides.ruler.on) {
+			if (near(guides.ruler.a))
+				return { what: 'a', i: 0, start: p, from: $state.snapshot(guides) as GuideSettings };
+			if (near(guides.ruler.b))
+				return { what: 'b', i: 0, start: p, from: $state.snapshot(guides) as GuideSettings };
+			if (rulerLine(guides, p, r))
+				return { what: 'ruler', i: 0, start: p, from: $state.snapshot(guides) as GuideSettings };
+		}
+		return null;
+	}
+
+	function guideMove(p: Pt) {
+		if (!guideDrag) return;
+		const g = structuredClone(guideDrag.from);
+		const [dx, dy] = [p[0] - guideDrag.start[0], p[1] - guideDrag.start[1]];
+		const shift = (q: Pt): Pt => [q[0] + dx, q[1] + dy];
+		if (guideDrag.what === 'vp')
+			g.perspective.vps[guideDrag.i] = shift(g.perspective.vps[guideDrag.i]);
+		else if (guideDrag.what === 'a') g.ruler.a = shift(g.ruler.a);
+		else if (guideDrag.what === 'b') g.ruler.b = shift(g.ruler.b);
+		else g.ruler = { ...g.ruler, a: shift(g.ruler.a), b: shift(g.ruler.b) };
+		onguides?.(g);
+	}
+
+	const guideGrid = $derived(guides?.grid.on ? gridLines(guides, width, height) : []);
+	const guideRays = $derived(
+		guides && guides.perspective.points
+			? guides.perspective.vps
+					.slice(0, guides.perspective.points)
+					.flatMap((vp) => perspectiveRays(vp, width, height))
+			: []
+	);
+
 	// ---- liquify ----
 
 	let liq: { id: number; x: number; y: number } | null = null;
@@ -1035,10 +1134,50 @@
 	/** follow factor per sample: 1 = raw input, small = very steady */
 	const follow = () => 1 - Math.min(0.92, Math.max(0, smoothing) * 0.92);
 
+	interface RawPoint {
+		x: number;
+		y: number;
+		p: number;
+		tx: number;
+		ty: number;
+		time: number;
+	}
+	/** points held back while perspective assist works out which way the stroke goes */
+	let heldBack: RawPoint[] = [];
+
 	function feed(e: PointerEvent) {
 		if (!paint || !brush || !current) return;
-		const [rx, ry] = toCanvas(e.clientX, e.clientY);
-		const rp = e.pointerType === 'mouse' || !penPressure ? 0.5 : e.pressure;
+		const [cx, cy] = toCanvas(e.clientX, e.clientY);
+		const raw: RawPoint = {
+			x: cx,
+			y: cy,
+			p: e.pointerType === 'mouse' || !penPressure ? 0.5 : e.pressure,
+			tx: penPressure ? (e.tiltX || 0) / 90 : 0,
+			ty: penPressure ? (e.tiltY || 0) / 90 : 0,
+			time: e.timeStamp
+		};
+		if (snapPending) {
+			heldBack.push(raw);
+			guided([cx, cy]); // decides once the stroke has gone far enough
+			if (snapPending) return;
+			releaseHeld();
+			return;
+		}
+		feedPoint(raw);
+	}
+
+	/** draw the points that were held back (now that the direction is known, or the stroke ended) */
+	function releaseHeld() {
+		const pts = heldBack;
+		heldBack = [];
+		snapPending = null;
+		for (const r of pts) feedPoint(r);
+	}
+
+	function feedPoint(r: RawPoint) {
+		if (!paint || !brush || !current) return;
+		const [rx, ry] = guided([r.x, r.y]);
+		const rp = r.p;
 		const a = follow();
 		smooth = smooth
 			? {
@@ -1047,12 +1186,11 @@
 					p: smooth.p + (rp - smooth.p) * a
 				}
 			: { x: rx, y: ry, p: rp };
-		lastRaw = { x: rx, y: ry, p: rp, t: e.timeStamp };
+		lastRaw = { x: rx, y: ry, p: rp, t: r.time };
 		const { x, y, p: pressure } = smooth;
-		const dt = Math.max(0, (e.timeStamp - lastT) / 1000);
-		lastT = e.timeStamp;
-		const [tx, ty] = penPressure ? [(e.tiltX || 0) / 90, (e.tiltY || 0) / 90] : [0, 0];
-		paint.strokeTo(brush, x, y, pressure, tx, ty, dt);
+		const dt = Math.max(0, (r.time - lastT) / 1000);
+		lastT = r.time;
+		paint.strokeTo(brush, x, y, pressure, r.tx, r.ty, dt);
 		if (onlive)
 			livePts.push(
 				Math.round(x * 10) / 10,
@@ -1064,7 +1202,7 @@
 			x: Math.round(x * 10) / 10,
 			y: Math.round(y * 10) / 10,
 			pressure: Math.round(pressure * 1000) / 1000,
-			t: Math.round(e.timeStamp - t0)
+			t: Math.round(r.time - t0)
 		});
 	}
 
@@ -1151,6 +1289,11 @@
 			xfDrag = { mode, start: p, from: { ...xf } };
 			return;
 		}
+		if (tool === 'guides') {
+			guideDrag = guideHit(toCanvas(e.clientX, e.clientY));
+			if (guideDrag) capture(e);
+			return;
+		}
 		if (tool === 'liquify') {
 			if (!paint.liquifyBegin()) {
 				const l = layerList().find((x) => x.id === paint!.activeLayer);
@@ -1190,6 +1333,7 @@
 		lastT = e.timeStamp;
 		smooth = null;
 		lastRaw = null;
+		startSnap(toCanvas(e.clientX, e.clientY));
 		snapped = false;
 		holdAnchor = null;
 		clearTimeout(shapeTimer);
@@ -1204,6 +1348,7 @@
 	let picking: number | null = null;
 
 	function move(e: PointerEvent) {
+		if (guideDrag) return guideMove(toCanvas(e.clientX, e.clientY));
 		if (tool === 'liquify') hoverAt = toCanvas(e.clientX, e.clientY);
 		if (liq && e.pointerId === liq.id && paint) {
 			const events = e.getCoalescedEvents?.() ?? [];
@@ -1268,6 +1413,10 @@
 	}
 
 	function up(e: PointerEvent) {
+		if (guideDrag) {
+			guideDrag = null;
+			return;
+		}
 		if (liq && e.pointerId === liq.id && paint) {
 			liq = null;
 			changed(paint.liquifyEnd());
@@ -1303,6 +1452,7 @@
 		if (moving && e.pointerId === moving.id) moving = null;
 		clearTimeout(shapeTimer);
 		if (!current || !paint || !brush) return;
+		if (heldBack.length) releaseHeld(); // a short stroke that never picked a direction
 		if (!snapped) catchUp();
 		snapped = false;
 		paint.endStroke(brush);
@@ -1510,6 +1660,7 @@
 	class:selecting={tool.startsWith('select')}
 	class:transforming={tool === 'transform'}
 	class:liquifying={tool === 'liquify'}
+	class:editing-guides={tool === 'guides'}
 	bind:this={vp}
 	style="aspect-ratio: {width} / {height}; max-height: {maxHeight}"
 	onpointerdown={down}
@@ -1535,6 +1686,53 @@
 			data-ready={ready}
 		></canvas>
 		<canvas class="ants" bind:this={antsEl} {width} {height} aria-hidden="true"></canvas>
+		{#if guides && (guideGrid.length || guideRays.length || guides.ruler.on)}
+			{@const hr = 8 / Math.max(0.01, fit * zoom)}
+			<svg
+				class="guides"
+				viewBox="0 0 {width} {height}"
+				preserveAspectRatio="none"
+				aria-hidden="true"
+			>
+				{#each guideGrid as [x1, y1, x2, y2], i (i)}
+					<line class="grid" {x1} {y1} {x2} {y2} />
+				{/each}
+				{#each guideRays as [x1, y1, x2, y2], i (i)}
+					<line class="ray" {x1} {y1} {x2} {y2} />
+				{/each}
+				{#if guides.perspective.points >= 1 && guides.perspective.points <= 2}
+					{@const v = guides.perspective.vps}
+					{@const [ax, ay] = v[0]}
+					{@const [bx, by] = guides.perspective.points === 2 ? v[1] : [v[0][0] + 1, v[0][1]]}
+					{@const k = (by - ay) / (bx - ax || 1e-6)}
+					<line
+						class="horizon"
+						x1={-width}
+						y1={ay - k * (ax + width)}
+						x2={2 * width}
+						y2={ay + k * (2 * width - ax)}
+					/>
+				{/if}
+				{#if guides.ruler.on}
+					<line
+						class="ruler"
+						x1={guides.ruler.a[0]}
+						y1={guides.ruler.a[1]}
+						x2={guides.ruler.b[0]}
+						y2={guides.ruler.b[1]}
+					/>
+				{/if}
+				{#if tool === 'guides'}
+					{#each guides.perspective.vps.slice(0, guides.perspective.points) as [x, y], i (i)}
+						<circle class="handle" cx={x} cy={y} r={hr} />
+					{/each}
+					{#if guides.ruler.on}
+						<circle class="handle" cx={guides.ruler.a[0]} cy={guides.ruler.a[1]} r={hr} />
+						<circle class="handle" cx={guides.ruler.b[0]} cy={guides.ruler.b[1]} r={hr} />
+					{/if}
+				{/if}
+			</svg>
+		{/if}
 		{#if tool === 'liquify' && hoverAt}
 			<svg class="xf" viewBox="0 0 {width} {height}" preserveAspectRatio="none" aria-hidden="true">
 				<circle class="liq" cx={hoverAt[0]} cy={hoverAt[1]} r={liquifySize} />
@@ -1680,6 +1878,9 @@
 		stroke-dasharray: 6 4;
 		vector-effect: non-scaling-stroke;
 	}
+	.viewport.editing-guides {
+		cursor: grab;
+	}
 	.viewport.liquifying {
 		cursor: none;
 	}
@@ -1699,6 +1900,40 @@
 		fill: none;
 		stroke: #3d6bff;
 		stroke-width: 1.5;
+		vector-effect: non-scaling-stroke;
+	}
+	.guides {
+		position: absolute;
+		inset: 0;
+		width: 100%;
+		height: 100%;
+		pointer-events: none;
+		overflow: visible;
+	}
+	.guides line {
+		vector-effect: non-scaling-stroke;
+	}
+	.guides .grid {
+		stroke: rgba(61, 107, 255, 0.28);
+		stroke-width: 1;
+	}
+	.guides .ray {
+		stroke: rgba(232, 73, 47, 0.22);
+		stroke-width: 1;
+	}
+	.guides .horizon {
+		stroke: rgba(232, 73, 47, 0.6);
+		stroke-width: 1.5;
+	}
+	.guides .ruler {
+		stroke: rgba(22, 22, 26, 0.35);
+		stroke-width: 10;
+		stroke-linecap: round;
+	}
+	.guides .handle {
+		fill: #fff;
+		stroke: #e8492f;
+		stroke-width: 2;
 		vector-effect: non-scaling-stroke;
 	}
 	.xf circle.liq {
