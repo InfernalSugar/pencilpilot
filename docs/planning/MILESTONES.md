@@ -72,3 +72,24 @@ Each heading is a GitHub milestone, and each bullet is an issue titled `Mx-Tyy �
 - **M9-T01** Accessibility, tablet/phone layouts, performance pass `web`
 - **M9-T02** Optional community critique (rubric + "which is closer?" voting) behind a flag `web`
 - **M9-T03** v1.0 release to `main` `infra`
+
+## M10 — Studio features (requested 2026-11-19)
+Added by the owner after M9. v1.0 (M9-T03) waits until these are in. Order matters: layers come first because tracing, sketch mode and lobbies build on them.
+
+- **M10-T01** Layers, Krita/Photoshop style `web` `brush`
+  Layer stack in the paint engine (one surface per layer, composited in WASM): add, delete, duplicate, rename, reorder (drag), show/hide, opacity, lock, alpha lock ("preserve transparency"), merge down, flatten. Blend modes: normal, multiply, screen, overlay, darken, lighten, add. Every layer action is undoable. A layers panel with thumbnails (folds away on phones like the brush panel). Grading, thumbnails and community sharing use the flattened visible layers. Stroke data records which layer each stroke went to. Later: groups and clipping masks.
+- **M10-T02** Adjustable canvas and reference size `web` `grader`
+  Canvas presets (4:3, 3:4, 1:1, 16:9, A4 portrait/landscape) plus custom size within limits. Zoom, pan, rotate and flip of the view (pinch on tablets, space-drag, keyboard). Reference panel: drag to resize, zoom and pan inside it, flip, or float it as a movable window. The grader fits the reference to the chosen canvas shape and grades at a fixed analysis resolution, so scores stay comparable across sizes.
+- **M10-T03** Tracing mode `web`
+  The reference (or your own picture, which never leaves the browser) sits on a locked "Tracing" layer inside the canvas at low opacity, with an opacity slider and move/scale/rotate handles. Traced drawings are marked "traced": they get the overlay and tips, but never count toward scores, streaks, progress or the community. Replaces the current Peek toggle.
+- **M10-T04** Timed modes `web`
+  30 s, 1 min, 2 min, 5 min and 10 min rounds plus a gesture session (a queue of references with a fixed time each, like a figure-drawing class). The canvas locks when time is up and grading starts automatically. Results and progress are tracked per time limit (a 2-minute drawing is judged against your other 2-minute drawings).
+- **M10-T05** Sketch mode `grader` `feedback` `web`
+  A mode (any category), not a separate category. Rough, hairy, multi-stroke lines are first merged into the lines you meant, then judged on proportions, placement, big shapes and angles only. Design: [ADR-0007](adr/0007-sketch-mode.md).
+- **M10-T06** Replay `web`
+  Watch any drawing being redrawn stroke by stroke from the recorded stroke data (play, pause, scrub, 1–8× speed), with layer changes, and the grader's tips appearing at the moments they relate to (for example, where proportions first went off). Export as a short video/GIF (later).
+- **M10-T07** Daily challenge `web` `server`
+  One reference a day, the same for everyone, picked from a calm, beginner-to-medium pool and announced at midnight UTC. Signed-in players get one scored try a day, plus a daily streak; they see how their score compares (percentile) and, with community on, others' drawings after they've submitted their own. Guests can play but don't appear in the results.
+- **M10-T08** Private lobbies (draw together) `web` `server`
+  Create a private room and share an invite link/code (up to 8 people). Pick free draw or a shared reference, an optional timer and canvas size. Modes: **side by side** (everyone draws on their own canvas while seeing the others live; at the end, a reveal with scores) and **shared canvas** (everyone on one canvas, each person on their own layer). Strokes are sent as stroke data, not pixels, and redrawn by the same brush engine on every screen. Rooms are temporary: nothing is stored after the room closes unless someone saves their own drawing. The host can remove people. Needs accounts for hosts; guests can join with a link.
+
