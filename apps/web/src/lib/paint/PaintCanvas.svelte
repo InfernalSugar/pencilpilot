@@ -101,6 +101,8 @@
 		selectMode = 'replace',
 		wandTolerance = 0.15,
 		ontransformend,
+		liquifySize = 60,
+		liquifyStrength = 0.6,
 		maxHeight = '78vh',
 		viewControls = true
 	}: {
@@ -122,7 +124,17 @@
 		overlayTransform?: { x: number; y: number; scale: number; rotate: number };
 		/** what a press on the canvas does */
 		tool?:
-			'brush' | 'picker' | 'fill' | 'select-rect' | 'select-lasso' | 'select-wand' | 'transform';
+			| 'brush'
+			| 'picker'
+			| 'fill'
+			| 'select-rect'
+			| 'select-lasso'
+			| 'select-wand'
+			| 'transform'
+			| 'liquify';
+		/** liquify: brush radius in canvas px, and how hard it pushes (0–1) */
+		liquifySize?: number;
+		liquifyStrength?: number;
 		/** a transform finished (kept or cancelled), or had nothing to move */
 		ontransformend?: (result: 'done' | 'cancelled' | 'empty') => void;
 		/** how a new selection combines with the current one (Shift = add, Alt = subtract) */
@@ -968,6 +980,12 @@
 		xfShow();
 	}
 
+	// ---- liquify ----
+
+	let liq: { id: number; x: number; y: number } | null = null;
+	/** where the liquify brush circle is drawn (canvas px) */
+	let hoverAt = $state<[number, number] | null>(null);
+
 	// ---- smoothing (lazy brush): the pen point follows the pointer on a short leash ----
 
 	let smooth: { x: number; y: number; p: number } | null = null;
@@ -1129,6 +1147,16 @@
 			xfDrag = { mode, start: p, from: { ...xf } };
 			return;
 		}
+		if (tool === 'liquify') {
+			if (!paint.liquifyBegin()) {
+				const l = layerList().find((x) => x.id === paint!.activeLayer);
+				return onblocked?.(l && !l.visible ? 'hidden' : 'locked');
+			}
+			capture(e);
+			const [x, y] = toCanvas(e.clientX, e.clientY);
+			liq = { id: e.pointerId, x, y };
+			return;
+		}
 		if (tool === 'fill') return fillAt(e.clientX, e.clientY);
 		if (tool === 'select-wand') {
 			const [cx, cy] = toCanvas(e.clientX, e.clientY);
@@ -1172,6 +1200,17 @@
 	let picking: number | null = null;
 
 	function move(e: PointerEvent) {
+		if (tool === 'liquify') hoverAt = toCanvas(e.clientX, e.clientY);
+		if (liq && e.pointerId === liq.id && paint) {
+			const events = e.getCoalescedEvents?.() ?? [];
+			for (const ev of events.length ? events : [e]) {
+				const [x, y] = toCanvas(ev.clientX, ev.clientY);
+				paint.liquifyPush(liq.x, liq.y, x - liq.x, y - liq.y, liquifySize, liquifyStrength);
+				liq = { ...liq, x, y };
+			}
+			schedule();
+			return;
+		}
 		if (picking === e.pointerId) return pick(e);
 		if (xfDrag) return xfMove(e);
 		if (marquee) {
@@ -1225,6 +1264,11 @@
 	}
 
 	function up(e: PointerEvent) {
+		if (liq && e.pointerId === liq.id && paint) {
+			liq = null;
+			changed(paint.liquifyEnd());
+			return;
+		}
 		if (xfDrag) {
 			xfDrag = null;
 			return;
@@ -1461,6 +1505,7 @@
 	class:filling={tool === 'fill'}
 	class:selecting={tool.startsWith('select')}
 	class:transforming={tool === 'transform'}
+	class:liquifying={tool === 'liquify'}
 	bind:this={vp}
 	style="aspect-ratio: {width} / {height}; max-height: {maxHeight}"
 	onpointerdown={down}
@@ -1471,7 +1516,10 @@
 	ondragover={dragOver}
 	ondrop={drop}
 	onpointerenter={() => (hovering = true)}
-	onpointerleave={() => (hovering = false)}
+	onpointerleave={() => {
+		hovering = false;
+		hoverAt = null;
+	}}
 	role="presentation"
 >
 	<div class="sheet" style="width: {baseW}px; height: {baseH}px; transform: {sheetTransform}">
@@ -1483,6 +1531,11 @@
 			data-ready={ready}
 		></canvas>
 		<canvas class="ants" bind:this={antsEl} {width} {height} aria-hidden="true"></canvas>
+		{#if tool === 'liquify' && hoverAt}
+			<svg class="xf" viewBox="0 0 {width} {height}" preserveAspectRatio="none" aria-hidden="true">
+				<circle class="liq" cx={hoverAt[0]} cy={hoverAt[1]} r={liquifySize} />
+			</svg>
+		{/if}
 		{#if xfShape}
 			{@const hr = 7 / Math.max(0.01, fit * zoom)}
 			<svg class="xf" viewBox="0 0 {width} {height}" preserveAspectRatio="none" aria-hidden="true">
@@ -1623,6 +1676,9 @@
 		stroke-dasharray: 6 4;
 		vector-effect: non-scaling-stroke;
 	}
+	.viewport.liquifying {
+		cursor: none;
+	}
 	.viewport.transforming {
 		cursor: move;
 	}
@@ -1640,6 +1696,11 @@
 		stroke: #3d6bff;
 		stroke-width: 1.5;
 		vector-effect: non-scaling-stroke;
+	}
+	.xf circle.liq {
+		fill: none;
+		stroke: #16161a;
+		stroke-dasharray: 4 3;
 	}
 	.xf rect,
 	.xf circle {
