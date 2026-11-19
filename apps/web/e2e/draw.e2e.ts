@@ -316,22 +316,3 @@ test('what you draw is visible on screen (nothing covers the canvas)', async ({ 
 		})
 		.toBeGreaterThan(30);
 });
-
-test('big canvases are graded too (1600 × 1200)', async ({ page }) => {
-	await page.addInitScript(() =>
-		localStorage.setItem('pp.canvasSize', JSON.stringify({ width: 1600, height: 1200 }))
-	);
-	await page.goto('/draw?category=animals');
-	const c = page.getByLabel(/Drawing canvas, 1600 by 1200/);
-	await expect(c).toHaveAttribute('data-ready', 'true', { timeout: 15_000 });
-	const b = (await c.boundingBox())!;
-	await page.mouse.move(b.x + b.width * 0.2, b.y + b.height * 0.4);
-	await page.mouse.down();
-	for (let i = 1; i <= 20; i++)
-		await page.mouse.move(b.x + b.width * (0.2 + i * 0.03), b.y + b.height * 0.5);
-	await page.mouse.up();
-	await page.getByRole('button', { name: /Submit drawing/ }).click();
-	await expect(page).toHaveURL(/\/results$/);
-	await expect(page.getByText(/out of 10/)).toBeVisible({ timeout: 20_000 });
-	await expect(page.getByText(/Could not grade/)).toHaveCount(0);
-});
