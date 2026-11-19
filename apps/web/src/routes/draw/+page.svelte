@@ -42,7 +42,13 @@
 		type RefFilter,
 		type Reference
 	} from '#lib/references.js';
-	import { fetchLiveReference, recentRefs, rememberRef, reportReference } from '#lib/live.js';
+	import {
+		fetchLiveReference,
+		liveAvailable,
+		recentRefs,
+		rememberRef,
+		reportReference
+	} from '#lib/live.js';
 	import { topicName, topicsFor } from '#lib/topics.js';
 	import { suggestTopic } from '#lib/progress.js';
 	import RefCredit from '#lib/RefCredit.svelte';
@@ -96,6 +102,8 @@
 			: referenceFromUrl()
 	);
 	let refLoading = $state(false);
+	/** the ref-service is still gathering pictures for this category */
+	let refWaiting = $state(false);
 	/** brush (draw / erase) or the eyedropper */
 	type Tool =
 		| 'brush'
@@ -238,8 +246,15 @@
 	});
 	function toggleTracing() {
 		tracing = !tracing;
+		traceBarOpen = tracing;
 		if (tracing && !reference) trace = { ...trace, source: 'own' };
 		if (!tracing) trace = { ...trace, adjusting: false };
+	}
+	/** tracing stays on while its settings bar is tucked away (less clutter) */
+	let traceBarOpen = $state(true);
+	function traceButton() {
+		if (!tracing) toggleTracing();
+		else traceBarOpen = !traceBarOpen;
 	}
 	let reportOpen = $state(false);
 	let reported = $state(false);
@@ -293,6 +308,16 @@
 			pickCurated(avoid) ??
 			pickCurated(avoid, { tier: filter.tier }) ??
 			pickCurated(avoid, {});
+		// still nothing (a category with no hand-approved pictures, e.g. right after the
+		// service starts): any live picture in the category, waiting a little while the
+		// service gathers some
+		const serviceUp = !r && (await liveAvailable());
+		for (let tries = 0; !r && serviceUp && tries < 10; tries++) {
+			refWaiting = tries > 0;
+			r = (await fetchLiveReference({ category: category.id, exclude: avoid }, 4000)) ?? undefined;
+			if (!r) await new Promise((done) => setTimeout(done, 3000));
+		}
+		refWaiting = false;
 		reference = r;
 		refLoading = false;
 		if (r) {
@@ -914,10 +939,17 @@
 			type="button"
 			class="tool"
 			aria-pressed={tracing}
-			title="Show a picture faintly inside the canvas to trace over (no score)"
-			onclick={toggleTracing}
+			aria-expanded={tracing ? traceBarOpen : undefined}
+			title={tracing
+				? traceBarOpen
+					? 'Hide the tracing settings (tracing stays on)'
+					: 'Show the tracing settings'
+				: 'Show a picture faintly inside the canvas to trace over (no score)'}
+			onclick={traceButton}
 		>
-			Trace
+			Trace{#if tracing}<span class="caret" aria-hidden="true">
+					{traceBarOpen ? '▴' : '▾'}
+				</span>{/if}
 		</button>
 	{/snippet}
 	{#snippet context()}
@@ -1214,8 +1246,13 @@
 				</button>
 			</div>
 		{/if}
-		{#if tracing}
-			<TracePanel bind:trace hasReference={!!reference} onclose={toggleTracing} />
+		{#if tracing && traceBarOpen}
+			<TracePanel
+				bind:trace
+				hasReference={!!reference}
+				onclose={toggleTracing}
+				onhide={() => (traceBarOpen = false)}
+			/>
 		{/if}
 	{/snippet}
 	{#snippet banner()}
@@ -1372,7 +1409,9 @@
 		{:else if refLoading}
 			<Tile as="section" label="Reference">
 				<div class="tile-head"><h2>Reference</h2></div>
-				<div class="ref-skeleton" aria-busy="true">Finding a picture…</div>
+				<div class="ref-skeleton" aria-busy="true">
+					{refWaiting ? 'Gathering pictures for this category… one moment' : 'Finding a picture…'}
+				</div>
 			</Tile>
 		{:else if ownMode}
 			<Tile tone="lilac" as="section" label="Reference">
@@ -1761,8 +1800,8 @@
 		gap: 4px;
 		font-size: 13px;
 		color: var(--pp-on-ink-muted);
-		min-width: 140px;
-		flex: 1 1 140px;
+		flex: none;
+		width: 150px;
 	}
 	.slider b {
 		color: var(--pp-on-ink);
@@ -1832,6 +1871,10 @@
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
+	}
+	.caret {
+		margin-left: 4px;
+		font-size: 11px;
 	}
 	.save {
 		position: relative;
