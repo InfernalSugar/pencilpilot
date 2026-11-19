@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { initSync, grade, defaultWeights, feedback } from 'pencilpilot-grader-wasm';
-import { humanize, measurement, toGray, type Feedback, type Grade } from './grader';
+import { gradeImages, humanize, measurement, toGray, type Feedback, type Grade } from './grader';
 
 describe('toGray', () => {
 	it('maps black, white and transparent pixels', () => {
@@ -114,5 +114,27 @@ describe('analysis size', () => {
 		expect(p.height / p.width).toBeCloseTo(1.414, 2);
 		// area averaging: a 2×2 block of 0 and 255 becomes mid grey
 		expect([...downscaleGray(new Uint8Array([0, 255, 255, 0]), 2, 2, 1, 1)]).toEqual([128]);
+	});
+
+	it('grades canvases bigger than 800 × 600 (scaled down first)', async () => {
+		// regression: the scaled options used to carry keypoints: undefined, which the grader rejected
+		const [w, h] = [1600, 1200];
+		const px = new Uint8Array(w * h).fill(255);
+		for (let x = 300; x < 1300; x++) for (let y = 598; y < 602; y++) px[y * w + x] = 0;
+		const g = await gradeImages(w, h, px, px, {
+			category: 'anime',
+			mode: 'sketch',
+			strokes: [
+				{
+					brushId: 'pencil',
+					eraser: false,
+					points: [
+						{ x: 300, y: 600, pressure: 0.5, t: 0 },
+						{ x: 1300, y: 600, pressure: 0.5, t: 400 }
+					]
+				}
+			]
+		});
+		expect(g.score).toBeGreaterThanOrEqual(1);
 	});
 });

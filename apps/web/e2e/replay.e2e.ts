@@ -32,6 +32,11 @@ test('replay redraws the drawing with its colours and layers', async ({ page }) 
 	await expect(page.getByLabel(/Drawing canvas/)).toHaveAttribute('data-ready', 'true', {
 		timeout: 15_000
 	});
+	// a solid marker: a thin pencil drawn fast (the canvas is shown smaller than its pixels) is faint
+	await page.getByRole('tab', { name: /^Brushes/ }).click();
+	await page.getByRole('tab', { name: 'Markers' }).click();
+	await page.getByRole('button', { name: /^Marker fat/ }).click();
+	await page.getByRole('tab', { name: /^Layers/ }).click();
 	await line(page, 0.3);
 	await page.getByRole('button', { name: 'New layer' }).click();
 	await page.getByRole('radio', { name: 'Colour #e8492f' }).click();
