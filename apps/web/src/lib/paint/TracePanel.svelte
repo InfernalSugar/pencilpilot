@@ -28,8 +28,15 @@
 	let {
 		trace = $bindable(),
 		hasReference,
-		onclose
-	}: { trace: TraceState; hasReference: boolean; onclose: () => void } = $props();
+		onclose,
+		onhide
+	}: {
+		trace: TraceState;
+		hasReference: boolean;
+		onclose: () => void;
+		/** tuck the bar away; tracing stays on */
+		onhide?: () => void;
+	} = $props();
 
 	let error = $state('');
 	let fileInput: HTMLInputElement;
@@ -67,6 +74,17 @@
 		>
 			Tracing <small>no score</small>
 		</span>
+		{#if onhide}
+			<button
+				type="button"
+				class="close"
+				aria-label="Hide the tracing settings"
+				title="Hide these settings (tracing stays on; the Trace button shows them again)"
+				onclick={onhide}
+			>
+				▴
+			</button>
+		{/if}
 		<button
 			type="button"
 			class="close"

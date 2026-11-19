@@ -409,3 +409,52 @@ test('zoom: a wheel notch with Ctrl is a small smooth step; Ctrl + wheel-drag zo
 	await page.keyboard.up('Control');
 	await expect.poll(pct).toBeGreaterThan(before * 1.5);
 });
+
+test('tracing: the Trace button hides and shows its settings; tracing stays on', async ({
+	page
+}) => {
+	await page.goto('/draw');
+	await expect(page.getByLabel(/Drawing canvas/)).toHaveAttribute('data-ready', 'true', {
+		timeout: 15_000
+	});
+	const trace = page.getByRole('button', { name: 'Trace', exact: true });
+	const bar = page.getByRole('region', { name: 'Tracing' });
+	await trace.click();
+	await expect(bar).toBeVisible();
+	await expect(trace).toHaveAttribute('aria-pressed', 'true');
+	await trace.click(); // tuck the bar away
+	await expect(bar).toHaveCount(0);
+	await expect(trace).toHaveAttribute('aria-pressed', 'true');
+	await trace.click(); // and back
+	await expect(bar).toBeVisible();
+	await bar.getByRole('button', { name: 'Hide the tracing settings' }).click();
+	await expect(bar).toHaveCount(0);
+	await trace.click();
+	await bar.getByRole('button', { name: 'Stop tracing' }).click();
+	await expect(trace).toHaveAttribute('aria-pressed', 'false');
+});
+
+test('a category with no pictures yet waits for the picture service instead of giving up', async ({
+	page
+}) => {
+	let asked = 0;
+	await page.route('**/api/health', (r) => r.fulfill({ status: 200, body: 'ok' }));
+	await page.route('**/api/ref?*', (r) => {
+		asked++;
+		return asked < 4
+			? r.fulfill({ status: 204 })
+			: r.fulfill({ json: { ...LIVE_REF, id: 'mt-1', category: 'masters', title: 'Old master' } });
+	});
+	await page.route('**/e2e-whale.svg', (r) =>
+		r.fulfill({
+			contentType: 'image/svg+xml',
+			body: '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="30"><rect width="40" height="30" fill="#888"/></svg>'
+		})
+	);
+	await page.goto('/draw?category=masters');
+	await expect(page.getByText(/Gathering pictures for this category/)).toBeVisible();
+	await expect(page.getByRole('heading', { name: 'Old master', level: 1 })).toBeVisible({
+		timeout: 20_000
+	});
+	await expect(page.getByText(/references yet/)).toHaveCount(0);
+});
