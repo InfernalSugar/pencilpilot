@@ -39,7 +39,25 @@
 	let reference = $state<Reference | undefined>(byId(page.url.searchParams.get('ref')));
 	let refLoading = $state(false);
 	/** brush (draw / erase) or the eyedropper */
-	let tool = $state<'brush' | 'picker' | 'fill'>('brush');
+	type Tool = 'brush' | 'picker' | 'fill' | 'select-rect' | 'select-lasso' | 'select-wand';
+	let tool = $state<Tool>('brush');
+	let selectMode = $state<'replace' | 'add' | 'subtract'>('replace');
+	let wandTolerance = $state(0.15);
+	const SELECT_TOOLS: { id: Tool; label: string; key: string; icon: string }[] = [
+		{ id: 'select-rect', label: 'Rectangle select (M)', key: 'm', icon: 'M4 4h16v16H4Z' },
+		{
+			id: 'select-lasso',
+			label: 'Lasso select (L)',
+			key: 'l',
+			icon: 'M7 20c-2 0-3-1-3-2.5S6 15 8 15c6 0 12-2 12-7 0-3-3-5-8-5S3 5 3 9c0 2 2 4 5 6'
+		},
+		{
+			id: 'select-wand',
+			label: 'Magic wand (W)',
+			key: 'w',
+			icon: 'm4 20 11-11M15 4v3M19 8h3M18 5l2-2M11 6 9 4'
+		}
+	];
 	let fillTolerance = $state(0.12);
 	let fillAllLayers = $state(true);
 	let quickShape = $state(true);
@@ -352,6 +370,22 @@
 			tool = 'brush';
 		} else if (!mod && k === 'i') tool = tool === 'picker' ? 'brush' : 'picker';
 		else if (!mod && k === 'g') tool = tool === 'fill' ? 'brush' : 'fill';
+		else if (!mod && (k === 'm' || k === 'l' || k === 'w')) {
+			const t = SELECT_TOOLS.find((x) => x.key === k)!.id;
+			tool = tool === t ? 'brush' : t;
+		} else if (mod && k === 'a') {
+			e.preventDefault();
+			canvas?.selectAll();
+		} else if (mod && k === 'd') {
+			e.preventDefault();
+			canvas?.deselect();
+		} else if (mod && e.shiftKey && k === 'i') {
+			e.preventDefault();
+			canvas?.invertSelection();
+		} else if (!mod && (e.key === 'Delete' || e.key === 'Backspace') && status.selection) {
+			e.preventDefault();
+			canvas?.clear();
+		} else if (e.key === 'Escape' && status.selection) canvas?.deselect();
 		else if (!mod && e.key === '[') size = Math.max(0.25, +(size / 1.25).toFixed(2));
 		else if (!mod && e.key === ']') size = Math.min(6, +(size * 1.25).toFixed(2));
 		else if (!mod && (e.key === '+' || e.key === '=')) canvas?.zoomIn();
@@ -650,6 +684,8 @@
 						{fillAllLayers}
 						{quickShape}
 						onshape={onShape}
+						{selectMode}
+						{wandTolerance}
 						overlaySrc={traceSrc}
 						overlayOpacity={trace.opacity}
 						overlayTransform={trace}
@@ -785,6 +821,31 @@
 							/><path d="M2 13h15" /><path d="M22 20a2 2 0 1 1-4 0c0-1.6 2-3 2-3s2 1.4 2 3Z" />
 						</svg>
 					</button>
+					{#each SELECT_TOOLS as t (t.id)}
+						<button
+							type="button"
+							class="tool"
+							aria-pressed={tool === t.id}
+							aria-label={t.label}
+							title="{t.label}. Shift adds, Alt subtracts."
+							onclick={() => (tool = tool === t.id ? 'brush' : t.id)}
+						>
+							<svg
+								width="22"
+								height="22"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="2.1"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+								stroke-dasharray={t.id === 'select-wand' ? undefined : '3 2.5'}
+								aria-hidden="true"
+							>
+								<path d={t.icon} />
+							</svg>
+						</button>
+					{/each}
 				</div>
 				<div class="group">
 					<button
@@ -946,6 +1007,41 @@
 				>
 					QuickShape
 				</button>
+				{#if tool.startsWith('select') || status.selection}
+					<div class="fill-opts" role="group" aria-label="Selection">
+						{#if tool.startsWith('select')}
+							<div class="seg" role="radiogroup" aria-label="Selection mode">
+								{#each [['replace', 'New'], ['add', 'Add'], ['subtract', 'Subtract']] as [id, label] (id)}
+									<button
+										type="button"
+										class="tool"
+										role="radio"
+										aria-checked={selectMode === id}
+										onclick={() => (selectMode = id as typeof selectMode)}
+									>
+										{label}
+									</button>
+								{/each}
+							</div>
+						{/if}
+						{#if tool === 'select-wand'}
+							<label class="slider">
+								<span>Tolerance <b>{Math.round(wandTolerance * 100)}%</b></span>
+								<input type="range" min="0" max="0.6" step="0.02" bind:value={wandTolerance} />
+							</label>
+						{/if}
+						<button type="button" class="tool" onclick={() => canvas?.selectAll()}>All</button>
+						{#if status.selection}
+							<button type="button" class="tool" onclick={() => canvas?.deselect()}>None</button>
+							<button type="button" class="tool" onclick={() => canvas?.invertSelection()}>
+								Invert
+							</button>
+							<button type="button" class="tool" onclick={() => canvas?.clear()}>
+								Clear selected
+							</button>
+						{/if}
+					</div>
+				{/if}
 				{#if tool === 'fill'}
 					<div class="fill-opts" role="group" aria-label="Fill options">
 						<label class="slider">
@@ -1138,6 +1234,14 @@
 		color: #fff;
 		font: 600 13px var(--pp-font-body);
 		cursor: pointer;
+	}
+	.seg {
+		display: flex;
+		gap: 2px;
+	}
+	.tool[role='radio'][aria-checked='true'] {
+		background: var(--pp-accent-strong);
+		color: #fff;
 	}
 	.fill-opts {
 		display: flex;
@@ -1387,6 +1491,7 @@
 	}
 	.group {
 		display: flex;
+		flex-wrap: wrap;
 		gap: 6px;
 		align-items: center;
 	}
