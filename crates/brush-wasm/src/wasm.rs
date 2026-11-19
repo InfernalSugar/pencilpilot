@@ -203,6 +203,62 @@ impl PaintCanvas {
         self.inner.layer_thumbnail(id, w, h)
     }
 
+    // ---- layer groups ----
+
+    #[wasm_bindgen(js_name = groupsJson)]
+    pub fn groups_json(&self) -> String {
+        self.inner.groups_json()
+    }
+
+    /// Put a layer in a new group; returns the group's id (0 = couldn't).
+    #[wasm_bindgen(js_name = addGroup)]
+    pub fn add_group(&mut self, layer: u32) -> u32 {
+        self.inner.add_group(layer)
+    }
+
+    #[wasm_bindgen(js_name = setGroup)]
+    pub fn set_group(
+        &mut self,
+        id: u32,
+        name: &str,
+        visible: bool,
+        opacity: f32,
+        record: bool,
+    ) -> bool {
+        self.inner.set_group(id, name, visible, opacity, record)
+    }
+
+    /// One undo step after previewing: the values from before.
+    #[wasm_bindgen(js_name = commitGroup)]
+    pub fn commit_group(&mut self, id: u32, name: &str, visible: bool, opacity: f32) -> bool {
+        self.inner.commit_group(id, name, visible, opacity)
+    }
+
+    pub fn ungroup(&mut self, id: u32) -> bool {
+        self.inner.ungroup(id)
+    }
+
+    #[wasm_bindgen(js_name = deleteGroup)]
+    pub fn delete_group(&mut self, id: u32) -> bool {
+        self.inner.delete_group(id)
+    }
+
+    #[wasm_bindgen(js_name = mergeGroup)]
+    pub fn merge_group(&mut self, id: u32) -> u32 {
+        self.inner.merge_group(id)
+    }
+
+    #[wasm_bindgen(js_name = moveGroup)]
+    pub fn move_group(&mut self, id: u32, up: bool) -> bool {
+        self.inner.move_group(id, up)
+    }
+
+    /// Move a layer to `to` (0 = bottom) and into `group` (0 = none), one undo step.
+    #[wasm_bindgen(js_name = moveLayerTo)]
+    pub fn move_layer_to(&mut self, id: u32, to: usize, group: u32) -> bool {
+        self.inner.move_layer_to(id, to, group)
+    }
+
     /// Greyscale RGBA8 preview of a layer's mask (empty if it has none).
     #[wasm_bindgen(js_name = maskThumbnail)]
     pub fn mask_thumbnail(&self, id: u32, w: u32, h: u32) -> Vec<u8> {

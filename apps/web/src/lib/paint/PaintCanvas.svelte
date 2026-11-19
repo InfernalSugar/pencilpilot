@@ -17,9 +17,20 @@
 		mask: boolean;
 		/** the tools paint on the mask */
 		editingMask: boolean;
+		/** the layer's group (0 = none) */
+		group: number;
 		empty: boolean;
 	}
-	export type LayerSettings = Omit<LayerInfo, 'id' | 'empty' | 'mask' | 'editingMask'>;
+	export type LayerSettings = Omit<LayerInfo, 'id' | 'empty' | 'mask' | 'editingMask' | 'group'>;
+
+	/** A layer group: its eye and opacity apply to each of its layers. */
+	export interface GroupInfo {
+		id: number;
+		name: string;
+		visible: boolean;
+		opacity: number;
+	}
+	export type GroupSettings = Omit<GroupInfo, 'id'>;
 
 	export interface CanvasStatus {
 		canUndo: boolean;
@@ -28,6 +39,7 @@
 		strokes: number;
 		/** bottom → top */
 		layers: LayerInfo[];
+		groups: GroupInfo[];
 		active: number;
 		/** bumps on every change (for refreshing layer thumbnails) */
 		version: number;
@@ -54,6 +66,7 @@
 		blank: true,
 		strokes: 0,
 		layers: [],
+		groups: [],
 		active: 0,
 		version: 0,
 		selection: false
@@ -274,9 +287,22 @@
 		return paint ? (JSON.parse(paint.layersJson()) as LayerInfo[]) : [];
 	}
 
+	function groupList(): GroupInfo[] {
+		return paint ? (JSON.parse(paint.groupsJson()) as GroupInfo[]) : [];
+	}
+
+	/** layers as they show on the canvas: their group's eye and opacity folded in */
+	function shownLayers(): LayerInfo[] {
+		const groups = new Map(groupList().map((g) => [g.id, g]));
+		return layerList().map((l) => {
+			const g = groups.get(l.group);
+			return g ? { ...l, visible: l.visible && g.visible, opacity: l.opacity * g.opacity } : l;
+		});
+	}
+
 	function visibleLayerIds(): Set<number> {
 		return new Set(
-			layerList()
+			shownLayers()
 				.filter((l) => l.visible && l.opacity > 0)
 				.map((l) => l.id)
 		);
@@ -289,8 +315,9 @@
 			canUndo: paint.canUndo(),
 			canRedo: paint.canRedo(),
 			blank: paint.isBlank(),
-			strokes: log.on(new Set(layers.filter((l) => l.visible).map((l) => l.id))).length,
+			strokes: log.on(visibleLayerIds()).length,
 			layers,
+			groups: groupList(),
 			active: paint.activeLayer,
 			version: ++version,
 			selection: paint.hasSelection()
@@ -625,7 +652,7 @@
 		if (!paint) return;
 		const [cx, cy] = toCanvas(clientX, clientY);
 		if (cx < 0 || cy < 0 || cx >= width || cy >= height) return;
-		const l = layerList().find((x) => x.id === paint!.activeLayer);
+		const l = shownLayers().find((x) => x.id === paint!.activeLayer);
 		if (l && (l.locked || !l.visible)) return onblocked?.(l.visible ? 'locked' : 'hidden');
 		const n = parseInt(hex.slice(1), 16) || 0;
 		const done = paint.fill(
@@ -1321,7 +1348,7 @@
 		}
 		if (tool === 'liquify') {
 			if (!paint.liquifyBegin()) {
-				const l = layerList().find((x) => x.id === paint!.activeLayer);
+				const l = shownLayers().find((x) => x.id === paint!.activeLayer);
 				return onblocked?.(l && !l.visible ? 'hidden' : 'locked');
 			}
 			capture(e);
@@ -1349,7 +1376,7 @@
 			return;
 		}
 		if (!paint.beginStroke()) {
-			const l = layerList().find((x) => x.id === paint!.activeLayer);
+			const l = shownLayers().find((x) => x.id === paint!.activeLayer);
 			onblocked?.(l && !l.visible ? 'hidden' : 'locked');
 			return;
 		}
@@ -1579,6 +1606,77 @@
 		if (paint) changed(paint.moveLayer(id, to));
 	}
 
+	/** move a layer to `to` (0 = bottom) and into `group` (0 = none), one undo step */
+	export function moveLayerTo(id: number, to: number, group: number) {
+		if (paint) changed(paint.moveLayerTo(id, to, group));
+	}
+
+	// ---- layer groups ----
+
+	export function addGroup(layer: number): number {
+		if (!paint) return 0;
+		const gid = paint.addGroup(layer);
+		changed(gid !== 0);
+		return gid;
+	}
+
+	function groupSettings(id: number): GroupSettings | null {
+		const g = groupList().find((x) => x.id === id);
+		return g ? { name: g.name, visible: g.visible, opacity: g.opacity } : null;
+	}
+
+	export function setGroup(id: number, patch: Partial<GroupSettings>) {
+		const cur = paint && groupSettings(id);
+		if (!cur) return;
+		const s = { ...cur, ...patch };
+		changed(paint!.setGroup(id, s.name, s.visible, s.opacity, true));
+	}
+
+	let previewingGroup: { id: number; before: GroupSettings } | null = null;
+
+	/** live preview (the group opacity slider); finish with `commitGroup` */
+	export function previewGroup(id: number, patch: Partial<GroupSettings>) {
+		const cur = paint && groupSettings(id);
+		if (!cur) return;
+		if (previewingGroup?.id !== id) previewingGroup = { id, before: cur };
+		const s = { ...cur, ...patch };
+		paint!.setGroup(id, s.name, s.visible, s.opacity, false);
+		schedule();
+		notify();
+	}
+
+	export function commitGroup() {
+		if (!paint || !previewingGroup) return;
+		const { id, before: b } = previewingGroup;
+		previewingGroup = null;
+		changed(paint.commitGroup(id, b.name, b.visible, b.opacity));
+	}
+
+	export function ungroup(id: number) {
+		if (paint) changed(paint.ungroup(id));
+	}
+
+	export function deleteGroup(id: number) {
+		if (!paint) return;
+		// strokes on deleted layers drop out at export (like deleting a layer)
+		changed(paint.deleteGroup(id));
+	}
+
+	export function mergeGroup(id: number) {
+		if (!paint) return;
+		const members = layerList().filter((l) => l.group === id);
+		const into = paint.mergeGroup(id);
+		changed(into !== 0, () =>
+			log.batch(() => {
+				for (const l of members.slice(1).reverse()) log.merge(l.id, into);
+			})
+		);
+	}
+
+	export function moveGroup(id: number, up: boolean) {
+		if (paint) changed(paint.moveGroup(id, up));
+	}
+
 	export function mergeDown(id: number) {
 		if (!paint) return;
 		const layers = layerList();
@@ -1689,7 +1787,7 @@
 			png: el.toDataURL('image/png'),
 			gray: toGray(ctx.getImageData(0, 0, width, height).data),
 			strokes: structuredClone(log.on(ids)),
-			layers: layerList().filter((l) => ids.has(l.id))
+			layers: shownLayers().filter((l) => ids.has(l.id))
 		};
 		// put the hidden layers back (in the same task, so nothing flickers)
 		for (const [id, s] of restore) setRaw(id, s, false);

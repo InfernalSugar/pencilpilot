@@ -107,6 +107,17 @@ pub struct Layer {
     mask: Option<UndoSurface>,
     /// `surface` and `mask` are swapped: tools paint on the mask
     editing_mask: bool,
+    /// the group this layer is in (0 = none); a group's layers are always next to each other
+    group: u32,
+}
+
+/// A layer group ("pass-through": its visibility and opacity apply to each of its layers).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Group {
+    pub id: u32,
+    pub name: String,
+    pub visible: bool,
+    pub opacity: f32,
 }
 
 impl Layer {
@@ -117,6 +128,7 @@ impl Layer {
             surface: UndoSurface::default(),
             mask: None,
             editing_mask: false,
+            group: 0,
         }
     }
 
@@ -270,6 +282,13 @@ enum Edit {
         /// the tiles are the layer's mask, not its colour
         mask: bool,
     },
+    /// Replace the whole group list (add / remove / change a group).
+    Groups(Vec<Group>),
+    /// Put a layer in a group (0 = none).
+    Member {
+        layer: u32,
+        group: u32,
+    },
     /// Swap a layer's mask (add / delete one).
     SetMask {
         layer: u32,
@@ -299,6 +318,8 @@ pub struct Painter {
     layers: Vec<Layer>,
     active: u32,
     next_id: u32,
+    groups: Vec<Group>,
+    next_group: u32,
     state: BrushState,
     /// strokes from other people (shared canvases), drawn alongside the local
     /// one: key → (layer id, brush state). Never in the undo history.
@@ -333,6 +354,8 @@ impl Painter {
             layers: vec![Layer::new(1, LayerProps::named("Layer 1"))],
             active: 1,
             next_id: 2,
+            groups: Vec::new(),
+            next_group: 1,
             state: BrushState::default(),
             remote: HashMap::new(),
             width,
@@ -397,6 +420,317 @@ impl Painter {
             keys.extend(m.tiles.keys().copied());
         }
         self.dirty.extend(keys);
+    }
+
+    /// A layer's group's (visible, opacity); (true, 1) outside a group.
+    fn group_of(&self, l: &Layer) -> (bool, f32) {
+        self.groups
+            .iter()
+            .find(|g| g.id == l.group)
+            .map_or((true, 1.0), |g| (g.visible, g.opacity))
+    }
+
+    /// Shown on the canvas (its own eye and its group's).
+    fn shown(&self, idx: usize) -> bool {
+        let l = &self.layers[idx];
+        l.props.visible && self.group_of(l).0
+    }
+
+    pub fn groups(&self) -> &[Group] {
+        &self.groups
+    }
+
+    /// Indices of a group's layers (bottom → top, next to each other).
+    fn members(&self, gid: u32) -> Vec<usize> {
+        (0..self.layers.len())
+            .filter(|&i| gid != 0 && self.layers[i].group == gid)
+            .collect()
+    }
+
+    /// Put layer `id` in a new group. Returns the group's id (0 = couldn't).
+    pub fn add_group(&mut self, id: u32) -> u32 {
+        if !self.idle() || self.index_of(id).is_none() {
+            return 0;
+        }
+        let gid = self.next_group;
+        self.next_group += 1;
+        let mut list = self.groups.clone();
+        list.push(Group {
+            id: gid,
+            name: format!("Group {gid}"),
+            visible: true,
+            opacity: 1.0,
+        });
+        self.perform(Edit::Batch(vec![
+            Edit::Groups(list),
+            Edit::Member {
+                layer: id,
+                group: gid,
+            },
+        ]));
+        gid
+    }
+
+    /// Change a group's name, visibility or opacity. `record` = false previews
+    /// (a slider drag); finish with `commit_group` and the values from before.
+    pub fn set_group(
+        &mut self,
+        gid: u32,
+        name: &str,
+        visible: bool,
+        opacity: f32,
+        record: bool,
+    ) -> bool {
+        let Some(i) = self.groups.iter().position(|g| g.id == gid) else {
+            return false;
+        };
+        let mut list = self.groups.clone();
+        let name: String = name.chars().take(60).collect();
+        if !name.trim().is_empty() {
+            list[i].name = name;
+        }
+        list[i].visible = visible;
+        list[i].opacity = opacity.clamp(0.0, 1.0);
+        if list == self.groups {
+            return false;
+        }
+        if record {
+            self.perform(Edit::Groups(list));
+        } else {
+            self.apply(Edit::Groups(list));
+        }
+        true
+    }
+
+    /// One undo step for a previewed change: `before` values are what it was.
+    pub fn commit_group(&mut self, gid: u32, name: &str, visible: bool, opacity: f32) -> bool {
+        let Some(i) = self.groups.iter().position(|g| g.id == gid) else {
+            return false;
+        };
+        let mut before = self.groups.clone();
+        before[i].name = name.chars().take(60).collect();
+        before[i].visible = visible;
+        before[i].opacity = opacity;
+        if before == self.groups {
+            return false;
+        }
+        self.push_undo(Edit::Groups(before));
+        true
+    }
+
+    /// Take the layers out of a group and remove it.
+    pub fn ungroup(&mut self, gid: u32) -> bool {
+        if !self.idle() || !self.groups.iter().any(|g| g.id == gid) {
+            return false;
+        }
+        let mut edits: Vec<Edit> = self
+            .members(gid)
+            .into_iter()
+            .map(|i| Edit::Member {
+                layer: self.layers[i].id,
+                group: 0,
+            })
+            .collect();
+        edits.push(Edit::Groups(
+            self.groups
+                .iter()
+                .filter(|g| g.id != gid)
+                .cloned()
+                .collect(),
+        ));
+        self.perform(Edit::Batch(edits));
+        true
+    }
+
+    /// Delete a group and its layers (not if that would leave no layers).
+    pub fn delete_group(&mut self, gid: u32) -> bool {
+        let m = self.members(gid);
+        if !self.idle() || m.len() >= self.layers.len() || !self.groups.iter().any(|g| g.id == gid)
+        {
+            return false;
+        }
+        self.stop_mask_editing();
+        let mut edits: Vec<Edit> = m
+            .iter()
+            .rev()
+            .map(|&index| Edit::Remove { index })
+            .collect();
+        edits.push(Edit::Groups(
+            self.groups
+                .iter()
+                .filter(|g| g.id != gid)
+                .cloned()
+                .collect(),
+        ));
+        self.perform(Edit::Batch(edits));
+        if self.index_of(self.active).is_none() {
+            self.active = self.layers[m[0].saturating_sub(1).min(self.layers.len() - 1)].id;
+        }
+        true
+    }
+
+    /// Flatten a group's visible layers into one layer (named after the group,
+    /// with the group's opacity). One undo step. Returns the layer's id.
+    pub fn merge_group(&mut self, gid: u32) -> u32 {
+        let m = self.members(gid);
+        let Some(g) = self.groups.iter().find(|g| g.id == gid).cloned() else {
+            return 0;
+        };
+        if !self.idle() || m.is_empty() {
+            return 0;
+        }
+        self.stop_mask_editing();
+        // composite the members onto transparency
+        let mut out: TileMap = TileMap::new();
+        let mut base: Option<TileMap> = None;
+        for &i in &m {
+            let l = &self.layers[i];
+            let baked = bake(&l.surface.tiles, l.mask.as_ref().map(|mk| &mk.tiles));
+            if !l.props.clip {
+                base = Some(baked.clone());
+            }
+            if !l.props.visible || l.props.opacity <= 0.0 {
+                continue;
+            }
+            for (key, src) in &baked {
+                let o = out.entry(*key).or_insert_with(empty_tile);
+                let bt = base.as_ref().and_then(|b| b.get(key));
+                for (r, (orow, srow)) in o.iter_mut().zip(src.iter()).enumerate() {
+                    for (c, (op, sp)) in orow.iter_mut().zip(srow.iter()).enumerate() {
+                        let k = if l.props.clip {
+                            bt.map_or(0.0, |t| t[r][c][3] as f32 / 32768.0)
+                        } else {
+                            1.0
+                        };
+                        *op = merge_pixel(*op, *sp, l.props.opacity * k, l.props.blend);
+                    }
+                }
+            }
+        }
+        let bottom = &self.layers[m[0]];
+        let bottom_id = bottom.id;
+        let mut snap: Snapshot = bottom.surface.tiles.keys().map(|k| (*k, None)).collect();
+        for (k, t) in out {
+            snap.insert(k, Some(t));
+        }
+        let mut props = LayerProps::named(g.name.clone());
+        props.opacity = g.opacity;
+        props.visible = g.visible;
+        let mut edits = vec![Edit::Tiles {
+            layer: bottom_id,
+            snap,
+            mask: false,
+        }];
+        if bottom.mask.is_some() {
+            edits.push(Edit::SetMask {
+                layer: bottom_id,
+                mask: None,
+            });
+        }
+        edits.push(Edit::Props {
+            layer: bottom_id,
+            props,
+        });
+        edits.push(Edit::Member {
+            layer: bottom_id,
+            group: 0,
+        });
+        edits.extend(m[1..].iter().rev().map(|&index| Edit::Remove { index }));
+        edits.push(Edit::Groups(
+            self.groups
+                .iter()
+                .filter(|x| x.id != gid)
+                .cloned()
+                .collect(),
+        ));
+        self.perform(Edit::Batch(edits));
+        self.active = bottom_id;
+        bottom_id
+    }
+
+    /// Move a group's layers together past the next layer (or whole group) above / below.
+    pub fn move_group(&mut self, gid: u32, up: bool) -> bool {
+        let m = self.members(gid);
+        if !self.idle() || m.is_empty() {
+            return false;
+        }
+        let (a, b) = (m[0], *m.last().unwrap());
+        let n = self.layers.len();
+        let mut edits = Vec::new();
+        if up {
+            if b + 1 >= n {
+                return false;
+            }
+            let h = self.layers[b + 1].group;
+            let mut c = b + 1;
+            while h != 0 && c + 1 < n && self.layers[c + 1].group == h {
+                c += 1;
+            }
+            for k in 0..(c - b) {
+                edits.push(Edit::Move {
+                    from: b + 1 + k,
+                    to: a + k,
+                });
+            }
+        } else {
+            if a == 0 {
+                return false;
+            }
+            let h = self.layers[a - 1].group;
+            let mut d = a - 1;
+            while h != 0 && d > 0 && self.layers[d - 1].group == h {
+                d -= 1;
+            }
+            for _ in 0..(a - d) {
+                edits.push(Edit::Move { from: d, to: b });
+            }
+        }
+        self.perform(Edit::Batch(edits));
+        true
+    }
+
+    /// Move a layer to `to` (0 = bottom) and into `group` (0 = none), as one step.
+    pub fn move_layer_to(&mut self, id: u32, to: usize, group: u32) -> bool {
+        let Some(from) = self.index_of(id) else {
+            return false;
+        };
+        let to = to.min(self.layers.len() - 1);
+        let group = if self.groups.iter().any(|g| g.id == group) {
+            group
+        } else {
+            0
+        };
+        let same_group = self.layers[from].group == group;
+        if self.stroking.is_some() || (from == to && same_group) {
+            return false;
+        }
+        let mut edits = Vec::new();
+        if from != to {
+            edits.push(Edit::Move { from, to });
+        }
+        if !same_group {
+            edits.push(Edit::Member { layer: id, group });
+        }
+        self.perform(Edit::Batch(edits));
+        true
+    }
+
+    /// The groups as JSON (for the layers panel).
+    pub fn groups_json(&self) -> String {
+        let items: Vec<String> = self
+            .groups
+            .iter()
+            .map(|g| {
+                format!(
+                    r#"{{"id":{},"name":{},"visible":{},"opacity":{}}}"#,
+                    g.id,
+                    json_str(&g.name),
+                    g.visible,
+                    (g.opacity * 1000.0).round() / 1000.0
+                )
+            })
+            .collect();
+        format!("[{}]", items.join(","))
     }
 
     fn editing_mask(&self, id: u32) -> bool {
@@ -512,6 +846,21 @@ impl Painter {
                     mask,
                 }
             }
+            Edit::Groups(list) => {
+                let old = std::mem::replace(&mut self.groups, list);
+                for i in 0..self.layers.len() {
+                    self.mark_layer(i);
+                }
+                Edit::Groups(old)
+            }
+            Edit::Member { layer, group } => {
+                let Some(idx) = self.index_of(layer) else {
+                    return Edit::Batch(Vec::new());
+                };
+                let old = std::mem::replace(&mut self.layers[idx].group, group);
+                self.mark_layer(idx);
+                Edit::Member { layer, group: old }
+            }
             Edit::SetMask { layer, mask } => {
                 let Some(idx) = self.index_of(layer) else {
                     return Edit::Batch(Vec::new());
@@ -588,9 +937,15 @@ impl Painter {
         } else {
             name.chars().take(60).collect()
         };
+        let mut layer = Layer::new(id, LayerProps::named(name));
+        // a new layer goes into the selected layer's group
+        layer.group = index
+            .checked_sub(1)
+            .and_then(|i| self.layers.get(i))
+            .map_or(0, |l| l.group);
         self.perform(Edit::Insert {
             index,
-            layer: Box::new(Layer::new(id, LayerProps::named(name))),
+            layer: Box::new(layer),
         });
         self.active = id;
         id
@@ -749,12 +1104,13 @@ impl Painter {
         if self.transform.is_some() {
             return false;
         }
-        let Some(l) = self.layer_mut(self.active) else {
+        let Some(idx) = self.index_of(self.active) else {
             return false;
         };
-        if l.props.locked || !l.props.visible {
+        if self.layers[idx].props.locked || !self.shown(idx) {
             return false;
         }
+        let l = &mut self.layers[idx];
         l.surface.recording = Some(Snapshot::new());
         let (id, alpha_lock) = (l.id, l.props.alpha_lock);
         self.state.reset();
@@ -1006,7 +1362,7 @@ impl Painter {
         let Some(li) = self.index_of(active) else {
             return false;
         };
-        if self.layers[li].props.locked || !self.layers[li].props.visible {
+        if self.layers[li].props.locked || !self.shown(li) {
             return false;
         }
         let source = self.sample_source(li, all_layers);
@@ -1216,7 +1572,7 @@ impl Painter {
         let Some(li) = self.index_of(active) else {
             return Vec::new();
         };
-        if self.layers[li].props.locked || !self.layers[li].props.visible {
+        if self.layers[li].props.locked || !self.shown(li) {
             return Vec::new();
         }
         let sel = self.selection.clone();
@@ -1461,10 +1817,10 @@ impl Painter {
         let Some(li) = self.index_of(self.active) else {
             return false;
         };
-        let l = &self.layers[li];
-        if l.props.locked || !l.props.visible {
+        if self.layers[li].props.locked || !self.shown(li) {
             return false;
         }
+        let l = &self.layers[li];
         self.liquify = Some((l.id, l.surface.tiles.clone()));
         true
     }
@@ -1704,10 +2060,10 @@ impl Painter {
 
     /// Whether nothing visible is painted (hidden or fully transparent layers don't count).
     pub fn is_blank(&self) -> bool {
-        !self
-            .layers
-            .iter()
-            .any(|l| l.props.visible && l.props.opacity > 0.0 && !l.is_empty())
+        !(0..self.layers.len()).any(|i| {
+            let l = &self.layers[i];
+            self.shown(i) && l.props.opacity * self.group_of(l).1 > 0.0 && !l.is_empty()
+        })
     }
 
     /// Recomposite changed tiles into the RGBA buffer. Returns the area that
@@ -1736,17 +2092,24 @@ impl Painter {
             // with clipping masks every layer matters (a hidden or empty base hides
             // what's clipped to it); otherwise only visible layers with paint here
             let clipping = self.layers.iter().any(|l| l.props.clip);
+            let groups = &self.groups;
             let sources: Vec<TileSource<'_>> = self
                 .layers
                 .iter()
-                .filter(|l| clipping || (l.props.visible && l.props.opacity > 0.0))
                 .filter_map(|l| {
+                    // pass-through groups: their eye and opacity apply to each layer
+                    let (gv, go) = groups
+                        .iter()
+                        .find(|g| g.id == l.group)
+                        .map_or((true, 1.0), |g| (g.visible, g.opacity));
+                    let opacity = l.props.opacity * go;
+                    let visible = l.props.visible && gv && opacity > 0.0;
                     let tile = l.colour().tiles.get(&(tx, ty));
-                    (clipping || tile.is_some()).then(|| TileSource {
+                    (clipping || (visible && tile.is_some())).then(|| TileSource {
                         tile: tile.map(|t| &**t),
-                        opacity: l.props.opacity,
+                        opacity,
                         blend: l.props.blend,
-                        visible: l.props.visible && l.props.opacity > 0.0,
+                        visible,
                         clip: l.props.clip,
                         mask: l
                             .mask_surface()
@@ -1882,7 +2245,7 @@ impl Painter {
             .map(|l| {
                 let p = &l.props;
                 format!(
-                    r#"{{"id":{},"name":{},"visible":{},"opacity":{},"blend":"{}","locked":{},"alphaLock":{},"clip":{},"mask":{},"editingMask":{},"empty":{}}}"#,
+                    r#"{{"id":{},"name":{},"visible":{},"opacity":{},"blend":"{}","locked":{},"alphaLock":{},"clip":{},"mask":{},"editingMask":{},"group":{},"empty":{}}}"#,
                     l.id,
                     json_str(&p.name),
                     p.visible,
@@ -1893,6 +2256,7 @@ impl Painter {
                     p.clip,
                     l.mask.is_some(),
                     l.editing_mask,
+                    l.group,
                     l.is_empty()
                 )
             })
@@ -2859,6 +3223,79 @@ mod tests {
         assert!(p.delete_mask(id));
         p.flush();
         assert!(px(&p, 60, 60)[0] < 120);
+    }
+
+    #[test]
+    fn layer_groups_hide_fade_move_merge_and_undo() {
+        let mut p = Painter::new(256, 128);
+        let b = pen();
+        line(&mut p, &b, 20.0); // layer 1 (bottom)
+        let l2 = p.add_layer("two");
+        line(&mut p, &b, 60.0);
+        let l3 = p.add_layer("three");
+        line(&mut p, &b, 100.0);
+        p.flush();
+        let gid = p.add_group(l2);
+        assert!(gid > 0);
+        assert!(p.layers_json().contains(&format!(r#""group":{gid}"#)));
+        // a layer added above a grouped layer joins it
+        p.set_active_layer(l2);
+        let l4 = p.add_layer("four");
+        assert_eq!(p.members(gid).len(), 2);
+        // hiding the group hides its layers; painting in it is refused
+        assert!(p.set_group(gid, "Head", false, 1.0, true));
+        p.flush();
+        assert!(px(&p, 100, 60)[0] > 240);
+        assert!(px(&p, 100, 100)[0] < 120);
+        p.set_active_layer(l4);
+        assert!(!p.begin_stroke());
+        assert!(p.undo());
+        p.flush();
+        assert!(px(&p, 100, 60)[0] < 120);
+        // group opacity fades its layers
+        let solid = px(&p, 100, 60)[0];
+        p.set_group(gid, "Head", true, 0.3, true);
+        p.flush();
+        assert!(px(&p, 100, 60)[0] > solid + 60);
+        // move the group up past layer three: order is 1, three, two, four
+        assert!(p.move_group(gid, true));
+        let order: Vec<u32> = p.layers().iter().map(|l| l.id).collect();
+        assert_eq!(order, vec![1, l3, l2, l4]);
+        assert!(p.move_group(gid, false));
+        assert!(!p.move_group(gid, false) || p.layers()[0].group == gid);
+        p.undo();
+        // move a layer out of the group with move_layer_to
+        assert!(p.move_layer_to(l4, 3, 0));
+        assert_eq!(p.members(gid).len(), 1);
+        p.undo();
+        assert_eq!(p.members(gid).len(), 2);
+        // merge: one layer named after the group, same picture
+        p.flush();
+        let before = p.rgba().to_vec();
+        let merged = p.merge_group(gid);
+        assert!(merged > 0);
+        p.flush();
+        let diff = p
+            .rgba()
+            .iter()
+            .zip(&before)
+            .filter(|(a, b)| a.abs_diff(**b) > 4)
+            .count();
+        assert!(diff < 60, "merge changed {diff} channels");
+        assert!(p.groups().is_empty());
+        assert!(p.layers_json().contains(r#""name":"Head""#));
+        assert_eq!(p.layers().len(), 3);
+        assert!(p.undo());
+        assert_eq!(p.layers().len(), 4);
+        assert_eq!(p.groups().len(), 1);
+        // ungroup keeps the layers; delete removes them
+        assert!(p.ungroup(gid));
+        assert!(p.groups().is_empty() && p.layers().len() == 4);
+        p.undo();
+        assert!(p.delete_group(gid));
+        assert_eq!(p.layers().len(), 2);
+        p.undo();
+        assert_eq!(p.layers().len(), 4);
     }
 
     #[test]
