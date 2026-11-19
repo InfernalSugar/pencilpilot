@@ -27,6 +27,18 @@
 		version: number;
 	}
 
+	/** A local stroke as it happens, for shared canvases. Points are [x, y, pressure, dtMs, …]. */
+	export type LiveEvent =
+		| {
+				type: 'begin';
+				k: number;
+				style: { brushId: string; color: string; size: number; opacity: number; eraser: boolean };
+		  }
+		| { type: 'points'; k: number; pts: number[] }
+		| { type: 'end'; k: number }
+		/** the stroke was abandoned (a pinch): others should drop it */
+		| { type: 'cancel'; k: number };
+
 	/** Status before the engine has loaded. */
 	export const BLANK_STATUS: CanvasStatus = {
 		canUndo: false,
@@ -73,6 +85,7 @@
 		adjustOverlay = false,
 		onoverlaymove,
 		locked = false,
+		onlive,
 		maxHeight = '78vh',
 		viewControls = true
 	}: {
@@ -92,6 +105,8 @@
 		overlayOpacity?: number;
 		/** where the overlay sits: offset (fraction of the canvas), scale and rotation (degrees) */
 		overlayTransform?: { x: number; y: number; scale: number; rotate: number };
+		/** local strokes as they happen (shared canvases) */
+		onlive?: (e: LiveEvent) => void;
 		/** no more strokes (e.g. time is up); a stroke in progress is finished */
 		locked?: boolean;
 		/** dragging moves the overlay instead of drawing */
@@ -215,8 +230,139 @@
 		if (!raf) raf = requestAnimationFrame(render);
 	}
 
+	// ---- shared canvases ----
+
+	let liveK = 0;
+	let livePts: number[] = [];
+	function flushLive() {
+		if (livePts.length && onlive) onlive({ type: 'points', k: liveK, pts: livePts });
+		livePts = [];
+	}
+
+	/** other people's layers and brushes */
+	// eslint-disable-next-line svelte/prefer-svelte-reactivity -- engine bookkeeping, never rendered
+	const remoteLayers = new Map<string, number>();
+	// eslint-disable-next-line svelte/prefer-svelte-reactivity -- engine bookkeeping, never rendered
+	const remoteBrushes = new Map<string, Promise<PaintBrush>>();
+	type Style = Extract<LiveEvent, { type: 'begin' }>['style'];
+	/** strokes in progress from others: key → engine stroke key, style, queued work */
+	// eslint-disable-next-line svelte/prefer-svelte-reactivity -- engine bookkeeping, never rendered
+	const remoteLive = new Map<
+		string,
+		{ key: number; style: Style; brush: PaintBrush | null; queue: number[][]; ended: boolean }
+	>();
+	let remoteKeys = 0;
+
+	function remoteBrush(id: string) {
+		let b = remoteBrushes.get(id);
+		if (!b) {
+			b = loadBrush(id).catch(() => loadBrush('deevad-2b-pencil'));
+			remoteBrushes.set(id, b);
+		}
+		return b;
+	}
+
+	function styled(b: PaintBrush, st: Style) {
+		b.setSizeScale(st.size);
+		b.setOpacity(st.opacity);
+		const n = parseInt(st.color.slice(1), 16) || 0;
+		b.setColor((n >> 16) & 255, (n >> 8) & 255, n & 255);
+		b.setEraser(st.eraser);
+		return b;
+	}
+
+	/** A layer for another person (no undo step). Returns its id. */
+	export function remoteJoin(playerId: string, name: string): number {
+		if (!paint) return 0;
+		let id = remoteLayers.get(playerId);
+		if (!id) {
+			id = paint.addLayerSilent(name);
+			remoteLayers.set(playerId, id);
+			notify();
+		}
+		return id;
+	}
+
+	function runRemote(r: NonNullable<ReturnType<typeof remoteLive.get>>) {
+		if (!paint || !r.brush) return;
+		const b = styled(r.brush, r.style);
+		for (const pts of r.queue)
+			for (let i = 0; i + 3 < pts.length; i += 4)
+				paint.remoteTo(r.key, b, pts[i], pts[i + 1], pts[i + 2], pts[i + 3] / 1000);
+		r.queue = [];
+		if (r.ended) paint.remoteEnd(r.key, b);
+		schedule();
+	}
+
+	export function remoteBegin(playerId: string, k: number, style: Style, name = '') {
+		if (!paint) return;
+		const layer = remoteJoin(playerId, name);
+		const key = ++remoteKeys;
+		paint.remoteBegin(key, layer);
+		const r = {
+			key,
+			style,
+			brush: null as PaintBrush | null,
+			queue: [] as number[][],
+			ended: false
+		};
+		remoteLive.set(`${playerId}:${k}`, r);
+		remoteBrush(style.brushId).then((b) => {
+			r.brush = b;
+			runRemote(r);
+		});
+	}
+
+	export function remotePoints(playerId: string, k: number, pts: number[]) {
+		const r = remoteLive.get(`${playerId}:${k}`);
+		if (!r) return;
+		r.queue.push(pts);
+		runRemote(r);
+	}
+
+	export function remoteEnd(playerId: string, k: number) {
+		const id = `${playerId}:${k}`;
+		const r = remoteLive.get(id);
+		if (!r) return;
+		r.ended = true;
+		remoteLive.delete(id);
+		runRemote(r);
+	}
+
+	/** Redraw someone's whole layer from their strokes (after their undo / clear, or on joining). */
+	export async function remoteRedraw(
+		playerId: string,
+		strokes: { style: Style; pts: number[] }[],
+		name = ''
+	) {
+		if (!paint) return;
+		const layer = remoteJoin(playerId, name);
+		const brushes = await Promise.all(strokes.map((s) => remoteBrush(s.style.brushId)));
+		paint.clearLayerSilent(layer);
+		strokes.forEach((s, i) => {
+			const key = ++remoteKeys;
+			paint!.remoteBegin(key, layer);
+			const b = styled(brushes[i], s.style);
+			for (let j = 0; j + 3 < s.pts.length; j += 4)
+				paint!.remoteTo(key, b, s.pts[j], s.pts[j + 1], s.pts[j + 2], s.pts[j + 3] / 1000);
+			paint!.remoteEnd(key, b);
+		});
+		schedule();
+	}
+
+	/** Name the local layer (e.g. after the player). */
+	export function nameOwnLayer(name: string) {
+		const id = paint?.activeLayer;
+		if (paint && id) {
+			const s = settings(id);
+			if (s) setRaw(id, { ...s, name }, false);
+			notify();
+		}
+	}
+
 	function render() {
 		raf = 0;
+		flushLive();
 		if (!paint || !ctx || !memory) return;
 		const r = paint.flush();
 		if (r.length !== 4) return;
@@ -363,6 +509,13 @@
 		const dt = Math.max(0, (e.timeStamp - lastT) / 1000);
 		lastT = e.timeStamp;
 		paint.strokeTo(brush, x, y, pressure, (e.tiltX || 0) / 90, (e.tiltY || 0) / 90, dt);
+		if (onlive)
+			livePts.push(
+				Math.round(x * 10) / 10,
+				Math.round(y * 10) / 10,
+				Math.round(pressure * 1000) / 1000,
+				Math.round(dt * 1000)
+			);
 		current.points.push({
 			x: Math.round(x * 10) / 10,
 			y: Math.round(y * 10) / 10,
@@ -389,6 +542,10 @@
 					paint.cancelStroke();
 					current = null;
 					schedule();
+					if (onlive) {
+						flushLive();
+						onlive({ type: 'cancel', k: liveK });
+					}
 				}
 				panning = null;
 				const g = twoTouches();
@@ -417,6 +574,10 @@
 		vp.setPointerCapture(e.pointerId);
 		current = { brushId, eraser, layer: paint.activeLayer, color, size, opacity, points: [] };
 		lastT = e.timeStamp;
+		if (onlive) {
+			liveK++;
+			onlive({ type: 'begin', k: liveK, style: { brushId, color, size, opacity, eraser } });
+		}
 		feed(e);
 		schedule();
 	}
@@ -469,6 +630,10 @@
 		paint.endStroke(brush);
 		log.add(current);
 		current = null;
+		if (onlive) {
+			flushLive();
+			onlive({ type: 'end', k: liveK });
+		}
 		schedule();
 		notify();
 	}

@@ -107,6 +107,13 @@ main:focus {
 	text-transform: uppercase;
 	color: var(--pp-muted);
 }
+/* eyebrows on coloured tiles (readable: 4.5:1 or better) */
+.pp-eyebrow.on-ink {
+	color: var(--pp-on-ink-muted);
+}
+.pp-eyebrow.ink {
+	color: var(--pp-ink);
+}
 
 .pp-page {
 	max-width: var(--pp-max);

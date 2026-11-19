@@ -98,6 +98,21 @@
 		</Tile>
 	</div>
 
+	<div class="pp-bento together">
+		<Tile tone="yellow" span={4}>
+			<div class="together-row">
+				<div>
+					<span class="pp-eyebrow ink">New · Private lobbies</span>
+					<h2 class="challenge-title">Draw with friends</h2>
+					<span class="note">
+						Race the clock on the same picture, or share one canvas and draw live.
+					</span>
+				</div>
+				<Button href="/lobby" variant="dark">Draw together →</Button>
+			</div>
+		</Tile>
+	</div>
+
 	<h2 class="section-title">Choose what to draw</h2>
 	<div class="cats">
 		{#each categories as c (c.id)}
@@ -243,6 +258,16 @@
 		color: var(--pp-muted);
 		font-weight: 600;
 		font-size: 13px;
+	}
+	.together {
+		margin-top: var(--pp-gap);
+	}
+	.together-row {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		justify-content: space-between;
+		gap: 16px;
 	}
 	img.ref-ph {
 		width: 200px;
