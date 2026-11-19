@@ -46,6 +46,8 @@
 		/** grayscale bytes, width*height, for the grader */
 		gray: Uint8Array;
 		strokes: Stroke[];
+		/** the exported layers, bottom → top (for replays) */
+		layers: LayerInfo[];
 	}
 </script>
 
@@ -413,7 +415,7 @@
 			return;
 		}
 		vp.setPointerCapture(e.pointerId);
-		current = { brushId, eraser, layer: paint.activeLayer, points: [] };
+		current = { brushId, eraser, layer: paint.activeLayer, color, size, opacity, points: [] };
 		lastT = e.timeStamp;
 		feed(e);
 		schedule();
@@ -636,7 +638,8 @@
 			height,
 			png: el.toDataURL('image/png'),
 			gray: toGray(ctx.getImageData(0, 0, width, height).data),
-			strokes: structuredClone(log.on(ids))
+			strokes: structuredClone(log.on(ids)),
+			layers: layerList().filter((l) => ids.has(l.id))
 		};
 		// put the hidden layers back (in the same task, so nothing flickers)
 		for (const [id, s] of restore) setRaw(id, s, false);

@@ -21,8 +21,11 @@
 		gradeSubmission,
 		recordGraded,
 		SKETCH_SKILLS,
-		SKILLS
+		SKILLS,
+		tipsFor,
+		type Graded
 	} from '#lib/grade-submission.js';
+	import ReplayPlayer from '#lib/results/ReplayPlayer.svelte';
 	import { sessionDrawing, timeLabel } from '#lib/timed.js';
 
 	let sub = $state<Submission | null>(null);
@@ -39,6 +42,9 @@
 	/** traced drawings are compared with the picture exactly where it was placed */
 	let compareSrc = $state<string | null>(null);
 	const traced = $derived(!!sub?.traced);
+	let graded = $state<Graded | null>(null);
+	let showReplay = $state(false);
+	const canReplay = $derived(!!sub?.strokeData?.some((s) => s.points.length));
 	let share = $state<{ state: 'idle' | 'busy' | 'done' | 'error'; message?: string }>({
 		state: 'idle'
 	});
@@ -121,6 +127,7 @@
 		if (!sub || !gradable(sub)) return;
 		try {
 			const g = await gradeSubmission(sub);
+			graded = g;
 			grade = g.grade;
 			fb = g.fb;
 			compareSrc = g.compareSrc;
@@ -276,6 +283,32 @@
 			{/if}
 		</div>
 
+		{#if canReplay}
+			<section class="replay-section" aria-label="Replay">
+				<div class="replay-head">
+					<h2>Replay</h2>
+					{#if !showReplay}
+						<Button variant="dark" onclick={() => (showReplay = true)}>Watch the replay ▶</Button>
+					{/if}
+				</div>
+				{#if showReplay && sub}
+					<ReplayPlayer
+						{sub}
+						tips={fb?.fixes.map((f) => ({ id: f.id, title: f.title })) ?? []}
+						firedAt={graded && sub
+							? (gray, strokes) => tipsFor(sub!, graded!, gray, strokes)
+							: undefined}
+					/>
+				{:else}
+					<p class="muted-line">
+						See your drawing come together stroke by stroke{fb?.fixes.length
+							? ', with a mark where each tip’s mistake started'
+							: ''}.
+					</p>
+				{/if}
+			</section>
+		{/if}
+
 		{#if levelUp && reference}
 			<div class="pp-bento levelup">
 				<Tile tone="accent" span={4}>
@@ -410,6 +443,29 @@
 </div>
 
 <style>
+	.replay-section {
+		margin-top: var(--pp-gap);
+		padding: 28px;
+		border-radius: var(--pp-radius-tile);
+		background: var(--pp-surface);
+		display: flex;
+		flex-direction: column;
+		gap: 14px;
+	}
+	.replay-head {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		justify-content: space-between;
+		gap: 12px;
+	}
+	.replay-head h2 {
+		font-size: 22px;
+	}
+	.muted-line {
+		margin: 0;
+		color: var(--pp-muted);
+	}
 	.share {
 		margin-top: var(--pp-gap);
 	}
