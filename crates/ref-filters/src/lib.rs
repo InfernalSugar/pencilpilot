@@ -204,6 +204,20 @@ impl Filters {
         self.nsfw.is_some()
     }
 
+    /// The NSFW guard alone, for drawings people choose to share (drawability
+    /// checks don't apply to them). Fails closed: with no model loaded, or if
+    /// the model errors, the picture is not safe to show.
+    pub fn safe_to_share(&self, img: &DynamicImage) -> Result<(), &'static str> {
+        let Some(model) = &self.nsfw else {
+            return Err("nsfw_unchecked");
+        };
+        match model.score(flatten_alpha(img).as_ref()) {
+            Ok(p) if p < self.thresholds.max_nsfw => Ok(()),
+            Ok(_) => Err("nsfw"),
+            Err(_) => Err("nsfw_error"),
+        }
+    }
+
     /// Run every check on a decoded image.
     pub fn check(&self, img: &DynamicImage) -> Verdict {
         let t = &self.thresholds;
