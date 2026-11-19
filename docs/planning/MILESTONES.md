@@ -94,3 +94,54 @@ Added by the owner after M9. v1.0 (M9-T03) waits until these are in. Order matte
   Private room joined with an invite link/code (up to 8 people). Players show a display name (signed-in name, or a nickname for guests). The lobby stays open between games: after a game ends, the host starts the next one without anyone leaving. The host can remove people. Strokes travel as stroke data (not pixels) and are redrawn by the same brush engine on every screen. Nothing is stored after the room closes unless a player saves their own drawing. Two modes, chosen when the lobby is set up (and changeable between games):
   - **Competition.** Setup: number of rounds and the time limit per round (plus category and difficulty for the reference). Each round, every player gets the same reference and draws on their own canvas; others' canvases stay hidden during the round so nobody copies. When time runs out, all canvases lock and are graded. Then the drawings are revealed one at a time with who made them; players can 👍 or 👎 each one (for fun, it doesn't decide anything). The round winner is the highest grader score. Game winner: the highest total score over all rounds (tie-break: most round wins). A scoreboard shows between rounds, and "Play again" starts a new game in the same lobby.
   - **Free draw.** Everyone draws together on one shared canvas and sees each other's strokes live as they draw, with name-tagged cursors. A reference is optional: any player can show one (from the site's references) beside the canvas or remove it. Each player gets their own layer, so undo only affects your own strokes. No scoring; anyone can save the canvas as an image.
+
+## M11 — Drawing tools (requested 2026-11-19)
+Procreate / Photoshop-style tools. Groups 1 and 2 first (owner's choice).
+
+**Group 1: Everyday tools**
+- **M11-T01** Eyedropper `web`
+  Pick a colour from the canvas: an eyedropper tool, Alt+click while drawing, or press-and-hold with a finger. Samples what you see (all visible layers).
+- **M11-T02** Fill / paint bucket (+ ColorDrop) `brush` `web`
+  Fill an area with the current colour, with tolerance and a small grow so fills tuck under anti-aliased lines; samples all visible layers or just the current one; drag a colour onto the canvas to fill (Procreate ColorDrop). Respects selections. Undoable.
+- **M11-T03** Stroke smoothing (StreamLine) `web`
+  A smoothing slider (0–100) that steadies wobbly strokes with a lazy-brush stabiliser; the smoothed line is what's recorded (grading, replay).
+- **M11-T04** QuickShape `web`
+  Draw a line, circle/ellipse, rectangle or polyline and hold at the end: it snaps to the clean shape, keeping brush and pressure.
+- **M11-T05** Colour panel `web`
+  Colour wheel / HSB square, recent colours, saved palettes (plus a few starter palettes), hex entry.
+- **M11-T06** Touch gestures `web`
+  Two-finger tap = undo, three-finger tap = redo (as in Procreate), alongside the existing pinch/rotate.
+
+**Group 2: Fixing proportions**
+- **M11-T07** Selections `brush` `web`
+  Rectangle, lasso and magic-wand selections (add/subtract), shown with marching ants; painting, fill and clear stay inside the selection; select all / deselect / invert.
+- **M11-T08** Transform `brush` `web`
+  Move, scale, rotate and flip the selection or the whole layer with handles; live preview; commit or cancel; undoable.
+- **M11-T09** Liquify `brush` `web`
+  A push (forward warp) brush to nudge parts of a layer into place, with size and strength; undoable as one step.
+
+**Group 3: Drawing guides**
+- **M11-T10** Drawing guides `web`
+  Grid, perspective guides (1/2/3 point) and symmetry (strokes mirrored live, vertical / horizontal / quadrant / radial).
+- **M11-T11** Ruler `web`
+  A movable ruler; strokes near it snap straight along its edge.
+
+**Group 4: Layers, advanced**
+- **M11-T12** Clipping masks `brush` `web`
+  Clip a layer to the one below (paint only inside it).
+- **M11-T13** Layer masks `brush` `web`
+  Hide parts of a layer without erasing (paint black/white on the mask).
+- **M11-T14** Layer groups `brush` `web`
+  Group layers; group visibility, opacity and blend.
+
+**Group 5: Adjustments**
+- **M11-T15** Adjustments and gradient `brush` `web`
+  Hue/saturation, brightness/contrast, Gaussian blur, recolour a layer; gradient fill (linear/radial).
+
+**Group 6: Files and brushes**
+- **M11-T16** Import a picture as a layer `web`
+  Bring an image from the device in as a new layer (stays in the browser).
+- **M11-T17** Layered export `web`
+  Export with layers (PSD) as well as PNG.
+- **M11-T18** Brush editor and pressure curve `brush` `web`
+  A simple brush studio (spacing, jitter, pressure → size/opacity) and a personal pen pressure curve.
