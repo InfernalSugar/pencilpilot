@@ -8,7 +8,8 @@
 //! ```
 //!
 //! Output columns: id, category, topic, decision, own topic, top styles, top
-//! topics, subject check (keep class vs the strongest reject class).
+//! topics, subject check (keep class vs the strongest reject class), franchise
+//! check (keep class vs the strongest franchise prompt).
 
 use std::path::Path;
 
@@ -62,8 +63,14 @@ fn main() {
                 s.p_keep, s.worst, s.p_worst, s.margin
             )
         });
+        let franchise = sorter.franchise(&e, cat, topic).map_or(String::new(), |s| {
+            format!(
+                "keep={:.3} {}={:.3} margin={}",
+                s.p_keep, s.worst, s.p_worst, s.margin
+            )
+        });
         println!(
-            "{id}\t{cat}\t{topic}\t{:?}\town={own:.3}\t{styles}\t{tops}\t{subject}",
+            "{id}\t{cat}\t{topic}\t{:?}\town={own:.3}\t{styles}\t{tops}\t{subject}\t{franchise}",
             sorter.decide(&e, cat, topic)
         );
     }

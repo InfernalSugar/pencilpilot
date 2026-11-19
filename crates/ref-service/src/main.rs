@@ -173,12 +173,7 @@ fn recheck_main(args: &[String]) {
     let data = data_dir();
     let topics = topics_path();
     let mut pool = load_pool(&data);
-    let purged = if apply {
-        purge_wrong_kind(&mut pool, &data.join("images"))
-    } else {
-        pool.remove_where(|r| !kind_allowed(&r.category, r.kind()))
-            .len()
-    };
+    let purged = purge_disallowed(&mut pool, &data.join("images"), apply);
     let sorter = load_sorter(&topics);
     let mut last = std::time::Instant::now();
     let rep = recheck::recheck(
@@ -198,8 +193,22 @@ fn recheck_main(args: &[String]) {
         println!("{id:<12} {from:<24} {change:?}  [{tags}]");
     }
     println!();
-    if purged > 0 {
-        println!("{purged} drawings removed from photo-only categories first");
+    if !purged.is_empty() {
+        println!("removed first (wrong kind for the category, banned or franchise words):");
+        for (r, why) in &purged {
+            println!(
+                "  {:<12} {:<24} {why:<28} [{}]",
+                r.id,
+                format!("{}/{}", r.category, r.topic),
+                r.tags
+                    .iter()
+                    .take(5)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        println!("{} removed first\n", purged.len());
     }
     rep.print();
     if apply {
@@ -258,10 +267,16 @@ async fn main() {
 
     let mut pool = load_pool(&data);
     info!(refs = pool.refs.len(), "loaded pool");
-    let purged = purge_wrong_kind(&mut pool, &data.join("images"));
-    if purged > 0 {
-        warn!(purged, "removed drawings from photo-only categories");
+    let purged = purge_disallowed(&mut pool, &data.join("images"), true);
+    if !purged.is_empty() {
+        let mut why: std::collections::BTreeMap<String, usize> = Default::default();
+        for (_, w) in &purged {
+            *why.entry(w.split(':').next().unwrap_or(w).to_string())
+                .or_default() += 1;
+        }
+        warn!(removed = purged.len(), reasons = ?why, "removed pictures the rules no longer allow");
     }
+    let purged = purged.len();
     // Pictures the sorter hasn't seen yet (e.g. from before ADR-0009): check
     // them once now. Takes ~0.1 s per picture; later starts skip them. After
     // a change to the sorting rules (prompts, cut-offs in topics.json) the
@@ -369,14 +384,50 @@ fn load_sources(data: &Path) -> Sources {
     s
 }
 
-/// Drop references whose image kind isn't allowed in their category (drawings
-/// in real-life/animals/environment) and delete their files. Returns how many.
-fn purge_wrong_kind(pool: &mut PoolState, images: &Path) -> usize {
-    let gone = pool.remove_where(|r| !kind_allowed(&r.category, r.kind()));
-    for r in &gone {
-        std::fs::remove_file(images.join(format!("{}.jpg", r.id))).ok();
+/// Why a picture already in the pool isn't allowed any more, if so: a kind
+/// its category doesn't take (drawings in real-life/animals/environment), or
+/// a banned or franchise word in its title or tags (ADR-0003).
+fn disallowed(r: &LiveRef) -> Option<String> {
+    if !kind_allowed(&r.category, r.kind()) {
+        return Some(format!("wrong_kind:{}", r.kind()));
     }
-    gone.len()
+    ref_filters::words::banned(&format!("{} {}", r.title, r.tags.join(", ")))
+}
+
+/// Drop the references [`disallowed`] rules out (with `apply`, also delete
+/// their files; their ids stay in `seen`, so they are never fetched again).
+/// Returns them with the reason.
+fn purge_disallowed(pool: &mut PoolState, images: &Path, apply: bool) -> Vec<(LiveRef, String)> {
+    let mut why = HashMap::new();
+    for r in pool.refs.values() {
+        if let Some(w) = disallowed(r) {
+            why.insert(r.id.clone(), w);
+        }
+    }
+    if why.is_empty() {
+        return Vec::new();
+    }
+    let gone = if apply {
+        pool.remove_where(|r| why.contains_key(&r.id))
+    } else {
+        let mut v: Vec<LiveRef> = pool
+            .refs
+            .values()
+            .filter(|r| why.contains_key(&r.id))
+            .cloned()
+            .collect();
+        v.sort_by(|a, b| a.id.cmp(&b.id));
+        v
+    };
+    gone.into_iter()
+        .map(|r| {
+            if apply {
+                std::fs::remove_file(images.join(format!("{}.jpg", r.id))).ok();
+            }
+            let w = why.remove(&r.id).unwrap_or_default();
+            (r, w)
+        })
+        .collect()
 }
 
 fn routes(app: Arc<App>) -> Router {
@@ -918,6 +969,89 @@ mod tests {
         assert_eq!(p.rejected.get("ai_generated"), Some(&1));
         assert!(p.is_seen("pixabay:3"));
         assert!(app.images().join(format!("{}.jpg", r.id)).exists());
+    }
+
+    #[test]
+    fn franchise_and_wrong_kind_pictures_are_purged() {
+        let mk = |id: &str, cat: &str, url: &str, tags: &[&str]| LiveRef {
+            id: id.into(),
+            source: "pixabay".into(),
+            source_id: 1,
+            category: cat.into(),
+            topic: "x".into(),
+            page_url: url.into(),
+            author: "a".into(),
+            author_url: String::new(),
+            license: "l".into(),
+            license_url: String::new(),
+            tags: tags.iter().map(|t| t.to_string()).collect(),
+            width: 1,
+            height: 1,
+            title: String::new(),
+            attribution: String::new(),
+            provider: String::new(),
+            kind: String::new(),
+            keypoints: vec![],
+            difficulty: 1.0,
+            tier: 1,
+            image_url: String::new(),
+            live: true,
+        };
+        let mut p = PoolState::default();
+        p.add(
+            mk(
+                "px-1",
+                "anime",
+                "https://pixabay.com/illustrations/a-1/",
+                &["naruto", "ninja"],
+            ),
+            None,
+        );
+        p.add(
+            mk(
+                "px-2",
+                "anime",
+                "https://pixabay.com/illustrations/a-2/",
+                &["girl", "anime"],
+            ),
+            None,
+        );
+        p.add(
+            mk(
+                "px-3",
+                "animals",
+                "https://pixabay.com/vectors/a-3/",
+                &["cat"],
+            ),
+            None,
+        );
+        p.add(
+            mk(
+                "px-4",
+                "anime",
+                "https://pixabay.com/illustrations/a-4/",
+                &["fan art", "girl"],
+            ),
+            None,
+        );
+        let dir = std::env::temp_dir();
+        let dry = purge_disallowed(&mut p, &dir, false);
+        assert_eq!(dry.len(), 3);
+        assert_eq!(p.refs.len(), 4, "dry run keeps everything");
+        let gone = purge_disallowed(&mut p, &dir, true);
+        let why: Vec<(&str, &str)> = gone
+            .iter()
+            .map(|(r, w)| (r.id.as_str(), w.as_str()))
+            .collect();
+        assert_eq!(
+            why,
+            [
+                ("px-1", "franchise:naruto"),
+                ("px-3", "wrong_kind:vector"),
+                ("px-4", "franchise:fan art")
+            ]
+        );
+        assert_eq!(p.refs.keys().collect::<Vec<_>>(), ["px-2"]);
     }
 
     #[tokio::test]

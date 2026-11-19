@@ -295,10 +295,11 @@ fn auto_reject(hit: &Value) -> Option<&'static str> {
         "mickey",
         "pikachu",
     ];
-    BANNED
-        .iter()
-        .any(|b| tags.contains(b))
-        .then_some("banned tag (AI / NSFW / franchise)")
+    if BANNED.iter().any(|b| tags.contains(b)) {
+        return Some("banned tag (AI / NSFW / franchise)");
+    }
+    // the shared lists: franchise names, brands, unsafe words (ADR-0003)
+    ref_filters::words::banned(&tags).map(|_| "banned word or franchise name")
 }
 
 fn search(key: &str, query: &str, kind: &str, page: u32) -> Value {
@@ -705,6 +706,14 @@ mod tests {
         assert!(auto_reject(&hit(false, false, false, "cat")).is_some());
         assert!(auto_reject(&hit(false, true, true, "cat")).is_some());
         assert!(auto_reject(&hit(false, true, false, "anime, pikachu")).is_some());
+        assert_eq!(
+            auto_reject(&hit(false, true, false, "anime, gaara, ninja")),
+            Some("banned word or franchise name")
+        );
+        assert_eq!(
+            auto_reject(&hit(false, true, false, "doraemon, cartoon")),
+            Some("banned word or franchise name")
+        );
         assert!(
             auto_reject(&json!({"isGRated": true, "tags": "cat"})).is_some(),
             "unknown AI flag is rejected"

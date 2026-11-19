@@ -36,7 +36,7 @@ use serde_json::Value;
 
 /// Bump when the decision logic changes, so pools re-check every picture
 /// (the prompts and thresholds are part of [`SortSpec::fingerprint`] anyway).
-pub const RULES_VERSION: u32 = 2;
+pub const RULES_VERSION: u32 = 3;
 
 /// Cut-offs (camelCase in topics.json).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -100,6 +100,25 @@ struct SortingSpec {
     categories: BTreeMap<String, CategorySpec>,
     #[serde(default)]
     subject: Option<SubjectRaw>,
+    #[serde(default)]
+    franchise: Option<FranchiseSpec>,
+}
+
+/// The franchise / fan-art check (`_sorting.franchise`, ADR-0003): each
+/// prompt names a well-known franchise character and is its own class; each
+/// decoy describes a look-alike original ("an anime girl with long blue
+/// hair") and is its own class too. Reject if the strongest franchise class
+/// beats both the topic's keep class and every decoy by `margin`. Without
+/// decoys, every blue-haired anime girl would be Hatsune Miku.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct FranchiseSpec {
+    pub margin: f32,
+    /// categories checked (empty: every checked category)
+    #[serde(default)]
+    pub categories: Vec<String>,
+    pub prompts: Vec<String>,
+    #[serde(default)]
+    pub decoys: Vec<String>,
 }
 
 /// A kind of picture a topic wants: one clear subject, or one scene.
@@ -146,6 +165,8 @@ pub struct SortSpec {
     pub topics: Vec<TopicSpec>,
     /// `None`: no subject check
     pub subject: Option<SubjectSpec>,
+    /// `None`: no franchise check
+    pub franchise: Option<FranchiseSpec>,
 }
 
 fn strings(v: &Value) -> Vec<String> {
@@ -229,6 +250,7 @@ impl SortSpec {
                 .collect(),
             topics,
             subject,
+            franchise: s.franchise.filter(|f| !f.prompts.is_empty()),
         })
     }
 
@@ -249,6 +271,11 @@ impl SortSpec {
                     .flat_map(|t| t.prompts.iter().chain(&t.avoid)),
             )
             .chain(sub)
+            .chain(
+                self.franchise
+                    .iter()
+                    .flat_map(|f| f.prompts.iter().chain(&f.decoys)),
+            )
             .map(String::as_str)
     }
 
@@ -305,6 +332,10 @@ pub struct Sorter {
     classes: Vec<Class>,
     /// subject check reject classes (empty: no subject check)
     reject: Vec<(String, Vec<f32>)>,
+    /// franchise check classes, one per prompt (empty: no franchise check)
+    franchise: Vec<(String, Vec<f32>)>,
+    /// look-alike originals for the franchise check, one class each
+    decoys: Vec<Vec<f32>>,
 }
 
 fn dot(a: &[f32], b: &[f32]) -> f32 {
@@ -400,11 +431,26 @@ impl Sorter {
                 avoid,
             });
         }
+        let mut franchise = Vec::new();
+        let mut decoys = Vec::new();
+        if let Some(f) = &spec.franchise {
+            for p in &f.prompts {
+                franchise.push((
+                    format!("franchise:{p}"),
+                    embed_all(std::slice::from_ref(p))?,
+                ));
+            }
+            for p in &f.decoys {
+                decoys.push(embed_all(std::slice::from_ref(p))?);
+            }
+        }
         Ok(Self {
             spec,
             styles,
             classes,
             reject,
+            franchise,
+            decoys,
         })
     }
 
@@ -487,10 +533,49 @@ impl Sorter {
             } => (category.as_str(), topic.as_str()),
             _ => return d,
         };
-        match self.subject(img, c, t) {
+        if let Some(s) = self.subject(img, c, t)
+            && s.rejects()
+        {
+            return Decision::Reject { reason: s.worst };
+        }
+        match self.franchise(img, c, t) {
             Some(s) if s.rejects() => Decision::Reject { reason: s.worst },
             _ => d,
         }
+    }
+
+    /// The franchise check for a picture in `category`/`topic`: the topic's
+    /// keep class and the decoys against each franchise prompt. `p_keep` is
+    /// the strongest of the keep class and the decoys. `None` if there is no
+    /// franchise check, the category isn't checked or the topic isn't covered.
+    pub fn franchise(&self, img: &[f32], category: &str, topic: &str) -> Option<SubjectScore> {
+        let spec = self.spec.franchise.as_ref()?;
+        if !spec.categories.is_empty() && !spec.categories.iter().any(|c| c == category) {
+            return None;
+        }
+        let c = self.class(category, topic)?;
+        if self.franchise.is_empty() {
+            return None;
+        }
+        let n_safe = 1 + self.decoys.len();
+        let p = softmax100(
+            img,
+            std::iter::once(&c.keep)
+                .chain(&self.decoys)
+                .chain(self.franchise.iter().map(|f| &f.1)),
+        );
+        let p_keep = p[..n_safe].iter().copied().fold(0.0, f32::max);
+        let (i, p_worst) = p[n_safe..]
+            .iter()
+            .copied()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(&b.1))?;
+        Some(SubjectScore {
+            p_keep,
+            worst: self.franchise[i].0.clone(),
+            p_worst,
+            margin: spec.margin,
+        })
     }
 
     /// Checks 1 and 2 (style, topic).
@@ -547,8 +632,9 @@ mod tests {
     use serde_json::json;
 
     /// The fake model's vocabulary: one axis per word.
-    const AXES: [&str; 11] = [
+    const AXES: [&str; 13] = [
         "photo", "anime", "cartoon", "face", "scenery", "cat", "car", "one", "wide", "grid", "eye",
+        "pikachu", "girl",
     ];
 
     /// A fake text "model": each prompt is a one-hot vector by its first word.
@@ -821,5 +907,43 @@ mod tests {
                 reason: "not_one_subject:sheet".into()
             }
         );
+    }
+
+    #[test]
+    fn franchise_check_with_decoys() {
+        let v = json!({
+            "_sorting": {
+                "styles": {"anime": ["anime"], "photo": ["photo"]},
+                "categories": {
+                    "anime": {"group": "drawn", "styles": ["anime"]},
+                    "animals": {"group": "photo", "styles": ["photo"]}
+                },
+                "franchise": {"margin": 0.3, "categories": ["anime"], "prompts": ["pikachu"], "decoys": ["girl"]}
+            },
+            "anime": [{"id": "characters", "prompts": ["face"]}],
+            "animals": [{"id": "pets", "prompts": ["cat"]}]
+        });
+        let spec = SortSpec::from_topics_json(&v).unwrap();
+        assert_eq!(spec.prompts().filter(|p| *p == "girl").count(), 1);
+        let s = Sorter::build(spec, fake_embed).unwrap();
+        // anime style, looks like Pikachu
+        let pika = img([0.0, 0.3, 0.0, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(
+            s.decide(&pika, "anime", "characters"),
+            Decision::Reject {
+                reason: "franchise:pikachu".into()
+            }
+        );
+        // an original girl: the decoy wins
+        let girl = img([
+            0.0, 0.3, 0.0, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.05, 1.0,
+        ]);
+        assert!(!s.franchise(&girl, "anime", "characters").unwrap().rejects());
+        assert!(matches!(
+            s.decide(&girl, "anime", "characters"),
+            Decision::Keep { .. }
+        ));
+        // photo categories aren't checked
+        assert!(s.franchise(&pika, "animals", "pets").is_none());
     }
 }
