@@ -54,12 +54,29 @@ student's drawing (ADR-0002). The sorter never sees drawings.
   - Reject it if its own topic gets less than `rejectBelow` and nothing
     claims it confidently.
   - Otherwise keep it: the model must be sure before it moves a picture.
+- One drawable subject (added 2026-11-19, user rule: "Characters should
+  only be close-up pictures, or characters posing"). A reference must show
+  one clear subject, or one coherent scene for scenery-type topics. Not a
+  sheet of twenty small heads, an icon or sticker set, a pattern, text or a
+  logo. Checked on the topic the picture ends up in:
+  - Each topic has a kind: `"subject": "single"` (the default) or
+    `"scene"` (anime scenery and the environment topics).
+  - The keep class is the mean of the topic's own prompts and its kind's
+    prompts. It competes with the reject classes in `_sorting.subject`
+    (sheet, icons, pattern, text, logo) and with each prompt in the topic's
+    `avoid` list (for example "a drawing of a single eye" for Characters).
+  - Reject if the strongest of those beats the keep class by the kind's
+    margin: 0.35 for `single`, 0.45 for `scene`.
 - Tag rules and search queries stay as the cheap first guess. The model has
   the final say.
 
 **Where it runs.**
 
 - In the refill path, on every new picture after the plain-maths checks.
+- At startup, ref-service checks the pool pictures it hasn't checked yet.
+  The pool stores a fingerprint of the rules (prompts, cut-offs, rule
+  version) with its `sorted` set. When the rules change, the next start
+  re-checks the whole pool once.
 - `ref-service recheck [--dry-run]` re-checks the existing live pool. Stop the
   server first.
 - `ref-importer sort [--dry-run]` re-checks the committed manifests. Removed
@@ -84,5 +101,9 @@ student's drawing (ADR-0002). The sorter never sees drawings.
 - About 580 MiB more to download on the server, and about 350 MiB of memory.
   The text tower is dropped once the prompts are embedded.
 - Changing a topic's prompts changes how pictures are sorted. Re-run the dry
-  runs after editing them.
+  runs after editing them. The live pool is re-checked on the next restart.
+- The subject check was calibrated on 988 live pool pictures and 124
+  manifest pictures (see crates/ref-filters/README.md). On the pool it
+  rejected 27 pictures: 23 clearly right, 4 borderline, none clearly wrong.
+  It caught 20 of 23 hand-labelled sheets and sets.
 - The privacy page and README promises stay true: no AI looks at drawings.

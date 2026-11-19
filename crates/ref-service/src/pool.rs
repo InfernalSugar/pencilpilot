@@ -35,6 +35,10 @@ pub struct PoolState {
     /// ids the picture sorter (ADR-0009) has checked; the rest are checked at startup
     #[serde(default)]
     pub sorted: HashSet<String>,
+    /// the sorting rules `sorted` was checked under (`TopicCheck::rules`);
+    /// other rules mean every picture is checked again
+    #[serde(default)]
+    pub sorted_rules: Option<String>,
     /// slot key → (slot, request count)
     #[serde(skip)]
     pub demand: HashMap<String, (Slot, u32)>,

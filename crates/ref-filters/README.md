@@ -202,3 +202,27 @@ Calibration (2026-11-19) on 609 live pool pictures and 127 manifest pictures:
   Cartoon › Animals, and a building photo from Animals › Birds to
   Environment › City.
 * A few re-files are debatable, such as hair clip art moved to Characters.
+
+Subject check (2026-11-19, `_sorting.subject`): a reference must show one
+clear subject, or one coherent scene for scenery-type topics (topic
+`"subject": "scene"`). Reject classes (sheet, icons, pattern, text, logo) and
+each topic's `avoid` prompts compete with a keep class made of the topic's
+own prompts plus its kind's prompts. Calibrated on 988 live pool pictures
+(55 hand-labelled near the cut-off) and 124 manifest pictures:
+
+* Keeping the topic's prompts in the keep class matters. Generic "one
+  subject" prompts alone lose to "a set of icons" on most single cartoon
+  pictures (300+ false rejects).
+* Margin 0.35 for `single`, 0.45 for `scene`: wide scenes have repeated
+  motifs (stars, windows) that look a bit like a pattern.
+* Pool: 27 rejected; 23 were clearly right, 4 borderline (a row of 3
+  lollipops, a row of sushi, a cat on a leaf pattern, a group of 6 girls),
+  none clearly wrong. 20 of the 23 hand-labelled sheets/sets were caught; a
+  2×3 cat sheet, a set of stamps and city skylines with captions slipped
+  through.
+* Manifests: 9 rejected, 7 right, 1 borderline, 1 wrong (a cartoon man
+  holding a chart, as "logo"). Tighter logo prompts fixed that one but
+  rejected three good pool pictures, so they stayed.
+* A plain-maths "count similar blobs on a plain background" heuristic was
+  tried and dropped: line drawings and faces split into many blobs, so it
+  flagged good pictures as often as it found missed sheets.

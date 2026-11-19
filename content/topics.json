@@ -25,8 +25,8 @@
 				"ninja illustration"
 			],
 			"prompts": [
-				"an anime illustration of a warrior fighting with a sword",
-				"an anime action scene with a dynamic fighting pose",
+				"one anime warrior fighting with a sword",
+				"an anime character in a dynamic action pose",
 				"a manga drawing of a samurai or ninja in battle"
 			]
 		},
@@ -46,9 +46,9 @@
 				"cute anime"
 			],
 			"prompts": [
-				"a cute chibi anime character with a big head and a tiny body",
-				"a kawaii chibi drawing",
-				"an adorable little chibi mascot"
+				"one cute chibi anime character with a big head and a tiny body",
+				"a kawaii chibi girl or boy",
+				"a little chibi person in a cute pose"
 			]
 		},
 		{
@@ -75,7 +75,8 @@
 				"an anime landscape scene",
 				"an anime background painting of a town or a sky",
 				"anime scenery of nature, buildings and clouds"
-			]
+			],
+			"subject": "scene"
 		},
 		{
 			"id": "full-body",
@@ -96,9 +97,13 @@
 				"manga character pose"
 			],
 			"prompts": [
-				"a full-body anime character standing, drawn from head to toe",
-				"an anime illustration of a whole character in a pose",
-				"a manga drawing of a full figure walking or dancing"
+				"one anime character posing, full body from head to toe",
+				"a full-body anime illustration of a single character standing",
+				"a manga drawing of one whole figure walking or dancing"
+			],
+			"avoid": [
+				"a tiny figure far away in a big landscape",
+				"a drawing of a single eye"
 			]
 		},
 		{
@@ -123,9 +128,14 @@
 				"anime portrait"
 			],
 			"prompts": [
-				"an anime portrait of a character's face",
-				"a close-up anime drawing of a character's head and shoulders",
-				"a manga character portrait with an expression"
+				"a close-up portrait of one anime character's face",
+				"an anime drawing of one character's head and shoulders",
+				"a manga portrait of a single character with an expression"
+			],
+			"avoid": [
+				"a drawing of a single eye",
+				"a hairstyle or a wig with no face",
+				"a tiny figure far away in a big landscape"
 			]
 		}
 	],
@@ -264,9 +274,13 @@
 				"elderly portrait"
 			],
 			"prompts": [
-				"a portrait photo of a person",
-				"a photo of a man or a woman",
-				"a photo of a person sitting or standing"
+				"a portrait photo of one person",
+				"a close-up photo of a person's face",
+				"a photo of one man or woman posing",
+				"a full-body photo of a person standing or sitting"
+			],
+			"avoid": [
+				"a crowd of many small people far away"
 			]
 		}
 	],
@@ -443,7 +457,8 @@
 				"a photo of a cafe or a kitchen interior",
 				"a photo of a staircase",
 				"a photo of a library inside"
-			]
+			],
+			"subject": "scene"
 		},
 		{
 			"id": "city",
@@ -470,7 +485,8 @@
 				"a photo of buildings and architecture",
 				"a photo of a bridge",
 				"a photo of an old town"
-			]
+			],
+			"subject": "scene"
 		},
 		{
 			"id": "plants",
@@ -496,7 +512,8 @@
 				"a photo of a flower",
 				"a close-up photo of leaves",
 				"a photo of a plant"
-			]
+			],
+			"subject": "scene"
 		},
 		{
 			"id": "skies-water",
@@ -524,7 +541,8 @@
 				"a photo of the sea and waves",
 				"a photo of a lake or a river",
 				"a photo of a waterfall"
-			]
+			],
+			"subject": "scene"
 		},
 		{
 			"id": "landscapes",
@@ -550,7 +568,8 @@
 				"a photo of rolling hills",
 				"a photo of a field",
 				"a photo of a valley"
-			]
+			],
+			"subject": "scene"
 		}
 	],
 	"cartoon": [
@@ -575,7 +594,7 @@
 				"cartoon bird"
 			],
 			"prompts": [
-				"a cartoon drawing of an animal",
+				"a cartoon drawing of one animal",
 				"a cartoon cat or a cartoon dog",
 				"a cute cartoon bird, bear or fox"
 			]
@@ -600,7 +619,7 @@
 				"cartoon fruit"
 			],
 			"prompts": [
-				"a cartoon drawing of an object",
+				"a cartoon drawing of one object",
 				"a cartoon drawing of food or fruit",
 				"a cartoon toy, house or car"
 			]
@@ -627,9 +646,13 @@
 				"cartoon monster"
 			],
 			"prompts": [
-				"a cartoon character",
-				"a cartoon drawing of a boy, a girl or a grown-up",
+				"one cartoon person posing",
+				"a cartoon drawing of one boy, girl or grown-up",
+				"a close-up of a cartoon person's face",
 				"a cartoon monster or creature"
+			],
+			"avoid": [
+				"a tiny figure far away in a big landscape"
 			]
 		}
 	],
@@ -684,7 +707,7 @@
 		}
 	],
 	"_sorting": {
-		"_comment": "Picture sorter (ADR-0009): a local CLIP model matches each reference picture against these prompts and the topics' `prompts`. Used only to sort reference pictures, never to grade or critique drawings. A topic is the mean of its prompts. Style: reject if the category's allowed styles get less than minStyle. Topic: compared with every topic of every category in the same group; re-file if the best beats the own topic by margin and has at least minBest, reject if the own topic has less than rejectBelow, otherwise keep. Categories not listed here (fundamentals) are not checked.",
+		"_comment": "Picture sorter (ADR-0009): a local CLIP model matches each reference picture against these prompts and the topics' `prompts`. Used only to sort reference pictures, never to grade or critique drawings. A topic is the mean of its prompts. Style: reject if the category's allowed styles get less than minStyle. Topic: compared with every topic of every category in the same group; re-file if the best beats the own topic by margin and has at least minBest, reject if the own topic has less than rejectBelow, otherwise keep. Subject: see `subject`. Categories not listed here (fundamentals) are not checked. Changing anything here makes ref-service re-check its whole pool once on the next start.",
 		"margin": 0.25,
 		"minBest": 0.5,
 		"rejectBelow": 0.05,
@@ -744,6 +767,53 @@
 					"anime",
 					"cartoon",
 					"drawing"
+				]
+			}
+		},
+		"subject": {
+			"_comment": "One drawable subject: a reference must show one clear subject (topic \"subject\": \"single\", the default) or one coherent scene (\"scene\"), not a sheet, grid, icon set, pattern, text or logo. Checked on the topic a picture ends up in. Keep class = mean of the topic's prompts and its kind's prompts; it competes with every `reject` class and every prompt in the topic's `avoid` list. Reject if the strongest of those beats the keep class by the kind's margin (default `margin`). Calibrated on the live pool, 2026-11-19.",
+			"margin": 0.35,
+			"kinds": {
+				"single": {
+					"prompts": [
+						"a picture of one subject",
+						"a single character or object",
+						"one figure on its own"
+					]
+				},
+				"scene": {
+					"prompts": [
+						"a picture of one scene",
+						"a wide view of a landscape, a sky or a town",
+						"a background painting of a place"
+					],
+					"margin": 0.45
+				}
+			},
+			"reject": {
+				"sheet": [
+					"a sheet of many small drawings arranged in a grid",
+					"the same character drawn many times with different expressions",
+					"a collection of many different hairstyles",
+					"a character sheet with many small figures"
+				],
+				"icons": [
+					"a set of many small flat icons",
+					"a sticker sheet with many stickers",
+					"a set of emoji faces"
+				],
+				"pattern": [
+					"a seamless repeating pattern",
+					"a wallpaper of many repeated small motifs"
+				],
+				"text": [
+					"a page of text",
+					"a poster with big letters",
+					"an infographic"
+				],
+				"logo": [
+					"a company logo",
+					"a graphic design template"
 				]
 			}
 		}

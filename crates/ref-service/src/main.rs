@@ -257,7 +257,9 @@ async fn main() {
         warn!(purged, "removed drawings from photo-only categories");
     }
     // Pictures the sorter hasn't seen yet (e.g. from before ADR-0009): check
-    // them once now. Takes ~0.1 s per picture; later starts skip them.
+    // them once now. Takes ~0.1 s per picture; later starts skip them. After
+    // a change to the sorting rules (prompts, cut-offs in topics.json) the
+    // whole pool is checked again once.
     let rep = recheck::recheck(
         &mut pool,
         &data.join("images"),
@@ -271,13 +273,17 @@ async fn main() {
         },
     );
     let changed = rep.changes.len();
-    if !rep.per_topic.is_empty() || purged > 0 {
+    if !rep.per_topic.is_empty() || purged > 0 || rep.rules_changed {
         let removed = rep
             .changes
             .iter()
             .filter(|c| matches!(c.2, recheck::Change::Removed { .. }))
             .count();
-        warn!(changed, removed, "sorted existing pictures (ADR-0009)");
+        let rules_changed = rep.rules_changed;
+        warn!(
+            changed,
+            removed, rules_changed, "sorted existing pictures (ADR-0009)"
+        );
         let text = serde_json::to_string(&pool).expect("pool serialises");
         std::fs::write(data.join("pool.json.tmp"), text).expect("write pool");
         std::fs::rename(data.join("pool.json.tmp"), data.join("pool.json")).expect("save pool");

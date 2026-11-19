@@ -26,6 +26,8 @@ pub struct Report {
     pub changes: Vec<(String, String, Change, String)>,
     /// pictures whose file is missing or unreadable (left alone)
     pub unreadable: Vec<String>,
+    /// the pool's pictures were sorted under other rules (or none), so all were checked
+    pub rules_changed: bool,
 }
 
 impl Report {
@@ -72,10 +74,12 @@ impl Report {
 }
 
 /// Check the pictures in `pool` (images in `images/<id>.jpg`): all of them,
-/// or with `only_unsorted` just those not in `pool.sorted` yet. With `apply`,
-/// re-file and remove (deleting the files of removed pictures) and remember
-/// the checked ones in `pool.sorted`. Unreadable pictures and model errors
-/// leave a picture alone.
+/// or with `only_unsorted` just those not in `pool.sorted` yet (all of them
+/// again if `pool.sorted_rules` isn't `check`'s current rules). With
+/// `apply`, re-file and remove (deleting the files of removed pictures) and
+/// remember the checked ones and the rules in `pool.sorted` and
+/// `pool.sorted_rules`. Unreadable pictures and model errors leave a picture
+/// alone.
 pub fn recheck(
     pool: &mut PoolState,
     images: &Path,
@@ -85,12 +89,23 @@ pub fn recheck(
     mut progress: impl FnMut(usize, usize),
 ) -> Report {
     let mut rep = Report::default();
+    // New sorting rules (prompts, cut-offs): what was checked under the old
+    // ones counts as unchecked, so a restart re-checks the whole pool once.
+    let rules = check.rules();
+    rep.rules_changed = rules.is_some() && pool.sorted_rules != rules;
+    let all = !only_unsorted || rep.rules_changed;
     let mut ids: Vec<String> = pool
         .refs
         .keys()
-        .filter(|id| !only_unsorted || !pool.sorted.contains(*id))
+        .filter(|id| all || !pool.sorted.contains(*id))
         .cloned()
         .collect();
+    if apply && all {
+        pool.sorted.clear();
+    }
+    if apply && rules.is_some() {
+        pool.sorted_rules = rules;
+    }
     ids.sort();
     let mut remove = Vec::new();
     for (i, id) in ids.iter().enumerate() {
@@ -235,6 +250,61 @@ mod tests {
         assert!(p2.sorted.is_empty());
         std::fs::remove_dir_all(dir).ok();
         std::fs::remove_dir_all(dir2).ok();
+    }
+
+    /// Keeps everything, under rules with the given id.
+    struct KeepUnder(&'static str);
+
+    impl TopicCheck for KeepUnder {
+        fn check(&self, _: &DynamicImage, _: &str, _: &str) -> Result<Decision, String> {
+            Ok(Decision::Keep { p: 0.9 })
+        }
+
+        fn rules(&self) -> Option<String> {
+            Some(self.0.into())
+        }
+    }
+
+    #[test]
+    fn new_rules_recheck_everything_once() {
+        let (mut p, dir) = setup("rules");
+        // a pool sorted before rules were remembered (or under older ones)
+        p.sorted.extend(["a".to_string(), "b".to_string()]);
+        let v1 = KeepUnder("v1");
+        let dry = recheck(&mut p, &dir, &v1, false, true, |_, _| {});
+        assert!(dry.rules_changed);
+        assert_eq!(
+            dry.per_topic["anime/characters"][0], 3,
+            "all, not just unsorted"
+        );
+        assert_eq!(p.sorted_rules, None, "dry run changes nothing");
+
+        let rep = recheck(&mut p, &dir, &v1, true, true, |_, _| {});
+        assert!(rep.rules_changed);
+        assert_eq!(rep.per_topic["anime/characters"][0], 3);
+        assert_eq!(p.sorted_rules.as_deref(), Some("v1"));
+        assert!(p.sorted.contains("a") && !p.sorted.contains("nofile"));
+        // same rules on the next start: only the unreadable one again
+        let rep = recheck(&mut p, &dir, &v1, true, true, |_, _| {});
+        assert!(!rep.rules_changed);
+        assert_eq!(rep.per_topic["anime/characters"][0], 1);
+        // edited prompts: everything once more
+        let rep = recheck(&mut p, &dir, &KeepUnder("v2"), true, true, |_, _| {});
+        assert!(rep.rules_changed);
+        assert_eq!(rep.per_topic["anime/characters"][0], 3);
+        assert_eq!(p.sorted_rules.as_deref(), Some("v2"));
+        // no model: the rules and the sorted set stay as they are
+        recheck(
+            &mut p,
+            &dir,
+            &crate::sorting::NoTopicCheck,
+            true,
+            true,
+            |_, _| {},
+        );
+        assert_eq!(p.sorted_rules.as_deref(), Some("v2"));
+        assert!(p.sorted.contains("a"));
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
