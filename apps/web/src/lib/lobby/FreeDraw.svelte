@@ -15,6 +15,7 @@
 	import { DEFAULT_BRUSH, loadManifest, type BrushManifest } from '../paint/brushes';
 	import { onMount } from 'svelte';
 	import { pickRefs } from './refs';
+	import RefCredit from '../RefCredit.svelte';
 	import type { ClientMsg, LobbyView, ServerMsg, WireStroke } from './protocol';
 
 	let {
@@ -247,9 +248,7 @@
 					<RefViewer src={lobby.reference.imageUrl} alt="Reference: {lobby.reference.title}" />
 				{/key}
 				<p class="credit">
-					By <a href={lobby.reference.authorUrl} target="_blank" rel="noreferrer">
-						{lobby.reference.author}
-					</a> via Pixabay
+					<RefCredit reference={lobby.reference} license={false} />
 				</p>
 			{:else}
 				<p class="help">No picture: draw whatever you like.</p>

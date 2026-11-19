@@ -44,6 +44,10 @@ export interface LobbyRef {
 	tier?: number;
 	live?: boolean;
 	tags?: string[];
+	/** pixabay, pexels, openverse, artic or met (credit wording) */
+	source?: string;
+	provider?: string;
+	attribution?: string;
 }
 
 export type Phase =

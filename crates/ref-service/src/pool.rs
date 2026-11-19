@@ -28,6 +28,9 @@ pub struct PoolState {
     pub blocked: HashSet<String>,
     /// Pixabay ids already looked at (accepted or rejected): never re-download.
     pub seen: HashSet<u64>,
+    /// the same for the other sources, as `source:id` (`openverse:<uuid>`)
+    #[serde(default)]
+    pub seen_keys: HashSet<String>,
     pub phashes: Vec<(String, u64)>,
     /// reason code → number of pictures rejected for it (monitoring)
     #[serde(default)]
@@ -48,6 +51,26 @@ pub struct PoolState {
 }
 
 impl PoolState {
+    /// Has the search hit with this key (`pixabay:123`, `met:456`) been
+    /// looked at before?
+    pub fn is_seen(&self, key: &str) -> bool {
+        match key.strip_prefix("pixabay:").map(str::parse::<u64>) {
+            Some(Ok(id)) => self.seen.contains(&id),
+            _ => self.seen_keys.contains(key),
+        }
+    }
+
+    pub fn mark_seen(&mut self, key: &str) {
+        match key.strip_prefix("pixabay:").map(str::parse::<u64>) {
+            Some(Ok(id)) => {
+                self.seen.insert(id);
+            }
+            _ => {
+                self.seen_keys.insert(key.to_string());
+            }
+        }
+    }
+
     pub fn note_demand(&mut self, slot: &Slot) {
         self.demand
             .entry(slot.key())
@@ -277,6 +300,9 @@ mod tests {
             width: 1000,
             height: 800,
             title: String::new(),
+            attribution: String::new(),
+            provider: String::new(),
+            kind: String::new(),
             keypoints: vec![],
             difficulty: 20.0,
             tier,
@@ -349,7 +375,7 @@ mod tests {
         // serve "v" once so it is in the library too
         assert_eq!(p.take(&s, &[], &mut rng).unwrap().id, "v");
 
-        let gone = p.remove_where(|r| !crate::model::kind_allowed(&r.category, &r.page_url));
+        let gone = p.remove_where(|r| !crate::model::kind_allowed(&r.category, r.kind()));
         assert_eq!(
             gone.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
             ["v"]
@@ -361,6 +387,32 @@ mod tests {
             assert_eq!(p.take(&s, &[], &mut rng).unwrap().id, "p");
         }
         assert!(p.remove_where(|_| false).is_empty());
+    }
+
+    #[test]
+    fn seen_keys_per_source() {
+        let mut p = PoolState::default();
+        p.mark_seen("pixabay:12");
+        p.mark_seen("openverse:abc");
+        assert!(p.seen.contains(&12), "Pixabay ids stay in the old set");
+        assert!(p.is_seen("pixabay:12"));
+        assert!(p.is_seen("openverse:abc"));
+        assert!(!p.is_seen("met:12"));
+        assert!(!p.is_seen("pixabay:13"));
+    }
+
+    #[test]
+    fn near_duplicates_across_sources() {
+        let mut p = PoolState::default();
+        let mut a = r("px-1", "animals", "birds", 2);
+        a.source = "pixabay".into();
+        let mut b = r("ov-1", "animals", "birds", 2);
+        b.source = "openverse".into();
+        assert!(p.add(a, Some(0xABCD_0000_1234)));
+        assert!(
+            !p.add(b, Some(0xABCD_0000_1235)),
+            "the same picture from another source is a duplicate"
+        );
     }
 
     #[test]

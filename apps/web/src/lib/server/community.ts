@@ -17,6 +17,7 @@
 import { randomUUID } from 'node:crypto';
 import { COMMUNITY, REF_SERVICE_URL } from '$app/env/private';
 import { byId, type Reference } from '../references';
+import { SOURCES, defaultLicense, safeLink } from '../credit';
 import type { DB } from './db';
 import { RateLimiter } from './ratelimit';
 
@@ -63,12 +64,12 @@ export interface MySharedDrawing extends SharedDrawing {
 }
 
 const LIVE_IMAGE = /^\/refimg\/[A-Za-z0-9_-]{1,36}\.jpg$/;
-const PIXABAY = /^https:\/\/pixabay\.com\/[^\s"<>]{0,300}$/;
 
 /**
  * The reference a shared drawing was made from. Curated ones are looked up by
  * id; Endless (live) ones come from the browser, so only known-shape fields are
- * kept and their links must point at our image server and Pixabay.
+ * kept and their links must point at our image server and the picture
+ * sources (`safeLink`).
  */
 export function cleanReference(raw: unknown): Reference | null {
 	if (!raw || typeof raw !== 'object') return null;
@@ -79,11 +80,13 @@ export function cleanReference(raw: unknown): Reference | null {
 	if (r.live !== true) return null;
 	const str = (v: unknown, max: number) => (typeof v === 'string' && v.length <= max ? v : null);
 	const imageUrl = str(r.imageUrl, 60);
-	const pageUrl = str(r.pageUrl, 300);
-	const authorUrl = str(r.authorUrl, 300);
+	const pageUrl = safeLink(r.pageUrl);
+	const authorUrl = safeLink(r.authorUrl);
+	const source = SOURCES.find((s) => s === r.source) ?? 'pixabay';
+	const fallback = defaultLicense(source);
 	const category = str(r.category, 30);
 	if (!imageUrl || !LIVE_IMAGE.test(imageUrl)) return null;
-	if (!pageUrl || !PIXABAY.test(pageUrl) || !authorUrl || !PIXABAY.test(authorUrl)) return null;
+	if (!pageUrl) return null;
 	if (!category || !/^[a-z-]+$/.test(category) || !/^[A-Za-z0-9_-]{1,40}$/.test(r.id)) return null;
 	const tags = Array.isArray(r.tags)
 		? r.tags.filter((t): t is string => typeof t === 'string' && t.length <= 40).slice(0, 12)
@@ -91,14 +94,16 @@ export function cleanReference(raw: unknown): Reference | null {
 	const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
 	return {
 		id: r.id,
-		source: 'pixabay',
+		source,
 		sourceId: num(r.sourceId) ?? 0,
 		category,
 		pageUrl,
 		author: str(r.author, 80) ?? 'Unknown',
 		authorUrl,
-		license: 'Pixabay Content License',
-		licenseUrl: 'https://pixabay.com/service/license-summary/',
+		license: str(r.license, 60) ?? fallback.license,
+		licenseUrl: safeLink(r.licenseUrl) || fallback.licenseUrl,
+		provider: str(r.provider, 80) ?? undefined,
+		attribution: str(r.attribution, 400) ?? undefined,
 		tags,
 		width: num(r.width) ?? 0,
 		height: num(r.height) ?? 0,

@@ -30,6 +30,7 @@
 	import { categories } from '#lib/categories.js';
 	import { categoryAverage, personalStreak } from '#lib/personal-daily.js';
 	import { sessionDrawing, timeLabel } from '#lib/timed.js';
+	import RefCredit from '#lib/RefCredit.svelte';
 
 	let sub = $state<Submission | null>(null);
 	let loaded = $state(false);
@@ -567,11 +568,7 @@
 			</p>
 		{:else if reference}
 			<p class="credit">
-				Reference by <a href={reference.authorUrl} target="_blank" rel="noreferrer">
-					{reference.author}
-				</a>
-				via <a href={reference.pageUrl} target="_blank" rel="noreferrer">Pixabay</a> ·
-				<a href={reference.licenseUrl} target="_blank" rel="noreferrer">{reference.license}</a> ·
+				<RefCredit {reference} lead="Reference by" /> ·
 				{time}, {sub.strokes} strokes
 			</p>
 		{/if}

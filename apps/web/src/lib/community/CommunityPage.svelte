@@ -4,6 +4,7 @@
 	import Button from '#lib/ui/Button.svelte';
 	import CommunityNav from './CommunityNav.svelte';
 	import { imageUrl, titleOf } from '#lib/references.js';
+	import RefCredit from '#lib/RefCredit.svelte';
 	import type { loadView } from '../server/community-pages';
 
 	let {
@@ -61,7 +62,7 @@
 					<h2>Reference</h2>
 					<img class="pic" src={imageUrl(ref)} alt="Reference: {titleOf(ref)}" />
 					<p class="credit">
-						By <a href={ref.authorUrl} target="_blank" rel="noreferrer">{ref.author}</a> via Pixabay
+						<RefCredit reference={ref} license={false} />
 					</p>
 				</Tile>
 				{#each [pair.a, pair.b] as d, i (d.id)}

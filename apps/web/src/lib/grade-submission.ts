@@ -2,6 +2,7 @@
  * Grade a submitted drawing and record it in the student's history. Shared by
  * the results page and the gesture-session summary.
  */
+import { gradeCategory } from './grade-category';
 import {
 	getFeedback,
 	gradeImages,
@@ -9,7 +10,6 @@ import {
 	toGray,
 	type Feedback,
 	type Grade,
-	type GradeCategory,
 	type MeasurementName
 } from './grader';
 import { recordAttempt, saveThumb } from './progress';
@@ -91,8 +91,8 @@ export async function gradeSubmission(sub: Submission): Promise<Graded> {
 	const mode = sub.mode ?? 'finished';
 	const refGray = toGray(refData.data);
 	const grade = await gradeImages(sub.width, sub.height, drawing, refGray, {
-		// Cartoons are graded like anime: clean outlines matter most.
-		category: (cat === 'cartoon' ? 'anime' : cat) as GradeCategory,
+		// Cartoons are graded like anime, master studies like real life.
+		category: gradeCategory(cat),
 		mode,
 		strokes: sub.strokeData ?? []
 	});
@@ -110,7 +110,7 @@ export async function tipsFor(
 	const cat = g.ref?.gradeAs ?? g.ref?.category ?? 'fundamentals';
 	const mode = sub.mode ?? 'finished';
 	const grade = await gradeImages(sub.width, sub.height, gray, g.refGray, {
-		category: (cat === 'cartoon' ? 'anime' : cat) as GradeCategory,
+		category: gradeCategory(cat),
 		mode,
 		strokes
 	});
