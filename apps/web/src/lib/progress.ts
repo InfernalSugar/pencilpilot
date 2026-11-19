@@ -18,6 +18,8 @@ export interface Attempt {
 	fixes?: string[];
 	/** 0–1 per skill: placement, outline, silhouette, tone, line_confidence */
 	skills?: Record<string, number>;
+	/** seconds, for timed drawings (absent = no time limit) */
+	timeLimit?: number;
 }
 
 const KEY = 'pp.attempts';

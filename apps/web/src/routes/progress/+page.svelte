@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { timeLabel } from '#lib/timed.js';
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
 	import Tile from '#lib/ui/Tile.svelte';
@@ -48,15 +49,21 @@
 		return () => window.removeEventListener(SYNCED, load);
 	});
 
-	const avg30 = $derived(averageScore(history, 30));
-	const best = $derived(bestScore(history));
-	const streak = $derived(streakDays(history));
-	const series = $derived(
-		dailyScores(history, range === 'week' ? 7 : range === 'month' ? 30 : null)
+	/** timed drawings are compared with others of the same time limit ('all' = everything) */
+	let timeFilter = $state<'all' | number>('all');
+	const limitsUsed = $derived(
+		[...new Set(history.map((a) => a.timeLimit ?? 0))].sort((a, b) => a - b)
 	);
-	const skills = $derived(skillAverages(history));
-	const patterns = $derived(recurringMistakes(history, 10, 3));
-	const recent = $derived([...history].reverse().slice(0, 10));
+	const shown = $derived(
+		timeFilter === 'all' ? history : history.filter((a) => (a.timeLimit ?? 0) === timeFilter)
+	);
+	const avg30 = $derived(averageScore(shown, 30));
+	const best = $derived(bestScore(shown));
+	const streak = $derived(streakDays(history));
+	const series = $derived(dailyScores(shown, range === 'week' ? 7 : range === 'month' ? 30 : null));
+	const skills = $derived(skillAverages(shown));
+	const patterns = $derived(recurringMistakes(shown, 10, 3));
+	const recent = $derived([...shown].reverse().slice(0, 10));
 
 	const AXES = [
 		{ key: 'outline', label: 'Outlines' },
@@ -102,6 +109,28 @@
 		<span class="pp-eyebrow">Your practice</span>
 		<h1>Progress</h1>
 	</div>
+	{#if limitsUsed.length > 1}
+		<div class="time-filter" role="radiogroup" aria-label="Time limit">
+			<button
+				type="button"
+				role="radio"
+				aria-checked={timeFilter === 'all'}
+				onclick={() => (timeFilter = 'all')}
+			>
+				All drawings
+			</button>
+			{#each limitsUsed as t (t)}
+				<button
+					type="button"
+					role="radio"
+					aria-checked={timeFilter === t}
+					onclick={() => (timeFilter = t)}
+				>
+					{t ? timeLabel(t) : 'No time limit'}
+				</button>
+			{/each}
+		</div>
+	{/if}
 
 	{#if loaded && !history.length && !drills.length}
 		<div class="pp-bento">
@@ -281,6 +310,26 @@
 </div>
 
 <style>
+	.time-filter {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
+		margin-bottom: var(--pp-gap);
+	}
+	.time-filter button {
+		min-height: 40px;
+		padding: 6px 16px;
+		border: 0;
+		border-radius: 999px;
+		background: var(--pp-surface);
+		color: var(--pp-ink);
+		font: 600 14px var(--pp-font-body);
+		cursor: pointer;
+	}
+	.time-filter button[aria-checked='true'] {
+		background: var(--pp-ink);
+		color: #fff;
+	}
 	.top {
 		margin-bottom: 16px;
 	}
