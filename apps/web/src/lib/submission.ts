@@ -1,5 +1,5 @@
 import type { Stroke } from './paint/strokes';
-import type { Reference } from './references';
+import type { Reference, TraceTransform } from './references';
 
 /** The last submitted drawing, handed from /draw to /results for this browser tab. */
 export interface Submission {
@@ -22,6 +22,10 @@ export interface Submission {
 	brushes: string[];
 	/** raw pen input, for the grader's line-confidence metrics */
 	strokeData: Stroke[];
+	/** drawn with a tracing picture showing: tips only, never scored or counted */
+	traced?: boolean;
+	/** how the tracing picture was placed, so the comparison matches what was traced */
+	trace?: { source: 'reference' | 'own'; transform: TraceTransform; ownUrl?: string };
 }
 
 const KEY = 'pp.lastSubmission';

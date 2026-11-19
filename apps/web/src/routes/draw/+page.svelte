@@ -9,6 +9,7 @@
 	import LayersPanel from '#lib/paint/LayersPanel.svelte';
 	import CanvasSizePicker from '#lib/paint/CanvasSizePicker.svelte';
 	import RefViewer from '#lib/paint/RefViewer.svelte';
+	import TracePanel, { TRACE_DEFAULTS, type TraceState } from '#lib/paint/TracePanel.svelte';
 	import { savedSize, saveSize, type CanvasSize } from '#lib/paint/canvas-size.js';
 	import BrushPicker from '#lib/paint/BrushPicker.svelte';
 	import { DEFAULT_BRUSH, loadManifest, type BrushManifest } from '#lib/paint/brushes.js';
@@ -35,7 +36,26 @@
 	};
 	let reference = $state<Reference | undefined>(byId(page.url.searchParams.get('ref')));
 	let refLoading = $state(false);
-	let peek = $state(false);
+	let tracing = $state(false);
+	let trace = $state<TraceState>({ ...TRACE_DEFAULTS });
+	/** a stroke was made while the tracing picture showed: tips only, no score */
+	let traced = $state(false);
+	const traceSrc = $derived(
+		!tracing ? null : trace.source === 'own' ? trace.ownUrl : reference ? imageUrl(reference) : null
+	);
+	let strokesSeen = 0;
+	$effect(() => {
+		const n = status.strokes;
+		if (status.blank)
+			traced = false; // a fresh start
+		else if (n > strokesSeen && traceSrc) traced = true;
+		strokesSeen = n;
+	});
+	function toggleTracing() {
+		tracing = !tracing;
+		if (tracing && !reference) trace = { ...trace, source: 'own' };
+		if (!tracing) trace = { ...trace, adjusting: false };
+	}
 	/** phones/tablets fold the brush panel away so the canvas comes first */
 	let brushesOpen = $state(false);
 	let reportOpen = $state(false);
@@ -58,7 +78,7 @@
 	async function loadReference(skip?: string) {
 		if (!category) return;
 		refLoading = true;
-		peek = false;
+		if (trace.source === 'reference') trace = { ...trace, x: 0, y: 0, scale: 1, rotate: 0 };
 		reported = false;
 		reportOpen = false;
 		const avoid = [...recentRefs(), ...(skip ? [skip] : [])];
@@ -232,7 +252,15 @@
 			strokes: d.strokes.length,
 			points: d.strokes.reduce((n, s) => n + s.points.length, 0),
 			brushes: [...new Set(d.strokes.map((s) => s.brushId))],
-			strokeData: d.strokes
+			strokeData: d.strokes,
+			traced,
+			trace: traced
+				? {
+						source: trace.source,
+						transform: { x: trace.x, y: trace.y, scale: trace.scale, rotate: trace.rotate },
+						ownUrl: trace.source === 'own' ? (trace.ownUrl ?? undefined) : undefined
+					}
+				: undefined
 		});
 		await goto('/results');
 	}
@@ -276,7 +304,9 @@
 				<span aria-label="Time spent">{clock}</span>
 			</button>
 			<CanvasSizePicker size={canvasSize} blank={status.blank} onpick={pickSize} />
-			<Button onclick={submit} disabled={status.blank}>Submit drawing →</Button>
+			<Button onclick={submit} disabled={status.blank}>
+				{traced ? 'Get tips →' : 'Submit drawing →'}
+			</Button>
 		</div>
 	</div>
 
@@ -431,7 +461,11 @@
 						{size}
 						{opacity}
 						{color}
-						overlaySrc={reference && peek ? imageUrl(reference) : null}
+						overlaySrc={traceSrc}
+						overlayOpacity={trace.opacity}
+						overlayTransform={trace}
+						adjustOverlay={trace.adjusting}
+						onoverlaymove={(dx, dy) => (trace = { ...trace, x: trace.x + dx, y: trace.y + dy })}
 						onchange={(s) => (status = s)}
 						onblocked={onBlocked}
 					/>
@@ -589,17 +623,15 @@
 					<span>Opacity <b>{Math.round(opacity * 100)}%</b></span>
 					<input type="range" min="0.05" max="1" step="0.05" bind:value={opacity} />
 				</label>
-				{#if reference}
-					<button
-						type="button"
-						class="tool"
-						aria-pressed={peek}
-						title="Show the reference faintly over your canvas"
-						onclick={() => (peek = !peek)}
-					>
-						Peek
-					</button>
-				{/if}
+				<button
+					type="button"
+					class="tool"
+					aria-pressed={tracing}
+					title="Show a picture faintly inside the canvas to trace over (no score)"
+					onclick={toggleTracing}
+				>
+					Trace
+				</button>
 				<div class="group swatches" role="radiogroup" aria-label="Colour">
 					{#each SWATCHES as c (c)}
 						<button
@@ -618,6 +650,9 @@
 					</label>
 				</div>
 			</div>
+			{#if tracing}
+				<TracePanel bind:trace hasReference={!!reference} onclose={toggleTracing} />
+			{/if}
 		</div>
 	</div>
 	{#if refFloating && reference}

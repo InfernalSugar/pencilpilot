@@ -7,7 +7,16 @@
 	import OverlayViewer, { type OverlayMode } from '#lib/results/OverlayViewer.svelte';
 	import ScoreReveal from '#lib/results/ScoreReveal.svelte';
 	import { loadSubmission, type Submission } from '#lib/submission.js';
-	import { byId, imageUrl, referencePixels, tierName, tierOf, titleOf } from '#lib/references.js';
+	import {
+		byId,
+		imageUrl,
+		NO_TRANSFORM,
+		placedPixels,
+		referencePixels,
+		tierName,
+		tierOf,
+		titleOf
+	} from '#lib/references.js';
 	import {
 		attempts,
 		recommendedTier,
@@ -40,6 +49,9 @@
 	let patterns = $state<Pattern[]>([]);
 	let votes = $state<Record<string, 1 | -1>>({});
 	let calSaved = $state(false);
+	/** traced drawings are compared with the picture exactly where it was placed */
+	let compareSrc = $state<string | null>(null);
+	const traced = $derived(!!sub?.traced);
 	let share = $state<{ state: 'idle' | 'busy' | 'done' | 'error'; message?: string }>({
 		state: 'idle'
 	});
@@ -137,18 +149,31 @@
 		sub = loadSubmission();
 		loaded = true;
 		const ref = sub?.reference ?? byId(sub?.referenceId);
-		if (!sub || !ref) return;
+		const own = sub?.trace?.source === 'own' ? sub.trace.ownUrl : undefined;
+		if (!sub || (!ref && !own)) return;
 		try {
+			const placed = sub.trace
+				? placedPixels(
+						own ?? imageUrl(ref!),
+						sub.width,
+						sub.height,
+						sub.trace.transform ?? NO_TRANSFORM
+					)
+				: null;
 			const [drawing, refData] = await Promise.all([
 				decodeGray(sub.png, sub.width, sub.height),
-				referencePixels(ref, sub.width, sub.height)
+				placed ? placed.then((p) => p.data) : referencePixels(ref!, sub.width, sub.height)
 			]);
+			if (placed) compareSrc = (await placed).url;
+			const cat = ref?.category ?? 'fundamentals';
 			grade = await gradeImages(sub.width, sub.height, drawing, toGray(refData.data), {
 				// Cartoons are graded like anime: clean outlines matter most.
-				category: (ref.category === 'cartoon' ? 'anime' : ref.category) as GradeCategory,
+				category: (cat === 'cartoon' ? 'anime' : cat) as GradeCategory,
 				strokes: sub.strokeData ?? []
 			});
-			fb = await getFeedback(grade, sub.at ?? 0, ref.category);
+			fb = await getFeedback(grade, sub.at ?? 0, ref?.category);
+			// Tracing is practice: tips, but no score, progress, streak or level-up.
+			if (sub.traced || !ref) return;
 			const tier = sub.tier ?? tierOf(ref);
 			const before = recommendedTier(ref.category);
 			if (!alreadyRecorded(sub.at)) {
@@ -242,7 +267,12 @@
 		<div class="pp-bento grid">
 			<Tile tone="ink">
 				<span class="pp-eyebrow on-ink">Your score</span>
-				{#if grade}
+				{#if traced}
+					<span class="big word">Traced</span>
+					<span class="note">
+						Tracing practice isn’t scored and doesn’t count toward your progress.
+					</span>
+				{:else if grade}
 					<ScoreReveal score={grade.score} />
 					<span class="note">{grade.passed ? 'Passed! Great match.' : 'out of 10'}</span>
 				{:else if reference && !gradeError}
@@ -258,9 +288,9 @@
 
 			<Tile span={2} rows={2} as="section" label="Compare">
 				<div id="compare">
-					{#if reference}
+					{#if compareSrc || reference}
 						<OverlayViewer
-							referenceSrc={imageUrl(reference)}
+							referenceSrc={compareSrc ?? imageUrl(reference!)}
 							drawingSrc={sub.png}
 							{grade}
 							bind:mode
@@ -406,7 +436,7 @@
 				{/each}
 			</div>
 		{/if}
-		{#if page.data.community && grade && reference && !grade.flags.includes('blank')}
+		{#if page.data.community && grade && reference && !traced && !grade.flags.includes('blank')}
 			<div class="share">
 				<Tile tone="lilac" as="section" label="Get a human opinion">
 					<span class="pp-eyebrow">Community · beta</span>
@@ -443,7 +473,7 @@
 				{time}, {sub.strokes} strokes
 			</p>
 		{/if}
-		{#if dev && grade && reference}
+		{#if dev && grade && reference && !traced}
 			<p class="credit">
 				<button type="button" class="chip" onclick={saveForCalibration} disabled={calSaved}>
 					{calSaved ? 'Saved for calibration ✓' : 'Save for calibration (dev)'}
@@ -505,6 +535,10 @@
 		width: 100%;
 		height: 100%;
 		object-fit: contain;
+	}
+	.big.word {
+		font-size: 56px;
+		letter-spacing: -2px;
 	}
 	.big {
 		font-family: var(--pp-font-display);
