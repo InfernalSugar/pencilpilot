@@ -102,6 +102,10 @@
 	import { StrokeLog, type Stroke } from './strokes';
 	import { recognise, resample } from './quickshape';
 	import type { PsdDoc, PsdGroup, PsdLayer } from './psd';
+	import { applyCurve } from './pressure';
+	import { customBrush, isCustom, onCustomBrushes } from './custom-brushes';
+	/** other players don't have "My brushes": they see the brush it's based on */
+	const sharedBrushId = (id: string) => (isCustom(id) ? (customBrush(id)?.base ?? id) : id);
 	import {
 		closestDirection,
 		gridLines,
@@ -276,9 +280,14 @@
 		};
 	});
 
+	// "My brushes" edited elsewhere (the brush editor): reload the current one
+	let brushVersion = $state(0);
+	$effect(() => onCustomBrushes(() => brushVersion++));
+
 	// Load the selected brush.
 	$effect(() => {
 		const id = brushId;
+		void (isCustom(id) && brushVersion);
 		if (!ready) return;
 		let cancelled = false;
 		loadBrush(id)
@@ -807,7 +816,11 @@
 			flushLive();
 			onlive?.({ type: 'cancel', k: liveK });
 			liveK++;
-			onlive?.({ type: 'begin', k: liveK, style: { brushId, color, size, opacity, eraser } });
+			onlive?.({
+				type: 'begin',
+				k: liveK,
+				style: { brushId: sharedBrushId(brushId), color, size, opacity, eraser }
+			});
 		}
 		if (!paint.beginStroke()) return;
 		const t = current.points.at(-1)?.t ?? 0;
@@ -1373,7 +1386,7 @@
 		const raw: RawPoint = {
 			x: cx,
 			y: cy,
-			p: e.pointerType === 'mouse' || !penPressure ? 0.5 : e.pressure,
+			p: e.pointerType === 'mouse' || !penPressure ? 0.5 : applyCurve(e.pressure),
 			tx: penPressure ? (e.tiltX || 0) / 90 : 0,
 			ty: penPressure ? (e.tiltY || 0) / 90 : 0,
 			time: e.timeStamp
@@ -1579,7 +1592,11 @@
 		maskStroke = paint.isEditingMask();
 		if (sendLive()) {
 			liveK++;
-			onlive?.({ type: 'begin', k: liveK, style: { brushId, color, size, opacity, eraser } });
+			onlive?.({
+				type: 'begin',
+				k: liveK,
+				style: { brushId: sharedBrushId(brushId), color, size, opacity, eraser }
+			});
 		}
 		feed(e);
 		schedule();
