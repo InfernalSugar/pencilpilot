@@ -156,7 +156,8 @@ export function recordGraded(sub: Submission, g: Graded): boolean {
 						)
 					),
 		...(sub.timeLimit ? { timeLimit: sub.timeLimit } : {}),
-		...(sub.mode === 'sketch' ? { mode: 'sketch' as const } : {})
+		...(sub.mode === 'sketch' ? { mode: 'sketch' as const } : {}),
+		...(sub.personal ? { personal: sub.personal } : {})
 	});
 	if (sub.at) saveThumb(sub.at, sub.png);
 	return true;

@@ -28,6 +28,8 @@ export interface Submission {
 	mode?: 'finished' | 'sketch';
 	/** the daily challenge day (YYYY-MM-DD) this drawing was for */
 	daily?: string;
+	/** the day of the student's own personal challenge this drawing was for */
+	personal?: string;
 	/** seconds, for timed drawings */
 	timeLimit?: number;
 	/** drawn with a tracing picture showing: tips only, never scored or counted */

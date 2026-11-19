@@ -92,7 +92,10 @@
 						{todayRef ? titleOf(todayRef) : 'A new picture every day'}
 					</h2>
 					<span class="note">The same picture for everyone. See how you compare.</span>
-					<Button href="/daily" variant="dark">Today’s challenge →</Button>
+					<div class="row-btns">
+						<Button href="/daily" variant="dark">Today’s challenge →</Button>
+						<Button href="/daily#yours" variant="outline">Your own challenge</Button>
+					</div>
 				</div>
 			</div>
 		</Tile>
@@ -258,6 +261,11 @@
 		color: var(--pp-muted);
 		font-weight: 600;
 		font-size: 13px;
+	}
+	.row-btns {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 8px;
 	}
 	.together {
 		margin-top: var(--pp-gap);
