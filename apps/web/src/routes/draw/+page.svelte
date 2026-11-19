@@ -475,7 +475,12 @@
 			points: d.strokes.reduce((n, s) => n + s.points.length, 0),
 			brushes: [...new Set(d.strokes.map((s) => s.brushId))],
 			strokeData: d.strokes,
-			layers: d.layers.map((l) => ({ id: l.id, opacity: l.opacity, blend: l.blend })),
+			layers: d.layers.map((l) => ({
+				id: l.id,
+				opacity: l.opacity,
+				blend: l.blend,
+				...(l.clip ? { clip: true } : {})
+			})),
 			traced,
 			trace: traced
 				? {

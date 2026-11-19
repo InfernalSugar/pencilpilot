@@ -498,7 +498,7 @@ impl Painter {
             return false;
         }
         let (lower, upper) = (&self.layers[upper_idx - 1], &self.layers[upper_idx]);
-        let (opacity, blend) = (upper.props.opacity, upper.props.blend);
+        let (opacity, blend, clipped) = (upper.props.opacity, upper.props.blend, upper.props.clip);
         let mut merged = Snapshot::new();
         for (key, src) in &upper.surface.tiles {
             let mut out = lower
@@ -509,7 +509,9 @@ impl Painter {
                 .unwrap_or_else(empty_tile);
             for (orow, srow) in out.iter_mut().zip(src.iter()) {
                 for (o, s) in orow.iter_mut().zip(srow.iter()) {
-                    *o = merge_pixel(*o, *s, opacity, blend);
+                    // a clipped layer only lands where the layer below has paint
+                    let k = if clipped { o[3] as f32 / 32768.0 } else { 1.0 };
+                    *o = merge_pixel(*o, *s, opacity * k, blend);
                 }
             }
             merged.insert(*key, Some(out));
@@ -1504,22 +1506,28 @@ impl Painter {
             if cx0 >= px1 || cy0 >= py1 {
                 continue; // tile entirely off-canvas
             }
+            // with clipping masks every layer matters (a hidden or empty base hides
+            // what's clipped to it); otherwise only visible layers with paint here
+            let clipping = self.layers.iter().any(|l| l.props.clip);
             let sources: Vec<TileSource<'_>> = self
                 .layers
                 .iter()
-                .filter(|l| l.props.visible && l.props.opacity > 0.0)
+                .filter(|l| clipping || (l.props.visible && l.props.opacity > 0.0))
                 .filter_map(|l| {
-                    l.surface.tiles.get(&(tx, ty)).map(|t| TileSource {
-                        tile: t,
+                    let tile = l.surface.tiles.get(&(tx, ty));
+                    (clipping || tile.is_some()).then(|| TileSource {
+                        tile: tile.map(|t| &**t),
                         opacity: l.props.opacity,
                         blend: l.props.blend,
+                        visible: l.props.visible && l.props.opacity > 0.0,
+                        clip: l.props.clip,
                     })
                 })
                 .collect();
             for y in cy0..py1 {
                 for x in cx0..px1 {
                     let idx = ((y * w + x) * 4) as usize;
-                    let px = if sources.is_empty() {
+                    let px = if sources.iter().all(|s| s.tile.is_none()) {
                         [255, 255, 255]
                     } else {
                         composite_pixel(&sources, (y - py0) as usize, (x - px0) as usize)
@@ -1616,7 +1624,7 @@ impl Painter {
             .map(|l| {
                 let p = &l.props;
                 format!(
-                    r#"{{"id":{},"name":{},"visible":{},"opacity":{},"blend":"{}","locked":{},"alphaLock":{},"empty":{}}}"#,
+                    r#"{{"id":{},"name":{},"visible":{},"opacity":{},"blend":"{}","locked":{},"alphaLock":{},"clip":{},"empty":{}}}"#,
                     l.id,
                     json_str(&p.name),
                     p.visible,
@@ -1624,6 +1632,7 @@ impl Painter {
                     p.blend.as_str(),
                     p.locked,
                     p.alpha_lock,
+                    p.clip,
                     l.is_empty()
                 )
             })
@@ -2469,6 +2478,56 @@ mod tests {
             .copies(0.0, 0.0),
             vec![(20.0, 0.0), (0.0, 20.0), (20.0, 20.0)]
         );
+    }
+
+    #[test]
+    fn clipping_masks_show_only_over_the_layer_below() {
+        let mut p = Painter::new(256, 128);
+        let b = pen();
+        line(&mut p, &b, 60.0); // base: a line at y 60
+        let top = p.add_layer("Colour");
+        let mut red = pen();
+        set_brush_rgb(&mut red, 220, 0, 0);
+        red.get_mut(BrushSetting::Radius).base_value = 4.0;
+        line(&mut p, &red, 60.0); // a fat red line over it
+        p.flush();
+        assert!(
+            px(&p, 100, 68)[0] > 200 && px(&p, 100, 68)[1] < 60,
+            "red spills past the base"
+        );
+        let mut c = props(&p, top);
+        c.clip = true;
+        p.set_layer_props(top, c.clone(), true);
+        p.flush();
+        assert!(
+            px(&p, 100, 68)[1] > 240,
+            "clipped: nothing outside the base line"
+        );
+        let on = px(&p, 100, 60);
+        assert!(on[0] > on[1] + 60, "red on the base line: {on:?}");
+        // hiding the base hides what's clipped to it
+        let base = p.layers()[0].id;
+        let mut hb = props(&p, base);
+        hb.visible = false;
+        p.set_layer_props(base, hb.clone(), true);
+        p.flush();
+        assert_eq!(dark_pixels(&p), 0);
+        assert!(px(&p, 100, 60)[1] > 240);
+        hb.visible = true;
+        p.set_layer_props(base, hb, true);
+        p.flush();
+        let image = p.rgba().to_vec();
+        // merging keeps it clipped
+        assert!(p.merge_down(top));
+        p.flush();
+        let diff = p
+            .rgba()
+            .iter()
+            .zip(&image)
+            .filter(|(a, b)| a.abs_diff(**b) > 3)
+            .count();
+        assert!(diff < 40, "merged picture differs in {diff} channels");
+        assert!(p.layers_json().contains(r#""clip":false"#));
     }
 
     #[test]

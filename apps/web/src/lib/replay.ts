@@ -15,6 +15,7 @@ export interface ReplayLayer {
 	id: number;
 	opacity: number;
 	blend: string;
+	clip?: boolean;
 }
 
 /** Pauses longer than this (ms) are shortened to it, so replays don't drag. */
@@ -102,7 +103,7 @@ export class Replayer {
 		this.#layers.forEach((l, i) => {
 			const id = i === 0 ? this.paint.activeLayer : this.paint.addLayer('');
 			this.#ids.set(l.id, id);
-			this.paint.setLayer(id, '', true, l.opacity, l.blend, false, false, false);
+			this.paint.setLayer(id, '', true, l.opacity, l.blend, false, false, !!l.clip, false);
 		});
 	}
 

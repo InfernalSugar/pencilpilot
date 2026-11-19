@@ -192,6 +192,16 @@
 				>
 					Alpha lock
 				</button>
+				<button
+					type="button"
+					class="chip"
+					aria-pressed={active.clip}
+					disabled={status.layers[0]?.id === active.id}
+					title="Clipping mask: only show where the layer below has paint"
+					onclick={() => controls?.setLayer(active.id, { clip: !active.clip })}
+				>
+					Clip to below
+				</button>
 			</div>
 		</div>
 	{/if}
@@ -200,6 +210,7 @@
 		{#each rows as l, i (l.id)}
 			<li
 				class:active={l.id === status.active}
+				class:clipped={l.clip}
 				class:drop={dropAt === i && dragging !== l.id}
 				draggable={renaming === null}
 				ondragstart={(e) => {
@@ -244,6 +255,16 @@
 						</svg>
 					{/if}
 				</button>
+				{#if l.clip}
+					<span
+						class="clip-mark"
+						title="Clipped to the layer below"
+						aria-label="Clipped to the layer below"
+						role="img"
+					>
+						↳
+					</span>
+				{/if}
 				<canvas
 					class="thumb"
 					width={TW}
@@ -490,6 +511,14 @@
 		font: 600 14px var(--pp-font-body);
 		background: var(--pp-surface);
 		color: var(--pp-ink);
+	}
+	li.clipped {
+		padding-left: 18px;
+	}
+	.clip-mark {
+		flex: none;
+		color: var(--pp-accent-strong);
+		font-weight: 800;
 	}
 	.badge {
 		flex: none;

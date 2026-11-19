@@ -11,6 +11,8 @@
 		blend: BlendMode;
 		locked: boolean;
 		alphaLock: boolean;
+		/** clipping mask: only shows where the layer below has paint */
+		clip: boolean;
 		empty: boolean;
 	}
 	export type LayerSettings = Omit<LayerInfo, 'id' | 'empty'>;
@@ -1577,8 +1579,8 @@
 	function settings(id: number): LayerSettings | null {
 		const l = layerList().find((x) => x.id === id);
 		if (!l) return null;
-		const { name, visible, opacity, blend, locked, alphaLock } = l;
-		return { name, visible, opacity, blend, locked, alphaLock };
+		const { name, visible, opacity, blend, locked, alphaLock, clip } = l;
+		return { name, visible, opacity, blend, locked, alphaLock, clip: !!clip };
 	}
 
 	function setRaw(id: number, s: LayerSettings, record: boolean) {
@@ -1590,6 +1592,7 @@
 			s.blend,
 			s.locked,
 			s.alphaLock,
+			s.clip,
 			record
 		);
 	}
@@ -1618,7 +1621,9 @@
 		const { id, before } = previewing;
 		previewing = null;
 		const b = before;
-		changed(paint.commitLayer(id, b.name, b.visible, b.opacity, b.blend, b.locked, b.alphaLock));
+		changed(
+			paint.commitLayer(id, b.name, b.visible, b.opacity, b.blend, b.locked, b.alphaLock, b.clip)
+		);
 	}
 
 	/** Straight-alpha preview of one layer. */
