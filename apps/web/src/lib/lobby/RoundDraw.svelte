@@ -4,8 +4,13 @@
 	import Button from '../ui/Button.svelte';
 	import PaintCanvas, { BLANK_STATUS, type CanvasStatus } from '../paint/PaintCanvas.svelte';
 	import RefViewer from '../paint/RefViewer.svelte';
-	import MiniToolbar from './MiniToolbar.svelte';
-	import { DEFAULT_BRUSH } from '../paint/brushes';
+	import Studio from '../paint/Studio.svelte';
+	import ToolRail from '../paint/ToolRail.svelte';
+	import Swatches from '../paint/Swatches.svelte';
+	import BrushPicker from '../paint/BrushPicker.svelte';
+	import ColorPanel from '../paint/ColorPanel.svelte';
+	import LayersPanel from '../paint/LayersPanel.svelte';
+	import { DEFAULT_BRUSH, loadManifest, type BrushManifest } from '../paint/brushes';
 	import { gradeImages, toGray, type GradeCategory } from '../grader';
 	import { referencePixels } from '../references';
 	import { clockOf } from '../timed';
@@ -16,13 +21,15 @@
 		lobby,
 		you,
 		send,
-		left
+		left,
+		reconnecting = false
 	}: {
 		lobby: LobbyView;
 		you: string;
 		send: (m: ClientMsg) => void;
 		/** ms left until a server time */
 		left: (t: number) => number;
+		reconnecting?: boolean;
 	} = $props();
 
 	let canvas: ReturnType<typeof PaintCanvas> | undefined = $state();
@@ -32,6 +39,12 @@
 	let size = $state(1);
 	let opacity = $state(1);
 	let eraser = $state(false);
+	let tool = $state<'brush' | 'picker' | 'fill'>('brush');
+	let tab = $state('layers');
+	let dockOpen = $state(false);
+	let manifest = $state<BrushManifest | null>(null);
+	const brushName = $derived(manifest?.brushes.find((b) => b.id === brushId)?.name ?? '…');
+	const activeLayerName = $derived(status.layers.find((l) => l.id === status.active)?.name ?? '');
 	let handedIn = $state(false);
 	let grading = $state(false);
 	let remaining = $state(0);
@@ -42,6 +55,7 @@
 	);
 
 	onMount(() => {
+		loadManifest().then((m) => (manifest = m));
 		const tick = () => (remaining = lobby.endsAt ? Math.max(0, left(lobby.endsAt)) : 0);
 		tick();
 		const id = setInterval(tick, 250);
@@ -73,9 +87,24 @@
 	}
 </script>
 
-<div class="round">
-	<div class="top">
-		<span class="pp-eyebrow">Round {lobby.round} of {lobby.settings.rounds}</span>
+<Studio
+	backHref="/lobby"
+	tabs={[
+		{ id: 'layers', label: 'Layers', meta: activeLayerName },
+		{ id: 'brushes', label: 'Brushes', meta: brushName },
+		{ id: 'colour', label: 'Colour' }
+	]}
+	bind:tab
+	bind:dockOpen
+>
+	{#snippet title()}
+		<span class="pp-eyebrow">
+			Lobby {lobby.code} · Competition · Round {lobby.round} of {lobby.settings
+				.rounds}{#if reconnecting}<span class="conn" role="status"> · Reconnecting…</span>{/if}
+		</span>
+		<h1>{lobby.reference?.title ?? 'Draw!'}</h1>
+	{/snippet}
+	{#snippet actions()}
 		<span
 			class="timer"
 			class:urgent={remaining <= 10_000}
@@ -84,111 +113,142 @@
 		>
 			{lobby.phase === 'collecting' ? 'Time’s up!' : clockOf(remaining / 1000)}
 		</span>
-	</div>
-	<div class="layout">
-		<div class="side">
-			{#if lobby.reference}
-				<Tile as="section" label="Reference">
-					<h2>{lobby.reference.title}</h2>
-					{#key lobby.reference.id}
-						<RefViewer src={lobby.reference.imageUrl} alt="Reference: {lobby.reference.title}" />
-					{/key}
-					<p class="credit">
-						By <a href={lobby.reference.authorUrl} target="_blank" rel="noreferrer">
-							{lobby.reference.author}
-						</a> via Pixabay
-					</p>
-				</Tile>
-			{/if}
-			<Tile as="section" label="Handed in">
-				<h2>
-					Handed in {lobby.submitted.length} / {lobby.players.filter((p) => p.connected).length}
-				</h2>
-				{#if waitingFor.length}
-					<p class="credit">Still drawing: {waitingFor.map((p) => p.name).join(', ')}</p>
-				{/if}
-				{#if !done}
-					<Button variant="dark" onclick={submitNow} disabled={status.blank}>I’m done →</Button>
-				{/if}
-			</Tile>
-		</div>
-		<div class="main">
-			<div class="canvas-tile">
-				{#key lobby.round}
-					<PaintCanvas
-						bind:this={canvas}
-						width={lobby.settings.width}
-						height={lobby.settings.height}
-						{brushId}
-						{eraser}
-						{size}
-						{opacity}
-						{color}
-						locked={done || lobby.phase === 'collecting'}
-						onchange={(s) => (status = s)}
-						maxHeight="70vh"
-					/>
-				{/key}
-				{#if done}
-					<div class="cover" role="status">
-						<b>{grading ? 'Grading…' : 'Handed in!'}</b>
-						<span>Waiting for the others. Nobody sees your drawing until the reveal.</span>
-					</div>
-				{/if}
-			</div>
-			<MiniToolbar
-				bind:brushId
-				bind:color
-				bind:size
-				bind:opacity
-				bind:eraser
-				canUndo={status.canUndo && !done}
-				onundo={() => canvas?.undo()}
-				onclear={() => canvas?.clear()}
+		<button
+			type="button"
+			class="act"
+			aria-label="Undo"
+			title="Undo"
+			disabled={!status.canUndo || done}
+			onclick={() => canvas?.undo()}
+		>
+			<svg viewBox="0 0 24 24" aria-hidden="true">
+				<path d="M9 14 4 9l5-5" /><path d="M4 9h11a5 5 0 0 1 0 10h-3" />
+			</svg>
+		</button>
+		<button
+			type="button"
+			class="act"
+			aria-label="Redo"
+			title="Redo"
+			disabled={!status.canRedo || done}
+			onclick={() => canvas?.redo()}
+		>
+			<svg viewBox="0 0 24 24" aria-hidden="true">
+				<path d="m15 14 5-5-5-5" /><path d="M20 9H9a5 5 0 0 0 0 10h3" />
+			</svg>
+		</button>
+		{#if !done}
+			<Button onclick={submitNow} disabled={status.blank}>I’m done →</Button>
+		{/if}
+	{/snippet}
+	{#snippet rail()}
+		<ToolRail
+			tools={['brush', 'eraser', 'picker', 'fill']}
+			bind:tool
+			bind:eraser
+			bind:size
+			bind:opacity
+		/>
+	{/snippet}
+	{#snippet options()}
+		<span class="brush-name">{brushName}</span>
+		<Swatches
+			bind:color
+			onmore={() => {
+				tab = 'colour';
+				dockOpen = true;
+			}}
+			moreOpen={tab === 'colour' && dockOpen}
+		/>
+		<button type="button" class="opt" disabled={done} onclick={() => canvas?.clear()}>
+			Clear layer
+		</button>
+	{/snippet}
+	{#snippet stage()}
+		{#key lobby.round}
+			<PaintCanvas
+				bind:this={canvas}
+				fill
+				width={lobby.settings.width}
+				height={lobby.settings.height}
+				{brushId}
+				{eraser}
+				{size}
+				{opacity}
+				{color}
+				{tool}
+				onpick={(c) => {
+					color = c;
+					eraser = false;
+					tool = 'brush';
+				}}
+				locked={done || lobby.phase === 'collecting'}
+				onchange={(s) => (status = s)}
 			/>
-		</div>
-	</div>
-</div>
+		{/key}
+		{#if done}
+			<div class="cover" role="status">
+				<b>{grading ? 'Grading…' : 'Handed in!'}</b>
+				<span>Waiting for the others. Nobody sees your drawing until the reveal.</span>
+			</div>
+		{/if}
+	{/snippet}
+	{#snippet dockTop()}
+		{#if lobby.reference}
+			<Tile as="section" label="Reference">
+				<h2>Reference</h2>
+				{#key lobby.reference.id}
+					<RefViewer src={lobby.reference.imageUrl} alt="Reference: {lobby.reference.title}" />
+				{/key}
+				<p class="credit">
+					By <a href={lobby.reference.authorUrl} target="_blank" rel="noreferrer">
+						{lobby.reference.author}
+					</a> via Pixabay
+				</p>
+			</Tile>
+		{/if}
+		<Tile as="section" label="Handed in">
+			<h2>
+				Handed in {lobby.submitted.length} / {lobby.players.filter((p) => p.connected).length}
+			</h2>
+			{#if waitingFor.length}
+				<p class="credit">Still drawing: {waitingFor.map((p) => p.name).join(', ')}</p>
+			{/if}
+		</Tile>
+	{/snippet}
+	{#snippet panel(t: string)}
+		{#if t === 'layers'}
+			<section aria-label="Layers">
+				<LayersPanel {status} controls={canvas} />
+			</section>
+		{:else if t === 'brushes'}
+			<section aria-label="Brushes">
+				{#if manifest}
+					<BrushPicker {manifest} bind:selected={brushId} />
+				{:else}
+					<p class="credit">Loading brushes…</p>
+				{/if}
+			</section>
+		{:else}
+			<ColorPanel bind:color onclose={() => (tab = 'layers')} />
+		{/if}
+	{/snippet}
+</Studio>
 
 <style>
-	.top {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 12px;
-		margin-bottom: 12px;
-	}
 	.timer {
-		min-width: 110px;
-		padding: 10px 18px;
-		border-radius: var(--pp-radius-btn);
+		min-width: 92px;
+		padding: 7px 14px;
+		border-radius: 12px;
 		background: var(--pp-yellow);
 		color: var(--pp-ink);
-		font: 700 24px var(--pp-font-display);
+		font: 700 18px var(--pp-font-display);
 		text-align: center;
 		font-variant-numeric: tabular-nums;
 	}
 	.timer.urgent {
 		background: var(--pp-accent-strong);
 		color: #fff;
-	}
-	.layout {
-		display: grid;
-		grid-template-columns: 320px minmax(0, 1fr);
-		gap: var(--pp-gap);
-		align-items: start;
-	}
-	@media (max-width: 960px) {
-		.layout {
-			grid-template-columns: minmax(0, 1fr);
-		}
-	}
-	.side,
-	.main {
-		display: flex;
-		flex-direction: column;
-		gap: var(--pp-gap);
-		min-width: 0;
 	}
 	h2 {
 		font-size: 18px;
@@ -198,11 +258,8 @@
 		font-size: 13px;
 		color: var(--pp-muted);
 	}
-	.canvas-tile {
-		position: relative;
-		border-radius: var(--pp-radius-tile);
-		overflow: hidden;
-		background: #fff;
+	.conn {
+		color: var(--pp-accent-ink);
 	}
 	.cover {
 		position: absolute;
@@ -219,5 +276,47 @@
 	}
 	.cover b {
 		font: 800 40px var(--pp-font-display);
+	}
+	.brush-name {
+		font: 700 15px var(--pp-font-display);
+		white-space: nowrap;
+	}
+	.opt {
+		height: 38px;
+		padding: 0 12px;
+		border: 0;
+		border-radius: 12px;
+		background: #2a2a30;
+		color: var(--pp-on-ink);
+		font: 600 14px var(--pp-font-body);
+		cursor: pointer;
+	}
+	.opt:disabled {
+		opacity: 0.35;
+	}
+	.act {
+		flex: none;
+		width: 40px;
+		height: 40px;
+		display: grid;
+		place-items: center;
+		border: 0;
+		border-radius: 12px;
+		background: var(--pp-ink);
+		color: #fff;
+		cursor: pointer;
+	}
+	.act:disabled {
+		opacity: 0.35;
+		cursor: not-allowed;
+	}
+	.act svg {
+		width: 20px;
+		height: 20px;
+		fill: none;
+		stroke: currentColor;
+		stroke-width: 2.3;
+		stroke-linecap: round;
+		stroke-linejoin: round;
 	}
 </style>
