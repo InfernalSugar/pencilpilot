@@ -45,6 +45,7 @@
 	import { fetchLiveReference, recentRefs, rememberRef, reportReference } from '#lib/live.js';
 	import { topicName, topicsFor } from '#lib/topics.js';
 	import { suggestTopic } from '#lib/progress.js';
+	import RefCredit from '#lib/RefCredit.svelte';
 
 	const category = categories.find((c) => c.id === page.url.searchParams.get('category'));
 	const filter = {
@@ -1344,14 +1345,7 @@
 					<p class="credit">Your own picture. It stays on this device and isn’t uploaded.</p>
 				{:else}
 					<p class="credit one-line">
-						By <a href={reference.authorUrl} target="_blank" rel="noreferrer">
-							{reference.author}
-						</a>
-						via
-						<a href={reference.pageUrl} target="_blank" rel="noreferrer">Pixabay</a> ·
-						<a href={reference.licenseUrl} target="_blank" rel="noreferrer">
-							{reference.license}
-						</a>
+						<RefCredit {reference} />
 						{#if reference.live}· <span class="badge-live">Endless</span>{/if}
 					</p>
 				{/if}

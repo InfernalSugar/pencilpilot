@@ -15,6 +15,8 @@
 	import { referencePixels } from '../references';
 	import { clockOf } from '../timed';
 	import { asReference } from './refs';
+	import RefCredit from '../RefCredit.svelte';
+	import { gradeCategory } from '../grade-category';
 	import type { ClientMsg, LobbyView } from './protocol';
 
 	let {
@@ -72,7 +74,7 @@
 			const ref = lobby.reference;
 			if (!d || status.blank || !ref) return send({ t: 'submit', png: null, score: null });
 			const refData = await referencePixels(asReference(ref), d.width, d.height);
-			const cat = ref.category === 'cartoon' ? 'anime' : ref.category;
+			const cat = gradeCategory(ref.category);
 			const g = await gradeImages(d.width, d.height, d.gray, toGray(refData.data), {
 				category: cat as GradeCategory,
 				strokes: d.strokes
@@ -201,9 +203,7 @@
 					<RefViewer src={lobby.reference.imageUrl} alt="Reference: {lobby.reference.title}" />
 				{/key}
 				<p class="credit">
-					By <a href={lobby.reference.authorUrl} target="_blank" rel="noreferrer">
-						{lobby.reference.author}
-					</a> via Pixabay
+					<RefCredit reference={lobby.reference} license={false} />
 				</p>
 			</Tile>
 		{/if}

@@ -9,6 +9,23 @@
 Reference image rules and the source allow-list are in [ADR-0003](adr/0003-reference-images.md).
 Each manifest entry needs: `id`, `category`, `source_url`, `author`, `licence`, `licence_url`, `approved`.
 
+### Where Endless (live) pictures come from
+
+| Source | Licences accepted | Credit on the site |
+|---|---|---|
+| Pixabay | Pixabay Content License | By *author* via Pixabay · licence |
+| Openverse | CC0, Public Domain Mark, CC BY (never NC, ND or SA) from an allow-list of museums, NASA, the US National Park Service, the Smithsonian and Wikimedia Commons (photos only); never Flickr or other open-upload sites | Openverse's attribution text · via *provider* · licence |
+| Art Institute of Chicago | public domain only (images CC0) | Artwork: *title*, *artist*, Art Institute of Chicago (public domain) |
+| The Met | public domain only (Open Access, CC0) | Artwork: *title*, *artist*, The Metropolitan Museum of Art (public domain) |
+
+Every live picture stores its source, author, author URL, page URL, licence, licence URL and
+provider (plus Openverse's attribution text), and every screen that shows a reference shows its
+credit. Pictures are downloaded to our server and re-encoded; they are never committed.
+
+**Pexels** is not used: Pexels paused new API key issuance (2026-11). It can be added for the
+photo categories when key issuance reopens (Pexels License, credit "Photo by *X* on Pexels").
+**Unsplash** is not used (user decision).
+
 Never commit API keys. Use `.env` locally (git-ignored) and GitHub Actions secrets in CI.
 
 ## Brushes and brush engine

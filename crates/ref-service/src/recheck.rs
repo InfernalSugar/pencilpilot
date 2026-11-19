@@ -134,7 +134,7 @@ pub fn recheck(
             Ok((c, t)) if c == r.category && t == r.topic => {
                 rep.per_topic.get_mut(&from).unwrap()[1] += 1;
             }
-            Ok((c, t)) if kind_allowed(&c, &r.page_url) => {
+            Ok((c, t)) if kind_allowed(&c, r.kind()) => {
                 let to = format!("{c}/{t}");
                 rep.per_topic.get_mut(&from).unwrap()[2] += 1;
                 rep.per_topic.entry(to.clone()).or_default()[3] += 1;
@@ -192,6 +192,9 @@ mod tests {
             width: 800,
             height: 600,
             title: String::new(),
+            attribution: String::new(),
+            provider: String::new(),
+            kind: String::new(),
             keypoints: vec![],
             difficulty: 20.0,
             tier: 2,

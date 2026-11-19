@@ -80,8 +80,11 @@
 		<Tile span={2}>
 			<h2>Reference pictures</h2>
 			<p>
-				References come from Pixabay under the Pixabay Content License and are credited on every
-				page. Pictures are checked automatically for safety, and anyone can report one.
+				References come from Pixabay (Pixabay Content License), from Openverse (museums, NASA and
+				Wikimedia Commons; CC0, public domain or CC BY only) and from the public-domain collections
+				of the Art Institute of Chicago and The Met. Each picture is credited the way its source
+				asks. We download pictures to our own server, so your browser never contacts these sites
+				while you draw. Pictures are checked automatically for safety, and anyone can report one.
 			</p>
 		</Tile>
 	</div>

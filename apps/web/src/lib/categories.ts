@@ -42,6 +42,12 @@ const base: Omit<Category, 'available'>[] = [
 		color: 'var(--pp-cat-env)'
 	},
 	{
+		id: 'masters',
+		name: 'Master studies',
+		blurb: 'Copy classic paintings and drawings',
+		color: 'var(--pp-cat-masters)'
+	},
+	{
 		id: 'fundamentals',
 		name: 'Fundamentals',
 		blurb: 'Lines, boxes, gesture',

@@ -32,6 +32,12 @@ export interface Reference {
 	own?: boolean;
 	/** own pictures: which category's grading to use */
 	gradeAs?: string;
+	/** who holds the picture ("Wikimedia Commons", "The Met", …); empty = the source */
+	provider?: string;
+	/** the source's own credit line (Openverse) */
+	attribution?: string;
+	/** "photo", "vector", "illustration" or "artwork" */
+	kind?: string;
 }
 
 const files = import.meta.glob<{ references: Reference[] }>(

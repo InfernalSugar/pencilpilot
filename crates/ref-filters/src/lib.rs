@@ -36,6 +36,7 @@ mod nsfw;
 mod phash;
 pub mod sort;
 mod text;
+pub mod words;
 mod work;
 
 use std::borrow::Cow;
