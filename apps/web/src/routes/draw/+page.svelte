@@ -11,6 +11,7 @@
 	import RefViewer from '#lib/paint/RefViewer.svelte';
 	import { addToSession, clockOf, startSession, timeLabel } from '#lib/timed.js';
 	import ColorPanel, { rememberColor } from '#lib/paint/ColorPanel.svelte';
+	import { anyGuide, defaultGuides, type GuideSettings } from '#lib/paint/guides.js';
 	import TracePanel, { TRACE_DEFAULTS, type TraceState } from '#lib/paint/TracePanel.svelte';
 	import { savedSize, saveSize, type CanvasSize } from '#lib/paint/canvas-size.js';
 	import BrushPicker from '#lib/paint/BrushPicker.svelte';
@@ -47,8 +48,29 @@
 		| 'select-lasso'
 		| 'select-wand'
 		| 'transform'
-		| 'liquify';
+		| 'liquify'
+		| 'guides';
 	let tool = $state<Tool>('brush');
+	let guides = $state<GuideSettings>(defaultGuides(800, 600));
+	let guidesOpen = $state(false);
+	function setGuides(g: GuideSettings) {
+		guides = g;
+		remember('pp.guides', { w: canvasSize.width, h: canvasSize.height, g });
+	}
+	/** guides saved for another canvas size are scaled to this one */
+	function loadGuides() {
+		const saved = recall<{ w: number; h: number; g: GuideSettings } | null>('pp.guides', null);
+		const { width: w, height: h } = canvasSize;
+		if (!saved?.g) return void (guides = defaultGuides(w, h));
+		const [kx, ky] = [w / saved.w, h / saved.h];
+		const sc = (p: [number, number]): [number, number] => [p[0] * kx, p[1] * ky];
+		const g = saved.g;
+		guides = {
+			grid: { ...g.grid, size: Math.round(g.grid.size * Math.min(kx, ky)) },
+			perspective: { ...g.perspective, vps: g.perspective.vps.map(sc) },
+			ruler: { ...g.ruler, a: sc(g.ruler.a), b: sc(g.ruler.b) }
+		};
+	}
 	/** pen pressure and tilt on/off (remembered) */
 	let penPressure = $state(true);
 	let liquifySize = $state(60);
@@ -200,6 +222,7 @@
 		canvasSize = next;
 		saveSize(next);
 		status = BLANK_STATUS;
+		loadGuides();
 	}
 
 	// Reference panel: resizable sidebar, or a floating window.
@@ -354,6 +377,7 @@
 		smoothing = recall('pp.smoothing', 0);
 		quickShape = recall('pp.quickShape', true);
 		penPressure = recall('pp.penPressure', true);
+		loadGuides();
 		loadManifest().then((m) => (manifest = m));
 		if (!reference) loadReference();
 		if (sessionMode && category)
@@ -716,6 +740,8 @@
 						{liquifySize}
 						{liquifyStrength}
 						{penPressure}
+						{guides}
+						onguides={setGuides}
 						overlaySrc={traceSrc}
 						overlayOpacity={trace.opacity}
 						overlayTransform={trace}
@@ -1074,6 +1100,16 @@
 				<button
 					type="button"
 					class="tool"
+					aria-pressed={anyGuide(guides)}
+					aria-expanded={guidesOpen}
+					title="Guides: grid, perspective and ruler"
+					onclick={() => (guidesOpen = !guidesOpen)}
+				>
+					Guides
+				</button>
+				<button
+					type="button"
+					class="tool"
 					aria-pressed={penPressure}
 					title="Pen pressure and tilt: off draws every stroke at a steady medium pressure"
 					onclick={() => {
@@ -1095,6 +1131,104 @@
 				>
 					QuickShape
 				</button>
+				{#if guidesOpen}
+					<div class="fill-opts guides-opts" role="group" aria-label="Guides">
+						<span class="opt-label">Grid</span>
+						<div class="seg" role="radiogroup" aria-label="Grid">
+							{#each [['off', 'Off'], ['square', 'Square'], ['isometric', 'Isometric']] as [id, label] (id)}
+								<button
+									type="button"
+									class="tool"
+									role="radio"
+									aria-checked={id === 'off'
+										? !guides.grid.on
+										: guides.grid.on && guides.grid.kind === id}
+									onclick={() =>
+										setGuides({
+											...guides,
+											grid:
+												id === 'off'
+													? { ...guides.grid, on: false }
+													: { ...guides.grid, on: true, kind: id as 'square' | 'isometric' }
+										})}
+								>
+									{label}
+								</button>
+							{/each}
+						</div>
+						{#if guides.grid.on}
+							<label class="slider">
+								<span>Grid size <b>{guides.grid.size}</b></span>
+								<input
+									type="range"
+									min="10"
+									max="300"
+									step="2"
+									value={guides.grid.size}
+									oninput={(e) =>
+										setGuides({
+											...guides,
+											grid: { ...guides.grid, size: +e.currentTarget.value }
+										})}
+								/>
+							</label>
+						{/if}
+						<span class="opt-label">Perspective</span>
+						<div class="seg" role="radiogroup" aria-label="Perspective">
+							{#each [0, 1, 2, 3] as n (n)}
+								<button
+									type="button"
+									class="tool"
+									role="radio"
+									aria-checked={guides.perspective.points === n}
+									onclick={() =>
+										setGuides({
+											...guides,
+											perspective: { ...guides.perspective, points: n as 0 | 1 | 2 | 3 }
+										})}
+								>
+									{n ? `${n}-point` : 'Off'}
+								</button>
+							{/each}
+						</div>
+						{#if guides.perspective.points}
+							<button
+								type="button"
+								class="tool"
+								aria-pressed={guides.perspective.assist}
+								title="Assist: lines snap to the perspective directions"
+								onclick={() =>
+									setGuides({
+										...guides,
+										perspective: { ...guides.perspective, assist: !guides.perspective.assist }
+									})}
+							>
+								Assist
+							</button>
+						{/if}
+						<button
+							type="button"
+							class="tool"
+							aria-pressed={guides.ruler.on}
+							title="Ruler: strokes started next to it run straight along it"
+							onclick={() =>
+								setGuides({ ...guides, ruler: { ...guides.ruler, on: !guides.ruler.on } })}
+						>
+							Ruler
+						</button>
+						{#if guides.perspective.points || guides.ruler.on}
+							<button
+								type="button"
+								class="tool"
+								aria-pressed={tool === 'guides'}
+								title="Drag vanishing points and the ruler"
+								onclick={() => (tool = tool === 'guides' ? 'brush' : 'guides')}
+							>
+								Move guides
+							</button>
+						{/if}
+					</div>
+				{/if}
 				{#if tool === 'liquify'}
 					<div class="fill-opts" role="group" aria-label="Liquify">
 						<label class="slider">
@@ -1368,6 +1502,11 @@
 	.tool[role='radio'][aria-checked='true'] {
 		background: var(--pp-accent-strong);
 		color: #fff;
+	}
+	.opt-label {
+		font-size: 13px;
+		font-weight: 600;
+		color: rgba(255, 255, 255, 0.75);
 	}
 	.fill-opts {
 		display: flex;
