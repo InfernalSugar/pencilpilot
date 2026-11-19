@@ -671,3 +671,51 @@ test('clipping mask: a clipped layer only shows over the layer below', async ({ 
 	await page.getByRole('button', { name: /Undo/ }).click();
 	await expect.poll(() => redIn(page, 0.33, 0.45)).toBeGreaterThan(20);
 });
+
+/** dark pixels in the columns x0..x1 (canvas fractions) */
+const inkCols = (page: Page, x0: number, x1: number) =>
+	canvas(page).evaluate(
+		(c: HTMLCanvasElement, [x0, x1]) => {
+			const left = Math.round(c.width * x0);
+			const d = c
+				.getContext('2d')!
+				.getImageData(left, 0, Math.round(c.width * x1) - left, c.height).data;
+			let n = 0;
+			for (let i = 0; i < d.length; i += 4) if (d[i] < 200) n++;
+			return n;
+		},
+		[x0, x1]
+	);
+
+test('layer mask: black on the mask hides, undo and delete bring it back', async ({ page }) => {
+	await ready(page);
+	for (let i = 0; i < 3; i++) await page.keyboard.press(']');
+	await drag(page, [0.1, 0.5], [0.9, 0.5], 16);
+	await expect.poll(() => inkCols(page, 0.15, 0.35)).toBeGreaterThan(50);
+	const right = await inkCols(page, 0.65, 0.85);
+	const left = await inkCols(page, 0.15, 0.35);
+
+	await page.getByRole('button', { name: 'Add mask' }).click();
+	await expect(page.getByRole('status').filter({ hasText: 'Painting on the mask' })).toBeVisible();
+	await expect(page.getByRole('button', { name: /Edit the mask of/ })).toHaveAttribute(
+		'aria-pressed',
+		'true'
+	);
+	// paint (dark) over the left part, on the mask: the line disappears there
+	for (let i = 0; i < 6; i++) await page.keyboard.press(']');
+	for (const y of [0.44, 0.5, 0.56]) await drag(page, [0.1, y], [0.4, y], 12);
+	await expect.poll(() => inkCols(page, 0.15, 0.35)).toBeLessThan(left * 0.35);
+	expect(await inkCols(page, 0.65, 0.85)).toBeGreaterThan(right * 0.8);
+
+	// undo the mask strokes: shown again
+	for (let i = 0; i < 3; i++) await page.getByRole('button', { name: /Undo/ }).click();
+	await expect.poll(() => inkCols(page, 0.15, 0.35)).toBeGreaterThan(left * 0.9);
+	for (let i = 0; i < 3; i++) await page.getByRole('button', { name: /Redo/ }).click();
+	await expect.poll(() => inkCols(page, 0.15, 0.35)).toBeLessThan(left * 0.35);
+
+	// back to the colour: Delete mask shows everything
+	await page.getByRole('button', { name: 'Edit mask' }).click();
+	await expect(page.getByRole('status').filter({ hasText: 'Painting on the mask' })).toHaveCount(0);
+	await page.getByRole('button', { name: 'Delete mask' }).click();
+	await expect.poll(() => inkCols(page, 0.15, 0.35)).toBeGreaterThan(left * 0.9);
+});
