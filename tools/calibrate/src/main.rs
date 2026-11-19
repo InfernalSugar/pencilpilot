@@ -15,6 +15,7 @@
 //!   on the dev rating page (`/dev/rate`), per category and overall.
 
 mod relevance;
+mod weights;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -420,6 +421,44 @@ fn fit(path: &Path) {
         "\nCurrent curve: floor {:.2}, pass {:.2}. Apply a fitted curve in crates/grader/src/score.rs (ScoreCurve::default) once there are 20–30 labels per category.",
         now.floor, now.pass
     );
+
+    // Weights too, for ratings that carry the grader's measurements.
+    let ratings: Vec<weights::Rating> = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    let fitted = weights::fit_all(&ratings, 12);
+    if fitted.is_empty() {
+        println!(
+            "\nNo ratings with measurements yet (rate drawings saved since the measurements were added)."
+        );
+        return;
+    }
+    println!(
+        "\n## Weights per category\n\n| Group | Ratings | Current error | Fitted error | Fitted error on unseen ratings |\n|---|---|---|---|---|"
+    );
+    let mut out = BTreeMap::new();
+    for (k, v) in &fitted {
+        match v {
+            Ok(f) => {
+                println!(
+                    "| {k} | {} | {:.2} | {:.2} | {:.2} |",
+                    f.labels, f.current_mae, f.fitted_mae, f.left_out_mae
+                );
+                out.insert(k.clone(), f);
+            }
+            Err(n) => println!("| {k} | {n} | – | – | need ≥ 12 |"),
+        }
+    }
+    println!(
+        "\nErrors are average points out of 10 between the grader and you. Only adopt a fit when its error on unseen ratings is clearly lower than the current error."
+    );
+    if !out.is_empty() {
+        let dest = path.with_file_name("fitted-weights.json");
+        fs::write(&dest, serde_json::to_string_pretty(&out).unwrap()).unwrap();
+        println!("Fitted weights and curves written to {}", dest.display());
+    }
 }
 
 fn main() {
