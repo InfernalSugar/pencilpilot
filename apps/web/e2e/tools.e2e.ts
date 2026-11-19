@@ -891,8 +891,13 @@ test('import picture: a new layer, undoable; handing it in visible means not sco
 	const layers = page.getByRole('list', { name: 'Layers, top to bottom' });
 	await expect(layers.getByRole('button', { name: 'square', exact: true })).toBeVisible();
 	// fitted inside the canvas and centred: blue in the middle, paper at the edge
-	await expect.poll(async () => (await pixel(page, 0.5, 0.5))[2]).toBeGreaterThan(200);
-	expect((await pixel(page, 0.5, 0.5))[0]).toBeLessThan(40);
+	// blue, not white paper (which also has a high blue value)
+	await expect
+		.poll(async () => {
+			const [r, , b] = await pixel(page, 0.5, 0.5);
+			return b > 200 && r < 40;
+		})
+		.toBe(true);
 	expect((await pixel(page, 0.02, 0.5))[0]).toBeGreaterThan(240);
 	await page.getByRole('button', { name: /Undo/ }).click();
 	await expect(layers.getByRole('button', { name: 'square', exact: true })).toHaveCount(0);
