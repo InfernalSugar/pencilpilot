@@ -15,6 +15,7 @@
 	--pp-on-ink-muted: #a9a7b0;
 	--pp-accent: #e8492f;
 	--pp-accent-ink: #c2391f; /* accent text on light grounds (passes 4.5:1) */
+	--pp-accent-strong: #d43f24; /* filled buttons: white text passes 4.5:1 */
 	--pp-yellow: #ffd84d;
 	--pp-lilac: #d9d2ff;
 	--pp-lilac-ink: #4a3f8c;
@@ -71,6 +72,27 @@ a {
 
 a:hover {
 	color: var(--pp-accent);
+}
+
+/* Keyboard users can jump past the header; it only shows while focused. */
+.skip-link {
+	position: absolute;
+	left: 16px;
+	top: -100px;
+	z-index: 100;
+	padding: 12px 18px;
+	border-radius: 999px;
+	background: var(--pp-ink);
+	color: #fff;
+	font-weight: 600;
+	text-decoration: none;
+}
+.skip-link:focus {
+	top: 12px;
+	color: #fff;
+}
+main:focus {
+	outline: none;
 }
 
 :focus-visible {

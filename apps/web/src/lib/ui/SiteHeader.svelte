@@ -24,19 +24,19 @@
 		{#each links as l (l.href)}
 			<a href={l.href} aria-current={current(l.href) ? 'page' : undefined}>{l.label}</a>
 		{/each}
-		{#if user}
-			<a
-				class="me"
-				href="/account"
-				aria-label="Your account"
-				title={user.name || user.email || 'Account'}
-			>
-				{initial}
-			</a>
-		{:else}
-			<a class="signin" href="/login">Sign in</a>
-		{/if}
 	</nav>
+	{#if user}
+		<a
+			class="me"
+			href="/account"
+			aria-label="Your account"
+			title={user.name || user.email || 'Account'}
+		>
+			{initial}
+		</a>
+	{:else}
+		<a class="signin" href="/login">Sign in</a>
+	{/if}
 </header>
 
 <style>
@@ -44,11 +44,44 @@
 		max-width: var(--pp-max);
 		margin: 0 auto;
 		padding: 24px var(--pp-page-pad);
-		display: flex;
-		flex-wrap: wrap;
-		gap: 16px;
+		display: grid;
+		grid-template-columns: auto 1fr auto;
+		grid-template-areas: 'brand nav me';
+		gap: 16px 28px;
 		align-items: center;
-		justify-content: space-between;
+	}
+	.brand {
+		grid-area: brand;
+	}
+	nav {
+		grid-area: nav;
+		justify-self: end;
+	}
+	.signin,
+	.me {
+		grid-area: me;
+		text-decoration: none;
+	}
+	/* Phones: logo + account on one row, the four sections on the next, spread edge to edge. */
+	@media (max-width: 640px) {
+		.header {
+			grid-template-columns: 1fr auto;
+			grid-template-areas: 'brand me' 'nav nav';
+			padding-top: 16px;
+			padding-bottom: 12px;
+			gap: 8px;
+		}
+		nav {
+			justify-self: stretch;
+			justify-content: space-between;
+			flex-wrap: nowrap;
+		}
+		nav a {
+			padding: 10px 0;
+		}
+		.brand {
+			font-size: 21px;
+		}
 	}
 	.brand {
 		display: flex;
@@ -74,7 +107,7 @@
 		align-items: center;
 	}
 	.signin {
-		padding: 10px 18px !important;
+		padding: 10px 18px;
 		border-radius: 999px;
 		background: var(--pp-ink);
 		color: #fff;
@@ -86,7 +119,6 @@
 	.me {
 		width: 40px;
 		height: 40px;
-		padding: 0 !important;
 		display: grid;
 		place-items: center;
 		border-radius: 999px;

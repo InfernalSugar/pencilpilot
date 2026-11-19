@@ -166,7 +166,81 @@ fn download(url: &str, dest: &Path) -> Result<(), String> {
         .read_to_vec()
         .map_err(|e| e.to_string())?;
     fs::create_dir_all(dest.parent().unwrap()).unwrap();
-    fs::write(dest, bytes).map_err(|e| e.to_string())
+    fs::write(dest, &bytes).map_err(|e| e.to_string())?;
+    // Smaller files load faster on phones; a failure here keeps the original.
+    if let Err(e) = web_optimise(dest) {
+        eprintln!("  (kept original size: {e})");
+    }
+    Ok(())
+}
+
+/// Longest side we serve. Pictures show at most ~640 CSS px wide, so this is enough for 2x screens.
+const WEB_MAX_SIDE: u32 = 1280;
+const WEB_JPEG_QUALITY: u8 = 82;
+
+/// Re-encode a reference as a plain JPEG (transparency onto white paper), at most
+/// `WEB_MAX_SIDE` on its long side. Only rewrites the file when that makes it smaller
+/// or when it wasn't really a JPEG. Returns (old bytes, new bytes).
+fn web_optimise(path: &Path) -> Result<(u64, u64), String> {
+    let old = fs::metadata(path).map_err(|e| e.to_string())?.len();
+    let reader = image::ImageReader::open(path)
+        .and_then(|r| r.with_guessed_format())
+        .map_err(|e| e.to_string())?;
+    let was_jpeg = reader.format() == Some(image::ImageFormat::Jpeg);
+    let img = reader.decode().map_err(|e| e.to_string())?;
+    let mut rgb = if img.color().has_alpha() {
+        let rgba = img.to_rgba8();
+        image::RgbImage::from_fn(rgba.width(), rgba.height(), |x, y| {
+            let p = rgba.get_pixel(x, y);
+            let a = p[3] as u32;
+            image::Rgb([0, 1, 2].map(|c| ((p[c] as u32 * a + 255 * (255 - a)) / 255) as u8))
+        })
+    } else {
+        img.to_rgb8()
+    };
+    let long = rgb.width().max(rgb.height());
+    if long > WEB_MAX_SIDE {
+        let k = WEB_MAX_SIDE as f32 / long as f32;
+        let (w, h) = (
+            ((rgb.width() as f32 * k).round() as u32).max(1),
+            ((rgb.height() as f32 * k).round() as u32).max(1),
+        );
+        rgb = image::imageops::resize(&rgb, w, h, image::imageops::FilterType::Lanczos3);
+    }
+    let mut out = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, WEB_JPEG_QUALITY)
+        .encode_image(&rgb)
+        .map_err(|e| e.to_string())?;
+    if !was_jpeg || (out.len() as u64) < old {
+        fs::write(path, &out).map_err(|e| e.to_string())?;
+        return Ok((old, out.len() as u64));
+    }
+    Ok((old, old))
+}
+
+/// Shrink every already-downloaded reference (see `web_optimise`).
+fn optimise_all() {
+    let mut paths: Vec<_> = fs::read_dir(images_dir())
+        .map(|d| d.filter_map(|e| e.ok().map(|e| e.path())).collect())
+        .unwrap_or_default();
+    paths.retain(|p| p.extension().is_some_and(|e| e == "jpg"));
+    paths.sort();
+    let (mut before, mut after) = (0u64, 0u64);
+    for p in &paths {
+        match web_optimise(p) {
+            Ok((a, b)) => {
+                before += a;
+                after += b;
+            }
+            Err(e) => eprintln!("{}: {e}", p.display()),
+        }
+    }
+    println!(
+        "{} pictures: {:.1} MB -> {:.1} MB",
+        paths.len(),
+        before as f64 / 1e6,
+        after as f64 / 1e6
+    );
 }
 
 /// Why a hit is rejected automatically, if it is.
@@ -534,13 +608,14 @@ fn main() {
         ),
         Some("sync") => sync(),
         Some("status") => status(),
+        Some("optimise") => optimise_all(),
         Some("classify") => classify(
             args.iter().any(|a| a == "--report"),
             args.iter().any(|a| a == "--retopic"),
         ),
         _ => {
             eprintln!(
-                "usage:\n  ref-importer fetch <category> <query> [--type photo|illustration|vector] [--count N] [--topic ID]\n  ref-importer sync\n  ref-importer classify [--report] [--retopic]\n  ref-importer status"
+                "usage:\n  ref-importer fetch <category> <query> [--type photo|illustration|vector] [--count N] [--topic ID]\n  ref-importer sync\n  ref-importer classify [--report] [--retopic]\n  ref-importer optimise\n  ref-importer status"
             );
             std::process::exit(2);
         }
@@ -554,6 +629,30 @@ mod tests {
 
     fn hit(ai: bool, g: bool, low: bool, tags: &str) -> Value {
         json!({"isAiGenerated": ai, "isGRated": g, "isLowQuality": low, "tags": tags})
+    }
+
+    #[test]
+    fn web_optimise_shrinks_and_flattens_to_jpeg() {
+        let dir = std::env::temp_dir().join(format!("pp-opt-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("big.jpg"); // a PNG under a .jpg name, like Pixabay sometimes serves
+        let img =
+            image::RgbaImage::from_fn(2000, 1000, |x, _| image::Rgba([0, 0, 0, (x % 256) as u8]));
+        img.save_with_format(&p, image::ImageFormat::Png).unwrap();
+        web_optimise(&p).unwrap();
+        let back = image::ImageReader::open(&p)
+            .unwrap()
+            .with_guessed_format()
+            .unwrap();
+        assert_eq!(back.format(), Some(image::ImageFormat::Jpeg));
+        let back = back.decode().unwrap();
+        assert_eq!(
+            (back.width(), back.height()),
+            (WEB_MAX_SIDE, WEB_MAX_SIDE / 2)
+        );
+        // fully transparent pixels became white paper, not black
+        assert!(back.to_luma8().get_pixel(0, 0)[0] > 240);
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -30,7 +30,8 @@
 </script>
 
 {#if href}
-	<a class="tile tone-{tone} link" {href} {style} aria-label={label}>{@render children()}</a>
+	<!-- a link is named by its own text; `label` only names non-link tiles -->
+	<a class="tile tone-{tone} link" {href} {style}>{@render children()}</a>
 {:else}
 	<svelte:element this={as} class="tile tone-{tone}" {style} aria-label={label}>
 		{@render children()}
@@ -62,7 +63,7 @@
 		background: var(--pp-lilac);
 	}
 	.tone-accent {
-		background: var(--pp-accent);
+		background: var(--pp-accent-strong);
 		color: #fff;
 	}
 	.link {
