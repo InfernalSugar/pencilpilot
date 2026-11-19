@@ -26,7 +26,7 @@
 </svelte:head>
 
 <a class="skip-link" href="#main">Skip to content</a>
-<SiteHeader user={data.user} />
+<SiteHeader user={data.user} community={data.community} />
 <main id="main" tabindex="-1">
 	{@render children()}
 </main>

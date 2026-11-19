@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { dev } from '$app/env';
+	import { page } from '$app/state';
 	import Tile from '#lib/ui/Tile.svelte';
 	import Button from '#lib/ui/Button.svelte';
 	import OverlayViewer, { type OverlayMode } from '#lib/results/OverlayViewer.svelte';
@@ -39,6 +40,33 @@
 	let patterns = $state<Pattern[]>([]);
 	let votes = $state<Record<string, 1 | -1>>({});
 	let calSaved = $state(false);
+	let share = $state<{ state: 'idle' | 'busy' | 'done' | 'error'; message?: string }>({
+		state: 'idle'
+	});
+
+	/** Community (flagged): share this drawing for human comparison + ratings. */
+	async function shareDrawing() {
+		if (!sub || !reference || !grade) return;
+		share = { state: 'busy' };
+		try {
+			const res = await fetch('/api/community/share', {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({
+					png: sub.png,
+					reference,
+					score: grade.score,
+					attemptAt: sub.at ?? null
+				})
+			});
+			const body = await res.json().catch(() => ({}));
+			share = res.ok
+				? { state: 'done' }
+				: { state: 'error', message: body.message ?? 'Couldn’t share that. Try again later.' };
+		} catch {
+			share = { state: 'error', message: 'Couldn’t reach the server. Try again later.' };
+		}
+	}
 
 	/** Dev only: keep this drawing + grade as a calibration sample for /dev/rate. */
 	async function saveForCalibration() {
@@ -371,6 +399,33 @@
 				{/each}
 			</div>
 		{/if}
+		{#if page.data.community && grade && reference && !grade.flags.includes('blank')}
+			<div class="share">
+				<Tile tone="lilac" as="section" label="Get a human opinion">
+					<span class="pp-eyebrow">Community · beta</span>
+					<h2>Get a human opinion</h2>
+					{#if !page.data.user}
+						<p>Sign in to share this drawing. Other students compare and rate it.</p>
+						<div><Button href="/login?next=/results" variant="dark">Sign in</Button></div>
+					{:else if share.state === 'done'}
+						<p role="status">
+							Shared! See how it does in <a href="/community/mine">My shared drawings</a>.
+						</p>
+					{:else}
+						<p>
+							Other signed-in students will compare it with drawings of the same picture and rate
+							it. They won’t see your name. You can delete it any time.
+						</p>
+						{#if share.state === 'error'}<p class="share-err" role="alert">{share.message}</p>{/if}
+						<div>
+							<Button variant="dark" onclick={shareDrawing} disabled={share.state === 'busy'}>
+								{share.state === 'busy' ? 'Checking…' : 'Share with the community'}
+							</Button>
+						</div>
+					{/if}
+				</Tile>
+			</div>
+		{/if}
 		{#if reference}
 			<p class="credit">
 				Reference by <a href={reference.authorUrl} target="_blank" rel="noreferrer">
@@ -393,6 +448,20 @@
 </div>
 
 <style>
+	.share {
+		margin-top: var(--pp-gap);
+	}
+	.share h2 {
+		font-size: 22px;
+	}
+	.share p {
+		margin: 0;
+		max-width: 60ch;
+	}
+	.share-err {
+		font-weight: 600;
+		color: var(--pp-accent-ink);
+	}
 	.top {
 		display: flex;
 		flex-wrap: wrap;

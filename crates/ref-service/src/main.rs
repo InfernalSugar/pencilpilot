@@ -185,6 +185,11 @@ fn routes(app: Arc<App>) -> Router {
         .route("/api/report", post(report))
         .route("/api/pool", get(pool_status))
         .route("/refimg/{file}", get(image))
+        // Not proxied to browsers: the web server calls it before accepting a shared drawing.
+        .route(
+            "/api/moderate",
+            post(moderate).layer(axum::extract::DefaultBodyLimit::max(MODERATE_MAX_BYTES)),
+        )
         .with_state(app)
 }
 
@@ -268,6 +273,27 @@ async fn report(State(app): State<Arc<App>>, Json(r): Json<Report>) -> Response 
     app.save().await;
     info!(id = %r.id, known, "reported and blocked");
     Json(json!({"blocked": true})).into_response()
+}
+
+/// Largest drawing `/api/moderate` accepts (an 800×600 PNG is well under this).
+const MODERATE_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+/// NSFW guard for a drawing someone wants to share. Always 200 with
+/// `{"safe": bool, "reason"?: string}`; anything that can't be checked is unsafe.
+async fn moderate(State(app): State<Arc<App>>, body: axum::body::Bytes) -> Response {
+    let verdict = tokio::task::spawn_blocking(move || {
+        let img = ref_filters::decode(&body).map_err(|_| "undecodable".to_string())?;
+        app.vetter.safe_to_share(&img)
+    })
+    .await
+    .unwrap_or_else(|_| Err("internal".into()));
+    match verdict {
+        Ok(()) => Json(json!({"safe": true})).into_response(),
+        Err(reason) => {
+            info!(%reason, "shared drawing refused");
+            Json(json!({"safe": false, "reason": reason})).into_response()
+        }
+    }
 }
 
 async fn pool_status(State(app): State<Arc<App>>) -> Json<Value> {
@@ -512,6 +538,27 @@ mod tests {
         let status = res.status();
         let body = res.into_body().collect().await.unwrap().to_bytes();
         (status, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    #[tokio::test]
+    async fn moderate_fails_closed_without_a_model() {
+        let mut png = Vec::new();
+        image::DynamicImage::new_luma8(80, 60)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let req = Request::post("/api/moderate")
+            .body(Body::from(png))
+            .unwrap();
+        let (status, body) = call(test_app(), req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains(r#""safe":false"#), "{body}");
+        assert!(body.contains("nsfw_unchecked"), "{body}");
+
+        let req = Request::post("/api/moderate")
+            .body(Body::from("not a picture"))
+            .unwrap();
+        let (_, body) = call(test_app(), req).await;
+        assert!(body.contains("undecodable"), "{body}");
     }
 
     #[tokio::test]

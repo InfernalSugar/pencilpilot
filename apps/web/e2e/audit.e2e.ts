@@ -13,7 +13,10 @@ const PAGES = [
 	'/progress',
 	'/login',
 	'/signup',
-	'/privacy'
+	'/privacy',
+	'/community',
+	'/community/rate',
+	'/community/mine'
 ];
 const VIEWPORTS = [
 	{ name: 'phone', width: 375, height: 740 },

@@ -15,5 +15,15 @@ export const variables = defineEnvVars({
 	GOOGLE_CLIENT_SECRET: {
 		schema: optional,
 		description: 'Google OAuth client secret.'
+	},
+	COMMUNITY: {
+		schema: optional,
+		description:
+			'Set to "on" to enable community critique (sharing + peer judging). Off by default.'
+	},
+	REF_SERVICE_URL: {
+		schema: optional,
+		description:
+			'Where the ref-service runs (NSFW guard for shared drawings). Default: http://127.0.0.1:8787'
 	}
 });

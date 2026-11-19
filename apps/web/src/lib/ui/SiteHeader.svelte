@@ -2,15 +2,20 @@
 	import { page } from '$app/state';
 	import Logo from './Logo.svelte';
 
-	let { user }: { user: { id: string; name: string; email: string | null } | null } = $props();
+	let {
+		user,
+		community = false
+	}: { user: { id: string; name: string; email: string | null } | null; community?: boolean } =
+		$props();
 	const initial = $derived((user?.name || user?.email || '?').trim()[0]?.toUpperCase() ?? '?');
 
-	const links = [
+	const links = $derived([
 		{ href: '/', label: 'Practice' },
 		{ href: '/lessons', label: 'Lessons' },
 		{ href: '/drills', label: 'Drills' },
+		...(community ? [{ href: '/community', label: 'Community' }] : []),
 		{ href: '/progress', label: 'Progress' }
-	];
+	]);
 	const current = (href: string) =>
 		href === '/' ? page.url.pathname === '/' : page.url.pathname.startsWith(href);
 </script>
@@ -75,6 +80,8 @@
 			justify-self: stretch;
 			justify-content: space-between;
 			flex-wrap: nowrap;
+			gap: 4px 10px;
+			font-size: 15px;
 		}
 		nav a {
 			padding: 10px 0;
