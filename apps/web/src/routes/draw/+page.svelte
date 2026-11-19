@@ -55,8 +55,39 @@
 		| 'select-wand'
 		| 'transform'
 		| 'liquify'
-		| 'guides';
+		| 'guides'
+		| 'gradient';
 	let tool = $state<Tool>('brush');
+	let gradientKind = $state<'linear' | 'radial'>('linear');
+	let gradientEnd = $state<string>('transparent');
+	let gradientEndColor = $state('#3d6bff');
+
+	// ---- Adjust panel: live preview on the active layer, Apply or Cancel ----
+	const NO_ADJUST = { hue: 0, saturation: 0, brightness: 0, contrast: 0, blur: 0 };
+	let adjustOpen = $state(false);
+	let adjust = $state({ ...NO_ADJUST });
+	let recolour = $state(false);
+	let adjustMsg = $state('');
+	function openAdjust() {
+		if (adjustOpen) return closeAdjust(false);
+		adjust = { ...NO_ADJUST };
+		recolour = false;
+		if (!canvas?.adjustBegin()) {
+			adjustMsg = 'This layer is locked or hidden, so it can’t be adjusted.';
+			return;
+		}
+		adjustMsg = '';
+		tool = 'brush';
+		adjustOpen = true;
+	}
+	function previewAdjust() {
+		canvas?.adjustPreview({ ...adjust, recolour: recolour ? color : null });
+	}
+	function closeAdjust(keep: boolean) {
+		if (keep) canvas?.adjustCommit();
+		else canvas?.adjustCancel();
+		adjustOpen = false;
+	}
 	let guides = $state<GuideSettings>(defaultGuides(800, 600));
 	let guidesOpen = $state(false);
 	function setGuides(g: GuideSettings) {
@@ -411,9 +442,13 @@
 		if (mod && k === 'z') {
 			e.preventDefault();
 			if (e.shiftKey) canvas?.redo();
-			else canvas?.undo();
+			else {
+				if (adjustOpen) closeAdjust(false);
+				canvas?.undo();
+			}
 		} else if (mod && k === 'y') {
 			e.preventDefault();
+			if (adjustOpen) closeAdjust(false);
 			canvas?.redo();
 		} else if (!mod && k === 'b') {
 			eraser = false;
@@ -751,6 +786,8 @@
 						ontransformend={onTransformEnd}
 						{liquifySize}
 						{liquifyStrength}
+						{gradientKind}
+						gradientEnd={gradientEnd === 'transparent' ? 'transparent' : gradientEndColor}
 						{penPressure}
 						{guides}
 						onguides={setGuides}
@@ -960,6 +997,59 @@
 							<path d="M3 12c3-6 6 6 9 0s6 6 9 0" /><path d="M3 18c3-6 6 6 9 0s6 6 9 0" />
 						</svg>
 					</button>
+					<button
+						type="button"
+						class="tool"
+						aria-pressed={tool === 'gradient'}
+						aria-label="Gradient"
+						title="Gradient: drag across the canvas"
+						onclick={() => (tool = tool === 'gradient' ? 'brush' : 'gradient')}
+					>
+						<svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true">
+							<defs>
+								<linearGradient id="gr-ic" x1="0" x2="1">
+									<stop offset="0" stop-color="currentColor" />
+									<stop offset="1" stop-color="currentColor" stop-opacity="0" />
+								</linearGradient>
+							</defs>
+							<rect
+								x="3"
+								y="5"
+								width="18"
+								height="14"
+								rx="3"
+								fill="url(#gr-ic)"
+								stroke="currentColor"
+								stroke-width="2"
+							/>
+						</svg>
+					</button>
+					<button
+						type="button"
+						class="tool"
+						aria-pressed={adjustOpen}
+						aria-expanded={adjustOpen}
+						aria-label="Adjust"
+						title="Adjust the layer: colour, brightness, blur"
+						onclick={openAdjust}
+					>
+						<svg
+							width="22"
+							height="22"
+							viewBox="0 0 24 24"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="2.1"
+							stroke-linecap="round"
+							aria-hidden="true"
+						>
+							<path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0" /><circle
+								cx="16"
+								cy="6"
+								r="2"
+							/><circle cx="10" cy="12" r="2" /><circle cx="18" cy="18" r="2" />
+						</svg>
+					</button>
 				</div>
 				<div class="group">
 					<button
@@ -968,7 +1058,10 @@
 						aria-label="Undo (Ctrl+Z)"
 						title="Undo (Ctrl+Z)"
 						disabled={!status.canUndo}
-						onclick={() => canvas?.undo()}
+						onclick={() => {
+							if (adjustOpen) closeAdjust(false);
+							canvas?.undo();
+						}}
 					>
 						<svg
 							width="22"
@@ -1273,6 +1366,86 @@
 						{/if}
 					</div>
 				{/if}
+				{#if adjustMsg}<p class="adjust-msg" role="alert">{adjustMsg}</p>{/if}
+				{#if adjustOpen}
+					<div class="fill-opts adjust-opts" role="group" aria-label="Adjust layer">
+						{#each [['hue', 'Hue', -180, 180, 1, '°'], ['saturation', 'Saturation', -100, 100, 1, '%'], ['brightness', 'Brightness', -100, 100, 1, '%'], ['contrast', 'Contrast', -100, 100, 1, '%'], ['blur', 'Blur', 0, 40, 1, ' px']] as [key, label, min, max, st, u] (key)}
+							{@const k = key as keyof typeof adjust}
+							{@const scale = k === 'hue' || k === 'blur' ? 1 : 100}
+							<label class="slider">
+								<span>{label} <b>{Math.round(adjust[k] * scale)}{u}</b></span>
+								<input
+									type="range"
+									{min}
+									{max}
+									step={st}
+									value={Math.round(adjust[k] * scale)}
+									oninput={(e) => {
+										adjust = { ...adjust, [k]: +e.currentTarget.value / scale };
+										previewAdjust();
+									}}
+								/>
+							</label>
+						{/each}
+						<button
+							type="button"
+							class="tool"
+							aria-pressed={recolour}
+							title="Paint the whole layer in the current colour (keeps its shading by transparency)"
+							onclick={() => {
+								recolour = !recolour;
+								previewAdjust();
+							}}
+						>
+							Recolour
+						</button>
+						<button type="button" class="tool done" onclick={() => closeAdjust(true)}>Apply</button>
+						<button type="button" class="tool" onclick={() => closeAdjust(false)}>Cancel</button>
+					</div>
+				{/if}
+				{#if tool === 'gradient'}
+					<div class="fill-opts" role="group" aria-label="Gradient">
+						<div class="seg" role="radiogroup" aria-label="Gradient shape">
+							{#each [['linear', 'Straight'], ['radial', 'Round']] as [id, label] (id)}
+								<button
+									type="button"
+									class="tool"
+									role="radio"
+									aria-checked={gradientKind === id}
+									onclick={() => (gradientKind = id as 'linear' | 'radial')}
+								>
+									{label}
+								</button>
+							{/each}
+						</div>
+						<div class="seg" role="radiogroup" aria-label="Gradient end">
+							<button
+								type="button"
+								class="tool"
+								role="radio"
+								aria-checked={gradientEnd === 'transparent'}
+								onclick={() => (gradientEnd = 'transparent')}
+							>
+								To transparent
+							</button>
+							<button
+								type="button"
+								class="tool"
+								role="radio"
+								aria-checked={gradientEnd !== 'transparent'}
+								onclick={() => (gradientEnd = 'colour')}
+							>
+								To a colour
+							</button>
+						</div>
+						{#if gradientEnd !== 'transparent'}
+							<label class="end-colour">
+								<input type="color" bind:value={gradientEndColor} aria-label="End colour" />
+							</label>
+						{/if}
+						<span class="opt-label">Drag across the canvas</span>
+					</div>
+				{/if}
 				{#if tool === 'liquify'}
 					<div class="fill-opts" role="group" aria-label="Liquify">
 						<label class="slider">
@@ -1546,6 +1719,21 @@
 	.tool[role='radio'][aria-checked='true'] {
 		background: var(--pp-accent-strong);
 		color: #fff;
+	}
+	.adjust-msg {
+		margin: 0;
+		color: #ffd6cc;
+		font-weight: 600;
+		font-size: 14px;
+	}
+	.end-colour input {
+		width: 44px;
+		height: 36px;
+		padding: 0;
+		border: 0;
+		border-radius: 10px;
+		background: transparent;
+		cursor: pointer;
 	}
 	.opt-label {
 		font-size: 13px;
