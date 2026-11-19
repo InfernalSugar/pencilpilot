@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { dev } from '$app/env';
+	import { setScore } from '#lib/history.js';
 	import { page } from '$app/state';
 	import Tile from '#lib/ui/Tile.svelte';
 	import Button from '#lib/ui/Button.svelte';
@@ -215,6 +216,7 @@
 			fb = g.fb;
 			compareSrc = g.compareSrc;
 			if (dev) void saveForCalibration();
+			if (sub.historyId && !sub.traced) void setScore(sub.historyId, g.grade.score);
 			// Tracing is practice: tips, but no score, progress, streak or level-up.
 			// own pictures too: scored, but not part of category progress
 			if (sub.traced || !g.ref || g.ref.own) return;
@@ -596,6 +598,9 @@
 				</Tile>
 			</div>
 		{/if}
+		<p class="credit">
+			<a href="/history">Your last 10 drawings: open, keep drawing or download →</a>
+		</p>
 		{#if reference?.own}
 			<p class="credit">
 				Your own picture (kept on this device only) · {time}, {sub.strokes} strokes
