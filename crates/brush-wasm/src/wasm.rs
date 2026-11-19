@@ -98,6 +98,12 @@ impl PaintCanvas {
             .stroke_to(&brush.inner, x, y, pressure, xtilt, ytilt, dtime);
     }
 
+    /// Abandon the stroke in progress without a history step.
+    #[wasm_bindgen(js_name = cancelStroke)]
+    pub fn cancel_stroke(&mut self) {
+        self.inner.cancel_stroke();
+    }
+
     #[wasm_bindgen(js_name = endStroke)]
     pub fn end_stroke(&mut self, brush: &PaintBrush) {
         self.inner.end_stroke(&brush.inner);

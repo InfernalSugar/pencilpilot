@@ -171,7 +171,61 @@ export async function gradeImages(
 	options: GradeOptions = {}
 ): Promise<Grade> {
 	await load();
-	return grade(width, height, drawing, reference, options) as Grade;
+	const g = analysisSize(width, height);
+	if (g.scale === 1) return grade(width, height, drawing, reference, options) as Grade;
+	// Big canvases are graded at the usual size, so scores stay comparable and fast.
+	const k = g.scale;
+	const scaled: GradeOptions = {
+		...options,
+		strokes: options.strokes?.map((s) => ({
+			...s,
+			points: s.points.map((p) => ({ ...p, x: p.x * k, y: p.y * k }))
+		})),
+		keypoints: options.keypoints?.map((kp) => scaleKeypoint(kp, k))
+	};
+	return grade(
+		g.width,
+		g.height,
+		downscaleGray(drawing, width, height, g.width, g.height),
+		downscaleGray(reference, width, height, g.width, g.height),
+		scaled
+	) as Grade;
+}
+
+/** The grader's working area: the classic 800×600 canvas. Larger drawings are scaled down to it. */
+export const ANALYSIS_PIXELS = 800 * 600;
+
+export function analysisSize(width: number, height: number) {
+	const area = width * height;
+	if (area <= ANALYSIS_PIXELS * 1.05) return { width, height, scale: 1 };
+	const scale = Math.sqrt(ANALYSIS_PIXELS / area);
+	return {
+		width: Math.max(1, Math.round(width * scale)),
+		height: Math.max(1, Math.round(height * scale)),
+		scale
+	};
+}
+
+/** Area-average downscale of a grayscale image. */
+export function downscaleGray(src: Uint8Array, sw: number, sh: number, dw: number, dh: number) {
+	const out = new Uint8Array(dw * dh);
+	for (let y = 0; y < dh; y++) {
+		const y0 = Math.floor((y * sh) / dh);
+		const y1 = Math.max(y0 + 1, Math.floor(((y + 1) * sh) / dh));
+		for (let x = 0; x < dw; x++) {
+			const x0 = Math.floor((x * sw) / dw);
+			const x1 = Math.max(x0 + 1, Math.floor(((x + 1) * sw) / dw));
+			let sum = 0;
+			for (let yy = y0; yy < y1; yy++) for (let xx = x0; xx < x1; xx++) sum += src[yy * sw + xx];
+			out[y * dw + x] = Math.round(sum / ((y1 - y0) * (x1 - x0)));
+		}
+	}
+	return out;
+}
+
+function scaleKeypoint(kp: KeypointPair, k: number): KeypointPair {
+	const p = (q: Point): Point => ({ ...q, x: q.x * k, y: q.y * k });
+	return { reference: p(kp.reference), drawing: p(kp.drawing) };
 }
 
 /** The built-in weights for a category. */

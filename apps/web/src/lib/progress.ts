@@ -198,7 +198,10 @@ export async function saveThumb(at: number, png: string) {
 		const ctx = c.getContext('2d')!;
 		ctx.fillStyle = '#fff';
 		ctx.fillRect(0, 0, 200, 150);
-		ctx.drawImage(img, 0, 0, 200, 150);
+		// any canvas shape: fit inside the 4:3 thumbnail, centred
+		const s = Math.min(200 / img.naturalWidth, 150 / img.naturalHeight);
+		const [w, h] = [img.naturalWidth * s, img.naturalHeight * s];
+		ctx.drawImage(img, (200 - w) / 2, (150 - h) / 2, w, h);
 		const all = thumbs();
 		all[at] = c.toDataURL('image/jpeg', 0.7);
 		const keep = Object.keys(all)
