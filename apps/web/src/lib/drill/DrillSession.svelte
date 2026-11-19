@@ -4,7 +4,7 @@
 	import { page } from '$app/state';
 	import Tile from '#lib/ui/Tile.svelte';
 	import Button from '#lib/ui/Button.svelte';
-	import PaintCanvas, { type CanvasStatus } from '#lib/paint/PaintCanvas.svelte';
+	import PaintCanvas, { type CanvasStatus, BLANK_STATUS } from '#lib/paint/PaintCanvas.svelte';
 	import {
 		DRILL_BRUSHES,
 		SKILL_NAMES,
@@ -22,7 +22,7 @@
 
 	const W = 800;
 	const H = 600;
-	const BLANK: CanvasStatus = { canUndo: false, canRedo: false, blank: true, strokes: 0 };
+	const BLANK: CanvasStatus = BLANK_STATUS;
 
 	type Phase = 'drawing' | 'grading' | 'revealed' | 'done';
 

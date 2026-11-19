@@ -3,7 +3,7 @@
 use hokusai::{Brush, BrushSetting};
 use wasm_bindgen::prelude::*;
 
-use crate::{Painter, set_brush_rgb};
+use crate::{Blend, LayerProps, Painter, set_brush_rgb};
 
 /// A MyPaint brush loaded from a `.myb` file.
 #[wasm_bindgen]
@@ -76,9 +76,10 @@ impl PaintCanvas {
         self.inner.height()
     }
 
+    /// Start a stroke on the active layer; false if it is locked or hidden.
     #[wasm_bindgen(js_name = beginStroke)]
-    pub fn begin_stroke(&mut self) {
-        self.inner.begin_stroke();
+    pub fn begin_stroke(&mut self) -> bool {
+        self.inner.begin_stroke()
     }
 
     #[wasm_bindgen(js_name = strokeTo)]
@@ -102,8 +103,96 @@ impl PaintCanvas {
         self.inner.end_stroke(&brush.inner);
     }
 
-    pub fn clear(&mut self) {
-        self.inner.clear();
+    /// Erase the active layer. False if there was nothing to erase (no history step).
+    pub fn clear(&mut self) -> bool {
+        self.inner.clear()
+    }
+
+    // ---- layers ----
+
+    /// `[{id, name, visible, opacity, blend, locked, alphaLock, empty}]`, bottom → top.
+    #[wasm_bindgen(js_name = layersJson)]
+    pub fn layers_json(&self) -> String {
+        self.inner.layers_json()
+    }
+
+    #[wasm_bindgen(js_name = activeLayer, getter)]
+    pub fn active_layer(&self) -> u32 {
+        self.inner.active_layer()
+    }
+
+    #[wasm_bindgen(js_name = setActiveLayer)]
+    pub fn set_active_layer(&mut self, id: u32) -> bool {
+        self.inner.set_active_layer(id)
+    }
+
+    /// New empty layer above the active one; returns its id (0 = limit reached).
+    #[wasm_bindgen(js_name = addLayer)]
+    pub fn add_layer(&mut self, name: &str) -> u32 {
+        self.inner.add_layer(name)
+    }
+
+    #[wasm_bindgen(js_name = duplicateLayer)]
+    pub fn duplicate_layer(&mut self, id: u32) -> u32 {
+        self.inner.duplicate_layer(id)
+    }
+
+    #[wasm_bindgen(js_name = deleteLayer)]
+    pub fn delete_layer(&mut self, id: u32) -> bool {
+        self.inner.delete_layer(id)
+    }
+
+    /// Move to position `to` (0 = bottom).
+    #[wasm_bindgen(js_name = moveLayer)]
+    pub fn move_layer(&mut self, id: u32, to: usize) -> bool {
+        self.inner.move_layer(id, to)
+    }
+
+    #[wasm_bindgen(js_name = mergeDown)]
+    pub fn merge_down(&mut self, id: u32) -> bool {
+        self.inner.merge_down(id)
+    }
+
+    /// Change a layer's settings. `record` = false previews (no undo step);
+    /// then call `commitLayer` with the settings from before the preview.
+    #[wasm_bindgen(js_name = setLayer)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_layer(
+        &mut self,
+        id: u32,
+        name: &str,
+        visible: bool,
+        opacity: f32,
+        blend: &str,
+        locked: bool,
+        alpha_lock: bool,
+        record: bool,
+    ) -> bool {
+        let props = layer_props(name, visible, opacity, blend, locked, alpha_lock);
+        self.inner.set_layer_props(id, props, record)
+    }
+
+    /// Record previewed changes as one undo step; pass the settings from before the preview.
+    #[wasm_bindgen(js_name = commitLayer)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn commit_layer(
+        &mut self,
+        id: u32,
+        name: &str,
+        visible: bool,
+        opacity: f32,
+        blend: &str,
+        locked: bool,
+        alpha_lock: bool,
+    ) -> bool {
+        let before = layer_props(name, visible, opacity, blend, locked, alpha_lock);
+        self.inner.commit_layer_props(id, before)
+    }
+
+    /// Straight-alpha RGBA8 preview of one layer, `w`×`h`.
+    #[wasm_bindgen(js_name = layerThumbnail)]
+    pub fn layer_thumbnail(&self, id: u32, w: u32, h: u32) -> Vec<u8> {
+        self.inner.layer_thumbnail(id, w, h)
     }
 
     pub fn undo(&mut self) -> bool {
@@ -142,5 +231,23 @@ impl PaintCanvas {
     #[wasm_bindgen(js_name = rgbaPtr)]
     pub fn rgba_ptr(&self) -> *const u8 {
         self.inner.rgba().as_ptr()
+    }
+}
+
+fn layer_props(
+    name: &str,
+    visible: bool,
+    opacity: f32,
+    blend: &str,
+    locked: bool,
+    alpha_lock: bool,
+) -> LayerProps {
+    LayerProps {
+        name: name.to_string(),
+        visible,
+        opacity,
+        blend: Blend::parse(blend).unwrap_or_default(),
+        locked,
+        alpha_lock,
     }
 }

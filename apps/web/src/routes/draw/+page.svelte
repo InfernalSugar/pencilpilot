@@ -5,7 +5,8 @@
 	import { page } from '$app/state';
 	import Tile from '#lib/ui/Tile.svelte';
 	import Button from '#lib/ui/Button.svelte';
-	import PaintCanvas, { type CanvasStatus } from '#lib/paint/PaintCanvas.svelte';
+	import PaintCanvas, { BLANK_STATUS, type CanvasStatus } from '#lib/paint/PaintCanvas.svelte';
+	import LayersPanel from '#lib/paint/LayersPanel.svelte';
 	import BrushPicker from '#lib/paint/BrushPicker.svelte';
 	import { DEFAULT_BRUSH, loadManifest, type BrushManifest } from '#lib/paint/brushes.js';
 	import { categories } from '#lib/categories.js';
@@ -102,7 +103,18 @@
 	let size = $state(1);
 	let opacity = $state(1);
 	let color = $state('#16161a');
-	let status = $state<CanvasStatus>({ canUndo: false, canRedo: false, blank: true, strokes: 0 });
+	let status = $state<CanvasStatus>(BLANK_STATUS);
+	/** phones/tablets fold the layers panel away too */
+	let layersOpen = $state(false);
+	/** "this layer is locked/hidden" notice after a refused stroke */
+	let blocked = $state<'' | 'locked' | 'hidden'>('');
+	let blockedTimer: ReturnType<typeof setTimeout> | undefined;
+	function onBlocked(why: 'locked' | 'hidden') {
+		blocked = why;
+		clearTimeout(blockedTimer);
+		blockedTimer = setTimeout(() => (blocked = ''), 3500);
+	}
+	const activeLayerName = $derived(status.layers.find((l) => l.id === status.active)?.name ?? '');
 	let canvas: ReturnType<typeof PaintCanvas> | undefined = $state();
 	let seconds = $state(0);
 	let timerOn = $state(true);
@@ -270,6 +282,26 @@
 				</Tile>
 			{/if}
 		</div>
+		<div class="layers-area">
+			<Tile as="section" label="Layers">
+				<div class="tile-head">
+					<h2>Layers</h2>
+					<span class="current">{activeLayerName}</span>
+					<button
+						type="button"
+						class="brush-toggle"
+						aria-expanded={layersOpen}
+						aria-controls="layers-body"
+						onclick={() => (layersOpen = !layersOpen)}
+					>
+						{layersOpen ? 'Hide' : 'Show'}
+					</button>
+				</div>
+				<div id="layers-body" class="brush-body" class:closed={!layersOpen}>
+					<LayersPanel {status} controls={canvas} />
+				</div>
+			</Tile>
+		</div>
 		<div class="brush-area">
 			<Tile as="section" label="Brushes">
 				<div class="tile-head">
@@ -305,9 +337,17 @@
 					{opacity}
 					{color}
 					onchange={(s) => (status = s)}
+					onblocked={onBlocked}
 				/>
 				{#if reference && peek}
 					<img class="peek" src={imageUrl(reference)} alt="" />
+				{/if}
+				{#if blocked}
+					<p class="blocked" role="status">
+						{blocked === 'hidden'
+							? `“${activeLayerName}” is hidden. Show it or pick another layer to draw.`
+							: `“${activeLayerName}” is locked. Unlock it or pick another layer to draw.`}
+					</p>
 				{/if}
 			</div>
 
@@ -412,15 +452,15 @@
 								confirmClear = false;
 							}}
 						>
-							Clear all?
+							Clear layer?
 						</button>
 						<button type="button" class="tool" onclick={() => (confirmClear = false)}>Keep</button>
 					{:else}
 						<button
 							type="button"
 							class="tool"
-							aria-label="Clear canvas"
-							title="Clear canvas"
+							aria-label="Clear layer"
+							title="Clear the current layer"
 							disabled={status.blank}
 							onclick={() => (confirmClear = true)}
 						>
@@ -535,8 +575,8 @@
 	.layout {
 		display: grid;
 		grid-template-columns: 340px minmax(0, 1fr);
-		grid-template-rows: auto 1fr;
-		grid-template-areas: 'ref canvas' 'brushes canvas';
+		grid-template-rows: auto auto 1fr;
+		grid-template-areas: 'ref canvas' 'layers canvas' 'brushes canvas';
 		gap: var(--pp-gap);
 		align-items: start;
 	}
@@ -551,6 +591,26 @@
 		grid-area: brushes;
 		min-width: 0;
 	}
+	.layers-area {
+		grid-area: layers;
+		min-width: 0;
+	}
+	.blocked {
+		position: absolute;
+		left: 50%;
+		bottom: 16px;
+		transform: translateX(-50%);
+		margin: 0;
+		padding: 10px 16px;
+		max-width: calc(100% - 32px);
+		border-radius: 999px;
+		background: var(--pp-ink);
+		color: #fff;
+		font-weight: 600;
+		font-size: 14px;
+		text-align: center;
+		pointer-events: none;
+	}
 	.canvas-col {
 		grid-area: canvas;
 	}
@@ -562,7 +622,7 @@
 		.layout {
 			grid-template-columns: minmax(0, 1fr);
 			grid-template-rows: none;
-			grid-template-areas: 'ref' 'canvas' 'brushes';
+			grid-template-areas: 'ref' 'canvas' 'layers' 'brushes';
 		}
 		.layout .ref-img img {
 			max-height: 34vh;

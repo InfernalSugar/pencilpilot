@@ -70,3 +70,46 @@ test('brush search finds brushes across categories', async ({ page }) => {
 	);
 	await expect(page.getByRole('button', { name: /^Thin watercolor/ })).toBeVisible();
 });
+
+test('layers: add, hide, lock, rename, merge, undo', async ({ page }) => {
+	await page.goto('/draw');
+	await expect(page.getByLabel(/Drawing canvas/)).toHaveAttribute('data-ready', 'true', {
+		timeout: 15_000
+	});
+	const layers = page.getByRole('list', { name: 'Layers, top to bottom' });
+	await expect(layers.getByRole('listitem')).toHaveCount(2); // Layer 1 + paper
+
+	await scribble(page, 0.3);
+	const one = await settledInk(page);
+	await page.getByRole('button', { name: 'New layer' }).click();
+	await expect(layers.getByRole('listitem')).toHaveCount(3);
+	await scribble(page, 0.7);
+	const two = await settledInk(page);
+	expect(two).toBeGreaterThan(one);
+
+	// hiding the new layer hides its ink; undo shows it again
+	await page.getByRole('button', { name: 'Hide Layer 2' }).click();
+	await expect.poll(() => inkPixels(page)).toBe(one);
+	await page.getByRole('button', { name: /Undo/ }).click();
+	await expect.poll(() => inkPixels(page)).toBe(two);
+
+	// a locked layer refuses strokes and says why
+	await page.getByRole('button', { name: 'Lock', exact: true }).click();
+	await scribble(page, 0.5);
+	await expect(page.getByRole('status').filter({ hasText: 'is locked' })).toBeVisible();
+	expect(await inkPixels(page)).toBe(two);
+	await page.getByRole('button', { name: 'Lock', exact: true }).click();
+
+	// rename
+	await page.getByRole('button', { name: 'Rename Layer 2' }).click();
+	await page.getByLabel('Layer name').fill('Ink');
+	await page.getByLabel('Layer name').press('Enter');
+	await expect(layers.getByText('Ink', { exact: true })).toBeVisible();
+
+	// merge down keeps the picture and leaves one layer
+	await page.getByRole('button', { name: 'Merge down' }).click();
+	await expect(layers.getByRole('listitem')).toHaveCount(2);
+	expect(await settledInk(page)).toBe(two);
+	await page.getByRole('button', { name: /Undo/ }).click();
+	await expect(layers.getByRole('listitem')).toHaveCount(3);
+});
