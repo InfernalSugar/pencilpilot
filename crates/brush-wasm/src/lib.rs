@@ -40,6 +40,8 @@ pub struct UndoSurface {
     /// `Some` while a stroke is recording.
     recording: Option<Snapshot>,
     dirty: HashSet<TileKey>,
+    /// tiles painted since the last `touched.clear()` (for clipping to a selection)
+    touched: HashSet<TileKey>,
 }
 
 impl UndoSurface {
@@ -69,6 +71,7 @@ impl TiledSurface for UndoSurface {
     fn tile_request_start(&mut self, tx: i32, ty: i32) -> &mut TilePixels {
         self.remember((tx, ty));
         self.dirty.insert((tx, ty));
+        self.touched.insert((tx, ty));
         self.tiles.entry((tx, ty)).or_insert_with(empty_tile)
     }
 
@@ -119,6 +122,7 @@ impl Clone for UndoSurface {
             tiles: self.tiles.clone(),
             recording: None,
             dirty: HashSet::new(),
+            touched: HashSet::new(),
         }
     }
 }
@@ -170,6 +174,8 @@ pub struct Painter {
     alpha_lock_stroke: bool,
     /// tiles to recomposite (structural changes); strokes use each surface's own set
     dirty: HashSet<TileKey>,
+    /// the selection: 255 = selected, per canvas pixel (None = no selection)
+    selection: Option<Vec<u8>>,
 }
 
 impl Painter {
@@ -189,6 +195,7 @@ impl Painter {
             stroke_brush: None,
             alpha_lock_stroke: false,
             dirty: HashSet::new(),
+            selection: None,
         }
     }
 
@@ -490,6 +497,7 @@ impl Painter {
         self.locked_copy(brush);
         let b = self.stroke_brush.as_ref().unwrap_or(brush);
         if let Some(l) = self.layers.iter_mut().find(|l| l.id == id) {
+            l.surface.touched.clear();
             b.stroke_to(
                 &mut self.state,
                 &mut l.surface,
@@ -501,6 +509,51 @@ impl Painter {
                 dtime,
             );
         }
+        self.clip_to_selection(id);
+    }
+
+    /// Undo paint that landed outside the selection on the tiles just touched
+    /// (restored from the stroke's own snapshot of how they were before).
+    fn clip_to_selection(&mut self, layer: u32) {
+        let Some(sel) = self.selection.as_ref() else {
+            return;
+        };
+        let (w, h) = (self.width as usize, self.height as usize);
+        let ts = TILE_SIZE;
+        let Some(l) = self.layers.iter_mut().find(|l| l.id == layer) else {
+            return;
+        };
+        let keys: Vec<TileKey> = l.surface.touched.drain().collect();
+        for key in keys {
+            let orig = l
+                .surface
+                .recording
+                .as_ref()
+                .and_then(|r| r.get(&key))
+                .cloned();
+            let Some(tile) = l.surface.tiles.get_mut(&key) else {
+                continue;
+            };
+            for (py, row) in tile.iter_mut().enumerate() {
+                for (px, p) in row.iter_mut().enumerate() {
+                    let (cx, cy) = (
+                        key.0 as i64 * ts as i64 + px as i64,
+                        key.1 as i64 * ts as i64 + py as i64,
+                    );
+                    let inside = cx >= 0
+                        && cy >= 0
+                        && (cx as usize) < w
+                        && (cy as usize) < h
+                        && sel[cy as usize * w + cx as usize] > 0;
+                    if !inside {
+                        *p = match &orig {
+                            Some(Some(o)) => o[py][px],
+                            _ => [0; 4],
+                        };
+                    }
+                }
+            }
+        }
     }
 
     /// Finish the stroke (flushes slow-tracking lag) and record it for undo.
@@ -511,10 +564,16 @@ impl Painter {
         self.locked_copy(brush);
         let b = self.stroke_brush.take();
         let b = b.as_ref().unwrap_or(brush);
-        let snap = self.layers.iter_mut().find(|l| l.id == id).and_then(|l| {
+        if let Some(l) = self.layers.iter_mut().find(|l| l.id == id) {
+            l.surface.touched.clear();
             b.finish_stroke(&mut self.state, &mut l.surface);
-            l.surface.recording.take()
-        });
+        }
+        self.clip_to_selection(id);
+        let snap = self
+            .layers
+            .iter_mut()
+            .find(|l| l.id == id)
+            .and_then(|l| l.surface.recording.take());
         self.state.reset();
         self.alpha_lock_stroke = false;
         // Always record a history step, even if no pixels changed, so the
@@ -558,6 +617,47 @@ impl Painter {
         if l.surface.tiles.is_empty() || l.props.locked {
             return false;
         }
+        if let Some(sel) = self.selection.clone() {
+            // clear only what's selected
+            let (w, h) = (self.width as usize, self.height as usize);
+            let ts = TILE_SIZE;
+            let l = self.layers.iter().find(|l| l.id == active).unwrap();
+            let mut snap = Snapshot::new();
+            for (&key, tile) in &l.surface.tiles {
+                let mut t = tile.clone();
+                let mut changed = false;
+                for (py, row) in t.iter_mut().enumerate() {
+                    for (px, p) in row.iter_mut().enumerate() {
+                        let (cx, cy) = (
+                            key.0 as i64 * ts as i64 + px as i64,
+                            key.1 as i64 * ts as i64 + py as i64,
+                        );
+                        if cx >= 0
+                            && cy >= 0
+                            && (cx as usize) < w
+                            && (cy as usize) < h
+                            && sel[cy as usize * w + cx as usize] > 0
+                            && p[3] > 0
+                        {
+                            *p = [0; 4];
+                            changed = true;
+                        }
+                    }
+                }
+                if changed {
+                    snap.insert(key, Some(t));
+                }
+            }
+            if snap.is_empty() {
+                return false;
+            }
+            self.perform(Edit::Tiles {
+                layer: active,
+                snap,
+            });
+            return true;
+        }
+        let l = self.layers.iter_mut().find(|l| l.id == active).unwrap();
         let snap: Snapshot = l.surface.tiles.drain().map(|(k, t)| (k, Some(t))).collect();
         l.surface.dirty.extend(snap.keys().copied());
         self.push_undo(Edit::Tiles {
@@ -600,57 +700,15 @@ impl Painter {
         if self.layers[li].props.locked || !self.layers[li].props.visible {
             return false;
         }
-        // 1. what to compare: straight RGBA per pixel
-        let source: Vec<[u8; 4]> = if all_layers {
-            self.flush();
-            self.rgba.as_chunks::<4>().0.to_vec()
-        } else {
-            let l = &self.layers[li];
-            let ts = TILE_SIZE;
-            let mut v = vec![[0u8; 4]; w * h];
-            for (&(tx, ty), tile) in &l.surface.tiles {
-                for py in 0..ts {
-                    for px in 0..ts {
-                        let (cx, cy) = (tx * ts as i32 + px as i32, ty * ts as i32 + py as i32);
-                        if cx < 0 || cy < 0 || cx as usize >= w || cy as usize >= h {
-                            continue;
-                        }
-                        let (c, a) = unpremul_srgb(tile[py][px]);
-                        v[cy as usize * w + cx as usize] = [
-                            (c[0] * 255.0) as u8,
-                            (c[1] * 255.0) as u8,
-                            (c[2] * 255.0) as u8,
-                            (a * 255.0) as u8,
-                        ];
-                    }
-                }
-            }
-            v
-        };
+        let source = self.sample_source(li, all_layers);
         let tol = (tolerance.clamp(0.0, 1.0) * 255.0) as i32;
-        // Gap closing: lines count as `gap` px thicker while flooding, so small
-        // gaps in grainy pencil lines don't let the fill leak; the fill then
-        // grows back by the same amount (plus `grow`) to meet the lines.
-        let mask = if gap > 0 {
-            let seed = source[y as usize * w + x as usize];
-            let near = |p: [u8; 4]| (0..4).all(|k| (p[k] as i32 - seed[k] as i32).abs() <= tol);
-            let wall: Vec<bool> = source.iter().map(|&p| !near(p)).collect();
-            let wall = grow_mask(&wall, w, h, gap as usize);
-            if wall[y as usize * w + x as usize] {
-                // clicked right by a line
-                flood(&source, w, h, x as usize, y as usize, tol)
-            } else {
-                let open: Vec<[u8; 4]> = wall
-                    .iter()
-                    .map(|&b| if b { [0, 0, 0, 0] } else { [255; 4] })
-                    .collect();
-                let m = flood(&open, w, h, x as usize, y as usize, 0);
-                grow_mask(&m, w, h, gap as usize)
+        let mask = flood_closed(&source, w, h, x as usize, y as usize, tol, gap as usize);
+        let mut mask = grow_mask(&mask, w, h, grow as usize);
+        if let Some(sel) = &self.selection {
+            for (m, &s) in mask.iter_mut().zip(sel) {
+                *m &= s > 0;
             }
-        } else {
-            flood(&source, w, h, x as usize, y as usize, tol)
-        };
-        let mask = grow_mask(&mask, w, h, grow as usize);
+        }
         // 2. paint behind the layer's pixels, tile by tile
         let fill = premul_fix15(
             [
@@ -714,6 +772,124 @@ impl Painter {
             snap,
         });
         true
+    }
+
+    /// Straight RGBA of every canvas pixel: what you see, or one layer's own pixels.
+    // pixel loops index tiles by (row, col) and map them to canvas coordinates
+    #[allow(clippy::needless_range_loop)]
+    fn sample_source(&mut self, li: usize, all_layers: bool) -> Vec<[u8; 4]> {
+        let (w, h) = (self.width as usize, self.height as usize);
+        if all_layers {
+            self.flush();
+            self.rgba.as_chunks::<4>().0.to_vec()
+        } else {
+            let l = &self.layers[li];
+            let ts = TILE_SIZE;
+            let mut v = vec![[0u8; 4]; w * h];
+            for (&(tx, ty), tile) in &l.surface.tiles {
+                for py in 0..ts {
+                    for px in 0..ts {
+                        let (cx, cy) = (tx * ts as i32 + px as i32, ty * ts as i32 + py as i32);
+                        if cx < 0 || cy < 0 || cx as usize >= w || cy as usize >= h {
+                            continue;
+                        }
+                        let (c, a) = unpremul_srgb(tile[py][px]);
+                        v[cy as usize * w + cx as usize] = [
+                            (c[0] * 255.0) as u8,
+                            (c[1] * 255.0) as u8,
+                            (c[2] * 255.0) as u8,
+                            (a * 255.0) as u8,
+                        ];
+                    }
+                }
+            }
+            v
+        }
+    }
+
+    // ---- selection ----
+
+    /// Combine `new` (per canvas pixel) into the selection: 0 replace, 1 add,
+    /// 2 subtract, 3 intersect. An empty result means no selection.
+    fn combine_selection(&mut self, new: Vec<bool>, op: u8) -> bool {
+        let n = (self.width * self.height) as usize;
+        if new.len() != n {
+            return false;
+        }
+        let cur = self.selection.take().unwrap_or_else(|| vec![0; n]);
+        let out: Vec<u8> = cur
+            .iter()
+            .zip(&new)
+            .map(|(&c, &m)| {
+                let c = c > 0;
+                let v = match op {
+                    1 => c || m,
+                    2 => c && !m,
+                    3 => c && m,
+                    _ => m,
+                };
+                if v { 255 } else { 0 }
+            })
+            .collect();
+        if out.iter().any(|&v| v > 0) {
+            self.selection = Some(out);
+        }
+        true
+    }
+
+    /// Set the selection from a mask (any byte > 127 = selected), combined by `op`.
+    pub fn set_selection(&mut self, mask: &[u8], op: u8) -> bool {
+        self.combine_selection(mask.iter().map(|&v| v > 127).collect(), op)
+    }
+
+    /// Magic wand: select the connected area of similar colour at (x, y).
+    pub fn select_wand(
+        &mut self,
+        x: u32,
+        y: u32,
+        tolerance: f32,
+        all_layers: bool,
+        op: u8,
+    ) -> bool {
+        let (w, h) = (self.width as usize, self.height as usize);
+        let Some(li) = self.index_of(self.active) else {
+            return false;
+        };
+        if x as usize >= w || y as usize >= h {
+            return false;
+        }
+        let src = self.sample_source(li, all_layers);
+        let tol = (tolerance.clamp(0.0, 1.0) * 255.0) as i32;
+        // the same gap closing as fill, so grainy pencil outlines hold the selection in
+        let m = flood_closed(&src, w, h, x as usize, y as usize, tol, 3);
+        self.combine_selection(m, op)
+    }
+
+    pub fn select_all(&mut self) {
+        self.selection = Some(vec![255; (self.width * self.height) as usize]);
+    }
+
+    pub fn deselect(&mut self) {
+        self.selection = None;
+    }
+
+    pub fn invert_selection(&mut self) {
+        self.selection = match self.selection.take() {
+            None => Some(vec![255; (self.width * self.height) as usize]),
+            Some(s) => {
+                let inv: Vec<u8> = s.iter().map(|&v| 255 - v).collect();
+                inv.iter().any(|&v| v > 0).then_some(inv)
+            }
+        };
+    }
+
+    pub fn has_selection(&self) -> bool {
+        self.selection.is_some()
+    }
+
+    /// The selection as bytes (empty when there is none).
+    pub fn selection_mask(&self) -> Vec<u8> {
+        self.selection.clone().unwrap_or_default()
     }
 
     // ---- shared canvases: other people's strokes ----
@@ -1019,6 +1195,36 @@ fn flood(src: &[[u8; 4]], w: usize, h: usize, x: usize, y: usize, tol: i32) -> V
         }
     }
     mask
+}
+
+/// Flood fill with gap closing: lines count as `gap` px thicker while
+/// flooding, so small gaps in grainy pencil lines don't let it leak; the
+/// region then grows back by `gap` to meet the lines. (`gap` 0 = plain flood.)
+fn flood_closed(
+    src: &[[u8; 4]],
+    w: usize,
+    h: usize,
+    x: usize,
+    y: usize,
+    tol: i32,
+    gap: usize,
+) -> Vec<bool> {
+    if gap == 0 {
+        return flood(src, w, h, x, y, tol);
+    }
+    let seed = src[y * w + x];
+    let near = |p: [u8; 4]| (0..4).all(|k| (p[k] as i32 - seed[k] as i32).abs() <= tol);
+    let wall: Vec<bool> = src.iter().map(|&p| !near(p)).collect();
+    let wall = grow_mask(&wall, w, h, gap);
+    if wall[y * w + x] {
+        // clicked right by a line
+        return flood(src, w, h, x, y, tol);
+    }
+    let open: Vec<[u8; 4]> = wall
+        .iter()
+        .map(|&b| if b { [0, 0, 0, 0] } else { [255; 4] })
+        .collect();
+    grow_mask(&flood(&open, w, h, x, y, 0), w, h, gap)
 }
 
 /// Grow a mask by `r` pixels (square neighbourhood, two separable passes).
@@ -1560,6 +1766,83 @@ mod tests {
         lock.locked = true;
         p.set_layer_props(top, lock, true);
         assert!(!p.fill(80, 60, [0, 200, 0], 1.0, 0.1, true, 0, 0));
+    }
+
+    /// a selection mask for the rectangle x0..x1, y0..y1
+    fn rect_mask(p: &Painter, x0: u32, y0: u32, x1: u32, y1: u32) -> Vec<u8> {
+        let (w, h) = (p.width(), p.height());
+        (0..h)
+            .flat_map(|y| (0..w).map(move |x| (x, y)))
+            .map(|(x, y)| {
+                if x >= x0 && x < x1 && y >= y0 && y < y1 {
+                    255
+                } else {
+                    0
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn strokes_stay_inside_the_selection_and_undo_cleanly() {
+        let mut p = Painter::new(256, 128);
+        let b = pen();
+        let m = rect_mask(&p, 0, 0, 128, 128);
+        assert!(p.set_selection(&m, 0));
+        line(&mut p, &b, 60.0); // from x 20 to 180
+        p.flush();
+        assert!(px(&p, 60, 60)[0] < 100, "inside painted");
+        assert!(px(&p, 160, 60)[0] > 240, "outside untouched");
+        p.undo();
+        p.flush();
+        assert_eq!(dark_pixels(&p), 0);
+        // with no selection, the whole line paints
+        p.deselect();
+        line(&mut p, &b, 60.0);
+        p.flush();
+        assert!(px(&p, 160, 60)[0] < 100);
+    }
+
+    #[test]
+    fn selection_ops_wand_fill_and_clear() {
+        let mut p = Painter::new(256, 128);
+        dense_square(&mut p);
+        // magic wand inside the square selects its inside only
+        assert!(p.select_wand(80, 60, 0.1, true, 0));
+        let sel = p.selection_mask();
+        assert!(sel[60 * 256 + 80] > 0 && sel[60 * 256 + 200] == 0);
+        // subtract the left half of the canvas
+        let left = rect_mask(&p, 0, 0, 80, 128);
+        p.set_selection(&left, 2);
+        assert!(p.selection_mask()[60 * 256 + 60] == 0 && p.selection_mask()[60 * 256 + 100] > 0);
+        // fill only paints selected pixels
+        assert!(p.fill(100, 60, [220, 0, 0], 1.0, 0.1, true, 2, 0));
+        p.flush();
+        assert!(px(&p, 100, 60)[1] < 60 && px(&p, 60, 60)[1] > 240);
+        // invert, then clear: only the unselected... i.e. now-selected outside clears the line
+        p.invert_selection();
+        assert!(p.clear());
+        p.flush();
+        assert!(
+            px(&p, 40, 60)[0] > 240,
+            "the left edge of the square was cleared"
+        );
+        assert!(
+            px(&p, 100, 60)[1] < 60,
+            "the red inside (not selected now) stays"
+        );
+        p.undo();
+        p.flush();
+        assert!(px(&p, 40, 60)[0] < 100);
+        // select all / deselect
+        p.select_all();
+        assert!(p.has_selection());
+        p.deselect();
+        assert!(!p.has_selection() && p.selection_mask().is_empty());
+        // subtracting everything leaves no selection
+        p.select_all();
+        p.set_selection(&rect_mask(&p, 0, 0, 256, 128), 2);
+        assert!(!p.has_selection());
     }
 
     #[test]

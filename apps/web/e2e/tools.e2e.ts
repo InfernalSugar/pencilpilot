@@ -272,3 +272,90 @@ test('QuickShape: hold at the end of a wobbly line or loop to snap it', async ({
 		timeout: 2500
 	});
 });
+
+/** non-transparent pixels on the marching-ants layer */
+const ants = (page: Page) =>
+	page.locator('canvas.ants').evaluate((c: HTMLCanvasElement) => {
+		const d = c.getContext('2d')!.getImageData(0, 0, c.width, c.height).data;
+		let n = 0;
+		for (let i = 3; i < d.length; i += 4) if (d[i]) n++;
+		return n;
+	});
+
+async function drag(page: Page, from: [number, number], to: [number, number], steps = 10) {
+	const b = await box(page);
+	await page.mouse.move(b.x + b.width * from[0], b.y + b.height * from[1]);
+	await page.mouse.down();
+	await page.mouse.move(b.x + b.width * to[0], b.y + b.height * to[1], { steps });
+	await page.mouse.up();
+}
+
+test('selections: rectangle keeps strokes inside, clear selected, shortcuts', async ({ page }) => {
+	await ready(page);
+	await page.keyboard.press('m');
+	await drag(page, [0.05, 0.05], [0.5, 0.95]);
+	await expect.poll(() => ants(page)).toBeGreaterThan(100);
+	await page.keyboard.press('b');
+	await zigzag(page, 0.5, 0); // from x 0.15 to 0.83
+	const half = await canvas(page).evaluate((c: HTMLCanvasElement) => {
+		const row = c
+			.getContext('2d')!
+			.getImageData(0, Math.round(c.height * 0.5) - 3, c.width, 6).data;
+		let [l, r] = [0, 0];
+		for (let i = 0; i < row.length; i += 4)
+			if (row[i] < 225) (i / 4) % c.width < c.width / 2 ? l++ : r++;
+		return { l, r };
+	});
+	expect(half.l).toBeGreaterThan(20);
+	expect(half.r).toBe(0);
+
+	// Delete clears only what's selected
+	await page.keyboard.press('Escape');
+	await expect.poll(() => ants(page)).toBe(0);
+	await zigzag(page, 0.3, 0);
+	await page.keyboard.press('m');
+	await drag(page, [0.05, 0.2], [0.5, 0.4]);
+	await page.keyboard.press('Delete');
+	const after = await band(page, 0.25, 0.35);
+	expect(after.n).toBeGreaterThan(20); // the right part is still there
+	await page.keyboard.press('Control+a');
+	await expect.poll(() => ants(page)).toBeGreaterThan(100);
+	await page.keyboard.press('Control+d');
+	await expect.poll(() => ants(page)).toBe(0);
+});
+
+test('selections: lasso, magic wand with add, and fill inside', async ({ page }) => {
+	await ready(page);
+	await square(page); // 0.3–0.6 × 0.3–0.7
+	await page.getByRole('button', { name: 'Magic wand (W)' }).click();
+	let b = await box(page);
+	await page.mouse.click(b.x + b.width * 0.45, b.y + b.height * 0.5);
+	await expect.poll(() => ants(page)).toBeGreaterThan(100);
+	const one = await ants(page);
+	// add a lasso area elsewhere with Shift
+	await page.getByRole('button', { name: 'Lasso select (L)' }).click();
+	b = await box(page);
+	await page.keyboard.down('Shift');
+	await page.mouse.move(b.x + b.width * 0.75, b.y + b.height * 0.2);
+	await page.mouse.down();
+	for (const [x, y] of [
+		[0.9, 0.2],
+		[0.9, 0.5],
+		[0.75, 0.5]
+	])
+		await page.mouse.move(b.x + b.width * x, b.y + b.height * y, { steps: 5 });
+	await page.mouse.up();
+	await page.keyboard.up('Shift');
+	await expect.poll(() => ants(page)).toBeGreaterThan(one);
+	// fill everything that's selected with a big tolerance: inside the square and the lasso area, not elsewhere
+	await page.getByRole('radio', { name: 'Colour #3d6bff' }).click();
+	await page.getByRole('button', { name: 'Fill (G)' }).click();
+	await page
+		.getByLabel(/^Tolerance/)
+		.last()
+		.fill('0.6');
+	b = await box(page);
+	await page.mouse.click(b.x + b.width * 0.1, b.y + b.height * 0.9);
+	await expect.poll(async () => (await pixel(page, 0.82, 0.35))[0]).toBeLessThan(150);
+	expect((await pixel(page, 0.1, 0.9))[0]).toBe(255);
+});

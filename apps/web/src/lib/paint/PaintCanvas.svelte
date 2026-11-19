@@ -25,6 +25,8 @@
 		active: number;
 		/** bumps on every change (for refreshing layer thumbnails) */
 		version: number;
+		/** something is selected */
+		selection: boolean;
 	}
 
 	/** A local stroke as it happens, for shared canvases. Points are [x, y, pressure, dtMs, …]. */
@@ -47,7 +49,8 @@
 		strokes: 0,
 		layers: [],
 		active: 0,
-		version: 0
+		version: 0,
+		selection: false
 	};
 
 	export interface DrawingExport {
@@ -95,6 +98,8 @@
 		fillAllLayers = true,
 		quickShape = true,
 		onshape,
+		selectMode = 'replace',
+		wandTolerance = 0.15,
 		maxHeight = '78vh',
 		viewControls = true
 	}: {
@@ -115,7 +120,11 @@
 		/** where the overlay sits: offset (fraction of the canvas), scale and rotation (degrees) */
 		overlayTransform?: { x: number; y: number; scale: number; rotate: number };
 		/** what a press on the canvas does */
-		tool?: 'brush' | 'picker' | 'fill';
+		tool?: 'brush' | 'picker' | 'fill' | 'select-rect' | 'select-lasso' | 'select-wand';
+		/** how a new selection combines with the current one (Shift = add, Alt = subtract) */
+		selectMode?: 'replace' | 'add' | 'subtract';
+		/** magic wand: colour tolerance (0–1) */
+		wandTolerance?: number;
 		/** fill: how different a colour may be and still be filled (0–1) */
 		fillTolerance?: number;
 		/** fill: sample what you see (true) or the current layer only */
@@ -239,7 +248,8 @@
 			strokes: log.on(new Set(layers.filter((l) => l.visible).map((l) => l.id))).length,
 			layers,
 			active: paint.activeLayer,
-			version: ++version
+			version: ++version,
+			selection: paint.hasSelection()
 		});
 	}
 
@@ -645,6 +655,128 @@
 		onshape?.(shape.kind);
 	}
 
+	// ---- selections ----
+
+	/** a rectangle or lasso being dragged (canvas px), shown live */
+	let marquee = $state<{ kind: 'rect' | 'lasso'; pts: [number, number][]; op: number } | null>(
+		null
+	);
+	let antsEl: HTMLCanvasElement | undefined = $state();
+	let antsEdges: Int32Array = new Int32Array(0);
+	let antsBox = { x0: 0, y0: 0, x1: 0, y1: 0 };
+	let antsPhase = 0;
+
+	const opOf = (e: PointerEvent | MouseEvent) =>
+		e.shiftKey ? 1 : e.altKey ? 2 : selectMode === 'add' ? 1 : selectMode === 'subtract' ? 2 : 0;
+
+	/** Recompute the marching-ants outline from the engine's selection. */
+	function refreshAnts() {
+		if (!paint) return;
+		const m = paint.selectionMask();
+		const edges: number[] = [];
+		let [x0, y0, x1, y1] = [width, height, -1, -1];
+		if (m.length) {
+			for (let y = 0; y < height; y++)
+				for (let x = 0; x < width; x++) {
+					const i = y * width + x;
+					if (!m[i]) continue;
+					if (
+						x === 0 ||
+						y === 0 ||
+						x === width - 1 ||
+						y === height - 1 ||
+						!m[i - 1] ||
+						!m[i + 1] ||
+						!m[i - width] ||
+						!m[i + width]
+					) {
+						edges.push(i);
+						x0 = Math.min(x0, x);
+						y0 = Math.min(y0, y);
+						x1 = Math.max(x1, x);
+						y1 = Math.max(y1, y);
+					}
+				}
+		}
+		antsEdges = Int32Array.from(edges);
+		antsBox = { x0, y0, x1, y1 };
+		drawAnts();
+		notify();
+	}
+
+	function drawAnts() {
+		const c = antsEl?.getContext('2d');
+		if (!c) return;
+		c.clearRect(0, 0, width, height);
+		if (!antsEdges.length) return;
+		const { x0, y0, x1, y1 } = antsBox;
+		const bw = x1 - x0 + 1;
+		const img = c.createImageData(bw, y1 - y0 + 1);
+		for (const i of antsEdges) {
+			const x = i % width;
+			const y = (i / width) | 0;
+			const o = ((y - y0) * bw + (x - x0)) * 4;
+			const v = ((x + y + antsPhase) >> 2) & 1 ? 255 : 0;
+			img.data[o] = img.data[o + 1] = img.data[o + 2] = v;
+			img.data[o + 3] = 255;
+		}
+		c.putImageData(img, x0, y0);
+	}
+
+	$effect(() => {
+		const id = setInterval(() => {
+			if (!antsEdges.length) return;
+			antsPhase = (antsPhase + 1) % 8;
+			drawAnts();
+		}, 140);
+		return () => clearInterval(id);
+	});
+
+	/** rasterise a rectangle / lasso to a canvas-sized mask and combine it */
+	function commitMarquee() {
+		if (!paint || !marquee) return;
+		const { kind, pts, op } = marquee;
+		marquee = null;
+		const area =
+			kind === 'rect' ? Math.abs((pts[1][0] - pts[0][0]) * (pts[1][1] - pts[0][1])) : pts.length;
+		if (area < 4) {
+			// a click without a drag clears the selection (replace mode)
+			if (op === 0) paint.deselect();
+			return refreshAnts();
+		}
+		const off = new OffscreenCanvas(width, height);
+		const c = off.getContext('2d')!;
+		c.fillStyle = '#fff';
+		c.beginPath();
+		if (kind === 'rect') {
+			const [[ax, ay], [bx, by]] = pts;
+			c.rect(Math.min(ax, bx), Math.min(ay, by), Math.abs(bx - ax), Math.abs(by - ay));
+		} else {
+			c.moveTo(...pts[0]);
+			for (const p of pts.slice(1)) c.lineTo(...p);
+			c.closePath();
+		}
+		c.fill();
+		const rgba = c.getImageData(0, 0, width, height).data;
+		const mask = new Uint8Array(width * height);
+		for (let i = 0; i < mask.length; i++) mask[i] = rgba[i * 4 + 3];
+		paint.setSelection(mask, op);
+		refreshAnts();
+	}
+
+	export function selectAll() {
+		paint?.selectAll();
+		refreshAnts();
+	}
+	export function deselect() {
+		paint?.deselect();
+		refreshAnts();
+	}
+	export function invertSelection() {
+		paint?.invertSelection();
+		refreshAnts();
+	}
+
 	// ---- smoothing (lazy brush): the pen point follows the pointer on a short leash ----
 
 	let smooth: { x: number; y: number; p: number } | null = null;
@@ -799,6 +931,18 @@
 		}
 		if (locked) return;
 		if (tool === 'fill') return fillAt(e.clientX, e.clientY);
+		if (tool === 'select-wand') {
+			const [cx, cy] = toCanvas(e.clientX, e.clientY);
+			if (cx >= 0 && cy >= 0 && cx < width && cy < height)
+				paint.selectWand(Math.floor(cx), Math.floor(cy), wandTolerance, true, opOf(e));
+			return refreshAnts();
+		}
+		if (tool === 'select-rect' || tool === 'select-lasso') {
+			capture(e);
+			const p = toCanvas(e.clientX, e.clientY);
+			marquee = { kind: tool === 'select-rect' ? 'rect' : 'lasso', pts: [p, p], op: opOf(e) };
+			return;
+		}
 		if (adjustOverlay && overlaySrc) {
 			capture(e);
 			const [cx, cy] = toCanvas(e.clientX, e.clientY);
@@ -830,6 +974,14 @@
 
 	function move(e: PointerEvent) {
 		if (picking === e.pointerId) return pick(e);
+		if (marquee) {
+			const p = toCanvas(e.clientX, e.clientY);
+			marquee =
+				marquee.kind === 'rect'
+					? { ...marquee, pts: [marquee.pts[0], p] }
+					: { ...marquee, pts: [...marquee.pts, p] };
+			return;
+		}
 		if (e.pointerType === 'touch' && touches.has(e.pointerId)) {
 			touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
 			const st = tap?.starts.get(e.pointerId);
@@ -873,6 +1025,7 @@
 	}
 
 	function up(e: PointerEvent) {
+		if (marquee) return commitMarquee();
 		if (picking === e.pointerId) {
 			picking = null;
 			return;
@@ -1101,6 +1254,7 @@
 	class:moving-overlay={adjustOverlay && !!overlaySrc}
 	class:picker={tool === 'picker'}
 	class:filling={tool === 'fill'}
+	class:selecting={tool.startsWith('select')}
 	bind:this={vp}
 	style="aspect-ratio: {width} / {height}; max-height: {maxHeight}"
 	onpointerdown={down}
@@ -1122,6 +1276,27 @@
 			aria-label="Drawing canvas, {width} by {height} pixels"
 			data-ready={ready}
 		></canvas>
+		<canvas class="ants" bind:this={antsEl} {width} {height} aria-hidden="true"></canvas>
+		{#if marquee}
+			<svg
+				class="marquee"
+				viewBox="0 0 {width} {height}"
+				preserveAspectRatio="none"
+				aria-hidden="true"
+			>
+				{#if marquee.kind === 'rect'}
+					{@const [[ax, ay], [bx, by]] = marquee.pts}
+					<rect
+						x={Math.min(ax, bx)}
+						y={Math.min(ay, by)}
+						width={Math.abs(bx - ax)}
+						height={Math.abs(by - ay)}
+					/>
+				{:else}
+					<polygon points={marquee.pts.map((p) => p.join(',')).join(' ')} />
+				{/if}
+			</svg>
+		{/if}
 		{#if overlaySrc}
 			<img
 				class="overlay"
@@ -1210,6 +1385,24 @@
 			url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="white" stroke="black" stroke-width="1.6"><path d="m2 22 1-4 9-9 3 3-9 9Z"/><path d="m14 7 3-3a2.1 2.1 0 0 1 3 3l-3 3"/></svg>')
 				2 22,
 			crosshair;
+	}
+	.viewport.selecting {
+		cursor: crosshair;
+	}
+	.ants,
+	.marquee {
+		position: absolute;
+		inset: 0;
+		width: 100%;
+		height: 100%;
+		pointer-events: none;
+	}
+	.marquee {
+		fill: rgba(61, 107, 255, 0.12);
+		stroke: #16161a;
+		stroke-width: 1.5;
+		stroke-dasharray: 6 4;
+		vector-effect: non-scaling-stroke;
 	}
 	.viewport.filling {
 		cursor: cell;

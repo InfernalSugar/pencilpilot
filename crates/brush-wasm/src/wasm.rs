@@ -228,6 +228,53 @@ impl PaintCanvas {
             .fill(x, y, [r, g, b], opacity, tolerance, all_layers, grow, gap)
     }
 
+    // ---- selection (not part of the undo history) ----
+
+    /// Set the selection from a canvas-sized mask (byte > 127 = selected);
+    /// `op`: 0 replace, 1 add, 2 subtract, 3 intersect.
+    #[wasm_bindgen(js_name = setSelection)]
+    pub fn set_selection(&mut self, mask: &[u8], op: u8) -> bool {
+        self.inner.set_selection(mask, op)
+    }
+
+    /// Magic wand at (x, y).
+    #[wasm_bindgen(js_name = selectWand)]
+    pub fn select_wand(
+        &mut self,
+        x: u32,
+        y: u32,
+        tolerance: f32,
+        all_layers: bool,
+        op: u8,
+    ) -> bool {
+        self.inner.select_wand(x, y, tolerance, all_layers, op)
+    }
+
+    #[wasm_bindgen(js_name = selectAll)]
+    pub fn select_all(&mut self) {
+        self.inner.select_all();
+    }
+
+    pub fn deselect(&mut self) {
+        self.inner.deselect();
+    }
+
+    #[wasm_bindgen(js_name = invertSelection)]
+    pub fn invert_selection(&mut self) {
+        self.inner.invert_selection();
+    }
+
+    #[wasm_bindgen(js_name = hasSelection)]
+    pub fn has_selection(&self) -> bool {
+        self.inner.has_selection()
+    }
+
+    /// The selection mask (empty when there is none).
+    #[wasm_bindgen(js_name = selectionMask)]
+    pub fn selection_mask(&self) -> Vec<u8> {
+        self.inner.selection_mask()
+    }
+
     /// A layer without an undo step (for another person on a shared canvas).
     #[wasm_bindgen(js_name = addLayerSilent)]
     pub fn add_layer_silent(&mut self, name: &str) -> u32 {
