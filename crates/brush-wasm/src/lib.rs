@@ -23,7 +23,7 @@ pub mod layers;
 pub mod wasm;
 
 pub use layers::{Blend, LayerProps};
-use layers::{TileSource, composite_pixel, json_str, merge_pixel, unpremul_srgb};
+use layers::{TileSource, composite_pixel, json_str, merge_pixel, premul_fix15, unpremul_srgb};
 
 type TileKey = (i32, i32);
 type TileMap = HashMap<TileKey, Box<TilePixels>>;
@@ -567,6 +567,155 @@ impl Painter {
         true
     }
 
+    // ---- fill ----
+
+    /// Flood-fill the active layer from canvas point (x, y) with sRGB colour
+    /// `rgb` at `opacity`. The region is every connected pixel within
+    /// `tolerance` (0–1, per channel) of the clicked colour, sampled from what
+    /// you see (`all_layers`) or the active layer alone; it then grows by
+    /// `grow` px so it tucks under soft line edges. Paint goes *behind* what
+    /// the layer already has, so lines stay on top. One undo step; false if
+    /// nothing changed (or the layer is locked/hidden).
+    // pixel loops index tiles by (row, col) and map them to canvas coordinates
+    #[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
+    pub fn fill(
+        &mut self,
+        x: u32,
+        y: u32,
+        rgb: [u8; 3],
+        opacity: f32,
+        tolerance: f32,
+        all_layers: bool,
+        grow: u32,
+        gap: u32,
+    ) -> bool {
+        let (w, h) = (self.width as usize, self.height as usize);
+        if self.stroking.is_some() || x as usize >= w || y as usize >= h {
+            return false;
+        }
+        let active = self.active;
+        let Some(li) = self.index_of(active) else {
+            return false;
+        };
+        if self.layers[li].props.locked || !self.layers[li].props.visible {
+            return false;
+        }
+        // 1. what to compare: straight RGBA per pixel
+        let source: Vec<[u8; 4]> = if all_layers {
+            self.flush();
+            self.rgba.as_chunks::<4>().0.to_vec()
+        } else {
+            let l = &self.layers[li];
+            let ts = TILE_SIZE;
+            let mut v = vec![[0u8; 4]; w * h];
+            for (&(tx, ty), tile) in &l.surface.tiles {
+                for py in 0..ts {
+                    for px in 0..ts {
+                        let (cx, cy) = (tx * ts as i32 + px as i32, ty * ts as i32 + py as i32);
+                        if cx < 0 || cy < 0 || cx as usize >= w || cy as usize >= h {
+                            continue;
+                        }
+                        let (c, a) = unpremul_srgb(tile[py][px]);
+                        v[cy as usize * w + cx as usize] = [
+                            (c[0] * 255.0) as u8,
+                            (c[1] * 255.0) as u8,
+                            (c[2] * 255.0) as u8,
+                            (a * 255.0) as u8,
+                        ];
+                    }
+                }
+            }
+            v
+        };
+        let tol = (tolerance.clamp(0.0, 1.0) * 255.0) as i32;
+        // Gap closing: lines count as `gap` px thicker while flooding, so small
+        // gaps in grainy pencil lines don't let the fill leak; the fill then
+        // grows back by the same amount (plus `grow`) to meet the lines.
+        let mask = if gap > 0 {
+            let seed = source[y as usize * w + x as usize];
+            let near = |p: [u8; 4]| (0..4).all(|k| (p[k] as i32 - seed[k] as i32).abs() <= tol);
+            let wall: Vec<bool> = source.iter().map(|&p| !near(p)).collect();
+            let wall = grow_mask(&wall, w, h, gap as usize);
+            if wall[y as usize * w + x as usize] {
+                // clicked right by a line
+                flood(&source, w, h, x as usize, y as usize, tol)
+            } else {
+                let open: Vec<[u8; 4]> = wall
+                    .iter()
+                    .map(|&b| if b { [0, 0, 0, 0] } else { [255; 4] })
+                    .collect();
+                let m = flood(&open, w, h, x as usize, y as usize, 0);
+                grow_mask(&m, w, h, gap as usize)
+            }
+        } else {
+            flood(&source, w, h, x as usize, y as usize, tol)
+        };
+        let mask = grow_mask(&mask, w, h, grow as usize);
+        // 2. paint behind the layer's pixels, tile by tile
+        let fill = premul_fix15(
+            [
+                rgb[0] as f32 / 255.0,
+                rgb[1] as f32 / 255.0,
+                rgb[2] as f32 / 255.0,
+            ],
+            opacity.clamp(0.0, 1.0),
+        );
+        let alpha_lock = self.layers[li].props.alpha_lock;
+        let ts = TILE_SIZE;
+        let mut keys: HashSet<TileKey> = HashSet::new();
+        for (i, &m) in mask.iter().enumerate() {
+            if m {
+                keys.insert(((i % w / ts) as i32, (i / w / ts) as i32));
+            }
+        }
+        let mut snap = Snapshot::new();
+        let l = &mut self.layers[li];
+        for key in keys {
+            let mut tile = l
+                .surface
+                .tiles
+                .get(&key)
+                .cloned()
+                .unwrap_or_else(empty_tile);
+            let mut changed = false;
+            for py in 0..ts {
+                for px in 0..ts {
+                    let (cx, cy) = (key.0 as usize * ts + px, key.1 as usize * ts + py);
+                    if cx >= w || cy >= h || !mask[cy * w + cx] {
+                        continue;
+                    }
+                    let d = tile[py][px];
+                    if alpha_lock && d[3] == 0 {
+                        continue;
+                    }
+                    // "destination over": the existing pixel stays on top of the fill
+                    let out = if alpha_lock {
+                        let (_, a) = unpremul_srgb(d);
+                        let c = unpremul_srgb(fill).0;
+                        premul_fix15(c, a)
+                    } else {
+                        merge_pixel(fill, d, 1.0, Blend::Normal)
+                    };
+                    if out != d {
+                        tile[py][px] = out;
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
+                snap.insert(key, Some(tile));
+            }
+        }
+        if snap.is_empty() {
+            return false;
+        }
+        self.perform(Edit::Tiles {
+            layer: active,
+            snap,
+        });
+        true
+    }
+
     // ---- shared canvases: other people's strokes ----
 
     /// Add a layer without an undo step (e.g. a layer for another person). Returns its id.
@@ -827,6 +976,71 @@ impl Painter {
             .collect();
         format!("[{}]", items.join(","))
     }
+}
+
+/// Pixels connected to (x, y) whose colour is within `tol` (per channel, 0–255)
+/// of the seed pixel (scanline flood fill).
+fn flood(src: &[[u8; 4]], w: usize, h: usize, x: usize, y: usize, tol: i32) -> Vec<bool> {
+    let seed = src[y * w + x];
+    let near = |p: [u8; 4]| (0..4).all(|k| (p[k] as i32 - seed[k] as i32).abs() <= tol);
+    let mut mask = vec![false; w * h];
+    let mut stack = vec![(x, y)];
+    while let Some((sx, sy)) = stack.pop() {
+        let row = sy * w;
+        if mask[row + sx] || !near(src[row + sx]) {
+            continue;
+        }
+        let (mut l, mut r) = (sx, sx);
+        while l > 0 && !mask[row + l - 1] && near(src[row + l - 1]) {
+            l -= 1;
+        }
+        while r + 1 < w && !mask[row + r + 1] && near(src[row + r + 1]) {
+            r += 1;
+        }
+        for i in l..=r {
+            mask[row + i] = true;
+        }
+        for ny in [sy.wrapping_sub(1), sy + 1] {
+            if ny >= h {
+                continue;
+            }
+            let nrow = ny * w;
+            let mut i = l;
+            while i <= r {
+                if !mask[nrow + i] && near(src[nrow + i]) {
+                    stack.push((i, ny));
+                    // skip the rest of this run; it's reached from the pushed seed
+                    while i <= r && near(src[nrow + i]) {
+                        i += 1;
+                    }
+                }
+                i += 1;
+            }
+        }
+    }
+    mask
+}
+
+/// Grow a mask by `r` pixels (square neighbourhood, two separable passes).
+fn grow_mask(m: &[bool], w: usize, h: usize, r: usize) -> Vec<bool> {
+    if r == 0 {
+        return m.to_vec();
+    }
+    let mut a = vec![false; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let (x0, x1) = (x.saturating_sub(r), (x + r).min(w - 1));
+            a[y * w + x] = (x0..=x1).any(|i| m[y * w + i]);
+        }
+    }
+    let mut b = vec![false; w * h];
+    for y in 0..h {
+        let (y0, y1) = (y.saturating_sub(r), (y + r).min(h - 1));
+        for x in 0..w {
+            b[y * w + x] = (y0..=y1).any(|j| a[j * w + x]);
+        }
+    }
+    b
 }
 
 /// Set a brush's base colour from sRGB 0–255 (converted to HSV, as MyPaint stores it).
@@ -1243,6 +1457,109 @@ mod tests {
         p.flush();
         assert!(px(&p, 100, 90)[0] > 240);
         assert!(!p.can_undo());
+    }
+
+    /// A closed square outline from (40,20) to (120,100).
+    fn dense_square(p: &mut Painter) {
+        let mut b = pen();
+        b.get_mut(BrushSetting::Radius).base_value = 1.0;
+        let corners = [
+            (40.0f32, 20.0f32),
+            (120.0, 20.0),
+            (120.0, 100.0),
+            (40.0, 100.0),
+            (40.0, 20.0),
+        ];
+        p.begin_stroke();
+        for w in corners.windows(2) {
+            for k in 0..=40 {
+                let t = k as f32 / 40.0;
+                let (x, y) = (
+                    w[0].0 + (w[1].0 - w[0].0) * t,
+                    w[0].1 + (w[1].1 - w[0].1) * t,
+                );
+                p.stroke_to(&b, x, y, 1.0, 0.0, 0.0, 0.002);
+            }
+        }
+        p.end_stroke(&b);
+    }
+
+    #[test]
+    fn fill_stays_inside_lines_and_tucks_under_them() {
+        let mut p = Painter::new(256, 128);
+        dense_square(&mut p);
+        p.flush();
+        assert!(p.fill(80, 60, [220, 0, 0], 1.0, 0.1, true, 2, 0));
+        p.flush();
+        let inside = px(&p, 80, 60);
+        assert!(
+            inside[0] > 200 && inside[1] < 40,
+            "inside is red: {inside:?}"
+        );
+        assert!(px(&p, 200, 60)[1] > 240, "outside untouched");
+        // the line is still dark on top
+        assert!(px(&p, 40, 60)[0] < 90, "line on top: {:?}", px(&p, 40, 60));
+        assert!(p.undo());
+        p.flush();
+        assert!(px(&p, 80, 60)[1] > 240);
+        // clicking outside fills the outside, not the inside
+        assert!(p.fill(200, 60, [0, 0, 220], 1.0, 0.1, true, 0, 0));
+        p.flush();
+        assert!(
+            px(&p, 80, 60)[2] > 240 && px(&p, 80, 60)[0] > 240,
+            "inside stays white"
+        );
+        assert!(px(&p, 200, 60)[0] < 40);
+    }
+
+    #[test]
+    fn gap_closing_stops_leaks_through_small_gaps() {
+        let mut p = Painter::new(256, 128);
+        dense_square(&mut p);
+        // cut a 3 px gap in the left side of the square
+        let mut e = pen();
+        e.get_mut(BrushSetting::Eraser).base_value = 1.0;
+        e.get_mut(BrushSetting::Radius).base_value = 0.6;
+        p.begin_stroke();
+        for k in 0..=6 {
+            p.stroke_to(&e, 34.0 + k as f32 * 2.0, 60.0, 1.0, 0.0, 0.0, 0.002);
+        }
+        p.end_stroke(&e);
+        p.flush();
+        // without gap closing the fill escapes through the gap
+        assert!(p.fill(80, 60, [220, 0, 0], 1.0, 0.1, true, 1, 0));
+        p.flush();
+        assert!(
+            px(&p, 200, 60)[1] < 60,
+            "leaked (as expected without gap closing)"
+        );
+        p.undo();
+        // with it, the outside stays white and the inside is filled
+        assert!(p.fill(80, 60, [220, 0, 0], 1.0, 0.1, true, 1, 3));
+        p.flush();
+        assert!(px(&p, 200, 60)[1] > 240, "no leak");
+        assert!(px(&p, 80, 60)[1] < 60, "inside filled");
+        assert!(
+            px(&p, 44, 40)[1] < 90,
+            "fill reaches the lines: {:?}",
+            px(&p, 44, 40)
+        );
+    }
+
+    #[test]
+    fn fill_respects_lock_and_layer_sampling() {
+        let mut p = Painter::new(256, 128);
+        dense_square(&mut p);
+        let top = p.add_layer("Colour");
+        // sampling only the empty top layer: everything is one region
+        assert!(p.fill(80, 60, [0, 200, 0], 1.0, 0.1, false, 0, 0));
+        p.flush();
+        assert!(px(&p, 200, 60)[1] > 150 && px(&p, 200, 60)[0] < 60);
+        p.undo();
+        let mut lock = props(&p, top);
+        lock.locked = true;
+        p.set_layer_props(top, lock, true);
+        assert!(!p.fill(80, 60, [0, 200, 0], 1.0, 0.1, true, 0, 0));
     }
 
     #[test]

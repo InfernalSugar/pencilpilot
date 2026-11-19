@@ -2,6 +2,7 @@ import { expect, test, type Page } from '@playwright/test';
 
 async function scribble(page: Page, y = 0.5) {
 	const canvas = page.getByLabel(/Drawing canvas/);
+	await canvas.scrollIntoViewIfNeeded(); // toolbar clicks can scroll the page
 	const box = (await canvas.boundingBox())!;
 	await page.mouse.move(box.x + box.width * 0.2, box.y + box.height * y);
 	await page.mouse.down();
@@ -252,6 +253,7 @@ test('tracing your own picture: line it up, draw, get tips but no score', async 
 
 	// move it: in move mode a drag shifts the picture, and paints nothing
 	await tracing.getByRole('button', { name: 'Move picture' }).click();
+	await page.getByLabel(/Drawing canvas/).scrollIntoViewIfNeeded();
 	const box = (await page.getByLabel(/Drawing canvas/).boundingBox())!;
 	await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
 	await page.mouse.down();

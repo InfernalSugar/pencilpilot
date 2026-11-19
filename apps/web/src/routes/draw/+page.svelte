@@ -39,7 +39,17 @@
 	let reference = $state<Reference | undefined>(byId(page.url.searchParams.get('ref')));
 	let refLoading = $state(false);
 	/** brush (draw / erase) or the eyedropper */
-	let tool = $state<'brush' | 'picker'>('brush');
+	let tool = $state<'brush' | 'picker' | 'fill'>('brush');
+	let fillTolerance = $state(0.12);
+	let fillAllLayers = $state(true);
+	let quickShape = $state(true);
+	let shapeNote = $state('');
+	let shapeTimer: ReturnType<typeof setTimeout> | undefined;
+	function onShape(kind: string) {
+		shapeNote = `Snapped to a ${kind}`;
+		clearTimeout(shapeTimer);
+		shapeTimer = setTimeout(() => (shapeNote = ''), 1800);
+	}
 	let smoothing = $state(0);
 	let colorOpen = $state(false);
 	function picked(c: string) {
@@ -303,6 +313,7 @@
 		refFloating = recall('pp.refFloating', false);
 		floatBox = recall('pp.refFloat', floatBox);
 		smoothing = recall('pp.smoothing', 0);
+		quickShape = recall('pp.quickShape', true);
 		loadManifest().then((m) => (manifest = m));
 		if (!reference) loadReference();
 		if (sessionMode && category)
@@ -340,6 +351,7 @@
 			eraser = true;
 			tool = 'brush';
 		} else if (!mod && k === 'i') tool = tool === 'picker' ? 'brush' : 'picker';
+		else if (!mod && k === 'g') tool = tool === 'fill' ? 'brush' : 'fill';
 		else if (!mod && e.key === '[') size = Math.max(0.25, +(size / 1.25).toFixed(2));
 		else if (!mod && e.key === ']') size = Math.min(6, +(size * 1.25).toFixed(2));
 		else if (!mod && (e.key === '+' || e.key === '=')) canvas?.zoomIn();
@@ -634,6 +646,10 @@
 						{tool}
 						{smoothing}
 						onpick={picked}
+						{fillTolerance}
+						{fillAllLayers}
+						{quickShape}
+						onshape={onShape}
 						overlaySrc={traceSrc}
 						overlayOpacity={trace.opacity}
 						overlayTransform={trace}
@@ -656,6 +672,9 @@
 							<span>Grading your {timeLabel(timeLimit)} drawing…</span>
 						{/if}
 					</div>
+				{/if}
+				{#if shapeNote}
+					<p class="blocked" role="status">{shapeNote}</p>
 				{/if}
 				{#if blocked}
 					<p class="blocked" role="status">
@@ -740,6 +759,30 @@
 							<path d="m2 22 1-4 9-9 3 3-9 9Z" /><path d="m14 7 3-3a2.1 2.1 0 0 1 3 3l-3 3" /><path
 								d="m11 6 7 7"
 							/>
+						</svg>
+					</button>
+					<button
+						type="button"
+						class="tool"
+						aria-pressed={tool === 'fill'}
+						aria-label="Fill (G)"
+						title="Fill (G): fill an area with the colour. Or drag a colour swatch onto the canvas."
+						onclick={() => (tool = tool === 'fill' ? 'brush' : 'fill')}
+					>
+						<svg
+							width="22"
+							height="22"
+							viewBox="0 0 24 24"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="2.3"
+							stroke-linecap="round"
+							stroke-linejoin="round"
+							aria-hidden="true"
+						>
+							<path d="m19 11-8-8-8.5 8.5a2.1 2.1 0 0 0 0 3L8 20a2.1 2.1 0 0 0 3 0Z" /><path
+								d="m5 2 5 5"
+							/><path d="M2 13h15" /><path d="M22 20a2 2 0 1 1-4 0c0-1.6 2-3 2-3s2 1.4 2 3Z" />
 						</svg>
 					</button>
 				</div>
@@ -856,6 +899,8 @@
 							role="radio"
 							aria-checked={color === c}
 							aria-label="Colour {c}"
+							draggable="true"
+							ondragstart={(e) => e.dataTransfer?.setData('application/x-pp-color', c)}
 							class="swatch"
 							style="background: {c}"
 							onclick={() => (color = c)}
@@ -889,6 +934,35 @@
 						title="Steadies wobbly lines (like StreamLine)"
 					/>
 				</label>
+				<button
+					type="button"
+					class="tool"
+					aria-pressed={quickShape}
+					title="QuickShape: hold at the end of a stroke to snap it to a line, circle or rectangle"
+					onclick={() => {
+						quickShape = !quickShape;
+						remember('pp.quickShape', quickShape);
+					}}
+				>
+					QuickShape
+				</button>
+				{#if tool === 'fill'}
+					<div class="fill-opts" role="group" aria-label="Fill options">
+						<label class="slider">
+							<span>Tolerance <b>{Math.round(fillTolerance * 100)}%</b></span>
+							<input type="range" min="0" max="0.6" step="0.02" bind:value={fillTolerance} />
+						</label>
+						<button
+							type="button"
+							class="tool"
+							aria-pressed={fillAllLayers}
+							title="Fill what you see (all layers) or only this layer's own pixels"
+							onclick={() => (fillAllLayers = !fillAllLayers)}
+						>
+							{fillAllLayers ? 'Sample: all layers' : 'Sample: this layer'}
+						</button>
+					</div>
+				{/if}
 			</div>
 			{#if tracing}
 				<TracePanel bind:trace hasReference={!!reference} onclose={toggleTracing} />
@@ -1064,6 +1138,12 @@
 		color: #fff;
 		font: 600 13px var(--pp-font-body);
 		cursor: pointer;
+	}
+	.fill-opts {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 8px 12px;
 	}
 	.color-more {
 		position: relative;
