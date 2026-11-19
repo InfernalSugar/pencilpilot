@@ -1,6 +1,6 @@
 # ADR-0003 — Reference images: licence-clean, SFW, human-approved
 
-**Status:** Accepted (2026-11-18). Sources updated 2026-11-19: Openverse, the Art Institute of Chicago and The Met added; Unsplash dropped.
+**Status:** Accepted (2026-11-18). Sources updated 2026-11-19: Openverse, the Art Institute of Chicago and The Met added; Unsplash dropped; franchise block applies to every source.
 
 ## Allowed sources
 | Source | Licence | Used for | Credit shown |
@@ -30,6 +30,10 @@
 ## Banned
 Pinterest, Danbooru/Safebooru, Google Images, ArtStation packs, and anything depicting existing franchise characters, logos or brands (fan art). Also **AI-generated images**: they often have broken anatomy, which would teach mistakes.
 
+**Franchise / fan-art block (every source, Pixabay included; user decision 2026-11-19):**
+1. **Words.** A picture is dropped if its title or tags name a franchise, studio, character or brand, or say it is fan art or cosplay (Naruto, Gaara, Doraemon, Pokémon, Disney, Marvel, Star Wars, Harry Potter, Ghibli, LEGO, Nike, …). The list is `FRANCHISE` in `crates/ref-filters/src/words.rs`; whole words only, so "spider", "frozen lake" or "a sailor" still pass. Used by ref-service (every source), `ref-importer fetch`, and on the existing pool at every start.
+2. **Picture.** For anime and cartoon, the picture sorter (ADR-0009) also compares each picture with ~40 well-known franchise characters and ~25 look-alike originals ("an anime girl with long blue hair"). It drops the picture if a franchise character beats both the topic and every look-alike by 0.5 (`_sorting.franchise` in `content/topics.json`). Photo categories rely on the word list (cosplay, brands), because the model confused ordinary photos of women and cats with Disney princesses and Hello Kitty.
+
 
 ## Process
 1. `ref-importer` pulls candidates with SafeSearch on and records source URL, author, licence and licence URL.
@@ -37,4 +41,4 @@ Pinterest, Danbooru/Safebooru, Google Images, ArtStation packs, and anything dep
 3. Keypoints are marked in `ref-annotator`.
 4. CI fails if any manifest entry lacks source, author, licence or approval.
 5. Image files are never committed. The site fetches and caches them, and always shows attribution.
-6. Endless (live) pictures from every source go through the same automatic checks (ADR-0005, ADR-0009): source licence and provider rules, banned words, NSFW guard, picture sorter (category, topic, one subject, photos-only rule), near-duplicate check across all sources. Each stores source, author, author URL, page URL, licence, licence URL, provider and (Openverse) the attribution text.
+6. Endless (live) pictures from every source go through the same automatic checks (ADR-0005, ADR-0009): source licence and provider rules, banned words and franchise names, NSFW guard, picture sorter (category, topic, one subject, photos-only rule), near-duplicate check across all sources. Each stores source, author, author URL, page URL, licence, licence URL, provider and (Openverse) the attribution text.
