@@ -101,6 +101,7 @@
 		selectMode = 'replace',
 		wandTolerance = 0.15,
 		ontransformend,
+		penPressure = true,
 		liquifySize = 60,
 		liquifyStrength = 0.6,
 		maxHeight = '78vh',
@@ -135,6 +136,8 @@
 		/** liquify: brush radius in canvas px, and how hard it pushes (0–1) */
 		liquifySize?: number;
 		liquifyStrength?: number;
+		/** use pen pressure and tilt (off = every stroke at a steady medium pressure, like a mouse) */
+		penPressure?: boolean;
 		/** a transform finished (kept or cancelled), or had nothing to move */
 		ontransformend?: (result: 'done' | 'cancelled' | 'empty') => void;
 		/** how a new selection combines with the current one (Shift = add, Alt = subtract) */
@@ -1035,7 +1038,7 @@
 	function feed(e: PointerEvent) {
 		if (!paint || !brush || !current) return;
 		const [rx, ry] = toCanvas(e.clientX, e.clientY);
-		const rp = e.pointerType === 'mouse' ? 0.5 : e.pressure;
+		const rp = e.pointerType === 'mouse' || !penPressure ? 0.5 : e.pressure;
 		const a = follow();
 		smooth = smooth
 			? {
@@ -1048,7 +1051,8 @@
 		const { x, y, p: pressure } = smooth;
 		const dt = Math.max(0, (e.timeStamp - lastT) / 1000);
 		lastT = e.timeStamp;
-		paint.strokeTo(brush, x, y, pressure, (e.tiltX || 0) / 90, (e.tiltY || 0) / 90, dt);
+		const [tx, ty] = penPressure ? [(e.tiltX || 0) / 90, (e.tiltY || 0) / 90] : [0, 0];
+		paint.strokeTo(brush, x, y, pressure, tx, ty, dt);
 		if (onlive)
 			livePts.push(
 				Math.round(x * 10) / 10,
