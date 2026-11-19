@@ -39,7 +39,8 @@
 	let reference = $state<Reference | undefined>(byId(page.url.searchParams.get('ref')));
 	let refLoading = $state(false);
 	/** brush (draw / erase) or the eyedropper */
-	type Tool = 'brush' | 'picker' | 'fill' | 'select-rect' | 'select-lasso' | 'select-wand';
+	type Tool =
+		'brush' | 'picker' | 'fill' | 'select-rect' | 'select-lasso' | 'select-wand' | 'transform';
 	let tool = $state<Tool>('brush');
 	let selectMode = $state<'replace' | 'add' | 'subtract'>('replace');
 	let wandTolerance = $state(0.15);
@@ -63,6 +64,15 @@
 	let quickShape = $state(true);
 	let shapeNote = $state('');
 	let shapeTimer: ReturnType<typeof setTimeout> | undefined;
+	function onTransformEnd(r: 'done' | 'cancelled' | 'empty') {
+		tool = 'brush';
+		if (r === 'empty') onShapeNote('Nothing to move on this layer (or it’s locked).');
+	}
+	function onShapeNote(text: string) {
+		shapeNote = text;
+		clearTimeout(shapeTimer);
+		shapeTimer = setTimeout(() => (shapeNote = ''), 2200);
+	}
 	function onShape(kind: string) {
 		shapeNote = `Snapped to a ${kind}`;
 		clearTimeout(shapeTimer);
@@ -370,6 +380,9 @@
 			tool = 'brush';
 		} else if (!mod && k === 'i') tool = tool === 'picker' ? 'brush' : 'picker';
 		else if (!mod && k === 'g') tool = tool === 'fill' ? 'brush' : 'fill';
+		else if (!mod && k === 'v') tool = tool === 'transform' ? 'brush' : 'transform';
+		else if (tool === 'transform' && e.key === 'Enter') canvas?.transformCommit();
+		else if (tool === 'transform' && e.key === 'Escape') canvas?.transformCancel();
 		else if (!mod && (k === 'm' || k === 'l' || k === 'w')) {
 			const t = SELECT_TOOLS.find((x) => x.key === k)!.id;
 			tool = tool === t ? 'brush' : t;
@@ -686,6 +699,7 @@
 						onshape={onShape}
 						{selectMode}
 						{wandTolerance}
+						ontransformend={onTransformEnd}
 						overlaySrc={traceSrc}
 						overlayOpacity={trace.opacity}
 						overlayTransform={trace}
@@ -846,6 +860,30 @@
 							</svg>
 						</button>
 					{/each}
+					<button
+						type="button"
+						class="tool"
+						aria-pressed={tool === 'transform'}
+						aria-label="Transform (V)"
+						title="Transform (V): move, scale, rotate or flip the selection (or the whole layer)"
+						onclick={() => (tool = tool === 'transform' ? 'brush' : 'transform')}
+					>
+						<svg
+							width="22"
+							height="22"
+							viewBox="0 0 24 24"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="2.1"
+							stroke-linecap="round"
+							stroke-linejoin="round"
+							aria-hidden="true"
+						>
+							<path
+								d="M12 2v20M2 12h20M12 2l-3 3M12 2l3 3M12 22l-3-3M12 22l3-3M2 12l3-3M2 12l3 3M22 12l-3-3M22 12l-3 3"
+							/>
+						</svg>
+					</button>
 				</div>
 				<div class="group">
 					<button
@@ -1007,6 +1045,28 @@
 				>
 					QuickShape
 				</button>
+				{#if tool === 'transform'}
+					<div class="fill-opts" role="group" aria-label="Transform">
+						<button type="button" class="tool" onclick={() => canvas?.transformFlip('x')}>
+							Flip ↔
+						</button>
+						<button type="button" class="tool" onclick={() => canvas?.transformFlip('y')}>
+							Flip ↕
+						</button>
+						<button type="button" class="tool" onclick={() => canvas?.transformRotate(90)}>
+							Rotate 90°
+						</button>
+						<button type="button" class="tool" onclick={() => canvas?.transformReset()}>
+							Reset
+						</button>
+						<button type="button" class="tool done" onclick={() => canvas?.transformCommit()}>
+							Done
+						</button>
+						<button type="button" class="tool" onclick={() => canvas?.transformCancel()}>
+							Cancel
+						</button>
+					</div>
+				{/if}
 				{#if tool.startsWith('select') || status.selection}
 					<div class="fill-opts" role="group" aria-label="Selection">
 						{#if tool.startsWith('select')}
@@ -1234,6 +1294,10 @@
 		color: #fff;
 		font: 600 13px var(--pp-font-body);
 		cursor: pointer;
+	}
+	.tool.done {
+		background: var(--pp-accent-strong);
+		color: #fff;
 	}
 	.seg {
 		display: flex;

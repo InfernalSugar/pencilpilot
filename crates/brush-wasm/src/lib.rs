@@ -127,6 +127,25 @@ impl Clone for UndoSurface {
     }
 }
 
+/// A transform in progress: the lifted pixels float above the rest of the layer.
+struct TransformSession {
+    layer: u32,
+    /// the layer's tiles before the transform (for cancel / undo)
+    original: TileMap,
+    /// the layer without the lifted pixels
+    base: TileMap,
+    /// the lifted pixels (premultiplied), `fw`×`fh` from canvas (fx0, fy0)
+    float: Vec<[u16; 4]>,
+    fx0: i64,
+    fy0: i64,
+    fw: usize,
+    fh: usize,
+    /// destination box drawn by the last preview (to repaint it next time)
+    last: Option<(i64, i64, i64, i64)>,
+    /// current matrix: dest = (a x + c y + e, b x + d y + f)
+    m: [f32; 6],
+}
+
 /// One undoable change. Applying an edit returns its inverse.
 enum Edit {
     /// Swap tiles of one layer (strokes, clearing, merging).
@@ -176,6 +195,8 @@ pub struct Painter {
     dirty: HashSet<TileKey>,
     /// the selection: 255 = selected, per canvas pixel (None = no selection)
     selection: Option<Vec<u8>>,
+    /// a transform in progress (see `transform_begin`)
+    transform: Option<Box<TransformSession>>,
 }
 
 impl Painter {
@@ -196,6 +217,7 @@ impl Painter {
             alpha_lock_stroke: false,
             dirty: HashSet::new(),
             selection: None,
+            transform: None,
         }
     }
 
@@ -454,6 +476,9 @@ impl Painter {
     /// Start a stroke on the active layer. Returns false (and paints nothing)
     /// if that layer is locked or hidden.
     pub fn begin_stroke(&mut self) -> bool {
+        if self.transform.is_some() {
+            return false;
+        }
         let Some(l) = self.layer_mut(self.active) else {
             return false;
         };
@@ -892,6 +917,245 @@ impl Painter {
         self.selection.clone().unwrap_or_default()
     }
 
+    // ---- transform ----
+
+    /// Lift the selected pixels of the active layer (or all of it, with no
+    /// selection) so they can be moved, scaled, rotated and flipped. Returns
+    /// the lifted box `[x0, y0, x1, y1]` (empty if there's nothing to lift).
+    pub fn transform_begin(&mut self) -> Vec<f32> {
+        if self.transform.is_some() || self.stroking.is_some() {
+            return Vec::new();
+        }
+        let (w, h) = (self.width as i64, self.height as i64);
+        let active = self.active;
+        let Some(li) = self.index_of(active) else {
+            return Vec::new();
+        };
+        if self.layers[li].props.locked || !self.layers[li].props.visible {
+            return Vec::new();
+        }
+        let sel = self.selection.clone();
+        let ts = TILE_SIZE as i64;
+        let picked = |cx: i64, cy: i64| match &sel {
+            None => true,
+            Some(s) => cx >= 0 && cy >= 0 && cx < w && cy < h && s[(cy * w + cx) as usize] > 0,
+        };
+        let l = &self.layers[li];
+        let (mut x0, mut y0, mut x1, mut y1) = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
+        for (&(tx, ty), tile) in &l.surface.tiles {
+            for (py, row) in tile.iter().enumerate() {
+                for (px, p) in row.iter().enumerate() {
+                    let (cx, cy) = (tx as i64 * ts + px as i64, ty as i64 * ts + py as i64);
+                    if p[3] > 0 && picked(cx, cy) {
+                        x0 = x0.min(cx);
+                        y0 = y0.min(cy);
+                        x1 = x1.max(cx);
+                        y1 = y1.max(cy);
+                    }
+                }
+            }
+        }
+        if x0 > x1 {
+            return Vec::new();
+        }
+        let (fw, fh) = ((x1 - x0 + 1) as usize, (y1 - y0 + 1) as usize);
+        let mut float = vec![[0u16; 4]; fw * fh];
+        let original = l.surface.tiles.clone();
+        let mut base = original.clone();
+        for (&(tx, ty), tile) in base.iter_mut() {
+            for (py, row) in tile.iter_mut().enumerate() {
+                for (px, p) in row.iter_mut().enumerate() {
+                    let (cx, cy) = (tx as i64 * ts + px as i64, ty as i64 * ts + py as i64);
+                    if p[3] > 0 && picked(cx, cy) && cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1 {
+                        float[((cy - y0) as usize) * fw + (cx - x0) as usize] = *p;
+                        *p = [0; 4];
+                    }
+                }
+            }
+        }
+        self.transform = Some(Box::new(TransformSession {
+            layer: active,
+            original,
+            base,
+            float,
+            fx0: x0,
+            fy0: y0,
+            fw,
+            fh,
+            last: None,
+            m: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+        }));
+        self.transform_preview([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        vec![x0 as f32, y0 as f32, (x1 + 1) as f32, (y1 + 1) as f32]
+    }
+
+    pub fn transforming(&self) -> bool {
+        self.transform.is_some()
+    }
+
+    // pixel loops index tiles by (row, col) and map them to canvas coordinates
+    #[allow(clippy::needless_range_loop)]
+    /// Show the lifted pixels under matrix `m` (dest = a·x + c·y + e, b·x + d·y + f).
+    pub fn transform_preview(&mut self, m: [f32; 6]) -> bool {
+        let Some(mut t) = self.transform.take() else {
+            return false;
+        };
+        let [a, b, c, d, e, f] = m;
+        let det = a * d - b * c;
+        if det.abs() < 1e-6 {
+            self.transform = Some(t);
+            return false;
+        }
+        t.m = m;
+        let (w, h) = (self.width as i64, self.height as i64);
+        let ts = TILE_SIZE as i64;
+        // where the floating box lands
+        let (fx0, fy0) = (t.fx0 as f32, t.fy0 as f32);
+        let (fx1, fy1) = (fx0 + t.fw as f32, fy0 + t.fh as f32);
+        let pts = [(fx0, fy0), (fx1, fy0), (fx0, fy1), (fx1, fy1)]
+            .map(|(x, y)| (a * x + c * y + e, b * x + d * y + f));
+        let dx0 = (pts.iter().map(|p| p.0).fold(f32::MAX, f32::min).floor() as i64 - 1).max(0);
+        let dy0 = (pts.iter().map(|p| p.1).fold(f32::MAX, f32::min).floor() as i64 - 1).max(0);
+        let dx1 = (pts.iter().map(|p| p.0).fold(f32::MIN, f32::max).ceil() as i64 + 1).min(w - 1);
+        let dy1 = (pts.iter().map(|p| p.1).fold(f32::MIN, f32::max).ceil() as i64 + 1).min(h - 1);
+        // repaint the old and new boxes from the base
+        let mut region = (dx0, dy0, dx1, dy1);
+        if let Some(o) = t.last {
+            region = (
+                region.0.min(o.0),
+                region.1.min(o.1),
+                region.2.max(o.2),
+                region.3.max(o.3),
+            );
+        }
+        t.last = Some((dx0, dy0, dx1, dy1));
+        let (ia, ib, ic, id) = (d / det, -b / det, -c / det, a / det);
+        let sample = |sx: f32, sy: f32| -> [u16; 4] {
+            // bilinear, premultiplied; outside the float is transparent
+            let (x, y) = (sx - fx0 - 0.5, sy - fy0 - 0.5);
+            let (x0, y0) = (x.floor(), y.floor());
+            let (tx, ty) = (x - x0, y - y0);
+            let get = |xi: i64, yi: i64| -> [f32; 4] {
+                if xi < 0 || yi < 0 || xi >= t.fw as i64 || yi >= t.fh as i64 {
+                    return [0.0; 4];
+                }
+                t.float[yi as usize * t.fw + xi as usize].map(|v| v as f32)
+            };
+            let (x0, y0) = (x0 as i64, y0 as i64);
+            let (p00, p10, p01, p11) = (
+                get(x0, y0),
+                get(x0 + 1, y0),
+                get(x0, y0 + 1),
+                get(x0 + 1, y0 + 1),
+            );
+            let mut out = [0u16; 4];
+            for k in 0..4 {
+                let v = p00[k] * (1.0 - tx) * (1.0 - ty)
+                    + p10[k] * tx * (1.0 - ty)
+                    + p01[k] * (1.0 - tx) * ty
+                    + p11[k] * tx * ty;
+                out[k] = v.round().clamp(0.0, 32768.0) as u16;
+            }
+            out
+        };
+        let Some(li) = self.index_of(t.layer) else {
+            self.transform = Some(t);
+            return false;
+        };
+        let tiles = &mut self.layers[li].surface.tiles;
+        for ty in region.1.div_euclid(ts)..=region.3.div_euclid(ts) {
+            for tx in region.0.div_euclid(ts)..=region.2.div_euclid(ts) {
+                let key = (tx as i32, ty as i32);
+                let mut tile = t.base.get(&key).cloned().unwrap_or_else(empty_tile);
+                for py in 0..TILE_SIZE {
+                    for px in 0..TILE_SIZE {
+                        let (cx, cy) = (tx * ts + px as i64, ty * ts + py as i64);
+                        if cx < dx0 || cx > dx1 || cy < dy0 || cy > dy1 {
+                            continue;
+                        }
+                        let (ux, uy) = (cx as f32 + 0.5 - e, cy as f32 + 0.5 - f);
+                        let s = sample(ia * ux + ic * uy, ib * ux + id * uy);
+                        if s[3] > 0 {
+                            tile[py][px] = merge_pixel(tile[py][px], s, 1.0, Blend::Normal);
+                        }
+                    }
+                }
+                if tile.iter().flatten().any(|p| p[3] > 0) {
+                    tiles.insert(key, tile);
+                } else {
+                    tiles.remove(&key);
+                }
+                self.dirty.insert(key);
+            }
+        }
+        self.transform = Some(t);
+        true
+    }
+
+    /// Keep the transform (one undo step); the selection follows the pixels.
+    pub fn transform_commit(&mut self) -> bool {
+        let Some(t) = self.transform.take() else {
+            return false;
+        };
+        let Some(li) = self.index_of(t.layer) else {
+            return false;
+        };
+        let now = &self.layers[li].surface.tiles;
+        let mut snap = Snapshot::new();
+        for key in t.original.keys().chain(now.keys()) {
+            let before = t.original.get(key);
+            let after = now.get(key);
+            let same = match (before, after) {
+                (Some(x), Some(y)) => x == y,
+                (None, None) => true,
+                _ => false,
+            };
+            if !same {
+                snap.insert(*key, before.cloned());
+            }
+        }
+        if let Some(sel) = self.selection.take() {
+            let (w, h) = (self.width as usize, self.height as usize);
+            let [a, b, c, d, e, f] = t.m;
+            let det = a * d - b * c;
+            let (ia, ib, ic, id) = (d / det, -b / det, -c / det, a / det);
+            let mut out = vec![0u8; w * h];
+            for y in 0..h {
+                for x in 0..w {
+                    let (ux, uy) = (x as f32 + 0.5 - e, y as f32 + 0.5 - f);
+                    let (sx, sy) = ((ia * ux + ic * uy).floor(), (ib * ux + id * uy).floor());
+                    if sx >= 0.0 && sy >= 0.0 && (sx as usize) < w && (sy as usize) < h {
+                        out[y * w + x] = sel[sy as usize * w + sx as usize];
+                    }
+                }
+            }
+            if out.iter().any(|&v| v > 0) {
+                self.selection = Some(out);
+            }
+        }
+        if snap.is_empty() {
+            return false;
+        }
+        self.push_undo(Edit::Tiles {
+            layer: t.layer,
+            snap,
+        });
+        true
+    }
+
+    /// Put everything back as it was before `transform_begin`.
+    pub fn transform_cancel(&mut self) {
+        let Some(t) = self.transform.take() else {
+            return;
+        };
+        if let Some(li) = self.index_of(t.layer) {
+            let tiles = &mut self.layers[li].surface.tiles;
+            self.dirty.extend(tiles.keys().copied());
+            *tiles = t.original;
+            self.dirty.extend(tiles.keys().copied());
+        }
+    }
+
     // ---- shared canvases: other people's strokes ----
 
     /// Add a layer without an undo step (e.g. a layer for another person). Returns its id.
@@ -976,6 +1240,11 @@ impl Painter {
 
     pub fn undo(&mut self) -> bool {
         if self.stroking.is_some() {
+            return false;
+        }
+        if self.transform.is_some() {
+            // undo during a transform just cancels it
+            self.transform_cancel();
             return false;
         }
         let Some(e) = self.undo.pop() else {
@@ -1843,6 +2112,73 @@ mod tests {
         p.select_all();
         p.set_selection(&rect_mask(&p, 0, 0, 256, 128), 2);
         assert!(!p.has_selection());
+    }
+
+    #[test]
+    fn transform_moves_and_undoes() {
+        let mut p = Painter::new(256, 128);
+        let b = pen();
+        line(&mut p, &b, 30.0);
+        p.flush();
+        let before = p.rgba().to_vec();
+        let bbox = p.transform_begin();
+        assert_eq!(bbox.len(), 4);
+        assert!(bbox[1] < 30.0 && bbox[3] > 30.0);
+        assert!(p.transform_preview([1.0, 0.0, 0.0, 1.0, 0.0, 50.0]));
+        p.flush();
+        assert!(
+            px(&p, 100, 30)[0] > 240 && px(&p, 100, 80)[0] < 100,
+            "moved down 50"
+        );
+        assert!(!p.begin_stroke(), "no painting mid-transform");
+        assert!(p.transform_commit());
+        assert!(p.undo());
+        p.flush();
+        assert_eq!(p.rgba(), &before[..]);
+        assert!(p.redo());
+        p.flush();
+        assert!(px(&p, 100, 80)[0] < 100);
+    }
+
+    #[test]
+    fn transform_lifts_only_the_selection_and_cancel_restores() {
+        let mut p = Painter::new(256, 128);
+        let b = pen();
+        line(&mut p, &b, 60.0); // x 20..180
+        p.flush();
+        let before = p.rgba().to_vec();
+        p.set_selection(&rect_mask(&p, 0, 0, 100, 128), 0);
+        assert!(!p.transform_begin().is_empty());
+        p.transform_preview([1.0, 0.0, 0.0, 1.0, 0.0, -40.0]);
+        p.flush();
+        assert!(px(&p, 60, 20)[0] < 100, "left part moved up");
+        assert!(px(&p, 60, 60)[0] > 240, "and left its old place");
+        assert!(px(&p, 150, 60)[0] < 100, "right part stayed");
+        p.transform_cancel();
+        p.flush();
+        assert_eq!(p.rgba(), &before[..]);
+        // flip horizontally about x = 128: the line's left end (x 20) lands near x 236
+        p.deselect();
+        p.transform_begin();
+        p.transform_preview([-1.0, 0.0, 0.0, 1.0, 256.0, 0.0]);
+        assert!(p.transform_commit());
+        p.flush();
+        assert!(px(&p, 230, 60)[0] < 100 && px(&p, 30, 60)[0] > 240);
+        // the selection follows the pixels
+        let mut q = Painter::new(256, 128);
+        line(&mut q, &b, 60.0);
+        q.set_selection(&rect_mask(&q, 0, 0, 50, 128), 0);
+        q.transform_begin();
+        q.transform_preview([1.0, 0.0, 0.0, 1.0, 100.0, 0.0]);
+        q.transform_commit();
+        let sel = q.selection_mask();
+        assert!(sel[60 * 256 + 120] > 0 && sel[60 * 256 + 20] == 0);
+        // a locked layer can't be transformed
+        let id = q.active_layer();
+        let mut lock = props(&q, id);
+        lock.locked = true;
+        q.set_layer_props(id, lock, true);
+        assert!(q.transform_begin().is_empty());
     }
 
     #[test]

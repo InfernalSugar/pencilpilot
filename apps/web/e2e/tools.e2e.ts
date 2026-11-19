@@ -362,3 +362,71 @@ test('selections: lasso, magic wand with add, and fill inside', async ({ page })
 	await expect.poll(async () => (await pixel(page, 0.82, 0.35))[0]).toBeLessThan(150);
 	expect((await pixel(page, 0.1, 0.9))[0]).toBe(255);
 });
+
+/** the ink's bounding box as fractions of the canvas */
+const inkFrac = (page: Page) =>
+	canvas(page).evaluate((c: HTMLCanvasElement) => {
+		const d = c.getContext('2d')!.getImageData(0, 0, c.width, c.height).data;
+		let [x0, y0, x1, y1] = [1, 1, 0, 0];
+		for (let i = 0; i < d.length; i += 4)
+			if (d[i] < 225) {
+				const x = ((i / 4) % c.width) / c.width;
+				const y = Math.floor(i / 4 / c.width) / c.height;
+				[x0, y0, x1, y1] = [Math.min(x0, x), Math.min(y0, y), Math.max(x1, x), Math.max(y1, y)];
+			}
+		return { x0, y0, x1, y1, w: x1 - x0, h: y1 - y0 };
+	});
+
+test('transform: move with a drag, keep with Enter, undo', async ({ page }) => {
+	await ready(page);
+	for (let i = 0; i < 4; i++) await page.keyboard.press(']');
+	await zigzag(page, 0.3, 0);
+	await expect.poll(async () => (await inkFrac(page)).y0).toBeLessThan(0.35);
+	await page.keyboard.press('v');
+	await expect(page.locator('svg.xf')).toBeVisible();
+	await drag(page, [0.5, 0.3], [0.5, 0.6], 8);
+	await page.keyboard.press('Enter');
+	await expect(page.locator('svg.xf')).toHaveCount(0);
+	await expect(page.getByRole('button', { name: 'Brush (B)' })).toHaveAttribute(
+		'aria-pressed',
+		'true'
+	);
+	await expect.poll(async () => (await inkFrac(page)).y0).toBeGreaterThan(0.5);
+	await page.getByRole('button', { name: /Undo/ }).click();
+	await expect.poll(async () => (await inkFrac(page)).y0).toBeLessThan(0.35);
+});
+
+test('transform: scale a selection with a corner; rotate, then cancel', async ({ page }) => {
+	await ready(page);
+	for (let i = 0; i < 4; i++) await page.keyboard.press(']');
+	await zigzag(page, 0.5, 0); // x 0.15..0.83
+	await expect.poll(async () => (await inkFrac(page)).w).toBeGreaterThan(0.6);
+	// select the left part only and shrink it from its left corner
+	await page.keyboard.press('m');
+	await drag(page, [0.05, 0.4], [0.45, 0.6]);
+	await page.keyboard.press('v');
+	await expect(page.locator('svg.xf')).toBeVisible();
+	const before = await inkFrac(page);
+	await drag(page, [before.x0, 0.5 - 0.01], [0.3, 0.5], 8); // the left edge handle area
+	await page.getByRole('button', { name: 'Done' }).click();
+	await expect.poll(async () => (await inkFrac(page)).x0).toBeGreaterThan(before.x0 + 0.05);
+	expect((await inkFrac(page)).x1).toBeGreaterThan(0.8); // the right part never moved
+
+	// rotate the whole layer 90°, then cancel
+	await page.keyboard.press('Control+d');
+	await page.keyboard.press('v');
+	await page.getByRole('button', { name: 'Rotate 90°' }).click();
+	await expect.poll(async () => (await inkFrac(page)).h).toBeGreaterThan(0.3);
+	await page.keyboard.press('Escape');
+	await expect.poll(async () => (await inkFrac(page)).h).toBeLessThan(0.15);
+});
+
+test('transform: an empty layer has nothing to move', async ({ page }) => {
+	await ready(page);
+	await page.keyboard.press('v');
+	await expect(page.getByRole('status').filter({ hasText: 'Nothing to move' })).toBeVisible();
+	await expect(page.getByRole('button', { name: 'Brush (B)' })).toHaveAttribute(
+		'aria-pressed',
+		'true'
+	);
+});

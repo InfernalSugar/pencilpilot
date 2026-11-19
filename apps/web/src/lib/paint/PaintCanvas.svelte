@@ -100,6 +100,7 @@
 		onshape,
 		selectMode = 'replace',
 		wandTolerance = 0.15,
+		ontransformend,
 		maxHeight = '78vh',
 		viewControls = true
 	}: {
@@ -120,7 +121,10 @@
 		/** where the overlay sits: offset (fraction of the canvas), scale and rotation (degrees) */
 		overlayTransform?: { x: number; y: number; scale: number; rotate: number };
 		/** what a press on the canvas does */
-		tool?: 'brush' | 'picker' | 'fill' | 'select-rect' | 'select-lasso' | 'select-wand';
+		tool?:
+			'brush' | 'picker' | 'fill' | 'select-rect' | 'select-lasso' | 'select-wand' | 'transform';
+		/** a transform finished (kept or cancelled), or had nothing to move */
+		ontransformend?: (result: 'done' | 'cancelled' | 'empty') => void;
 		/** how a new selection combines with the current one (Shift = add, Alt = subtract) */
 		selectMode?: 'replace' | 'add' | 'subtract';
 		/** magic wand: colour tolerance (0–1) */
@@ -777,6 +781,193 @@
 		refreshAnts();
 	}
 
+	// ---- transform: move / scale / rotate / flip the selection or the layer ----
+
+	interface Xf {
+		box: [number, number, number, number];
+		tx: number;
+		ty: number;
+		sx: number;
+		sy: number;
+		rot: number;
+		fx: 1 | -1;
+		fy: 1 | -1;
+	}
+	let xf = $state<Xf | null>(null);
+	let xfDrag: {
+		mode: 'move' | 'rotate' | 'corner' | 'edge-x' | 'edge-y';
+		start: [number, number];
+		from: Xf;
+	} | null = null;
+	let xfRaf = 0;
+
+	const xfCenter = (x: Xf): [number, number] => [
+		(x.box[0] + x.box[2]) / 2,
+		(x.box[1] + x.box[3]) / 2
+	];
+
+	/** dest = M · src, as [a, b, c, d, e, f] */
+	function xfMatrix(x: Xf): [number, number, number, number, number, number] {
+		const [cx, cy] = xfCenter(x);
+		const r = (x.rot * Math.PI) / 180;
+		const [cs, sn] = [Math.cos(r), Math.sin(r)];
+		const [kx, ky] = [x.sx * x.fx, x.sy * x.fy];
+		const a = cs * kx;
+		const b = sn * kx;
+		const c = -sn * ky;
+		const d = cs * ky;
+		return [a, b, c, d, cx + x.tx - (a * cx + c * cy), cy + x.ty - (b * cx + d * cy)];
+	}
+
+	const xfApply = (m: number[], p: [number, number]): [number, number] => [
+		m[0] * p[0] + m[2] * p[1] + m[4],
+		m[1] * p[0] + m[3] * p[1] + m[5]
+	];
+
+	/** the transformed box corners (tl, tr, br, bl) and handles, in canvas px */
+	const xfShape = $derived.by(() => {
+		if (!xf) return null;
+		const m = xfMatrix(xf);
+		const [x0, y0, x1, y1] = xf.box;
+		const corners = [
+			xfApply(m, [x0, y0]),
+			xfApply(m, [x1, y0]),
+			xfApply(m, [x1, y1]),
+			xfApply(m, [x0, y1])
+		];
+		const mid = (p: [number, number], q: [number, number]): [number, number] => [
+			(p[0] + q[0]) / 2,
+			(p[1] + q[1]) / 2
+		];
+		const top = mid(corners[0], corners[1]);
+		const centre = mid(corners[0], corners[2]);
+		// the rotate handle sits outside the top edge, ~28 screen px away
+		const away = 28 / Math.max(0.01, fit * zoom);
+		const dir = [top[0] - centre[0], top[1] - centre[1]];
+		const len = Math.hypot(dir[0], dir[1]) || 1;
+		const rotH: [number, number] = [top[0] + (dir[0] / len) * away, top[1] + (dir[1] / len) * away];
+		return {
+			corners,
+			edges: [
+				top,
+				mid(corners[1], corners[2]),
+				mid(corners[2], corners[3]),
+				mid(corners[3], corners[0])
+			],
+			rotH,
+			top
+		};
+	});
+
+	function xfShow() {
+		if (!paint || !xf || xfRaf) return;
+		xfRaf = requestAnimationFrame(() => {
+			xfRaf = 0;
+			if (!paint || !xf) return;
+			paint.transformPreview(...xfMatrix(xf));
+			render();
+		});
+	}
+
+	// entering the tool lifts the pixels; leaving it keeps the result
+	$effect(() => {
+		if (!ready || !paint) return;
+		if (tool === 'transform' && !xf && !paint.isTransforming()) {
+			const b = paint.transformBegin();
+			if (b.length !== 4) return void ontransformend?.('empty');
+			xf = { box: [b[0], b[1], b[2], b[3]], tx: 0, ty: 0, sx: 1, sy: 1, rot: 0, fx: 1, fy: 1 };
+			schedule();
+		} else if (tool !== 'transform' && xf) {
+			transformCommit();
+		}
+	});
+
+	export function transformCommit() {
+		if (!paint || !xf) return;
+		xf = null;
+		changed(paint.transformCommit());
+		refreshAnts();
+		ontransformend?.('done');
+	}
+	export function transformCancel() {
+		if (!paint || !xf) return;
+		xf = null;
+		paint.transformCancel();
+		schedule();
+		notify();
+		refreshAnts();
+		ontransformend?.('cancelled');
+	}
+	export function transformFlip(axis: 'x' | 'y') {
+		if (!xf) return;
+		xf = axis === 'x' ? { ...xf, fx: xf.fx === 1 ? -1 : 1 } : { ...xf, fy: xf.fy === 1 ? -1 : 1 };
+		xfShow();
+	}
+	export function transformRotate(deg: number) {
+		if (!xf) return;
+		xf = { ...xf, rot: (((xf.rot + deg) % 360) + 360) % 360 };
+		xfShow();
+	}
+	export function transformReset() {
+		if (!xf) return;
+		xf = { ...xf, tx: 0, ty: 0, sx: 1, sy: 1, rot: 0, fx: 1, fy: 1 };
+		xfShow();
+	}
+
+	/** what a press at canvas point p grabs */
+	function xfHit(p: [number, number]): NonNullable<typeof xfDrag>['mode'] | null {
+		if (!xfShape) return null;
+		const r = 14 / Math.max(0.01, fit * zoom);
+		const near = (q: [number, number]) => Math.hypot(p[0] - q[0], p[1] - q[1]) <= r;
+		if (near(xfShape.rotH)) return 'rotate';
+		if (xfShape.corners.some(near)) return 'corner';
+		const e = xfShape.edges.findIndex(near);
+		if (e >= 0) return e % 2 === 0 ? 'edge-y' : 'edge-x';
+		// inside the (possibly rotated) box?
+		const c = xfShape.corners;
+		let inside = false;
+		for (let i = 0, j = 3; i < 4; j = i++)
+			if (
+				c[i][1] > p[1] !== c[j][1] > p[1] &&
+				p[0] < ((c[j][0] - c[i][0]) * (p[1] - c[i][1])) / (c[j][1] - c[i][1]) + c[i][0]
+			)
+				inside = !inside;
+		return inside ? 'move' : null;
+	}
+
+	function xfMove(e: PointerEvent) {
+		if (!xfDrag) return;
+		const p = toCanvas(e.clientX, e.clientY);
+		const f = xfDrag.from;
+		const [cx, cy] = xfCenter(f);
+		const centre: [number, number] = [cx + f.tx, cy + f.ty];
+		if (xfDrag.mode === 'move') {
+			xf = { ...f, tx: f.tx + p[0] - xfDrag.start[0], ty: f.ty + p[1] - xfDrag.start[1] };
+		} else if (xfDrag.mode === 'rotate') {
+			const a0 = Math.atan2(xfDrag.start[1] - centre[1], xfDrag.start[0] - centre[0]);
+			const a1 = Math.atan2(p[1] - centre[1], p[0] - centre[0]);
+			let rot = f.rot + ((a1 - a0) * 180) / Math.PI;
+			if (e.shiftKey) rot = Math.round(rot / 15) * 15;
+			xf = { ...f, rot: ((rot % 360) + 360) % 360 };
+		} else {
+			// work in the box's own (unrotated) frame
+			const r = (-f.rot * Math.PI) / 180;
+			const local = (q: [number, number]): [number, number] => {
+				const [dx, dy] = [q[0] - centre[0], q[1] - centre[1]];
+				return [dx * Math.cos(r) - dy * Math.sin(r), dx * Math.sin(r) + dy * Math.cos(r)];
+			};
+			const [s0, s1] = [local(xfDrag.start), local(p)];
+			const k = (a: number, b: number) =>
+				Math.abs(a) < 1 ? 1 : Math.max(0.02, Math.abs(b) / Math.abs(a));
+			if (xfDrag.mode === 'corner') {
+				const g = k(Math.hypot(...s0), Math.hypot(...s1));
+				xf = { ...f, sx: f.sx * g, sy: f.sy * g };
+			} else if (xfDrag.mode === 'edge-x') xf = { ...f, sx: f.sx * k(s0[0], s1[0]) };
+			else xf = { ...f, sy: f.sy * k(s0[1], s1[1]) };
+		}
+		xfShow();
+	}
+
 	// ---- smoothing (lazy brush): the pen point follows the pointer on a short leash ----
 
 	let smooth: { x: number; y: number; p: number } | null = null;
@@ -930,6 +1121,14 @@
 			return;
 		}
 		if (locked) return;
+		if (tool === 'transform') {
+			if (!xf) return;
+			const p = toCanvas(e.clientX, e.clientY);
+			const mode = xfHit(p) ?? 'move';
+			capture(e);
+			xfDrag = { mode, start: p, from: { ...xf } };
+			return;
+		}
 		if (tool === 'fill') return fillAt(e.clientX, e.clientY);
 		if (tool === 'select-wand') {
 			const [cx, cy] = toCanvas(e.clientX, e.clientY);
@@ -974,6 +1173,7 @@
 
 	function move(e: PointerEvent) {
 		if (picking === e.pointerId) return pick(e);
+		if (xfDrag) return xfMove(e);
 		if (marquee) {
 			const p = toCanvas(e.clientX, e.clientY);
 			marquee =
@@ -1025,6 +1225,10 @@
 	}
 
 	function up(e: PointerEvent) {
+		if (xfDrag) {
+			xfDrag = null;
+			return;
+		}
 		if (marquee) return commitMarquee();
 		if (picking === e.pointerId) {
 			picking = null;
@@ -1106,6 +1310,7 @@
 	}
 
 	export function undo() {
+		if (xf) return transformCancel();
 		if (paint?.undo()) log.undo();
 		schedule();
 		notify();
@@ -1255,6 +1460,7 @@
 	class:picker={tool === 'picker'}
 	class:filling={tool === 'fill'}
 	class:selecting={tool.startsWith('select')}
+	class:transforming={tool === 'transform'}
 	bind:this={vp}
 	style="aspect-ratio: {width} / {height}; max-height: {maxHeight}"
 	onpointerdown={down}
@@ -1277,6 +1483,17 @@
 			data-ready={ready}
 		></canvas>
 		<canvas class="ants" bind:this={antsEl} {width} {height} aria-hidden="true"></canvas>
+		{#if xfShape}
+			{@const hr = 7 / Math.max(0.01, fit * zoom)}
+			<svg class="xf" viewBox="0 0 {width} {height}" preserveAspectRatio="none" aria-hidden="true">
+				<polygon points={xfShape.corners.map((p) => p.join(',')).join(' ')} />
+				<line x1={xfShape.top[0]} y1={xfShape.top[1]} x2={xfShape.rotH[0]} y2={xfShape.rotH[1]} />
+				{#each [...xfShape.corners, ...xfShape.edges] as [x, y], i (i)}
+					<rect x={x - hr} y={y - hr} width={hr * 2} height={hr * 2} />
+				{/each}
+				<circle cx={xfShape.rotH[0]} cy={xfShape.rotH[1]} r={hr * 1.1} />
+			</svg>
+		{/if}
 		{#if marquee}
 			<svg
 				class="marquee"
@@ -1298,14 +1515,16 @@
 			</svg>
 		{/if}
 		{#if overlaySrc}
-			<img
-				class="overlay"
-				src={overlaySrc}
-				alt=""
-				style="opacity: {overlayOpacity}; transform: translate({overlayTransform.x *
-					100}%, {overlayTransform.y *
-					100}%) rotate({overlayTransform.rotate}deg) scale({overlayTransform.scale})"
-			/>
+			<div class="overlay-clip">
+				<img
+					class="overlay"
+					src={overlaySrc}
+					alt=""
+					style="opacity: {overlayOpacity}; transform: translate({overlayTransform.x *
+						100}%, {overlayTransform.y *
+						100}%) rotate({overlayTransform.rotate}deg) scale({overlayTransform.scale})"
+				/>
+			</div>
 		{/if}
 	</div>
 	{#if viewControls && ready}
@@ -1404,6 +1623,31 @@
 		stroke-dasharray: 6 4;
 		vector-effect: non-scaling-stroke;
 	}
+	.viewport.transforming {
+		cursor: move;
+	}
+	.xf {
+		position: absolute;
+		inset: 0;
+		width: 100%;
+		height: 100%;
+		pointer-events: none;
+		overflow: visible;
+	}
+	.xf polygon,
+	.xf line {
+		fill: none;
+		stroke: #3d6bff;
+		stroke-width: 1.5;
+		vector-effect: non-scaling-stroke;
+	}
+	.xf rect,
+	.xf circle {
+		fill: #fff;
+		stroke: #3d6bff;
+		stroke-width: 1.5;
+		vector-effect: non-scaling-stroke;
+	}
 	.viewport.filling {
 		cursor: cell;
 	}
@@ -1411,7 +1655,7 @@
 		cursor: move;
 	}
 	.sheet {
-		overflow: hidden;
+		overflow: visible;
 	}
 	.sheet {
 		position: absolute;
@@ -1426,6 +1670,12 @@
 		height: 100%;
 		touch-action: none;
 		background: #fff;
+	}
+	.overlay-clip {
+		position: absolute;
+		inset: 0;
+		overflow: hidden;
+		pointer-events: none;
 	}
 	.overlay {
 		position: absolute;
