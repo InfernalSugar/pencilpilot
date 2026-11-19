@@ -759,6 +759,45 @@ fn blank_grade(category: Category, out: &mut Out, flags: &mut Vec<String>) -> Gr
     }
 }
 
+/// Recompute (similarity, score) from a grade's measurements with other
+/// weights or another curve, exactly as [`grade_with`] combines them. Used by
+/// `tools/calibrate` to fit weights to human ratings without re-grading.
+pub fn rescore(
+    m: &std::collections::HashMap<String, f32>,
+    weights: &Weights,
+    curve: &ScoreCurve,
+) -> (f32, f32) {
+    let get = |k: &str| m.get(k).copied();
+    let shading = get("shading").unwrap_or(0.0);
+    let shading_weight = ((shading - SHADING_NONE) / (SHADING_FULL - SHADING_NONE)).clamp(0.0, 1.0);
+    let mut parts: Vec<(f32, f32)> = vec![
+        (weights.placement, get("placement").unwrap_or(0.0)),
+        (weights.outline, get("outline").unwrap_or(0.0)),
+        (weights.silhouette, get("silhouette").unwrap_or(0.0)),
+        (weights.grid, get("grid").unwrap_or(0.0)),
+        (weights.tone * shading_weight, get("tone").unwrap_or(0.0)),
+        (weights.ssim * shading_weight, get("ssim").unwrap_or(0.0)),
+        (weights.angles, get("angles").unwrap_or(0.0)),
+    ];
+    if let Some(v) = get("line_confidence") {
+        parts.push((weights.line_confidence, v));
+    }
+    if let Some(v) = get("keypoints") {
+        parts.push((weights.keypoints, v));
+    }
+    let wsum: f32 = parts.iter().map(|p| p.0.max(0.0)).sum();
+    let similarity = if wsum > 0.0 {
+        parts.iter().map(|p| p.0.max(0.0) * p.1).sum::<f32>() / wsum
+    } else {
+        0.0
+    };
+    let similarity = match get("relevance") {
+        Some(r) => relevance::cap(similarity, r, curve),
+        None => similarity,
+    };
+    (similarity, curve.score(similarity))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -952,6 +991,46 @@ mod tests {
 
     fn img(fill: u8) -> Gray {
         Gray::new(40, 30, vec![fill; 1200]).unwrap()
+    }
+
+    #[test]
+    fn rescore_matches_grading() {
+        // a box drawn a little off against a shaded box: every part of the score in play
+        let (w, h) = (160usize, 120usize);
+        let mut r = Gray::new(w as u32, h as u32, vec![255; w * h]).unwrap();
+        let mut d = r.clone();
+        for y in 30..90 {
+            for x in 40..120 {
+                r.pixels[y * w + x] = 90;
+                let edge = y == 32 || y == 88 || x == 42 || x == 117;
+                if edge {
+                    d.pixels[y * w + x] = 20;
+                }
+            }
+        }
+        for cat in [Category::Anime, Category::RealLife, Category::Environment] {
+            let opts = GradeOptions {
+                category: cat,
+                ..Default::default()
+            };
+            let g = grade_with(&d, &r, &opts).unwrap();
+            let m: std::collections::HashMap<String, f32> = g
+                .measurements
+                .iter()
+                .map(|x| (x.name.clone(), x.value))
+                .collect();
+            let (sim, score) = rescore(&m, &Weights::for_category(cat), &ScoreCurve::default());
+            assert!(
+                (sim - g.similarity).abs() < 1e-5,
+                "{cat:?}: {sim} vs {}",
+                g.similarity
+            );
+            assert!(
+                (score - g.score).abs() < 1e-4,
+                "{cat:?}: {score} vs {}",
+                g.score
+            );
+        }
     }
 
     #[test]
