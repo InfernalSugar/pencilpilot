@@ -4,7 +4,7 @@
 	import Swatches from '#lib/paint/Swatches.svelte';
 	import { onMount } from 'svelte';
 	import { warmGrader } from '#lib/grader.js';
-	import { goto, replaceState } from '$app/navigation';
+	import { beforeNavigate, goto, replaceState } from '$app/navigation';
 	import { page } from '$app/state';
 	import Tile from '#lib/ui/Tile.svelte';
 	import Button from '#lib/ui/Button.svelte';
@@ -32,6 +32,15 @@
 	import { categories } from '#lib/categories.js';
 	import { loadSubmission, saveSubmission, type Submission } from '#lib/submission.js';
 	import { ownReference } from '#lib/own-picture.js';
+	import {
+		getDrawing,
+		grayToPng,
+		pngToGray,
+		pngToRgba,
+		rgbaToPng,
+		saveDrawing,
+		type SavedDrawing
+	} from '#lib/history.js';
 	import {
 		byId,
 		filtered,
@@ -515,7 +524,8 @@
 		penPressure = recall('pp.penPressure', true);
 		loadGuides();
 		loadManifest().then((m) => (manifest = m));
-		if (!reference) loadReference();
+		if (historyParam) void openFromHistory(historyParam);
+		else if (!reference) loadReference();
 		else keepReference(reference);
 		if (sessionMode && category)
 			startSession({
@@ -675,9 +685,146 @@
 	async function submit() {
 		const sub = buildSubmission();
 		if (!sub) return;
-		saveSubmission(sub);
+		handedIn = true;
+		await saveToHistory(true);
+		saveSubmission({ ...sub, historyId: drawingId });
 		await goto('/results');
 	}
+
+	// ---- drawing history: the last 10 drawings, kept in this browser (lib/history.ts) ----
+	const historyParam = page.url.searchParams.get('history');
+	/** this drawing's history entry (continuing one keeps its id) */
+	let drawingId = historyParam ?? `d${Date.now()}`;
+	let handedIn = false;
+	let historyTimer: ReturnType<typeof setTimeout> | undefined;
+	let historySaving = false;
+
+	async function saveToHistory(submitted: boolean) {
+		if (!canvas || status.blank || historySaving) return;
+		const snap = canvas.snapshotLayers();
+		const d = canvas.exportDrawing();
+		if (!snap || !d) return;
+		historySaving = true;
+		try {
+			const { width: w, height: h } = canvasSize;
+			const layers = await Promise.all(
+				snap.layers.map(async (l) => ({
+					id: l.id,
+					name: l.name,
+					opacity: l.opacity,
+					blend: l.blend,
+					visible: l.visible,
+					locked: l.locked,
+					alphaLock: l.alphaLock,
+					clip: l.clip,
+					imported: l.imported,
+					group: l.group,
+					png: await rgbaToPng(l.rgba, w, h),
+					...(l.mask ? { mask: await grayToPng(l.mask, w, h) } : {})
+				}))
+			);
+			const png = await (await fetch(d.png)).blob();
+			await saveDrawing({
+				id: drawingId,
+				savedAt: Date.now(),
+				title: reference ? titleOf(reference) : 'Free drawing',
+				submitted,
+				width: w,
+				height: h,
+				thumb: await thumbOf(d.png),
+				png,
+				layers,
+				groups: snap.groups,
+				strokes: snap.strokes,
+				...(reference ? { reference: $state.snapshot(reference) as Reference } : {}),
+				...(category ? { category: category.id } : {}),
+				mode: drawMode,
+				traced
+			});
+		} finally {
+			historySaving = false;
+		}
+	}
+
+	/** a small JPEG preview */
+	async function thumbOf(png: string) {
+		const img = new Image();
+		img.src = png;
+		await img.decode();
+		const k = Math.min(1, 320 / img.naturalWidth);
+		const c = document.createElement('canvas');
+		c.width = Math.round(img.naturalWidth * k);
+		c.height = Math.round(img.naturalHeight * k);
+		c.getContext('2d')!.drawImage(img, 0, 0, c.width, c.height);
+		return c.toDataURL('image/jpeg', 0.8);
+	}
+
+	// keep a draft: a few seconds after the last change, and when leaving the page
+	$effect(() => {
+		void status.version;
+		if (status.blank || handedIn || restoring) return;
+		clearTimeout(historyTimer);
+		historyTimer = setTimeout(() => void saveToHistory(false), 3000);
+	});
+	$effect(() => {
+		const leave = () => {
+			if (document.visibilityState === 'hidden' && !handedIn) void saveToHistory(false);
+		};
+		const closing = () => {
+			if (!handedIn) void saveToHistory(false);
+		};
+		document.addEventListener('visibilitychange', leave);
+		window.addEventListener('pagehide', closing);
+		return () => {
+			document.removeEventListener('visibilitychange', leave);
+			window.removeEventListener('pagehide', closing);
+			clearTimeout(historyTimer);
+		};
+	});
+	// leaving for another page in the app: snapshot now, while the canvas is still here
+	beforeNavigate(() => {
+		clearTimeout(historyTimer);
+		if (!handedIn) void saveToHistory(false);
+	});
+
+	// continuing a drawing from the history
+	// raw: the saved drawing must stay plain data (proxies can't be stored or cloned)
+	let restoring = $state.raw<SavedDrawing | null>(null);
+	async function openFromHistory(id: string) {
+		const entry = await getDrawing(id);
+		if (!entry) return loadReference();
+		if (entry.width !== canvasSize.width || entry.height !== canvasSize.height) {
+			canvasSize = { width: entry.width, height: entry.height };
+			status = BLANK_STATUS; // wait for the new canvas
+		}
+		reference = entry.reference;
+		if (reference) keepReference(reference);
+		traced = !!entry.traced;
+		restoring = entry;
+	}
+	$effect(() => {
+		const entry = restoring;
+		if (
+			!entry ||
+			!canvas ||
+			!status.layers.length ||
+			entry.width !== canvasSize.width ||
+			entry.height !== canvasSize.height
+		)
+			return;
+		restoring = null; // once
+		void (async () => {
+			const { width: w, height: h } = entry;
+			const layers = await Promise.all(
+				entry.layers.map(async (l) => ({
+					...l,
+					rgba: await pngToRgba(l.png, w, h),
+					mask: l.mask ? await pngToGray(l.mask, w, h) : undefined
+				}))
+			);
+			canvas?.restoreLayers(layers, entry.groups, entry.strokes);
+		})();
+	});
 </script>
 
 <svelte:window onkeydown={onkey} />
@@ -865,6 +1012,7 @@
 						<button type="button" onclick={savePsd}>
 							<b>Photoshop file (.psd)</b><span>Keeps layers, groups and masks</span>
 						</button>
+						<a class="menu-link" href="/history">Your last 10 drawings →</a>
 					</div>
 				{/if}
 			</div>
@@ -1924,6 +2072,13 @@
 	.save-menu button:hover,
 	.save-menu button:focus-visible {
 		background: var(--pp-surface-sunk);
+	}
+	.menu-link {
+		padding: 8px 12px;
+		font-size: 13px;
+		font-weight: 700;
+		color: var(--pp-accent-ink);
+		text-decoration: none;
 	}
 	.save-menu span {
 		font-size: 12px;

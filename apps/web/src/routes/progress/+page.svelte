@@ -278,6 +278,7 @@
 			<Tile span={3} as="section" label="Recent drawings">
 				<div class="head">
 					<h2>Recent drawings</h2>
+					<a class="all" href="/history">Open, edit or download →</a>
 				</div>
 				<ul class="recent">
 					{#each recent as a (a.at)}
@@ -333,6 +334,11 @@
 </div>
 
 <style>
+	.all {
+		font-size: 14px;
+		font-weight: 700;
+		color: var(--pp-accent-ink);
+	}
 	.time-filter {
 		display: flex;
 		flex-wrap: wrap;

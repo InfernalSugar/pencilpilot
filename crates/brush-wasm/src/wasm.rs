@@ -209,6 +209,18 @@ impl PaintCanvas {
         self.inner.add_image_layer(name, rgba)
     }
 
+    /// Bring back a saved layer (drawing history); `imported` keeps that mark.
+    #[wasm_bindgen(js_name = restoreLayer)]
+    pub fn restore_layer(&mut self, name: &str, rgba: &[u8], imported: bool) -> u32 {
+        self.inner.restore_layer(name, rgba, imported)
+    }
+
+    /// Give a layer a saved mask (one byte per canvas pixel, 255 = shown).
+    #[wasm_bindgen(js_name = restoreMask)]
+    pub fn restore_mask(&mut self, id: u32, gray: &[u8]) -> bool {
+        self.inner.restore_mask(id, gray)
+    }
+
     // ---- adjustments and gradients ----
 
     /// Start adjusting the active layer (or a gradient on it); false if it can't be.

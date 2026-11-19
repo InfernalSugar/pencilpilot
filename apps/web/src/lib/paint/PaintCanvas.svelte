@@ -1988,6 +1988,115 @@
 	 * Everything needed for a layered file (Photoshop .psd): each layer's own
 	 * pixels, masks, groups and settings, plus the flattened picture.
 	 */
+	/** One layer as the drawing history keeps it. */
+	export interface LayerSnapshot {
+		id: number;
+		name: string;
+		opacity: number;
+		blend: string;
+		visible: boolean;
+		locked: boolean;
+		alphaLock: boolean;
+		clip: boolean;
+		imported: boolean;
+		group: number;
+		/** the layer's own pixels (straight-alpha RGBA, canvas size) */
+		rgba: Uint8Array;
+		/** greyscale mask, one byte per pixel (255 = shown) */
+		mask?: Uint8Array;
+	}
+
+	/** Everything needed to bring this drawing back later (bottom → top). */
+	export function snapshotLayers(): {
+		layers: LayerSnapshot[];
+		groups: GroupInfo[];
+		strokes: Stroke[];
+	} | null {
+		if (!paint) return null;
+		const layers = layerList().map((l) => {
+			let mask: Uint8Array | undefined;
+			if (l.mask) {
+				const m = paint!.maskThumbnail(l.id, width, height);
+				mask = new Uint8Array(width * height);
+				for (let i = 0; i < mask.length; i++) mask[i] = m[i * 4];
+			}
+			return {
+				id: l.id,
+				name: l.name,
+				opacity: l.opacity,
+				blend: l.blend,
+				visible: l.visible,
+				locked: l.locked,
+				alphaLock: l.alphaLock,
+				clip: !!l.clip,
+				imported: !!l.imported,
+				group: l.group,
+				rgba: paint!.layerRgba(l.id),
+				mask
+			};
+		});
+		return { layers, groups: groupList(), strokes: structuredClone(log.strokes) as Stroke[] };
+	}
+
+	/**
+	 * Replace this canvas's layers with saved ones (the drawing history): pixels,
+	 * settings, masks, groups and the strokes, with nothing left to undo.
+	 */
+	export function restoreLayers(saved: LayerSnapshot[], groups: GroupInfo[], strokes: Stroke[]) {
+		if (!paint || !saved.length) return false;
+		const before = layerList().map((l) => l.id);
+		paint.setActiveLayer(before.at(-1)!);
+		// eslint-disable-next-line svelte/prefer-svelte-reactivity -- a local lookup, not state
+		const ids = new Map<number, number>();
+		for (const l of saved) {
+			const id = paint.restoreLayer(l.name, l.rgba, l.imported);
+			if (!id) continue;
+			ids.set(l.id, id);
+			setRaw(
+				id,
+				{
+					name: l.name,
+					visible: l.visible,
+					opacity: l.opacity,
+					blend: l.blend as BlendMode,
+					locked: l.locked,
+					alphaLock: l.alphaLock,
+					clip: l.clip
+				},
+				false
+			);
+			if (l.mask) paint.restoreMask(id, l.mask);
+		}
+		// groups: the first layer of each starts it, the rest join
+		// eslint-disable-next-line svelte/prefer-svelte-reactivity -- a local lookup, not state
+		const gids = new Map<number, number>();
+		for (const l of saved) {
+			const id = ids.get(l.id);
+			if (!id || !l.group) continue;
+			const g = groups.find((x) => x.id === l.group);
+			const known = gids.get(l.group);
+			if (known === undefined) {
+				const gid = paint.addGroup(id);
+				if (!gid) continue;
+				gids.set(l.group, gid);
+				if (g) paint.setGroup(gid, g.name, g.visible, g.opacity, false);
+			} else {
+				const at = layerList().findIndex((x) => x.id === id);
+				paint.moveLayerTo(id, at, known);
+			}
+		}
+		for (const id of before) paint.deleteLayer(id);
+		log.reset(
+			strokes
+				.filter((st) => st.layer === undefined || ids.has(st.layer))
+				.map((st) => (st.layer === undefined ? st : { ...st, layer: ids.get(st.layer)! }))
+		);
+		paint.clearHistory();
+		schedule();
+		notify();
+		return true;
+	}
+
 	export function exportLayered(): PsdDoc | null {
 		if (!paint || !ctx) return null;
 		render();
