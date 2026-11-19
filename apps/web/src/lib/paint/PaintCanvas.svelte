@@ -13,9 +13,13 @@
 		alphaLock: boolean;
 		/** clipping mask: only shows where the layer below has paint */
 		clip: boolean;
+		/** has a layer mask */
+		mask: boolean;
+		/** the tools paint on the mask */
+		editingMask: boolean;
 		empty: boolean;
 	}
-	export type LayerSettings = Omit<LayerInfo, 'id' | 'empty'>;
+	export type LayerSettings = Omit<LayerInfo, 'id' | 'empty' | 'mask' | 'editingMask'>;
 
 	export interface CanvasStatus {
 		canUndo: boolean;
@@ -293,6 +297,10 @@
 		});
 	}
 
+	/** the stroke in progress paints a layer mask (not shared, not in the stroke log) */
+	let maskStroke = false;
+	const sendLive = () => !!onlive && !maskStroke;
+
 	/** run an engine change, keep the history in step, then redraw */
 	function changed(recorded: boolean, logIt: () => void = () => log.layerChange()) {
 		if (recorded) logIt();
@@ -310,7 +318,7 @@
 	let liveK = 0;
 	let livePts: number[] = [];
 	function flushLive() {
-		if (livePts.length && onlive) onlive({ type: 'points', k: liveK, pts: livePts });
+		if (livePts.length && sendLive()) onlive?.({ type: 'points', k: liveK, pts: livePts });
 		livePts = [];
 	}
 
@@ -670,11 +678,11 @@
 		const path = resample(shape.points, 3);
 		// redraw: drop the hand-drawn stroke, draw the clean one in its place
 		paint.cancelStroke();
-		if (onlive) {
+		if (sendLive()) {
 			flushLive();
-			onlive({ type: 'cancel', k: liveK });
+			onlive?.({ type: 'cancel', k: liveK });
 			liveK++;
-			onlive({ type: 'begin', k: liveK, style: { brushId, color, size, opacity, eraser } });
+			onlive?.({ type: 'begin', k: liveK, style: { brushId, color, size, opacity, eraser } });
 		}
 		if (!paint.beginStroke()) return;
 		const t = current.points.at(-1)?.t ?? 0;
@@ -682,7 +690,7 @@
 		for (const [x, y] of path) {
 			paint.strokeTo(brush, x, y, pressure, 0, 0, 0.008);
 			current.points.push({ x: Math.round(x * 10) / 10, y: Math.round(y * 10) / 10, pressure, t });
-			if (onlive)
+			if (sendLive())
 				livePts.push(
 					Math.round(x * 10) / 10,
 					Math.round(y * 10) / 10,
@@ -1121,7 +1129,7 @@
 			const y = from.y + (lastRaw.y - from.y) * t;
 			const p = from.p + (lastRaw.p - from.p) * t;
 			paint.strokeTo(brush, x, y, p, 0, 0, 0.004);
-			if (onlive)
+			if (sendLive())
 				livePts.push(
 					Math.round(x * 10) / 10,
 					Math.round(y * 10) / 10,
@@ -1208,7 +1216,7 @@
 		const dt = Math.max(0, (r.time - lastT) / 1000);
 		lastT = r.time;
 		paint.strokeTo(brush, x, y, pressure, r.tx, r.ty, dt);
-		if (onlive)
+		if (sendLive())
 			livePts.push(
 				Math.round(x * 10) / 10,
 				Math.round(y * 10) / 10,
@@ -1260,9 +1268,9 @@
 					paint.cancelStroke();
 					current = null;
 					schedule();
-					if (onlive) {
+					if (sendLive()) {
 						flushLive();
-						onlive({ type: 'cancel', k: liveK });
+						onlive?.({ type: 'cancel', k: liveK });
 					}
 				}
 				panning = null;
@@ -1354,9 +1362,10 @@
 		snapped = false;
 		holdAnchor = null;
 		clearTimeout(shapeTimer);
-		if (onlive) {
+		maskStroke = paint.isEditingMask();
+		if (sendLive()) {
 			liveK++;
-			onlive({ type: 'begin', k: liveK, style: { brushId, color, size, opacity, eraser } });
+			onlive?.({ type: 'begin', k: liveK, style: { brushId, color, size, opacity, eraser } });
 		}
 		feed(e);
 		schedule();
@@ -1473,11 +1482,12 @@
 		if (!snapped) catchUp();
 		snapped = false;
 		paint.endStroke(brush);
-		log.add(current);
+		if (maskStroke) log.layerChange();
+		else log.add(current);
 		current = null;
-		if (onlive) {
+		if (sendLive()) {
 			flushLive();
-			onlive({ type: 'end', k: liveK });
+			onlive?.({ type: 'end', k: liveK });
 		}
 		schedule();
 		notify();
@@ -1487,7 +1497,8 @@
 	$effect(() => {
 		if (locked && current && paint && brush) {
 			paint.endStroke(brush);
-			log.add(current);
+			if (maskStroke) log.layerChange();
+			else log.add(current);
 			current = null;
 			schedule();
 			notify();
@@ -1541,7 +1552,8 @@
 	export function clear() {
 		if (!paint) return;
 		const layer = paint.activeLayer;
-		changed(paint.clear(), () => log.clear(layer));
+		const mask = paint.isEditingMask();
+		changed(paint.clear(), () => (mask ? log.layerChange() : log.clear(layer)));
 	}
 
 	// ---- layers ----
@@ -1624,6 +1636,30 @@
 		changed(
 			paint.commitLayer(id, b.name, b.visible, b.opacity, b.blend, b.locked, b.alphaLock, b.clip)
 		);
+	}
+
+	// ---- layer masks (white shows, black hides) ----
+
+	export function addMask(id: number) {
+		if (paint) changed(paint.addMask(id));
+	}
+	export function deleteMask(id: number) {
+		if (paint) changed(paint.deleteMask(id));
+	}
+	/** bake the mask into the layer */
+	export function applyMask(id: number) {
+		if (paint) changed(paint.applyMask(id));
+	}
+	/** paint on the mask (true) or the layer's colour; selects the layer */
+	export function editMask(id: number, on: boolean) {
+		if (!paint) return;
+		paint.setMaskEditing(id, on);
+		notify();
+	}
+	export function maskThumbnail(id: number, w: number, h: number): ImageData | null {
+		if (!paint) return null;
+		const px = paint.maskThumbnail(id, w, h);
+		return px.length ? new ImageData(new Uint8ClampedArray(px), w, h) : null;
 	}
 
 	/** Straight-alpha preview of one layer. */

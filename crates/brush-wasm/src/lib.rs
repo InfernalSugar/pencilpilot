@@ -23,7 +23,9 @@ pub mod layers;
 pub mod wasm;
 
 pub use layers::{Blend, LayerProps};
-use layers::{TileSource, composite_pixel, json_str, merge_pixel, premul_fix15, unpremul_srgb};
+use layers::{
+    TileSource, composite_pixel, json_str, mask_value, merge_pixel, premul_fix15, unpremul_srgb,
+};
 
 type TileKey = (i32, i32);
 type TileMap = HashMap<TileKey, Box<TilePixels>>;
@@ -99,7 +101,12 @@ pub const MAX_LAYERS: usize = 32;
 pub struct Layer {
     pub id: u32,
     pub props: LayerProps,
+    /// the pixels tools paint on: the colour, or the mask while editing it
     surface: UndoSurface,
+    /// layer mask (white shows, black hides): holds the colour while editing the mask
+    mask: Option<UndoSurface>,
+    /// `surface` and `mask` are swapped: tools paint on the mask
+    editing_mask: bool,
 }
 
 impl Layer {
@@ -108,12 +115,74 @@ impl Layer {
             id,
             props,
             surface: UndoSurface::default(),
+            mask: None,
+            editing_mask: false,
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.surface.tiles.is_empty()
+        self.colour().tiles.is_empty()
     }
+
+    pub fn has_mask(&self) -> bool {
+        self.mask.is_some()
+    }
+
+    fn colour(&self) -> &UndoSurface {
+        match (&self.mask, self.editing_mask) {
+            (Some(m), true) => m,
+            _ => &self.surface,
+        }
+    }
+
+    fn colour_mut(&mut self) -> &mut UndoSurface {
+        match (&mut self.mask, self.editing_mask) {
+            (Some(m), true) => m,
+            _ => &mut self.surface,
+        }
+    }
+
+    fn mask_surface(&self) -> Option<&UndoSurface> {
+        if self.editing_mask {
+            Some(&self.surface)
+        } else {
+            self.mask.as_ref()
+        }
+    }
+
+    /// Point the tools at the mask (or back at the colour).
+    fn set_editing(&mut self, on: bool) {
+        if on != self.editing_mask
+            && let Some(m) = self.mask.as_mut()
+        {
+            std::mem::swap(&mut self.surface, m);
+            self.editing_mask = on;
+        }
+    }
+}
+
+/// Colour tiles with a mask applied (premultiplied, so every channel scales).
+fn bake(colour: &TileMap, mask: Option<&TileMap>) -> TileMap {
+    let Some(mask) = mask else {
+        return colour.clone();
+    };
+    colour
+        .iter()
+        .map(|(k, t)| {
+            let mut t = t.clone();
+            if let Some(m) = mask.get(k) {
+                for (row, mrow) in t.iter_mut().zip(m.iter()) {
+                    for (p, mp) in row.iter_mut().zip(mrow.iter()) {
+                        let v = mask_value(*mp);
+                        for c in p.iter_mut() {
+                            *c = (*c as f32 * v).round() as u16;
+                        }
+                    }
+                }
+            }
+            (*k, t)
+        })
+        .collect()
 }
 
 impl Clone for UndoSurface {
@@ -198,6 +267,13 @@ enum Edit {
     Tiles {
         layer: u32,
         snap: Snapshot,
+        /// the tiles are the layer's mask, not its colour
+        mask: bool,
+    },
+    /// Swap a layer's mask (add / delete one).
+    SetMask {
+        layer: u32,
+        mask: Option<Box<UndoSurface>>,
     },
     Insert {
         index: usize,
@@ -307,26 +383,147 @@ impl Painter {
         if self.stroking.is_some() || self.index_of(id).is_none() {
             return false;
         }
+        if id != self.active && self.idle() {
+            self.stop_mask_editing();
+        }
         self.active = id;
         true
     }
 
     fn mark_layer(&mut self, idx: usize) {
-        let keys: Vec<TileKey> = self.layers[idx].surface.tiles.keys().copied().collect();
+        let l = &self.layers[idx];
+        let mut keys: Vec<TileKey> = l.surface.tiles.keys().copied().collect();
+        if let Some(m) = &l.mask {
+            keys.extend(m.tiles.keys().copied());
+        }
         self.dirty.extend(keys);
+    }
+
+    fn editing_mask(&self, id: u32) -> bool {
+        self.layers.iter().any(|l| l.id == id && l.editing_mask)
+    }
+
+    /// No tool is busy with pixels (so surfaces can be swapped).
+    fn idle(&self) -> bool {
+        self.stroking.is_none() && self.transform.is_none() && self.liquify.is_none()
+    }
+
+    fn stop_mask_editing(&mut self) {
+        for l in &mut self.layers {
+            l.set_editing(false);
+        }
+    }
+
+    // ---- layer masks ----
+
+    /// Give a layer an empty mask (everything shown). Undoable.
+    pub fn add_mask(&mut self, id: u32) -> bool {
+        if !self.idle() || self.layers.iter().any(|l| l.id == id && l.mask.is_some()) {
+            return false;
+        }
+        if self.index_of(id).is_none() {
+            return false;
+        }
+        self.perform(Edit::SetMask {
+            layer: id,
+            mask: Some(Box::default()),
+        });
+        true
+    }
+
+    /// Remove a layer's mask (everything shown again). Undoable.
+    pub fn delete_mask(&mut self, id: u32) -> bool {
+        if !self.idle() || !self.layers.iter().any(|l| l.id == id && l.mask.is_some()) {
+            return false;
+        }
+        self.perform(Edit::SetMask {
+            layer: id,
+            mask: None,
+        });
+        true
+    }
+
+    /// Bake the mask into the layer's pixels and remove it. Undoable, one step.
+    pub fn apply_mask(&mut self, id: u32) -> bool {
+        if !self.idle() {
+            return false;
+        }
+        let Some(idx) = self.index_of(id) else {
+            return false;
+        };
+        self.layers[idx].set_editing(false);
+        let l = &self.layers[idx];
+        let Some(m) = &l.mask else {
+            return false;
+        };
+        let baked = bake(&l.surface.tiles, Some(&m.tiles));
+        let snap: Snapshot = baked.into_iter().map(|(k, t)| (k, Some(t))).collect();
+        self.perform(Edit::Batch(vec![
+            Edit::Tiles {
+                layer: id,
+                snap,
+                mask: false,
+            },
+            Edit::SetMask {
+                layer: id,
+                mask: None,
+            },
+        ]));
+        true
+    }
+
+    /// Paint on the layer's mask (`true`) or its colour. Makes the layer active.
+    pub fn set_mask_editing(&mut self, id: u32, on: bool) -> bool {
+        if !self.idle() || self.index_of(id).is_none() {
+            return false;
+        }
+        for l in &mut self.layers {
+            l.set_editing(on && l.id == id);
+        }
+        self.active = id;
+        self.layers
+            .iter()
+            .any(|l| l.id == id && l.editing_mask == on)
+    }
+
+    pub fn is_editing_mask(&self) -> bool {
+        self.editing_mask(self.active)
     }
 
     /// Apply an edit and return its inverse.
     fn apply(&mut self, e: Edit) -> Edit {
         match e {
-            Edit::Tiles { layer, snap } => {
+            Edit::Tiles { layer, snap, mask } => {
                 let Some(l) = self.layer_mut(layer) else {
                     return Edit::Batch(Vec::new());
                 };
-                let replaced = l.surface.swap_in(snap);
+                let target = if mask == l.editing_mask {
+                    Some(&mut l.surface)
+                } else {
+                    l.mask.as_mut()
+                };
+                let Some(target) = target else {
+                    return Edit::Batch(Vec::new());
+                };
+                let replaced = target.swap_in(snap);
                 Edit::Tiles {
                     layer,
                     snap: replaced,
+                    mask,
+                }
+            }
+            Edit::SetMask { layer, mask } => {
+                let Some(idx) = self.index_of(layer) else {
+                    return Edit::Batch(Vec::new());
+                };
+                self.mark_layer(idx);
+                let l = &mut self.layers[idx];
+                l.set_editing(false);
+                let old = std::mem::replace(&mut l.mask, mask.map(|b| *b));
+                self.mark_layer(idx);
+                Edit::SetMask {
+                    layer,
+                    mask: old.map(Box::new),
                 }
             }
             Edit::Insert { index, layer } => {
@@ -410,6 +607,7 @@ impl Painter {
         let new_id = self.next_id;
         self.next_id += 1;
         let mut copy = self.layers[idx].clone();
+        copy.set_editing(false);
         copy.id = new_id;
         copy.props.name = format!("{} copy", copy.props.name)
             .chars()
@@ -494,19 +692,27 @@ impl Painter {
         let Some(upper_idx) = self.index_of(id) else {
             return false;
         };
-        if upper_idx == 0 {
+        if upper_idx == 0 || !self.idle() {
             return false;
         }
+        self.stop_mask_editing();
         let (lower, upper) = (&self.layers[upper_idx - 1], &self.layers[upper_idx]);
         let (opacity, blend, clipped) = (upper.props.opacity, upper.props.blend, upper.props.clip);
+        // masks are baked in: the merged layer looks the same and has none
+        let upper_tiles = bake(&upper.surface.tiles, upper.mask.as_ref().map(|m| &m.tiles));
+        let lower_baked = lower
+            .mask
+            .as_ref()
+            .map(|m| bake(&lower.surface.tiles, Some(&m.tiles)));
+        let lower_tiles = lower_baked.as_ref().unwrap_or(&lower.surface.tiles);
         let mut merged = Snapshot::new();
-        for (key, src) in &upper.surface.tiles {
-            let mut out = lower
-                .surface
-                .tiles
-                .get(key)
-                .cloned()
-                .unwrap_or_else(empty_tile);
+        if lower_baked.is_some() {
+            for (k, t) in lower_tiles {
+                merged.insert(*k, Some(t.clone()));
+            }
+        }
+        for (key, src) in &upper_tiles {
+            let mut out = lower_tiles.get(key).cloned().unwrap_or_else(empty_tile);
             for (orow, srow) in out.iter_mut().zip(src.iter()) {
                 for (o, s) in orow.iter_mut().zip(srow.iter()) {
                     // a clipped layer only lands where the layer below has paint
@@ -517,13 +723,20 @@ impl Painter {
             merged.insert(*key, Some(out));
         }
         let lower_id = lower.id;
-        self.perform(Edit::Batch(vec![
-            Edit::Tiles {
+        let lower_masked = lower.mask.is_some();
+        let mut edits = vec![Edit::Tiles {
+            layer: lower_id,
+            mask: self.editing_mask(lower_id),
+            snap: merged,
+        }];
+        if lower_masked {
+            edits.push(Edit::SetMask {
                 layer: lower_id,
-                snap: merged,
-            },
-            Edit::Remove { index: upper_idx },
-        ]));
+                mask: None,
+            });
+        }
+        edits.push(Edit::Remove { index: upper_idx });
+        self.perform(Edit::Batch(edits));
         self.active = lower_id;
         true
     }
@@ -673,6 +886,7 @@ impl Painter {
         // web app's history and this undo stack stay one-to-one.
         self.push_undo(Edit::Tiles {
             layer: id,
+            mask: self.editing_mask(id),
             snap: snap.unwrap_or_default(),
         });
     }
@@ -746,6 +960,7 @@ impl Painter {
             }
             self.perform(Edit::Tiles {
                 layer: active,
+                mask: self.editing_mask(active),
                 snap,
             });
             return true;
@@ -755,6 +970,7 @@ impl Painter {
         l.surface.dirty.extend(snap.keys().copied());
         self.push_undo(Edit::Tiles {
             layer: active,
+            mask: self.editing_mask(active),
             snap,
         });
         true
@@ -862,6 +1078,7 @@ impl Painter {
         }
         self.perform(Edit::Tiles {
             layer: active,
+            mask: self.editing_mask(active),
             snap,
         });
         true
@@ -1206,6 +1423,7 @@ impl Painter {
         }
         self.push_undo(Edit::Tiles {
             layer: t.layer,
+            mask: self.editing_mask(t.layer),
             snap,
         });
         true
@@ -1363,7 +1581,11 @@ impl Painter {
         if snap.is_empty() {
             return false;
         }
-        self.push_undo(Edit::Tiles { layer, snap });
+        self.push_undo(Edit::Tiles {
+            layer,
+            mask: self.editing_mask(layer),
+            snap,
+        });
         true
     }
 
@@ -1387,7 +1609,7 @@ impl Painter {
     pub fn clear_layer_silent(&mut self, id: u32) {
         if let Some(idx) = self.index_of(id) {
             self.mark_layer(idx);
-            self.layers[idx].surface.tiles.clear();
+            self.layers[idx].colour_mut().tiles.clear();
         }
     }
 
@@ -1417,9 +1639,10 @@ impl Painter {
         let layer = *layer;
         if let Some(l) = self.layers.iter_mut().find(|l| l.id == layer) {
             // a remote stroke must not land in the local stroke's undo snapshot
-            let rec = l.surface.recording.take();
-            brush.stroke_to(state, &mut l.surface, x, y, pressure, 0.0, 0.0, dtime);
-            l.surface.recording = rec;
+            let c = l.colour_mut();
+            let rec = c.recording.take();
+            brush.stroke_to(state, c, x, y, pressure, 0.0, 0.0, dtime);
+            c.recording = rec;
         }
     }
 
@@ -1428,9 +1651,10 @@ impl Painter {
             return;
         };
         if let Some(l) = self.layers.iter_mut().find(|l| l.id == layer) {
-            let rec = l.surface.recording.take();
-            brush.finish_stroke(&mut state, &mut l.surface);
-            l.surface.recording = rec;
+            let c = l.colour_mut();
+            let rec = c.recording.take();
+            brush.finish_stroke(&mut state, c);
+            c.recording = rec;
         }
     }
 
@@ -1491,6 +1715,9 @@ impl Painter {
     pub fn flush(&mut self) -> Option<Rect> {
         for l in &mut self.layers {
             self.dirty.extend(l.surface.dirty.drain());
+            if let Some(m) = l.mask.as_mut() {
+                self.dirty.extend(m.dirty.drain());
+            }
         }
         if self.dirty.is_empty() {
             return None;
@@ -1514,13 +1741,16 @@ impl Painter {
                 .iter()
                 .filter(|l| clipping || (l.props.visible && l.props.opacity > 0.0))
                 .filter_map(|l| {
-                    let tile = l.surface.tiles.get(&(tx, ty));
+                    let tile = l.colour().tiles.get(&(tx, ty));
                     (clipping || tile.is_some()).then(|| TileSource {
                         tile: tile.map(|t| &**t),
                         opacity: l.props.opacity,
                         blend: l.props.blend,
                         visible: l.props.visible && l.props.opacity > 0.0,
                         clip: l.props.clip,
+                        mask: l
+                            .mask_surface()
+                            .map(|m| m.tiles.get(&(tx, ty)).map(|t| &**t)),
                     })
                 })
                 .collect();
@@ -1572,7 +1802,7 @@ impl Painter {
         let mut sc = vec![[0f32; 3]; n];
         let ts = TILE_SIZE as u32;
         let step = ((self.width / tw).max(1) / 4).max(1);
-        for (&(kx, ky), tile) in &l.surface.tiles {
+        for (&(kx, ky), tile) in &l.colour().tiles {
             if kx < 0 || ky < 0 {
                 continue;
             }
@@ -1616,6 +1846,34 @@ impl Painter {
         out
     }
 
+    /// A small greyscale preview of a layer's mask (RGBA, `tw`×`th`; empty if it has none).
+    pub fn mask_thumbnail(&self, id: u32, tw: u32, th: u32) -> Vec<u8> {
+        let Some(m) = self
+            .layers
+            .iter()
+            .find(|l| l.id == id)
+            .and_then(|l| l.mask_surface())
+        else {
+            return Vec::new();
+        };
+        let ts = TILE_SIZE as u32;
+        let mut out = Vec::with_capacity((tw * th * 4) as usize);
+        for j in 0..th {
+            for i in 0..tw {
+                let x = (i * self.width + self.width / (2 * tw.max(1))) / tw.max(1);
+                let y = (j * self.height + self.height / (2 * th.max(1))) / th.max(1);
+                let key = ((x / ts) as i32, (y / ts) as i32);
+                let v = m
+                    .tiles
+                    .get(&key)
+                    .map_or(1.0, |t| mask_value(t[(y % ts) as usize][(x % ts) as usize]));
+                let g = (v * 255.0).round() as u8;
+                out.extend_from_slice(&[g, g, g, 255]);
+            }
+        }
+        out
+    }
+
     /// The layer list as JSON, bottom → top (for the web app's layers panel).
     pub fn layers_json(&self) -> String {
         let items: Vec<String> = self
@@ -1624,7 +1882,7 @@ impl Painter {
             .map(|l| {
                 let p = &l.props;
                 format!(
-                    r#"{{"id":{},"name":{},"visible":{},"opacity":{},"blend":"{}","locked":{},"alphaLock":{},"clip":{},"empty":{}}}"#,
+                    r#"{{"id":{},"name":{},"visible":{},"opacity":{},"blend":"{}","locked":{},"alphaLock":{},"clip":{},"mask":{},"editingMask":{},"empty":{}}}"#,
                     l.id,
                     json_str(&p.name),
                     p.visible,
@@ -1633,6 +1891,8 @@ impl Painter {
                     p.locked,
                     p.alpha_lock,
                     p.clip,
+                    l.mask.is_some(),
+                    l.editing_mask,
                     l.is_empty()
                 )
             })
@@ -2528,6 +2788,77 @@ mod tests {
             .count();
         assert!(diff < 40, "merged picture differs in {diff} channels");
         assert!(p.layers_json().contains(r#""clip":false"#));
+    }
+
+    #[test]
+    fn layer_masks_hide_and_show_and_undo() {
+        let mut p = Painter::new(256, 128);
+        let b = pen();
+        let mut fat = pen();
+        fat.get_mut(BrushSetting::Radius).base_value = 1.6; // logarithmic: ~5 px
+        line(&mut p, &fat, 60.0); // a fat line across the middle
+        p.flush();
+        let id = p.active_layer();
+        let full = dark_pixels(&p);
+        assert!(p.add_mask(id));
+        assert!(p.layers_json().contains(r#""mask":true"#));
+        p.flush();
+        assert_eq!(dark_pixels(&p), full, "an empty mask shows everything");
+        // paint black on the mask over the left half: hidden there
+        assert!(p.set_mask_editing(id, true));
+        assert!(p.is_editing_mask());
+        let mut wide = pen();
+        wide.get_mut(BrushSetting::Radius).base_value = 3.0; // ~20 px
+        p.begin_stroke();
+        for i in 0..=20 {
+            p.stroke_to(&wide, 10.0 + i as f32 * 5.0, 60.0, 1.0, 0.0, 0.0, 0.01);
+        }
+        p.end_stroke(&wide);
+        p.flush();
+        assert!(px(&p, 60, 60)[0] > 240, "hidden under black mask paint");
+        assert!(px(&p, 160, 60)[0] < 120, "still shown on the right");
+        // the colour wasn't touched
+        assert_eq!(p.layer_thumbnail(id, 16, 8), {
+            let mut q = Painter::new(256, 128);
+            line(&mut q, &fat, 60.0);
+            q.layer_thumbnail(q.active_layer(), 16, 8)
+        });
+        // undo the mask stroke after leaving mask editing still hits the mask
+        assert!(p.set_mask_editing(id, false));
+        assert!(p.undo());
+        p.flush();
+        assert_eq!(dark_pixels(&p), full);
+        assert!(p.redo());
+        p.flush();
+        assert!(px(&p, 60, 60)[0] > 240);
+        let masked = p.rgba().to_vec();
+        // apply: same picture, no mask; undo brings the mask back
+        assert!(p.apply_mask(id));
+        p.flush();
+        assert_eq!(p.rgba(), &masked[..]);
+        assert!(p.layers_json().contains(r#""mask":false"#));
+        assert!(p.undo());
+        assert!(p.layers_json().contains(r#""mask":true"#));
+        // merge down bakes the mask in
+        let top = p.add_layer("top");
+        line(&mut p, &b, 20.0);
+        p.flush();
+        let before = p.rgba().to_vec();
+        assert!(p.merge_down(top));
+        p.flush();
+        let diff = p
+            .rgba()
+            .iter()
+            .zip(&before)
+            .filter(|(a, b)| a.abs_diff(**b) > 3)
+            .count();
+        assert!(diff < 40, "merge changed {diff} channels");
+        assert!(p.layers_json().contains(r#""mask":false"#));
+        // delete: everything shows again
+        assert!(p.undo());
+        assert!(p.delete_mask(id));
+        p.flush();
+        assert!(px(&p, 60, 60)[0] < 120);
     }
 
     #[test]

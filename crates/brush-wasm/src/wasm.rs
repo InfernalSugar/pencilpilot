@@ -203,6 +203,38 @@ impl PaintCanvas {
         self.inner.layer_thumbnail(id, w, h)
     }
 
+    /// Greyscale RGBA8 preview of a layer's mask (empty if it has none).
+    #[wasm_bindgen(js_name = maskThumbnail)]
+    pub fn mask_thumbnail(&self, id: u32, w: u32, h: u32) -> Vec<u8> {
+        self.inner.mask_thumbnail(id, w, h)
+    }
+
+    #[wasm_bindgen(js_name = addMask)]
+    pub fn add_mask(&mut self, id: u32) -> bool {
+        self.inner.add_mask(id)
+    }
+
+    #[wasm_bindgen(js_name = deleteMask)]
+    pub fn delete_mask(&mut self, id: u32) -> bool {
+        self.inner.delete_mask(id)
+    }
+
+    #[wasm_bindgen(js_name = applyMask)]
+    pub fn apply_mask(&mut self, id: u32) -> bool {
+        self.inner.apply_mask(id)
+    }
+
+    /// Paint on a layer's mask (true) or its colour; makes it the active layer.
+    #[wasm_bindgen(js_name = setMaskEditing)]
+    pub fn set_mask_editing(&mut self, id: u32, on: bool) -> bool {
+        self.inner.set_mask_editing(id, on)
+    }
+
+    #[wasm_bindgen(js_name = isEditingMask)]
+    pub fn is_editing_mask(&self) -> bool {
+        self.inner.is_editing_mask()
+    }
+
     pub fn undo(&mut self) -> bool {
         self.inner.undo()
     }

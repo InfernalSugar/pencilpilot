@@ -13,6 +13,11 @@
 		previewLayer(id: number, patch: Partial<LayerSettings>): void;
 		commitLayer(): void;
 		layerThumbnail(id: number, w: number, h: number): ImageData | null;
+		addMask(id: number): void;
+		deleteMask(id: number): void;
+		applyMask(id: number): void;
+		editMask(id: number, on: boolean): void;
+		maskThumbnail(id: number, w: number, h: number): ImageData | null;
 	}
 </script>
 
@@ -48,6 +53,7 @@
 	let dropAt = $state<number | null>(null);
 	/** preview canvases by layer id (not reactive state: written by the action below) */
 	const thumbs: Record<number, HTMLCanvasElement> = {};
+	const maskThumbs: Record<number, HTMLCanvasElement> = {};
 
 	// redraw thumbnails after each change (one frame later, batched)
 	let raf = 0;
@@ -60,6 +66,9 @@
 				const c = thumbs[l.id];
 				const img = controls?.layerThumbnail(l.id, TW, TH);
 				if (c && img) c.getContext('2d')?.putImageData(img, 0, 0);
+				const mc = maskThumbs[l.id];
+				const mimg = l.mask ? controls?.maskThumbnail(l.id, TW, TH) : null;
+				if (mc && mimg) mc.getContext('2d')?.putImageData(mimg, 0, 0);
 			}
 		});
 		return () => cancelAnimationFrame(raf);
@@ -68,6 +77,10 @@
 	function thumb(node: HTMLCanvasElement, id: number) {
 		thumbs[id] = node;
 		return { destroy: () => delete thumbs[id] };
+	}
+	function maskThumb(node: HTMLCanvasElement, id: number) {
+		maskThumbs[id] = node;
+		return { destroy: () => delete maskThumbs[id] };
 	}
 
 	function finishRename(l: LayerInfo, value: string) {
@@ -202,7 +215,49 @@
 				>
 					Clip to below
 				</button>
+				{#if active.mask}
+					<button
+						type="button"
+						class="chip"
+						aria-pressed={active.editingMask}
+						title="Paint on the mask: black hides, white shows"
+						onclick={() => controls?.editMask(active.id, !active.editingMask)}
+					>
+						Edit mask
+					</button>
+					<button
+						type="button"
+						class="chip"
+						title="Bake the mask into the layer"
+						onclick={() => controls?.applyMask(active.id)}
+					>
+						Apply mask
+					</button>
+					<button
+						type="button"
+						class="chip"
+						title="Remove the mask (everything shows again)"
+						onclick={() => controls?.deleteMask(active.id)}
+					>
+						Delete mask
+					</button>
+				{:else}
+					<button
+						type="button"
+						class="chip"
+						title="Layer mask: hide parts of this layer without erasing them"
+						onclick={() => {
+							controls?.addMask(active.id);
+							controls?.editMask(active.id, true);
+						}}
+					>
+						Add mask
+					</button>
+				{/if}
 			</div>
+			{#if active.editingMask}
+				<p class="mask-hint" role="status">Painting on the mask: black hides, white shows.</p>
+			{/if}
 		</div>
 	{/if}
 
@@ -273,6 +328,26 @@
 					use:thumb={l.id}
 					aria-hidden="true"
 				></canvas>
+				{#if l.mask}
+					<button
+						type="button"
+						class="mask-btn"
+						class:on={l.editingMask}
+						aria-pressed={l.editingMask}
+						aria-label="Edit the mask of {l.name}"
+						title="Mask: click to paint on it"
+						onclick={() => controls?.editMask(l.id, !l.editingMask)}
+					>
+						<canvas
+							class="thumb mask-thumb"
+							width={TW}
+							height={TH}
+							style="width:{TW}px;height:{TH}px"
+							use:maskThumb={l.id}
+							aria-hidden="true"
+						></canvas>
+					</button>
+				{/if}
 				{#if renaming === l.id}
 					<!-- svelte-ignore a11y_autofocus -->
 					<input
@@ -294,7 +369,8 @@
 						class="name"
 						aria-current={l.id === status.active ? 'true' : undefined}
 						title="Select · double-click to rename"
-						onclick={() => controls?.selectLayer(l.id)}
+						onclick={() =>
+							l.editingMask ? controls?.editMask(l.id, false) : controls?.selectLayer(l.id)}
 						ondblclick={() => (renaming = l.id)}
 						onkeydown={(e) => {
 							if (e.key === 'F2') renaming = l.id;
@@ -468,6 +544,28 @@
 		border: 1px solid var(--pp-track);
 		/* checkerboard = transparent */
 		background: repeating-conic-gradient(#e9e6de 0 25%, #fff 0 50%) 0 0 / 10px 10px;
+	}
+	.mask-btn {
+		flex: none;
+		display: grid;
+		padding: 0;
+		border: 0;
+		border-radius: 8px;
+		background: transparent;
+		cursor: pointer;
+	}
+	.mask-btn.on {
+		outline: 2px solid var(--pp-accent-strong);
+		outline-offset: 1px;
+	}
+	.mask-thumb {
+		background: #fff;
+	}
+	.mask-hint {
+		margin: 6px 0 0;
+		font-size: 13px;
+		font-weight: 600;
+		color: var(--pp-ink-2);
 	}
 	.paper-thumb {
 		background: #fff;
