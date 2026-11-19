@@ -147,6 +147,7 @@
 				{color}
 				onchange={(s) => (status = s)}
 				onlive={live}
+				ongesture={(g) => g === 'undo' && undo()}
 				maxHeight="72vh"
 			/>
 		</div>

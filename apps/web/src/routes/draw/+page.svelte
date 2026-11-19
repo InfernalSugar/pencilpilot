@@ -10,6 +10,7 @@
 	import CanvasSizePicker from '#lib/paint/CanvasSizePicker.svelte';
 	import RefViewer from '#lib/paint/RefViewer.svelte';
 	import { addToSession, clockOf, startSession, timeLabel } from '#lib/timed.js';
+	import ColorPanel, { rememberColor } from '#lib/paint/ColorPanel.svelte';
 	import TracePanel, { TRACE_DEFAULTS, type TraceState } from '#lib/paint/TracePanel.svelte';
 	import { savedSize, saveSize, type CanvasSize } from '#lib/paint/canvas-size.js';
 	import BrushPicker from '#lib/paint/BrushPicker.svelte';
@@ -37,6 +38,23 @@
 	};
 	let reference = $state<Reference | undefined>(byId(page.url.searchParams.get('ref')));
 	let refLoading = $state(false);
+	/** brush (draw / erase) or the eyedropper */
+	let tool = $state<'brush' | 'picker'>('brush');
+	let smoothing = $state(0);
+	let colorOpen = $state(false);
+	function picked(c: string) {
+		color = c;
+		eraser = false;
+		tool = 'brush';
+	}
+	// recent colours: the colour of each new (non-eraser) stroke
+	let strokesForColor = 0;
+	$effect(() => {
+		const n = status.strokes;
+		if (n > strokesForColor && !eraser) rememberColor(color);
+		strokesForColor = n;
+	});
+
 	let tracing = $state(false);
 	let trace = $state<TraceState>({ ...TRACE_DEFAULTS });
 	/** a stroke was made while the tracing picture showed: tips only, no score */
@@ -284,6 +302,7 @@
 		sideW = recall('pp.sideWidth', 340);
 		refFloating = recall('pp.refFloating', false);
 		floatBox = recall('pp.refFloat', floatBox);
+		smoothing = recall('pp.smoothing', 0);
 		loadManifest().then((m) => (manifest = m));
 		if (!reference) loadReference();
 		if (sessionMode && category)
@@ -314,8 +333,13 @@
 		} else if (mod && k === 'y') {
 			e.preventDefault();
 			canvas?.redo();
-		} else if (!mod && k === 'b') eraser = false;
-		else if (!mod && k === 'e') eraser = true;
+		} else if (!mod && k === 'b') {
+			eraser = false;
+			tool = 'brush';
+		} else if (!mod && k === 'e') {
+			eraser = true;
+			tool = 'brush';
+		} else if (!mod && k === 'i') tool = tool === 'picker' ? 'brush' : 'picker';
 		else if (!mod && e.key === '[') size = Math.max(0.25, +(size / 1.25).toFixed(2));
 		else if (!mod && e.key === ']') size = Math.min(6, +(size * 1.25).toFixed(2));
 		else if (!mod && (e.key === '+' || e.key === '=')) canvas?.zoomIn();
@@ -607,6 +631,9 @@
 						{size}
 						{opacity}
 						{color}
+						{tool}
+						{smoothing}
+						onpick={picked}
 						overlaySrc={traceSrc}
 						overlayOpacity={trace.opacity}
 						overlayTransform={trace}
@@ -644,10 +671,13 @@
 					<button
 						type="button"
 						class="tool"
-						aria-pressed={!eraser}
+						aria-pressed={!eraser && tool === 'brush'}
 						aria-label="Brush (B)"
 						title="Brush (B)"
-						onclick={() => (eraser = false)}
+						onclick={() => {
+							eraser = false;
+							tool = 'brush';
+						}}
 					>
 						<svg
 							width="22"
@@ -666,10 +696,13 @@
 					<button
 						type="button"
 						class="tool"
-						aria-pressed={eraser}
+						aria-pressed={eraser && tool === 'brush'}
 						aria-label="Eraser (E)"
 						title="Eraser (E) — uses the current brush shape"
-						onclick={() => (eraser = true)}
+						onclick={() => {
+							eraser = true;
+							tool = 'brush';
+						}}
 					>
 						<svg
 							width="22"
@@ -683,6 +716,30 @@
 							aria-hidden="true"
 						>
 							<path d="m7 21-4-4L14 6l5 5-8 10Z" /><path d="M22 21H7" />
+						</svg>
+					</button>
+					<button
+						type="button"
+						class="tool"
+						aria-pressed={tool === 'picker'}
+						aria-label="Eyedropper (I)"
+						title="Eyedropper (I): pick a colour from the canvas. Alt+click works too."
+						onclick={() => (tool = tool === 'picker' ? 'brush' : 'picker')}
+					>
+						<svg
+							width="22"
+							height="22"
+							viewBox="0 0 24 24"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="2.3"
+							stroke-linecap="round"
+							stroke-linejoin="round"
+							aria-hidden="true"
+						>
+							<path d="m2 22 1-4 9-9 3 3-9 9Z" /><path d="m14 7 3-3a2.1 2.1 0 0 1 3 3l-3 3" /><path
+								d="m11 6 7 7"
+							/>
 						</svg>
 					</button>
 				</div>
@@ -804,11 +861,34 @@
 							onclick={() => (color = c)}
 						></button>
 					{/each}
-					<label class="swatch custom" title="Pick any colour">
-						<span class="visually-hidden">Custom colour</span>
-						<input type="color" bind:value={color} />
-					</label>
+					<div class="color-more">
+						<button
+							type="button"
+							class="swatch custom"
+							aria-label="More colours"
+							aria-expanded={colorOpen}
+							title="Colour wheel, recent colours and palettes"
+							onclick={() => (colorOpen = !colorOpen)}
+						></button>
+						{#if colorOpen}
+							<div class="color-pop">
+								<ColorPanel bind:color onclose={() => (colorOpen = false)} />
+							</div>
+						{/if}
+					</div>
 				</div>
+				<label class="slider">
+					<span>Smoothing <b>{Math.round(smoothing * 100)}%</b></span>
+					<input
+						type="range"
+						min="0"
+						max="1"
+						step="0.05"
+						bind:value={smoothing}
+						onchange={() => remember('pp.smoothing', smoothing)}
+						title="Steadies wobbly lines (like StreamLine)"
+					/>
+				</label>
 			</div>
 			{#if tracing}
 				<TracePanel bind:trace hasReference={!!reference} onclose={toggleTracing} />
@@ -984,6 +1064,23 @@
 		color: #fff;
 		font: 600 13px var(--pp-font-body);
 		cursor: pointer;
+	}
+	.color-more {
+		position: relative;
+	}
+	.color-pop {
+		position: absolute;
+		z-index: 40;
+		bottom: calc(100% + 10px);
+		right: 0;
+	}
+	@media (max-width: 640px) {
+		.color-pop {
+			position: fixed;
+			left: 16px;
+			right: 16px;
+			bottom: 16px;
+		}
 	}
 	.sketch-note {
 		margin: 0;
@@ -1268,14 +1365,10 @@
 	.custom {
 		position: relative;
 		overflow: hidden;
+		cursor: pointer;
 		background: conic-gradient(red, yellow, lime, cyan, blue, magenta, red);
 	}
-	.custom input {
-		position: absolute;
-		inset: -8px;
-		opacity: 0;
-		cursor: pointer;
-	}
+
 	.hint {
 		margin: 16px 0 0;
 		font-size: 13px;
@@ -1287,12 +1380,5 @@
 		border-radius: 6px;
 		background: var(--pp-surface);
 		border: 1px solid var(--pp-track);
-	}
-	.visually-hidden {
-		position: absolute;
-		width: 1px;
-		height: 1px;
-		overflow: hidden;
-		clip: rect(0 0 0 0);
 	}
 </style>

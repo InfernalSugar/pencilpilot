@@ -86,6 +86,10 @@
 		onoverlaymove,
 		locked = false,
 		onlive,
+		tool = 'brush',
+		smoothing = 0,
+		onpick,
+		ongesture,
 		maxHeight = '78vh',
 		viewControls = true
 	}: {
@@ -105,6 +109,14 @@
 		overlayOpacity?: number;
 		/** where the overlay sits: offset (fraction of the canvas), scale and rotation (degrees) */
 		overlayTransform?: { x: number; y: number; scale: number; rotate: number };
+		/** what a press on the canvas does */
+		tool?: 'brush' | 'picker';
+		/** 0–1: steadies strokes (lazy brush, like Procreate's StreamLine) */
+		smoothing?: number;
+		/** a colour was picked (eyedropper tool, Alt+click, or a finger held still) */
+		onpick?: (hex: string) => void;
+		/** two-finger tap = undo, three-finger tap = redo; defaults to this canvas's own */
+		ongesture?: (g: 'undo' | 'redo') => void;
 		/** local strokes as they happen (shared canvases) */
 		onlive?: (e: LiveEvent) => void;
 		/** no more strokes (e.g. time is up); a stroke in progress is finished */
@@ -502,10 +514,99 @@
 		};
 	}
 
+	// ---- eyedropper ----
+
+	/** The colour you see at a client position (all visible layers), as #rrggbb. */
+	function colorAt(clientX: number, clientY: number): string | null {
+		if (!paint || !memory) return null;
+		render(); // composite anything pending (and show it) before reading
+		const [cx, cy] = toCanvas(clientX, clientY);
+		const data = new Uint8ClampedArray(memory.buffer, paint.rgbaPtr(), width * height * 4);
+		let [r, g, b, n] = [0, 0, 0, 0];
+		for (let dy = -1; dy <= 1; dy++)
+			for (let dx = -1; dx <= 1; dx++) {
+				const x = Math.round(cx) + dx;
+				const y = Math.round(cy) + dy;
+				if (x < 0 || y < 0 || x >= width || y >= height) continue;
+				const i = (y * width + x) * 4;
+				r += data[i];
+				g += data[i + 1];
+				b += data[i + 2];
+				n++;
+			}
+		if (!n) return null;
+		const h = (v: number) =>
+			Math.round(v / n)
+				.toString(16)
+				.padStart(2, '0');
+		return `#${h(r)}${h(g)}${h(b)}`;
+	}
+
+	function pick(e: PointerEvent) {
+		const c = colorAt(e.clientX, e.clientY);
+		if (c) onpick?.(c);
+	}
+
+	// ---- smoothing (lazy brush): the pen point follows the pointer on a short leash ----
+
+	let smooth: { x: number; y: number; p: number } | null = null;
+	let lastRaw: { x: number; y: number; p: number; t: number } | null = null;
+
+	/** at the end of a smoothed stroke, carry the line on to where the pen actually stopped */
+	function catchUp() {
+		if (!paint || !brush || !current || !smooth || !lastRaw || smoothing <= 0) return;
+		const steps = 6;
+		const from = { ...smooth };
+		for (let k = 1; k <= steps; k++) {
+			const t = k / steps;
+			const x = from.x + (lastRaw.x - from.x) * t;
+			const y = from.y + (lastRaw.y - from.y) * t;
+			const p = from.p + (lastRaw.p - from.p) * t;
+			paint.strokeTo(brush, x, y, p, 0, 0, 0.004);
+			if (onlive)
+				livePts.push(
+					Math.round(x * 10) / 10,
+					Math.round(y * 10) / 10,
+					Math.round(p * 1000) / 1000,
+					4
+				);
+			current.points.push({
+				x: Math.round(x * 10) / 10,
+				y: Math.round(y * 10) / 10,
+				pressure: Math.round(p * 1000) / 1000,
+				t: Math.round(lastRaw.t - t0)
+			});
+		}
+		smooth = { x: lastRaw.x, y: lastRaw.y, p: lastRaw.p };
+	}
+
+	// ---- touch taps: two fingers = undo, three = redo ----
+
+	let tap: {
+		t0: number;
+		max: number;
+		moved: boolean;
+		starts: Map<number, { x: number; y: number }>;
+		view: { zoom: number; rot: number; panX: number; panY: number };
+	} | null = null;
+	let holdTimer: ReturnType<typeof setTimeout> | undefined;
+	/** follow factor per sample: 1 = raw input, small = very steady */
+	const follow = () => 1 - Math.min(0.92, Math.max(0, smoothing) * 0.92);
+
 	function feed(e: PointerEvent) {
 		if (!paint || !brush || !current) return;
-		const [x, y] = toCanvas(e.clientX, e.clientY);
-		const pressure = e.pointerType === 'mouse' ? 0.5 : e.pressure;
+		const [rx, ry] = toCanvas(e.clientX, e.clientY);
+		const rp = e.pointerType === 'mouse' ? 0.5 : e.pressure;
+		const a = follow();
+		smooth = smooth
+			? {
+					x: smooth.x + (rx - smooth.x) * a,
+					y: smooth.y + (ry - smooth.y) * a,
+					p: smooth.p + (rp - smooth.p) * a
+				}
+			: { x: rx, y: ry, p: rp };
+		lastRaw = { x: rx, y: ry, p: rp, t: e.timeStamp };
+		const { x, y, p: pressure } = smooth;
 		const dt = Math.max(0, (e.timeStamp - lastT) / 1000);
 		lastT = e.timeStamp;
 		paint.strokeTo(brush, x, y, pressure, (e.tiltX || 0) / 90, (e.tiltY || 0) / 90, dt);
@@ -524,8 +625,17 @@
 		});
 	}
 
+	/** capture the pointer (some synthetic / stylus edge cases can't be captured: then just don't) */
+	function capture(e: PointerEvent) {
+		try {
+			vp.setPointerCapture(e.pointerId);
+		} catch {
+			/* not capturable */
+		}
+	}
+
 	function startPan(e: PointerEvent) {
-		vp.setPointerCapture(e.pointerId);
+		capture(e);
 		panning = { id: e.pointerId, x: e.clientX, y: e.clientY, panX, panY };
 	}
 
@@ -536,6 +646,16 @@
 		if (e.pointerType === 'pen') penSeen = true;
 		if (e.pointerType === 'touch') {
 			touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+			if (!tap)
+				tap = {
+					t0: e.timeStamp,
+					max: 0,
+					moved: false,
+					starts: new Map(),
+					view: { zoom, rot, panX, panY }
+				};
+			tap.starts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+			tap.max = Math.max(tap.max, touches.size);
 			if (touches.size === 2) {
 				// a second finger: this is a pinch, not a stroke
 				if (current) {
@@ -554,14 +674,34 @@
 				return;
 			}
 			if (touches.size > 2 || gestureLatch) return;
-			if (penSeen) return startPan(e);
+			if (penSeen) {
+				// with a pen around, a finger moves the view, or picks a colour when held still
+				clearTimeout(holdTimer);
+				const id = e.pointerId;
+				holdTimer = setTimeout(() => {
+					if (touches.size === 1 && touches.has(id) && !tap?.moved) {
+						panning = null;
+						const t = touches.get(id)!;
+						const c = colorAt(t.x, t.y);
+						if (c) onpick?.(c);
+					}
+				}, 450);
+				return startPan(e);
+			}
 		}
 		if (e.pointerType === 'mouse' && e.button === 1) return startPan(e);
 		if (spaceHeld) return startPan(e);
 		if (e.pointerType === 'mouse' && e.button !== 0) return;
+		// eyedropper: the tool, or Alt+click with the brush
+		if (tool === 'picker' || (e.altKey && e.pointerType !== 'touch')) {
+			capture(e);
+			picking = e.pointerId;
+			pick(e);
+			return;
+		}
 		if (locked) return;
 		if (adjustOverlay && overlaySrc) {
-			vp.setPointerCapture(e.pointerId);
+			capture(e);
 			const [cx, cy] = toCanvas(e.clientX, e.clientY);
 			moving = { id: e.pointerId, cx, cy };
 			return;
@@ -571,9 +711,11 @@
 			onblocked?.(l && !l.visible ? 'hidden' : 'locked');
 			return;
 		}
-		vp.setPointerCapture(e.pointerId);
+		capture(e);
 		current = { brushId, eraser, layer: paint.activeLayer, color, size, opacity, points: [] };
 		lastT = e.timeStamp;
+		smooth = null;
+		lastRaw = null;
 		if (onlive) {
 			liveK++;
 			onlive({ type: 'begin', k: liveK, style: { brushId, color, size, opacity, eraser } });
@@ -582,9 +724,17 @@
 		schedule();
 	}
 
+	let picking: number | null = null;
+
 	function move(e: PointerEvent) {
+		if (picking === e.pointerId) return pick(e);
 		if (e.pointerType === 'touch' && touches.has(e.pointerId)) {
 			touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+			const st = tap?.starts.get(e.pointerId);
+			if (tap && st && Math.hypot(e.clientX - st.x, e.clientY - st.y) > 12) {
+				tap.moved = true;
+				clearTimeout(holdTimer);
+			}
 			if (gesture && touches.size >= 2) {
 				const g = twoTouches();
 				const r = vp.getBoundingClientRect();
@@ -619,14 +769,31 @@
 	}
 
 	function up(e: PointerEvent) {
+		if (picking === e.pointerId) {
+			picking = null;
+			return;
+		}
 		if (e.pointerType === 'touch') {
 			touches.delete(e.pointerId);
+			clearTimeout(holdTimer);
 			if (touches.size < 2) gesture = null;
-			if (touches.size === 0) gestureLatch = false;
+			if (touches.size === 0) {
+				gestureLatch = false;
+				// a quick tap with two or three fingers that didn't move: undo / redo
+				if (tap && !tap.moved && tap.max >= 2 && e.timeStamp - tap.t0 < 350) {
+					({ zoom, rot, panX, panY } = tap.view);
+					const g = tap.max === 2 ? 'undo' : 'redo';
+					if (ongesture) ongesture(g);
+					else if (g === 'undo') undo();
+					else redo();
+				}
+				tap = null;
+			}
 		}
 		if (panning && e.pointerId === panning.id) panning = null;
 		if (moving && e.pointerId === moving.id) moving = null;
 		if (!current || !paint || !brush) return;
+		catchUp();
 		paint.endStroke(brush);
 		log.add(current);
 		current = null;
@@ -826,6 +993,7 @@
 	class="viewport"
 	class:grab={spaceHeld}
 	class:moving-overlay={adjustOverlay && !!overlaySrc}
+	class:picker={tool === 'picker'}
 	bind:this={vp}
 	style="aspect-ratio: {width} / {height}; max-height: {maxHeight}"
 	onpointerdown={down}
@@ -927,6 +1095,12 @@
 	}
 	.viewport.grab {
 		cursor: grab;
+	}
+	.viewport.picker {
+		cursor:
+			url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="white" stroke="black" stroke-width="1.6"><path d="m2 22 1-4 9-9 3 3-9 9Z"/><path d="m14 7 3-3a2.1 2.1 0 0 1 3 3l-3 3"/></svg>')
+				2 22,
+			crosshair;
 	}
 	.viewport.moving-overlay {
 		cursor: move;
