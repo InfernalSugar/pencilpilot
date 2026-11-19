@@ -82,6 +82,8 @@ pub struct LayerProps {
     pub locked: bool,
     /// paint only where the layer already has paint ("preserve transparency")
     pub alpha_lock: bool,
+    /// clipping mask: only show where the layer below (the nearest unclipped one) has paint
+    pub clip: bool,
 }
 
 impl LayerProps {
@@ -93,6 +95,7 @@ impl LayerProps {
             blend: Blend::Normal,
             locked: false,
             alpha_lock: false,
+            clip: false,
         }
     }
 }
@@ -140,19 +143,31 @@ pub fn premul_fix15(c: [f32; 3], a: f32) -> [u16; 4] {
 
 /// One visible layer's contribution to one tile.
 pub struct TileSource<'a> {
-    pub tile: &'a TilePixels,
+    /// `None`: this layer has nothing in this tile
+    pub tile: Option<&'a TilePixels>,
     pub opacity: f32,
     pub blend: Blend,
+    pub visible: bool,
+    pub clip: bool,
 }
 
 /// Composite the sources (bottom → top) for one pixel over white paper → sRGB8.
 #[inline]
 pub fn composite_pixel(sources: &[TileSource<'_>], row: usize, col: usize) -> [u8; 3] {
     let mut dst = [1.0f32; 3];
+    // alpha of the nearest unclipped layer: what clipped layers above it show through
+    let mut base = 0.0f32;
     for s in sources {
-        let (cs, a) = unpremul_srgb(s.tile[row][col]);
-        let a = a * s.opacity;
-        if a <= 0.0 {
+        let (cs, a) = s
+            .tile
+            .map_or(([0.0; 3], 0.0), |t| unpremul_srgb(t[row][col]));
+        let mut a = a * s.opacity;
+        if s.clip {
+            a *= base;
+        } else {
+            base = if s.visible { a } else { 0.0 };
+        }
+        if !s.visible || a <= 0.0 {
             continue;
         }
         for i in 0..3 {

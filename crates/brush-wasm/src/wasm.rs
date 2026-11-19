@@ -172,9 +172,10 @@ impl PaintCanvas {
         blend: &str,
         locked: bool,
         alpha_lock: bool,
+        clip: bool,
         record: bool,
     ) -> bool {
-        let props = layer_props(name, visible, opacity, blend, locked, alpha_lock);
+        let props = layer_props(name, visible, opacity, blend, locked, alpha_lock, clip);
         self.inner.set_layer_props(id, props, record)
     }
 
@@ -190,8 +191,9 @@ impl PaintCanvas {
         blend: &str,
         locked: bool,
         alpha_lock: bool,
+        clip: bool,
     ) -> bool {
-        let before = layer_props(name, visible, opacity, blend, locked, alpha_lock);
+        let before = layer_props(name, visible, opacity, blend, locked, alpha_lock, clip);
         self.inner.commit_layer_props(id, before)
     }
 
@@ -421,6 +423,7 @@ fn layer_props(
     blend: &str,
     locked: bool,
     alpha_lock: bool,
+    clip: bool,
 ) -> LayerProps {
     LayerProps {
         name: name.to_string(),
@@ -429,5 +432,6 @@ fn layer_props(
         blend: Blend::parse(blend).unwrap_or_default(),
         locked,
         alpha_lock,
+        clip,
     }
 }
