@@ -27,6 +27,10 @@ export default defineConfig({
 	],
 	projects: [
 		{ name: 'build', use: { baseURL: 'http://localhost:4173' } },
-		{ name: 'dev', use: { baseURL: 'http://localhost:5179' }, testMatch: '**/smoke.e2e.ts' }
+		{
+			name: 'dev',
+			use: { baseURL: 'http://localhost:5179' },
+			testMatch: ['**/smoke.e2e.ts', '**/dev-pictures.e2e.ts']
+		}
 	]
 });

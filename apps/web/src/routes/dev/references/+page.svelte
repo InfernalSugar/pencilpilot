@@ -9,8 +9,13 @@
 <svelte:head><title>Review references · PencilPilot (dev)</title></svelte:head>
 
 <div class="pp-page">
-	<span class="pp-eyebrow">Dev only · ADR-0003</span>
+	<span class="pp-eyebrow"><a href="/dev">Dev tools</a> · ADR-0003</span>
 	<h1>Review references</h1>
+	<p>
+		Live pictures from the ref-service are reviewed on <a href="/dev/pictures">
+			Review live pictures
+		</a>.
+	</p>
 	<p class="lede">
 		Approve only pictures that are safe for all ages, clearly not AI-made (check hands, eyes and
 		text), not a franchise character, and good to draw from. Approved:
