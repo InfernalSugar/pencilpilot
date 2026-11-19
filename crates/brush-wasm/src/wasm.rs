@@ -209,6 +209,43 @@ impl PaintCanvas {
         self.inner.redo()
     }
 
+    /// A layer without an undo step (for another person on a shared canvas).
+    #[wasm_bindgen(js_name = addLayerSilent)]
+    pub fn add_layer_silent(&mut self, name: &str) -> u32 {
+        self.inner.add_layer_silent(name)
+    }
+
+    /// Erase a layer without an undo step.
+    #[wasm_bindgen(js_name = clearLayerSilent)]
+    pub fn clear_layer_silent(&mut self, id: u32) {
+        self.inner.clear_layer_silent(id);
+    }
+
+    /// Start someone else's stroke `key` on `layer` (alongside the local stroke).
+    #[wasm_bindgen(js_name = remoteBegin)]
+    pub fn remote_begin(&mut self, key: u32, layer: u32) -> bool {
+        self.inner.remote_begin(key, layer)
+    }
+
+    #[wasm_bindgen(js_name = remoteTo)]
+    pub fn remote_to(
+        &mut self,
+        key: u32,
+        brush: &PaintBrush,
+        x: f32,
+        y: f32,
+        pressure: f32,
+        dtime: f64,
+    ) {
+        self.inner
+            .remote_to(key, &brush.inner, x, y, pressure, dtime);
+    }
+
+    #[wasm_bindgen(js_name = remoteEnd)]
+    pub fn remote_end(&mut self, key: u32, brush: &PaintBrush) {
+        self.inner.remote_end(key, &brush.inner);
+    }
+
     /// Forget the undo/redo history.
     #[wasm_bindgen(js_name = clearHistory)]
     pub fn clear_history(&mut self) {

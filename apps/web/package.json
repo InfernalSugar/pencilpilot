@@ -9,7 +9,7 @@
 	},
 	"scripts": {
 		"dev": "vite dev",
-		"build": "vite build",
+		"build": "vite build && esbuild src/lib/server/lobby/socket.ts --bundle --platform=node --format=esm --packages=external --outfile=build/lobby-socket.js --log-level=warning",
 		"preview": "vite preview",
 		"prepare": "svelte-kit sync || echo ''",
 		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
@@ -18,7 +18,8 @@
 		"format": "prettier --write .",
 		"test:unit": "vitest",
 		"test": "npm run test:unit -- --run && npm run test:e2e",
-		"test:e2e": "playwright install && playwright test"
+		"test:e2e": "playwright install && playwright test",
+		"start": "node server.js"
 	},
 	"devDependencies": {
 		"@axe-core/playwright": "^4.14.0",
@@ -31,6 +32,8 @@
 		"@sveltejs/vite-plugin-svelte": "^7.3.1",
 		"@types/better-sqlite3": "^9.6.0",
 		"@types/node": "^26",
+		"@types/ws": "^8.18.2",
+		"esbuild": "^0.28.2",
 		"eslint": "^10.15.0",
 		"eslint-config-prettier": "^10.1.8",
 		"eslint-plugin-svelte": "^3.24.1",
@@ -52,6 +55,7 @@
 		"better-sqlite3": "^13.2.0",
 		"marked": "^18.2.1",
 		"pencilpilot-brush-wasm": "workspace:*",
-		"pencilpilot-grader-wasm": "workspace:*"
+		"pencilpilot-grader-wasm": "workspace:*",
+		"ws": "^8.23.0"
 	}
 }

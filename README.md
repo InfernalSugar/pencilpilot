@@ -46,3 +46,7 @@ One git-ignored `.env` at the repo root:
 - Code: [MIT](LICENSE)
 - Teaching content in `content/`: [CC BY-SA 4.0](content/README.md)
 - Reference images: each keeps its own licence and is credited on the site. See [LICENSING.md](docs/planning/LICENSING.md).
+
+## Production
+
+`pnpm -C apps/web build`, then `node apps/web/server.js` (`PORT`, default 3000). The custom server adds the live connections for private lobbies ([ADR-0008](docs/planning/adr/0008-private-lobbies.md)).
