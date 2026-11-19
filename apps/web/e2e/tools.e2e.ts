@@ -719,3 +719,61 @@ test('layer mask: black on the mask hides, undo and delete bring it back', async
 	await page.getByRole('button', { name: 'Delete mask' }).click();
 	await expect.poll(() => inkCols(page, 0.15, 0.35)).toBeGreaterThan(left * 0.9);
 });
+
+test('layer groups: group, hide, collapse, merge, undo, ungroup', async ({ page }) => {
+	await ready(page);
+	for (let i = 0; i < 3; i++) await page.keyboard.press(']');
+	const layers = page.getByRole('list', { name: 'Layers, top to bottom' });
+	await drag(page, [0.2, 0.3], [0.8, 0.3], 12); // Layer 1
+	await page.getByRole('button', { name: 'New layer' }).click();
+	await drag(page, [0.2, 0.7], [0.8, 0.7], 12); // Layer 2
+	await page.getByRole('button', { name: 'New group' }).click();
+	await expect(layers.getByRole('button', { name: 'Group 1', exact: true })).toBeVisible();
+	// a new layer joins the selected layer's group
+	await page.getByRole('button', { name: 'New layer' }).click();
+	await expect(page.getByRole('button', { name: 'Leave group' })).toBeVisible();
+
+	// hiding the group hides its layers' paint, not the others'
+	await expect.poll(() => redOrInk(page, 0.65, 0.75)).toBeGreaterThan(30);
+	await layers.getByRole('button', { name: 'Hide group Group 1' }).click();
+	await expect.poll(() => redOrInk(page, 0.65, 0.75)).toBe(0);
+	expect(await redOrInk(page, 0.25, 0.35)).toBeGreaterThan(30);
+	await layers.getByRole('button', { name: 'Show group Group 1' }).click();
+	await expect.poll(() => redOrInk(page, 0.65, 0.75)).toBeGreaterThan(30);
+
+	// collapse hides the member rows
+	const rowsBefore = await layers.getByRole('listitem').count();
+	await layers.getByRole('button', { name: 'Collapse group Group 1' }).click();
+	await expect(layers.getByRole('listitem')).toHaveCount(rowsBefore - 2);
+	await layers.getByRole('button', { name: 'Expand group Group 1' }).click();
+
+	// merge the group into one layer named after it; undo brings the group back
+	await layers.getByRole('button', { name: 'Group 1', exact: true }).click();
+	await page.getByRole('button', { name: 'Merge group' }).click();
+	await expect(layers.getByRole('button', { name: 'Hide group Group 1' })).toHaveCount(0);
+	await expect(layers.getByRole('button', { name: 'Group 1', exact: true })).toBeVisible();
+	await expect.poll(() => redOrInk(page, 0.65, 0.75)).toBeGreaterThan(30);
+	await page.getByRole('button', { name: /Undo/ }).click();
+	await expect(layers.getByRole('button', { name: 'Hide group Group 1' })).toBeVisible();
+
+	// ungroup keeps the layers
+	await layers.getByRole('button', { name: 'Group 1', exact: true }).click();
+	await page.getByRole('button', { name: 'Ungroup' }).click();
+	await expect(layers.getByRole('button', { name: 'Hide group Group 1' })).toHaveCount(0);
+	await expect(layers.getByRole('listitem')).toHaveCount(rowsBefore - 1);
+});
+
+/** dark pixels in rows y0..y1 (canvas fractions) */
+const redOrInk = (page: Page, y0: number, y1: number) =>
+	canvas(page).evaluate(
+		(c: HTMLCanvasElement, [y0, y1]) => {
+			const top = Math.round(c.height * y0);
+			const d = c
+				.getContext('2d')!
+				.getImageData(0, top, c.width, Math.round(c.height * y1) - top).data;
+			let n = 0;
+			for (let i = 0; i < d.length; i += 4) if (d[i] < 200) n++;
+			return n;
+		},
+		[y0, y1]
+	);

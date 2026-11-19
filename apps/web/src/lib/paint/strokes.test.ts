@@ -70,3 +70,28 @@ describe('StrokeLog', () => {
 		expect(ids(log)).toEqual(['1', '2']);
 	});
 });
+
+describe('StrokeLog batch', () => {
+	it('records several actions as one undo step', () => {
+		const log = new StrokeLog();
+		const s = (layer: number) => ({
+			brushId: 'b',
+			eraser: false,
+			layer,
+			points: [{ x: 0, y: 0, pressure: 1, t: 0 }]
+		});
+		log.add(s(2));
+		log.add(s(3));
+		log.batch(() => {
+			log.merge(3, 1);
+			log.merge(2, 1);
+		});
+		expect(log.strokes.every((x) => x.layer === 1)).toBe(true);
+		expect(log.undo()).toBe(true);
+		expect(log.strokes.map((x) => x.layer)).toEqual([2, 3]);
+		expect(log.redo()).toBe(true);
+		expect(log.strokes.every((x) => x.layer === 1)).toBe(true);
+		expect(log.undo() && log.undo() && log.undo()).toBe(true);
+		expect(log.strokes).toHaveLength(0);
+	});
+});

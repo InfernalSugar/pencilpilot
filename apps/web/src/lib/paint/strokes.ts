@@ -26,7 +26,9 @@ type Action =
 	| { kind: 'clear'; layer: number; removed: Stroke[] }
 	| { kind: 'merge'; from: number; to: number; moved: Stroke[] }
 	/** add / delete / move / settings: no strokes change, but it's an undo step */
-	| { kind: 'layer' };
+	| { kind: 'layer' }
+	/** several of the above as one engine undo step */
+	| { kind: 'batch'; actions: Action[] };
 
 /**
  * Mirrors the paint engine's undo history one-to-one (every engine step has a
@@ -73,6 +75,21 @@ export class StrokeLog {
 		this.#push({ kind: 'merge', from, to, moved });
 	}
 
+	/** Record what `run` logs as one undo step (the engine did it in one). */
+	batch(run: () => void) {
+		const outer = this.#collect;
+		const actions: Action[] = [];
+		this.#collect = actions;
+		try {
+			run();
+		} finally {
+			this.#collect = outer;
+		}
+		this.#push({ kind: 'batch', actions });
+	}
+
+	#collect: Action[] | null = null;
+
 	/** Any other undoable layer change. */
 	layerChange() {
 		this.#push({ kind: 'layer' });
@@ -106,6 +123,7 @@ export class StrokeLog {
 			if (i >= 0) this.#all.splice(i, 1);
 		} else if (a.kind === 'clear') this.#all.push(...a.removed);
 		else if (a.kind === 'merge') for (const s of a.moved) s.layer = a.from;
+		else if (a.kind === 'batch') for (const x of [...a.actions].reverse()) this.#revert(x);
 	}
 
 	#reapply(a: Action) {
@@ -115,9 +133,11 @@ export class StrokeLog {
 			const gone = new Set(a.removed);
 			this.#all = this.#all.filter((s) => !gone.has(s));
 		} else if (a.kind === 'merge') for (const s of a.moved) s.layer = a.to;
+		else if (a.kind === 'batch') for (const x of a.actions) this.#reapply(x);
 	}
 
 	#push(a: Action) {
+		if (this.#collect) return void this.#collect.push(a);
 		this.#undo.push(a);
 		if (this.#undo.length > this.limit) this.#undo.shift();
 		this.#redo = [];
