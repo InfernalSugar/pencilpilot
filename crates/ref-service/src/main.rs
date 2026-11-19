@@ -36,7 +36,7 @@ use serde_json::{Value, json};
 use tokio::sync::{Mutex, Notify};
 use tracing::{info, warn};
 
-use model::{CATEGORIES, LiveRef, Slot, Topic, image_type};
+use model::{CATEGORIES, LiveRef, Slot, Topic, image_type, kind_allowed};
 use pixabay::Pixabay;
 use pool::PoolState;
 use vet::{FiltersVetter, Vetter, pixabay_flags_ok};
@@ -146,11 +146,15 @@ async fn main() {
         .and_then(|t| t.parse().ok())
         .unwrap_or(6);
 
-    let pool: PoolState = std::fs::read_to_string(data.join("pool.json"))
+    let mut pool: PoolState = std::fs::read_to_string(data.join("pool.json"))
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or_default();
     info!(refs = pool.refs.len(), "loaded pool");
+    let purged = purge_wrong_kind(&mut pool, &data.join("images"));
+    if purged > 0 {
+        warn!(purged, "removed drawings from photo-only categories");
+    }
 
     let app = Arc::new(App {
         pool: Mutex::new(pool),
@@ -176,6 +180,16 @@ async fn main() {
         })
         .await
         .expect("server");
+}
+
+/// Drop references whose image kind isn't allowed in their category (drawings
+/// in real-life/animals/environment) and delete their files. Returns how many.
+fn purge_wrong_kind(pool: &mut PoolState, images: &Path) -> usize {
+    let gone = pool.remove_where(|r| !kind_allowed(&r.category, &r.page_url));
+    for r in &gone {
+        std::fs::remove_file(images.join(format!("{}.jpg", r.id))).ok();
+    }
+    gone.len()
 }
 
 fn routes(app: Arc<App>) -> Router {
@@ -404,6 +418,10 @@ async fn refill_step(app: &App, slot: &Slot) -> Result<(), String> {
             p.seen.insert(sid);
             if let Err(why) = pixabay_flags_ok(&hit) {
                 tracing::debug!(sid, why, "skip");
+                continue;
+            }
+            if !kind_allowed(&slot.category, hit["pageURL"].as_str().unwrap_or("")) {
+                tracing::debug!(sid, "skip: not a photo");
                 continue;
             }
             // The 640 px rendition is plenty for a reference and ~5x smaller.
