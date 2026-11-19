@@ -113,3 +113,108 @@ test('layers: add, hide, lock, rename, merge, undo', async ({ page }) => {
 	await page.getByRole('button', { name: /Undo/ }).click();
 	await expect(layers.getByRole('listitem')).toHaveCount(3);
 });
+
+/** Bounding box of the ink on the canvas, in canvas pixels. */
+async function inkBox(page: Page) {
+	return page.getByLabel(/Drawing canvas/).evaluate((c: HTMLCanvasElement) => {
+		const d = c.getContext('2d')!.getImageData(0, 0, c.width, c.height).data;
+		let [x0, y0, x1, y1] = [Infinity, Infinity, -1, -1];
+		for (let y = 0; y < c.height; y++)
+			for (let x = 0; x < c.width; x++)
+				if (d[(y * c.width + x) * 4] < 200) {
+					x0 = Math.min(x0, x);
+					x1 = Math.max(x1, x);
+					y0 = Math.min(y0, y);
+					y1 = Math.max(y1, y);
+				}
+		return { x0, y0, x1, y1, w: x1 - x0, h: y1 - y0 };
+	});
+}
+
+/** A straight horizontal drag across the middle of the canvas area, in screen space. */
+async function hline(page: Page) {
+	const vp = (await page
+		.getByLabel(/Drawing canvas/)
+		.locator('..')
+		.locator('..')
+		.boundingBox())!;
+	const [cx, cy] = [vp.x + vp.width / 2, vp.y + vp.height / 2];
+	await page.mouse.move(cx - 60, cy);
+	await page.mouse.down();
+	for (let i = 1; i <= 12; i++) await page.mouse.move(cx - 60 + i * 10, cy);
+	await page.mouse.up();
+}
+
+test('zoomed and rotated views still put the stroke under the pointer', async ({ page }) => {
+	await page.goto('/draw');
+	const canvas = page.getByLabel(/Drawing canvas/);
+	await expect(canvas).toHaveAttribute('data-ready', 'true', { timeout: 15_000 });
+
+	// zoomed in 2× (approx): a 120-px screen line is ~half as long on the canvas
+	await page.getByRole('button', { name: 'Zoom in', exact: true }).click();
+	await page.getByRole('button', { name: 'Zoom in', exact: true }).click();
+	await page.getByRole('button', { name: 'Zoom in', exact: true }).click();
+	await expect(page.getByRole('button', { name: /^Zoom 195%/ })).toBeVisible();
+	await hline(page);
+	await settledInk(page);
+	const zoomed = await inkBox(page);
+	// the canvas centre stays under the viewport centre
+	expect(Math.abs((zoomed.x0 + zoomed.x1) / 2 - 400)).toBeLessThan(12);
+	expect(Math.abs((zoomed.y0 + zoomed.y1) / 2 - 300)).toBeLessThan(12);
+	await page.getByRole('button', { name: /Undo/ }).click();
+
+	// rotated 90°: a horizontal screen stroke is vertical on the canvas
+	await page.getByRole('button', { name: /^Zoom .*reset view/ }).click();
+	for (let i = 0; i < 6; i++) await page.getByRole('button', { name: 'Rotate right' }).click();
+	await hline(page);
+	await settledInk(page);
+	const turned = await inkBox(page);
+	expect(turned.h).toBeGreaterThan(turned.w * 3);
+
+	// mirroring is only a view: the drawing itself isn't flipped
+	await page.keyboard.press('0');
+	await page.getByRole('button', { name: 'Mirror view' }).click();
+	await expect(page.getByRole('button', { name: 'Mirror view' })).toHaveAttribute(
+		'aria-pressed',
+		'true'
+	);
+	expect(await inkBox(page)).toEqual(turned);
+});
+
+test('canvas size: pick a shape, and confirm before clearing a drawing', async ({ page }) => {
+	await page.goto('/draw');
+	const canvas = page.getByLabel(/Drawing canvas/);
+	await expect(canvas).toHaveAttribute('data-ready', 'true', { timeout: 15_000 });
+	await page.getByRole('button', { name: '800 × 600' }).click();
+	await page.getByRole('radio', { name: /Portrait 3:4/ }).check();
+	await page.getByRole('button', { name: 'Use this size' }).click();
+	await expect(page.getByLabel('Drawing canvas, 600 by 800 pixels')).toHaveAttribute(
+		'data-ready',
+		'true'
+	);
+
+	await scribble(page);
+	await settledInk(page);
+	await page.getByRole('button', { name: '600 × 800' }).click();
+	await page.getByRole('radio', { name: /Custom/ }).check();
+	await page.getByLabel('Width').fill('5000');
+	await expect(page.getByRole('alert').filter({ hasText: 'At most 2048' })).toBeVisible();
+	await page.getByLabel('Width').fill('1000');
+	await page.getByLabel('Height').fill('1000');
+	await page.getByRole('button', { name: 'Use this size' }).click();
+	await expect(page.getByText('Your drawing will be cleared')).toBeVisible();
+	await page.getByRole('button', { name: 'Clear and resize' }).click();
+	await expect(page.getByLabel('Drawing canvas, 1000 by 1000 pixels')).toHaveAttribute(
+		'data-ready',
+		'true'
+	);
+	expect(await inkPixels(page)).toBe(0);
+
+	// remembered next time
+	await page.reload();
+	await expect(page.getByLabel('Drawing canvas, 1000 by 1000 pixels')).toBeVisible();
+	await scribble(page);
+	await page.getByRole('button', { name: /Submit drawing/ }).click();
+	await expect(page).toHaveURL(/\/results$/);
+	await expect(page.getByRole('img', { name: 'Your submitted drawing' })).toBeVisible();
+});

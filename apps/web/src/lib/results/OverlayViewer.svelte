@@ -10,7 +10,8 @@
 		drawingSrc,
 		grade,
 		mode = $bindable('fade'),
-		highlight = null
+		highlight = null,
+		aspect = 4 / 3
 	}: {
 		referenceSrc: string;
 		drawingSrc: string;
@@ -18,6 +19,8 @@
 		mode?: OverlayMode;
 		/** a fix's overlay hint to emphasise */
 		highlight?: string | null;
+		/** the canvas's width ÷ height, so boxes and the heatmap line up */
+		aspect?: number;
 	} = $props();
 
 	/** 0 = only your drawing, 1 = only the reference */
@@ -71,16 +74,24 @@
 	{#if mode === 'side'}
 		<div class="side">
 			<figure>
-				<div class="frame"><img src={referenceSrc} alt="The reference" /></div>
+				<div class="frame" style="aspect-ratio: {aspect}; width: min(100%, calc(75vh * {aspect}))">
+					<img src={referenceSrc} alt="The reference" />
+				</div>
 				<figcaption>Reference</figcaption>
 			</figure>
 			<figure>
-				<div class="frame"><img src={drawingSrc} alt="Your drawing" /></div>
+				<div class="frame" style="aspect-ratio: {aspect}; width: min(100%, calc(75vh * {aspect}))">
+					<img src={drawingSrc} alt="Your drawing" />
+				</div>
 				<figcaption>Your drawing</figcaption>
 			</figure>
 		</div>
 	{:else}
-		<div class="frame stack" data-testid="overlay">
+		<div
+			class="frame stack"
+			data-testid="overlay"
+			style="aspect-ratio: {aspect}; width: min(100%, calc(75vh * {aspect}))"
+		>
 			<img
 				src={referenceSrc}
 				alt="The reference"
@@ -117,7 +128,12 @@
 				{#if grade.bbox.reference && grade.bbox.drawing}
 					{@const r = grade.bbox.reference}
 					{@const d = grade.bbox.drawing}
-					<svg class="arrow" viewBox="0 0 100 75" preserveAspectRatio="none" aria-hidden="true">
+					<svg
+						class="arrow"
+						viewBox="0 0 100 {100 / aspect}"
+						preserveAspectRatio="none"
+						aria-hidden="true"
+					>
 						<defs>
 							<marker id="pp-head" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
 								<path d="M0,0 L6,3 L0,6 Z" fill="var(--pp-accent)" />
@@ -202,7 +218,7 @@
 	}
 	.frame {
 		position: relative;
-		aspect-ratio: 4 / 3;
+		margin-inline: auto;
 		background: #fff;
 		border-radius: 20px;
 		overflow: hidden;

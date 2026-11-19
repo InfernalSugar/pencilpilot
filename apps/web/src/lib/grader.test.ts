@@ -101,3 +101,18 @@ describe('grader wasm', () => {
 		expect(defaultWeights('real-life').tone).toBeGreaterThan(defaultWeights('anime').tone);
 	});
 });
+
+describe('analysis size', () => {
+	it('keeps the classic canvas and shrinks big ones to about the same area', async () => {
+		const { analysisSize, downscaleGray } = await import('./grader');
+		expect(analysisSize(800, 600)).toEqual({ width: 800, height: 600, scale: 1 });
+		const a = analysisSize(1600, 1200);
+		expect(a).toMatchObject({ width: 800, height: 600 });
+		const p = analysisSize(1000, 1414);
+		expect(p.width * p.height).toBeGreaterThan(470_000);
+		expect(p.width * p.height).toBeLessThan(490_000);
+		expect(p.height / p.width).toBeCloseTo(1.414, 2);
+		// area averaging: a 2×2 block of 0 and 255 becomes mid grey
+		expect([...downscaleGray(new Uint8Array([0, 255, 255, 0]), 2, 2, 1, 1)]).toEqual([128]);
+	});
+});

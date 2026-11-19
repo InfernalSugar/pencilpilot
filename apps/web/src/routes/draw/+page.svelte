@@ -7,6 +7,9 @@
 	import Button from '#lib/ui/Button.svelte';
 	import PaintCanvas, { BLANK_STATUS, type CanvasStatus } from '#lib/paint/PaintCanvas.svelte';
 	import LayersPanel from '#lib/paint/LayersPanel.svelte';
+	import CanvasSizePicker from '#lib/paint/CanvasSizePicker.svelte';
+	import RefViewer from '#lib/paint/RefViewer.svelte';
+	import { savedSize, saveSize, type CanvasSize } from '#lib/paint/canvas-size.js';
 	import BrushPicker from '#lib/paint/BrushPicker.svelte';
 	import { DEFAULT_BRUSH, loadManifest, type BrushManifest } from '#lib/paint/brushes.js';
 	import { categories } from '#lib/categories.js';
@@ -104,6 +107,53 @@
 	let opacity = $state(1);
 	let color = $state('#16161a');
 	let status = $state<CanvasStatus>(BLANK_STATUS);
+	let canvasSize = $state<CanvasSize>({ width: 800, height: 600 });
+	function pickSize(next: CanvasSize) {
+		canvasSize = next;
+		saveSize(next);
+		status = BLANK_STATUS;
+	}
+
+	// Reference panel: resizable sidebar, or a floating window.
+	const SIDE_MIN = 260;
+	const SIDE_MAX = 640;
+	let sideW = $state(340);
+	let refFloating = $state(false);
+	let floatBox = $state({ x: 24, y: 120, w: 360, h: 420 });
+	function remember(key: string, value: unknown) {
+		try {
+			localStorage.setItem(key, JSON.stringify(value));
+		} catch {
+			/* storage blocked */
+		}
+	}
+	function recall<T>(key: string, fallback: T): T {
+		try {
+			return JSON.parse(localStorage.getItem(key) ?? 'null') ?? fallback;
+		} catch {
+			return fallback;
+		}
+	}
+	function setSide(w: number) {
+		sideW = Math.round(Math.max(SIDE_MIN, Math.min(SIDE_MAX, w)));
+		remember('pp.sideWidth', sideW);
+	}
+	let sideDrag: { x: number; w: number } | null = null;
+	function setFloating(on: boolean) {
+		refFloating = on;
+		remember('pp.refFloating', on);
+	}
+	let floatDrag: { x: number; y: number; bx: number; by: number } | null = null;
+	function keepFloatOnScreen() {
+		const b = floatBox;
+		floatBox = {
+			...b,
+			x: Math.max(0, Math.min(window.innerWidth - 120, b.x)),
+			y: Math.max(0, Math.min(window.innerHeight - 60, b.y))
+		};
+		remember('pp.refFloat', floatBox);
+	}
+
 	/** phones/tablets fold the layers panel away too */
 	let layersOpen = $state(false);
 	/** "this layer is locked/hidden" notice after a refused stroke */
@@ -128,6 +178,10 @@
 
 	onMount(() => {
 		warmGrader();
+		canvasSize = savedSize();
+		sideW = recall('pp.sideWidth', 340);
+		refFloating = recall('pp.refFloating', false);
+		floatBox = recall('pp.refFloat', floatBox);
 		loadManifest().then((m) => (manifest = m));
 		if (!reference) loadReference();
 		const id = setInterval(() => {
@@ -152,6 +206,13 @@
 		else if (!mod && k === 'e') eraser = true;
 		else if (!mod && e.key === '[') size = Math.max(0.25, +(size / 1.25).toFixed(2));
 		else if (!mod && e.key === ']') size = Math.min(6, +(size * 1.25).toFixed(2));
+		else if (!mod && (e.key === '+' || e.key === '=')) canvas?.zoomIn();
+		else if (!mod && e.key === '-') canvas?.zoomOut();
+		else if (!mod && e.key === '0') canvas?.resetView();
+		else if (!mod && e.key === '4') canvas?.rotateBy(-15);
+		else if (!mod && e.key === '6') canvas?.rotateBy(15);
+		else if (!mod && e.key === '5') canvas?.resetRotation();
+		else if (!mod && k === 'm') canvas?.toggleMirror();
 	}
 
 	async function submit() {
@@ -214,11 +275,12 @@
 				</svg>
 				<span aria-label="Time spent">{clock}</span>
 			</button>
+			<CanvasSizePicker size={canvasSize} blank={status.blank} onpick={pickSize} />
 			<Button onclick={submit} disabled={status.blank}>Submit drawing →</Button>
 		</div>
 	</div>
 
-	<div class="layout">
+	<div class="layout" style="--side: {sideW}px; --ref-max-h: {Math.round(sideW * 0.95)}px">
 		<div class="ref-area">
 			{#if reference}
 				<Tile as="section" label="Reference">
@@ -236,15 +298,23 @@
 							</button>
 						{/if}
 					</div>
-					{#key reference.id}
-						<a class="ref-img" href={imageUrl(reference)} target="_blank" rel="noreferrer">
-							<img
-								class="fade-in"
-								src={imageUrl(reference)}
-								alt="Reference: {reference.tags.join(', ')}"
-							/>
-						</a>
-					{/key}
+					{#if refFloating}
+						<p class="muted">The picture is in a floating window.</p>
+						<button type="button" class="link-btn" onclick={() => setFloating(false)}>
+							Put it back here
+						</button>
+					{:else}
+						{#key reference.id}
+							<RefViewer src={imageUrl(reference)} alt="Reference: {reference.tags.join(', ')}" />
+						{/key}
+						<button
+							type="button"
+							class="link-btn small float-btn"
+							onclick={() => setFloating(true)}
+						>
+							Float this picture ⧉
+						</button>
+					{/if}
 					<p class="credit">
 						By <a href={reference.authorUrl} target="_blank" rel="noreferrer">{reference.author}</a>
 						via
@@ -282,6 +352,28 @@
 				</Tile>
 			{/if}
 		</div>
+		<!-- ARIA window-splitter pattern: a focusable separator resized with the arrow keys -->
+		<!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+		<div
+			class="splitter"
+			role="separator"
+			aria-orientation="vertical"
+			aria-label="Resize the side panel"
+			aria-valuemin={SIDE_MIN}
+			aria-valuemax={SIDE_MAX}
+			aria-valuenow={sideW}
+			tabindex="0"
+			onpointerdown={(e) => {
+				e.currentTarget.setPointerCapture(e.pointerId);
+				sideDrag = { x: e.clientX, w: sideW };
+			}}
+			onpointermove={(e) => sideDrag && setSide(sideDrag.w + e.clientX - sideDrag.x)}
+			onpointerup={() => (sideDrag = null)}
+			onkeydown={(e) => {
+				if (e.key === 'ArrowLeft') setSide(sideW - 20);
+				if (e.key === 'ArrowRight') setSide(sideW + 20);
+			}}
+		></div>
 		<div class="layers-area">
 			<Tile as="section" label="Layers">
 				<div class="tile-head">
@@ -329,19 +421,21 @@
 
 		<div class="canvas-col">
 			<div class="canvas-tile">
-				<PaintCanvas
-					bind:this={canvas}
-					{brushId}
-					{eraser}
-					{size}
-					{opacity}
-					{color}
-					onchange={(s) => (status = s)}
-					onblocked={onBlocked}
-				/>
-				{#if reference && peek}
-					<img class="peek" src={imageUrl(reference)} alt="" />
-				{/if}
+				{#key `${canvasSize.width}x${canvasSize.height}`}
+					<PaintCanvas
+						bind:this={canvas}
+						width={canvasSize.width}
+						height={canvasSize.height}
+						{brushId}
+						{eraser}
+						{size}
+						{opacity}
+						{color}
+						overlaySrc={reference && peek ? imageUrl(reference) : null}
+						onchange={(s) => (status = s)}
+						onblocked={onBlocked}
+					/>
+				{/key}
 				{#if blocked}
 					<p class="blocked" role="status">
 						{blocked === 'hidden'
@@ -526,6 +620,47 @@
 			</div>
 		</div>
 	</div>
+	{#if refFloating && reference}
+		<section
+			class="floating"
+			aria-label="Reference picture"
+			style="left: {floatBox.x}px; top: {floatBox.y}px; width: {floatBox.w}px; height: {floatBox.h}px"
+			onpointerup={(e) => {
+				const el = e.currentTarget as HTMLElement;
+				floatBox = { ...floatBox, w: el.offsetWidth, h: el.offsetHeight };
+				remember('pp.refFloat', floatBox);
+			}}
+		>
+			<div
+				class="float-bar"
+				role="presentation"
+				onpointerdown={(e) => {
+					if ((e.target as HTMLElement).closest('button')) return;
+					e.currentTarget.setPointerCapture(e.pointerId);
+					floatDrag = { x: e.clientX, y: e.clientY, bx: floatBox.x, by: floatBox.y };
+				}}
+				onpointermove={(e) => {
+					if (!floatDrag) return;
+					floatBox = {
+						...floatBox,
+						x: floatDrag.bx + e.clientX - floatDrag.x,
+						y: floatDrag.by + e.clientY - floatDrag.y
+					};
+				}}
+				onpointerup={() => {
+					floatDrag = null;
+					keepFloatOnScreen();
+				}}
+			>
+				<span>Reference · drag to move</span>
+				<button type="button" onclick={() => setFloating(false)}>Dock</button>
+			</div>
+			{#key reference.id}
+				<RefViewer src={imageUrl(reference)} alt="Reference: {reference.tags.join(', ')}" fill />
+			{/key}
+		</section>
+	{/if}
+
 	<p class="hint">
 		Shortcuts: <kbd>B</kbd> brush · <kbd>E</kbd> eraser · <kbd>[</kbd> <kbd>]</kbd> size ·
 		<kbd>Ctrl</kbd>+<kbd>Z</kbd> undo · <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> redo. Pen pressure
@@ -574,9 +709,10 @@
 	}
 	.layout {
 		display: grid;
-		grid-template-columns: 340px minmax(0, 1fr);
+		grid-template-columns: var(--side, 340px) 0 minmax(0, 1fr);
 		grid-template-rows: auto auto 1fr;
-		grid-template-areas: 'ref canvas' 'layers canvas' 'brushes canvas';
+		grid-template-areas: 'ref split canvas' 'layers split canvas' 'brushes split canvas';
+		column-gap: calc(var(--pp-gap) / 2);
 		gap: var(--pp-gap);
 		align-items: start;
 	}
@@ -594,6 +730,65 @@
 	.layers-area {
 		grid-area: layers;
 		min-width: 0;
+	}
+	.splitter {
+		grid-area: split;
+		position: relative;
+		align-self: stretch;
+		cursor: col-resize;
+		touch-action: none;
+	}
+	.splitter::after {
+		content: '';
+		position: absolute;
+		top: 0;
+		bottom: 0;
+		left: -6px;
+		width: 12px;
+		border-radius: 999px;
+	}
+	.splitter:hover::after,
+	.splitter:focus-visible::after {
+		background: color-mix(in srgb, var(--pp-ink) 12%, transparent);
+	}
+	.floating {
+		position: fixed;
+		z-index: 30;
+		min-width: 200px;
+		min-height: 200px;
+		max-width: calc(100vw - 16px);
+		max-height: calc(100vh - 16px);
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+		padding: 0 12px 12px;
+		border-radius: 20px;
+		background: var(--pp-surface);
+		box-shadow: 0 10px 40px rgba(22, 22, 26, 0.25);
+		resize: both;
+		overflow: hidden;
+	}
+	.float-bar {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 8px;
+		padding: 10px 2px 2px;
+		cursor: move;
+		touch-action: none;
+		font-size: 13px;
+		font-weight: 600;
+		color: var(--pp-ink-2);
+	}
+	.float-bar button {
+		min-height: 32px;
+		padding: 4px 12px;
+		border: 0;
+		border-radius: 999px;
+		background: var(--pp-ink);
+		color: #fff;
+		font: 600 13px var(--pp-font-body);
+		cursor: pointer;
 	}
 	.blocked {
 		position: absolute;
@@ -624,8 +819,12 @@
 			grid-template-rows: none;
 			grid-template-areas: 'ref' 'canvas' 'layers' 'brushes';
 		}
-		.layout .ref-img img {
-			max-height: 34vh;
+		.splitter,
+		.float-btn {
+			display: none;
+		}
+		.layout {
+			--ref-max-h: 34vh !important;
 		}
 		.brush-toggle {
 			display: block;
@@ -665,14 +864,7 @@
 		gap: var(--pp-gap);
 		min-width: 0;
 	}
-	.ref-img img {
-		display: block;
-		width: 100%;
-		max-height: 320px;
-		object-fit: contain;
-		border-radius: 18px;
-		background: var(--pp-surface-sunk);
-	}
+
 	.credit {
 		margin: 0;
 		font-size: 12px;
@@ -694,15 +886,7 @@
 		color: var(--pp-muted);
 		cursor: not-allowed;
 	}
-	.fade-in {
-		animation: fade 0.35s ease-out;
-	}
-	@keyframes fade {
-		from {
-			opacity: 0;
-			transform: scale(0.98);
-		}
-	}
+
 	.ref-skeleton {
 		height: 240px;
 		border-radius: 18px;
@@ -755,15 +939,7 @@
 	.report button:not(.cancel) {
 		color: var(--pp-accent-ink);
 	}
-	.peek {
-		position: absolute;
-		inset: 0;
-		width: 100%;
-		height: 100%;
-		object-fit: contain;
-		opacity: 0.3;
-		pointer-events: none;
-	}
+
 	.canvas-tile {
 		position: relative;
 		background: #fff;
