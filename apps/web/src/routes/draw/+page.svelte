@@ -4,7 +4,7 @@
 	import Swatches from '#lib/paint/Swatches.svelte';
 	import { onMount } from 'svelte';
 	import { warmGrader } from '#lib/grader.js';
-	import { goto } from '$app/navigation';
+	import { goto, replaceState } from '$app/navigation';
 	import { page } from '$app/state';
 	import Tile from '#lib/ui/Tile.svelte';
 	import Button from '#lib/ui/Button.svelte';
@@ -30,7 +30,7 @@
 	import BrushPicker from '#lib/paint/BrushPicker.svelte';
 	import { DEFAULT_BRUSH, loadManifest, type BrushManifest } from '#lib/paint/brushes.js';
 	import { categories } from '#lib/categories.js';
-	import { saveSubmission, type Submission } from '#lib/submission.js';
+	import { loadSubmission, saveSubmission, type Submission } from '#lib/submission.js';
 	import {
 		byId,
 		filtered,
@@ -50,7 +50,41 @@
 		topic: page.url.searchParams.get('topic'),
 		tier: Number(page.url.searchParams.get('tier')) || null
 	};
-	let reference = $state<Reference | undefined>(byId(page.url.searchParams.get('ref')));
+	/**
+	 * The picture asked for in the address (?ref=): a hand-approved one, the one from the
+	 * last submission (Try again), or the one this tab was drawing (a reload).
+	 */
+	function referenceFromUrl(): Reference | undefined {
+		const id = page.url.searchParams.get('ref');
+		if (!id) return undefined;
+		const curated = byId(id);
+		if (curated) return curated;
+		if (typeof sessionStorage === 'undefined') return undefined;
+		const last = loadSubmission()?.reference;
+		if (last?.id === id) return last;
+		try {
+			const kept = JSON.parse(sessionStorage.getItem(KEPT_REF) ?? 'null') as Reference | null;
+			if (kept?.id === id) return kept;
+		} catch {
+			/* storage blocked */
+		}
+		return undefined;
+	}
+	const KEPT_REF = 'pp.drawRef';
+	/** remember the picture in the address and this tab, so a reload keeps it */
+	function keepReference(r: Reference) {
+		try {
+			sessionStorage.setItem(KEPT_REF, JSON.stringify(r));
+		} catch {
+			/* storage blocked */
+		}
+		if (daily || personal || sessionMode) return;
+		const url = new URL(page.url.href);
+		if (url.searchParams.get('ref') === r.id) return;
+		url.searchParams.set('ref', r.id);
+		replaceState(url, page.state);
+	}
+	let reference = $state<Reference | undefined>(referenceFromUrl());
 	let refLoading = $state(false);
 	/** brush (draw / erase) or the eyedropper */
 	type Tool =
@@ -234,16 +268,27 @@
 		let r: Reference | undefined =
 			filter.tier === 1 && unseenCurated.length ? pickCurated(avoid, f) : undefined;
 		r ??=
-			(await fetchLiveReference({
-				category: category.id,
-				topic,
-				tier: filter.tier,
-				exclude: avoid
-			})) ?? undefined;
-		r ??= pickCurated(avoid, f) ?? pickCurated(avoid) ?? pickCurated(avoid, { tier: filter.tier });
+			(await fetchLiveReference(
+				{
+					category: category.id,
+					topic,
+					tier: filter.tier,
+					exclude: avoid
+				},
+				4000
+			)) ?? undefined;
+		// nothing ready that fits: any hand-approved picture in the category beats none
+		r ??=
+			pickCurated(avoid, f) ??
+			pickCurated(avoid) ??
+			pickCurated(avoid, { tier: filter.tier }) ??
+			pickCurated(avoid, {});
 		reference = r;
 		refLoading = false;
-		if (r) rememberRef(r.id);
+		if (r) {
+			rememberRef(r.id);
+			keepReference(r);
+		}
 	}
 
 	function nextReference() {
@@ -434,6 +479,7 @@
 		loadGuides();
 		loadManifest().then((m) => (manifest = m));
 		if (!reference) loadReference();
+		else keepReference(reference);
 		if (sessionMode && category)
 			startSession({
 				count: sessionCount,
@@ -548,6 +594,45 @@
 			...(daily ? { daily } : {}),
 			...(personal ? { personal } : {})
 		};
+	}
+
+	// ---- Save: a PNG picture or a layered Photoshop file ----
+	let saveOpen = $state(false);
+	let saving = $state(false);
+	function fileName(ext: string) {
+		const base = (reference ? titleOf(reference) : 'drawing')
+			.toLowerCase()
+			.replace(/[^a-z0-9]+/g, '-')
+			.replace(/^-|-$/g, '');
+		return `pencilpilot-${base || 'drawing'}-${new Date().toISOString().slice(0, 10)}.${ext}`;
+	}
+	function download(blob: Blob, name: string) {
+		const a = document.createElement('a');
+		a.href = URL.createObjectURL(blob);
+		a.download = name;
+		a.click();
+		setTimeout(() => URL.revokeObjectURL(a.href), 10_000);
+	}
+	async function savePng() {
+		saveOpen = false;
+		const d = canvas?.exportDrawing();
+		if (d) download(await (await fetch(d.png)).blob(), fileName('png'));
+	}
+	async function savePsd() {
+		saveOpen = false;
+		saving = true;
+		try {
+			const doc = canvas?.exportLayered();
+			if (!doc) return;
+			const { writePsd } = await import('#lib/paint/psd.js');
+			const bytes = writePsd(doc);
+			download(
+				new Blob([bytes as BlobPart], { type: 'image/vnd.adobe.photoshop' }),
+				fileName('psd')
+			);
+		} finally {
+			saving = false;
+		}
 	}
 
 	async function submit() {
@@ -721,6 +806,28 @@
 		</div>
 		{#if !sessionMode}
 			<CanvasSizePicker size={canvasSize} blank={status.blank} onpick={pickSize} />
+			<div class="save">
+				<button
+					type="button"
+					class="save-btn"
+					aria-expanded={saveOpen}
+					aria-haspopup="true"
+					disabled={status.blank || saving}
+					onclick={() => (saveOpen = !saveOpen)}
+				>
+					{saving ? 'Saving…' : 'Save'}
+				</button>
+				{#if saveOpen}
+					<div class="save-menu" role="group" aria-label="Save as">
+						<button type="button" onclick={savePng}>
+							<b>PNG picture</b><span>One flat image</span>
+						</button>
+						<button type="button" onclick={savePsd}>
+							<b>Photoshop file (.psd)</b><span>Keeps layers, groups and masks</span>
+						</button>
+					</div>
+				{/if}
+			</div>
 			<Button
 				onclick={submit}
 				disabled={status.blank || timeUp}
@@ -1422,11 +1529,23 @@
 		font-weight: 600;
 		color: rgba(255, 255, 255, 0.75);
 	}
+	/* tool options: always one compact row (scrolls sideways when the window is narrow) */
 	.fill-opts {
 		display: flex;
-		flex-wrap: wrap;
+		flex-wrap: nowrap;
 		align-items: center;
 		gap: 8px 12px;
+		min-width: 0;
+		overflow-x: auto;
+		scrollbar-width: thin;
+	}
+	.fill-opts > * {
+		flex: none;
+	}
+	.fill-opts .slider {
+		flex: none;
+		width: 130px;
+		min-width: 0;
 	}
 	.sketch-note {
 		flex: none;
@@ -1689,6 +1808,59 @@
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
+	}
+	.save {
+		position: relative;
+	}
+	.save-btn {
+		min-height: 40px;
+		padding: 0 14px;
+		border: 0;
+		border-radius: 12px;
+		background: var(--pp-surface-sunk);
+		color: var(--pp-ink);
+		font: 600 15px var(--pp-font-body);
+		cursor: pointer;
+	}
+	.save-btn:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+	.save-menu {
+		position: absolute;
+		right: 0;
+		top: calc(100% + 6px);
+		z-index: 40;
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		width: 250px;
+		padding: 6px;
+		background: var(--pp-surface);
+		border-radius: 14px;
+		box-shadow: 0 12px 34px rgba(22, 22, 26, 0.2);
+	}
+	.save-menu button {
+		display: flex;
+		flex-direction: column;
+		align-items: flex-start;
+		gap: 2px;
+		padding: 10px 12px;
+		border: 0;
+		border-radius: 10px;
+		background: transparent;
+		color: var(--pp-ink);
+		font: 14px var(--pp-font-body);
+		text-align: left;
+		cursor: pointer;
+	}
+	.save-menu button:hover,
+	.save-menu button:focus-visible {
+		background: var(--pp-surface-sunk);
+	}
+	.save-menu span {
+		font-size: 12px;
+		color: var(--pp-ink-2);
 	}
 	.hint {
 		margin: 0;

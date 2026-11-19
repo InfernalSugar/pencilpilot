@@ -98,6 +98,64 @@
 		else raf = requestAnimationFrame((n) => frame(n, now));
 	}
 
+	// ---- save the replay as a video: play it from the start and record the canvas ----
+	let recording = $state<number | null>(null);
+	let videoError = $state('');
+	const VIDEO_TYPES = ['video/mp4;codecs=avc1', 'video/mp4', 'video/webm;codecs=vp9', 'video/webm'];
+	const videoType = () =>
+		typeof MediaRecorder === 'undefined'
+			? null
+			: (VIDEO_TYPES.find((t) => MediaRecorder.isTypeSupported(t)) ?? null);
+	const canRecord = typeof window !== 'undefined' && !!videoType();
+
+	async function saveVideo() {
+		const type = videoType();
+		if (!type || !tl || recording !== null) return;
+		videoError = '';
+		pause();
+		// the whole drawing in about 15 s (at least 2x, at most 32x)
+		const rate = Math.min(32, Math.max(2, tl.duration / 15_000));
+		const stream = el.captureStream(30);
+		const rec = new MediaRecorder(stream, { mimeType: type, videoBitsPerSecond: 6_000_000 });
+		const chunks: Blob[] = [];
+		rec.ondataavailable = (e) => {
+			if (e.data.size) chunks.push(e.data);
+		};
+		const stopped = new Promise<void>((done) => (rec.onstop = () => done()));
+		seek(0);
+		paint(true);
+		rec.start(250);
+		recording = 0;
+		await new Promise<void>((done) => {
+			let last = performance.now();
+			const step = (now: number) => {
+				seek(at + (now - last) * rate);
+				last = now;
+				recording = Math.round((at / Math.max(1, tl!.duration)) * 100);
+				if (at >= tl!.duration) done();
+				else requestAnimationFrame(step);
+			};
+			requestAnimationFrame(step);
+		});
+		// hold the finished drawing for a moment
+		await new Promise((r) => setTimeout(r, 1200));
+		rec.stop();
+		await stopped;
+		stream.getTracks().forEach((t) => t.stop());
+		recording = null;
+		if (!chunks.length) {
+			videoError = 'This browser couldn’t record the replay.';
+			return;
+		}
+		const blob = new Blob(chunks, { type: type.split(';')[0] });
+		const a = document.createElement('a');
+		a.href = URL.createObjectURL(blob);
+		const ext = type.includes('mp4') ? 'mp4' : 'webm';
+		a.download = `pencilpilot-replay-${new Date().toISOString().slice(0, 10)}.${ext}`;
+		a.click();
+		setTimeout(() => URL.revokeObjectURL(a.href), 10_000);
+	}
+
 	function play() {
 		if (!tl) return;
 		if (at >= tl.duration) seek(0);
@@ -217,6 +275,17 @@
 				{/if}
 			</div>
 			<span class="time">{fmt(at)} / {fmt(tl.duration)}</span>
+			{#if canRecord}
+				<button
+					type="button"
+					class="save"
+					disabled={recording !== null}
+					onclick={saveVideo}
+					title="Save the replay as a video"
+				>
+					{recording !== null ? `Recording… ${recording}%` : 'Save video'}
+				</button>
+			{/if}
 			<label class="speed">
 				<span class="visually-hidden">Speed</span>
 				<select bind:value={speed} aria-label="Replay speed">
@@ -224,6 +293,7 @@
 				</select>
 			</label>
 		</div>
+		{#if videoError}<p class="note" role="alert">{videoError}</p>{/if}
 		{#if momentsBusy}
 			<p class="note">Finding when each tip happened…</p>
 		{:else if moments && tips.length}
@@ -339,6 +409,22 @@
 		font-size: 13px;
 		font-weight: 600;
 		font-variant-numeric: tabular-nums;
+		color: var(--pp-ink-2);
+	}
+	.save {
+		flex: none;
+		min-height: 36px;
+		padding: 0 12px;
+		border: 1px solid var(--pp-track);
+		border-radius: 10px;
+		background: var(--pp-surface);
+		color: var(--pp-ink);
+		font: 600 13px var(--pp-font-body);
+		cursor: pointer;
+		white-space: nowrap;
+	}
+	.save:disabled {
+		cursor: progress;
 		color: var(--pp-ink-2);
 	}
 	select {

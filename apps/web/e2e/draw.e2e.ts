@@ -320,3 +320,92 @@ test('what you draw is visible on screen (nothing covers the canvas)', async ({ 
 		})
 		.toBeGreaterThan(30);
 });
+
+/** a fake Endless picture from the ref-service (a tiny SVG), so CI needs no service */
+const LIVE_REF = {
+	id: 'px-424242',
+	source: 'pixabay',
+	sourceId: 424242,
+	category: 'animals',
+	pageUrl: 'https://pixabay.com/photos/x-424242/',
+	author: 'Tester',
+	authorUrl: 'https://pixabay.com/users/tester/',
+	license: 'Pixabay Content License',
+	licenseUrl: 'https://pixabay.com/service/license-summary/',
+	tags: ['whale', 'sea'],
+	width: 40,
+	height: 30,
+	title: 'Test whale',
+	keypoints: [],
+	topic: 'sea-life',
+	tier: 2,
+	imageUrl: '/e2e-whale.svg',
+	live: true
+};
+
+test('the picture stays the same after a reload and on Try again', async ({ page }) => {
+	let served = 0;
+	await page.route('**/api/ref?*', (r) => {
+		served++;
+		return r.fulfill({ json: { ...LIVE_REF, id: `px-${424242 + served}` } });
+	});
+	await page.route('**/e2e-whale.svg', (r) =>
+		r.fulfill({
+			contentType: 'image/svg+xml',
+			body: '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="30"><rect width="40" height="30" fill="#3d6bff"/></svg>'
+		})
+	);
+	await page.goto('/draw?category=animals&tier=2');
+	await expect(page).toHaveURL(/ref=px-42424/);
+	const first = new URL(page.url()).searchParams.get('ref');
+	await page.reload();
+	await expect(page.getByLabel(/Drawing canvas/)).toHaveAttribute('data-ready', 'true', {
+		timeout: 15_000
+	});
+	expect(new URL(page.url()).searchParams.get('ref')).toBe(first);
+	expect(served).toBe(1); // the reload didn't ask for a new picture
+
+	// draw, hand in, Try again: the same picture
+	const c = page.getByLabel(/Drawing canvas/);
+	const b = (await c.boundingBox())!;
+	await page.mouse.move(b.x + b.width * 0.3, b.y + b.height * 0.5);
+	await page.mouse.down();
+	for (let i = 1; i <= 10; i++)
+		await page.mouse.move(b.x + b.width * (0.3 + i * 0.03), b.y + b.height * 0.5);
+	await page.mouse.up();
+	await page.getByRole('button', { name: /Submit drawing/ }).click();
+	await expect(page).toHaveURL(/\/results$/);
+	await page.getByRole('link', { name: 'Try again' }).click();
+	await expect(page).toHaveURL(new RegExp(`ref=${first}`));
+	await expect(page.getByText(/No animals references yet/)).toHaveCount(0);
+	expect(served).toBe(1);
+});
+
+test('zoom: a wheel notch with Ctrl is a small smooth step; Ctrl + wheel-drag zooms', async ({
+	page
+}) => {
+	await page.goto('/draw');
+	const c = page.getByLabel(/Drawing canvas/);
+	await expect(c).toHaveAttribute('data-ready', 'true', { timeout: 15_000 });
+	const pct = async () =>
+		Number(
+			(await page.getByRole('button', { name: /^Zoom \d+%/ }).getAttribute('aria-label'))!.match(
+				/(\d+)%/
+			)![1]
+		);
+	const b = (await c.boundingBox())!;
+	await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2);
+	await page.keyboard.down('Control');
+	await page.mouse.wheel(0, 100); // one notch out
+	await page.keyboard.up('Control');
+	await expect.poll(pct).toBeLessThan(95);
+	expect(await pct()).toBeGreaterThan(80); // not 37%
+	// Ctrl + drag with the middle button: up zooms in
+	const before = await pct();
+	await page.keyboard.down('Control');
+	await page.mouse.down({ button: 'middle' });
+	await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2 - 120, { steps: 6 });
+	await page.mouse.up({ button: 'middle' });
+	await page.keyboard.up('Control');
+	await expect.poll(pct).toBeGreaterThan(before * 1.5);
+});
