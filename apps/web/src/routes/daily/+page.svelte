@@ -6,6 +6,16 @@
 	import { dailyReference, dailyUrl, dayOf, msToNextDay, percentile } from '#lib/daily.js';
 	import { imageUrl, tierName, tierOf, titleOf } from '#lib/references.js';
 	import { categories } from '#lib/categories.js';
+	import { attempts } from '#lib/progress.js';
+	import { SYNCED } from '#lib/sync.js';
+	import {
+		personalDone,
+		personalKey,
+		personalStreak,
+		personalUrl,
+		todaysPersonal,
+		type PersonalChallenge
+	} from '#lib/personal-daily.js';
 
 	const day = dayOf();
 	const ref = dailyReference(day);
@@ -18,14 +28,29 @@
 		streak: number;
 	} | null>(null);
 	let left = $state(msToNextDay());
+	let mine = $state<PersonalChallenge | null>(null);
+	let mineDone = $state<number | null>(null);
+	let mineStreak = $state(0);
+
+	function loadPersonal() {
+		const history = attempts();
+		mine = todaysPersonal(personalKey(page.data.user?.id), history, day);
+		mineDone = personalDone(history, day)?.score ?? null;
+		mineStreak = personalStreak(history, day);
+	}
 
 	onMount(() => {
 		fetch(`/api/daily?day=${day}`)
 			.then((r) => (r.ok ? r.json() : null))
 			.then((s) => (stats = s))
 			.catch(() => {});
+		loadPersonal();
+		window.addEventListener(SYNCED, loadPersonal);
 		const id = setInterval(() => (left = msToNextDay()), 1000);
-		return () => clearInterval(id);
+		return () => {
+			clearInterval(id);
+			window.removeEventListener(SYNCED, loadPersonal);
+		};
 	});
 
 	const countdown = $derived(
@@ -111,9 +136,56 @@
 			</Tile>
 		</div>
 	{/if}
+
+	{#if mine}
+		<h2 class="section" id="yours">Your challenge</h2>
+		<p class="lede">
+			Just for you, from what you’ve been drawing. Separate from the challenge everyone shares.
+		</p>
+		<div class="pp-bento grid">
+			<Tile span={2} as="section" label="Your picture">
+				<img class="ref small" src={imageUrl(mine.ref)} alt="Your picture: {titleOf(mine.ref)}" />
+				<h3>{titleOf(mine.ref)}</h3>
+				<p class="credit">
+					{categories.find((c) => c.id === mine!.category)?.name ?? mine.category} · {tierName(
+						mine.tier
+					)} · by
+					<a href={mine.ref.authorUrl} target="_blank" rel="noreferrer">{mine.ref.author}</a>
+					via
+					<a href={mine.ref.pageUrl} target="_blank" rel="noreferrer">Pixabay</a>
+				</p>
+			</Tile>
+			<Tile span={2} tone="lilac">
+				<span class="pp-eyebrow ink">Why this one</span>
+				<p class="plain">{mine.reason}</p>
+				{#if mineDone !== null}
+					<p class="plain"><b>Done today: {mineDone.toFixed(1)}.</b> A new one tomorrow.</p>
+				{/if}
+				<p class="plain">
+					Personal streak: <b>{mineStreak}</b> day{mineStreak === 1 ? '' : 's'}
+				</p>
+				<div class="row">
+					<Button href={personalUrl(mine)} variant="dark">
+						{mineDone !== null ? 'Draw it again' : 'Draw your challenge →'}
+					</Button>
+				</div>
+			</Tile>
+		</div>
+	{/if}
 </div>
 
 <style>
+	.section {
+		margin: calc(var(--pp-gap) * 2) 0 0;
+		font-size: 28px;
+		letter-spacing: -0.5px;
+	}
+	h3 {
+		font-size: 20px;
+	}
+	.ref.small {
+		max-height: 300px;
+	}
 	h1 {
 		font-size: 40px;
 		letter-spacing: -1px;

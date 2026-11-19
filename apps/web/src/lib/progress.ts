@@ -22,6 +22,8 @@ export interface Attempt {
 	timeLimit?: number;
 	/** 'sketch' for sketch mode (absent = finished drawing) */
 	mode?: 'sketch';
+	/** the day (YYYY-MM-DD) of the personal challenge this drawing was for */
+	personal?: string;
 }
 
 const KEY = 'pp.attempts';

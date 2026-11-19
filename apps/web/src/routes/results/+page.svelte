@@ -27,6 +27,8 @@
 	} from '#lib/grade-submission.js';
 	import ReplayPlayer from '#lib/results/ReplayPlayer.svelte';
 	import { percentile } from '#lib/daily.js';
+	import { categories } from '#lib/categories.js';
+	import { categoryAverage, personalStreak } from '#lib/personal-daily.js';
 	import { sessionDrawing, timeLabel } from '#lib/timed.js';
 
 	let sub = $state<Submission | null>(null);
@@ -53,6 +55,11 @@
 		players: number;
 		streak: number;
 	} | null>(null);
+
+	/** personal challenge: how today went against their own average */
+	let personalResult = $state<{ avg: number | null; streak: number; category: string } | null>(
+		null
+	);
 
 	async function countDaily(s: Submission, score: number) {
 		if (!s.daily || s.traced) return;
@@ -177,6 +184,14 @@
 			if (sub.traced || !g.ref) return;
 			const before = recommendedTier(g.ref.category);
 			recordGraded(sub, g);
+			if (sub.personal) {
+				const all = attempts();
+				personalResult = {
+					avg: categoryAverage(all, g.ref.category, sub.at ?? Date.now()),
+					streak: personalStreak(all),
+					category: categories.find((c) => c.id === g.ref!.category)?.name ?? g.ref.category
+				};
+			}
 			// a mistake that keeps coming back (and is in this drawing too)
 			patterns = recurringMistakes(attempts()).filter((p) =>
 				fb!.fixes.some((f) => f.id === p.ruleId)
@@ -353,6 +368,33 @@
 			</section>
 		{/if}
 
+		{#if personalResult && grade}
+			{@const diff = personalResult.avg === null ? null : grade.score - personalResult.avg}
+			<section class="daily personal" aria-label="Your challenge">
+				<span class="pp-eyebrow">Your challenge · done</span>
+				<p class="daily-line">
+					{#if diff === null}
+						Your first {personalResult.category} drawing: this sets the bar.
+					{:else if diff >= 0.05}
+						<b>+{diff.toFixed(1)}</b> above your {personalResult.category} average ({personalResult.avg!.toFixed(
+							1
+						)}). Nice!
+					{:else if diff > -0.05}
+						Right on your {personalResult.category} average ({personalResult.avg!.toFixed(1)}).
+					{:else}
+						{Math.abs(diff).toFixed(1)} below your {personalResult.category} average ({personalResult.avg!.toFixed(
+							1
+						)}). Tricky one: the tips below show why.
+					{/if}
+				</p>
+				<p class="daily-meta">
+					Personal streak: <b>{personalResult.streak}</b> day{personalResult.streak === 1
+						? ''
+						: 's'} · <a href="/daily">Tomorrow’s is waiting there</a>
+				</p>
+			</section>
+		{/if}
+
 		{#if canReplay}
 			<section class="replay-section" aria-label="Replay">
 				<div class="replay-head">
@@ -522,6 +564,9 @@
 		display: flex;
 		flex-direction: column;
 		gap: 6px;
+	}
+	.daily.personal {
+		background: var(--pp-lilac);
 	}
 	.daily-line {
 		margin: 0;
