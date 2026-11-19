@@ -209,6 +209,12 @@ impl PaintCanvas {
         self.inner.redo()
     }
 
+    /// Forget the undo/redo history.
+    #[wasm_bindgen(js_name = clearHistory)]
+    pub fn clear_history(&mut self) {
+        self.inner.clear_history();
+    }
+
     #[wasm_bindgen(js_name = canUndo)]
     pub fn can_undo(&self) -> bool {
         self.inner.can_undo()

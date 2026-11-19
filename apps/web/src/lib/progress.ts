@@ -20,6 +20,8 @@ export interface Attempt {
 	skills?: Record<string, number>;
 	/** seconds, for timed drawings (absent = no time limit) */
 	timeLimit?: number;
+	/** 'sketch' for sketch mode (absent = finished drawing) */
+	mode?: 'sketch';
 }
 
 const KEY = 'pp.attempts';

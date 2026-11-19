@@ -35,6 +35,7 @@ export interface SessionPlan {
 	category: string;
 	topic: string | null;
 	tier: number | null;
+	mode?: 'finished' | 'sketch';
 	startedAt: number;
 }
 

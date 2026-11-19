@@ -34,6 +34,14 @@ export const SKILLS: { name: MeasurementName; label: string; skill: string }[] =
 	{ name: 'line_confidence', label: 'Line confidence', skill: 'line_confidence' }
 ];
 
+/** What a sketch is judged on (ADR-0007): no shading or line neatness. */
+export const SKETCH_SKILLS: { name: MeasurementName; label: string; skill: string }[] = [
+	{ name: 'placement', label: 'Size & placement', skill: 'placement' },
+	{ name: 'silhouette', label: 'Big shapes', skill: 'silhouette' },
+	{ name: 'angles', label: 'Main angles', skill: 'angles' },
+	{ name: 'outline', label: 'Outlines (loose)', skill: 'outline' }
+];
+
 export interface Graded {
 	grade: Grade;
 	fb: Feedback;
@@ -76,12 +84,14 @@ export async function gradeSubmission(sub: Submission): Promise<Graded> {
 		placed ? placed.then((p) => p.data) : referencePixels(ref!, sub.width, sub.height)
 	]);
 	const cat = ref?.category ?? 'fundamentals';
+	const mode = sub.mode ?? 'finished';
 	const grade = await gradeImages(sub.width, sub.height, drawing, toGray(refData.data), {
 		// Cartoons are graded like anime: clean outlines matter most.
 		category: (cat === 'cartoon' ? 'anime' : cat) as GradeCategory,
+		mode,
 		strokes: sub.strokeData ?? []
 	});
-	const fb = await getFeedback(grade, sub.at ?? 0, ref?.category);
+	const fb = await getFeedback(grade, sub.at ?? 0, ref?.category, mode);
 	return { grade, fb, ref, compareSrc: placed ? (await placed).url : null };
 }
 
@@ -115,10 +125,17 @@ export function recordGraded(sub: Submission, g: Graded): boolean {
 		refId: ref.id,
 		title: titleOf(ref),
 		fixes: fb.fixes.map((f) => f.id),
-		skills: Object.fromEntries(
-			SKILLS.map((s) => [s.skill, measurement(grade, s.name)]).filter(([, v]) => v !== undefined)
-		),
-		...(sub.timeLimit ? { timeLimit: sub.timeLimit } : {})
+		// sketches don't feed the skill radar: their lines and shading aren't judged
+		skills:
+			sub.mode === 'sketch'
+				? {}
+				: Object.fromEntries(
+						SKILLS.map((s) => [s.skill, measurement(grade, s.name)]).filter(
+							([, v]) => v !== undefined
+						)
+					),
+		...(sub.timeLimit ? { timeLimit: sub.timeLimit } : {}),
+		...(sub.mode === 'sketch' ? { mode: 'sketch' as const } : {})
 	});
 	if (sub.at) saveThumb(sub.at, sub.png);
 	return true;

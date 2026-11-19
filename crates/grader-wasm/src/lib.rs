@@ -58,13 +58,20 @@ struct NamedValue {
 
 /// Turn a grade's `measurements` (`[{name, value}]`) into ranked tips:
 /// `{ fixes: Item[], praise: Item | null }`. `seed` picks tip wordings
-/// (use something stable per attempt, e.g. its timestamp).
+/// (use something stable per attempt, e.g. its timestamp). `mode`: "finished"
+/// (default) or "sketch".
 #[wasm_bindgen]
-pub fn feedback(measurements: JsValue, category: &str, seed: u32) -> Result<JsValue, JsError> {
+pub fn feedback(
+    measurements: JsValue,
+    category: &str,
+    seed: u32,
+    mode: Option<String>,
+) -> Result<JsValue, JsError> {
     let ms: Vec<NamedValue> =
         serde_wasm_bindgen::from_value(measurements).map_err(|e| JsError::new(&e.to_string()))?;
     let pairs: Vec<(String, f32)> = ms.into_iter().map(|m| (m.name, m.value)).collect();
-    let f = feedback::feedback(feedback::Library::builtin(), &pairs, category, seed);
+    let mode = mode.as_deref().unwrap_or("finished");
+    let f = feedback::feedback_for(feedback::Library::builtin(), &pairs, category, mode, seed);
     f.serialize(&serde_wasm_bindgen::Serializer::json_compatible())
         .map_err(|e| JsError::new(&e.to_string()))
 }
