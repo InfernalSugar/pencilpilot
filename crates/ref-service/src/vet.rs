@@ -17,6 +17,11 @@ pub struct Vetted {
 pub trait Vetter: Send + Sync + 'static {
     /// `Ok` = safe and drawable; `Err(reason)` = reject.
     fn vet(&self, img: &DynamicImage) -> Result<Vetted, String>;
+    /// Safety only (no drawability checks), for drawings people share.
+    /// `Err(reason)` = don't show it. Fails closed.
+    fn safe_to_share(&self, _img: &DynamicImage) -> Result<(), String> {
+        Err("unsupported".into())
+    }
 }
 
 /// Pixabay's own flags + banned tags. Unknown AI flag counts as AI (reject).
@@ -102,6 +107,10 @@ impl Vetter for FiltersVetter {
         } else {
             Err(v.reasons.join(","))
         }
+    }
+
+    fn safe_to_share(&self, img: &DynamicImage) -> Result<(), String> {
+        self.0.safe_to_share(img).map_err(String::from)
     }
 }
 

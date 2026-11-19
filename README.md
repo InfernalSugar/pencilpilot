@@ -38,6 +38,8 @@ One git-ignored `.env` at the repo root:
 | `PIXABAY_API_KEY` | reference importer + Endless reference service |
 | `DATABASE_PATH` | optional; SQLite file for accounts (default `data/pencilpilot.db`) |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | optional; enables "Continue with Google" (redirect URI: `<site>/auth/google/callback`) |
+| `COMMUNITY` | optional; `on` enables community critique (beta, [ADR-0006](docs/planning/adr/0006-community-critique.md)). Needs the ref-service running with its NSFW model, or sharing is refused |
+| `REF_SERVICE_URL` | optional; where the web server reaches the ref-service (default `http://127.0.0.1:8787`) |
 
 ## Licences
 

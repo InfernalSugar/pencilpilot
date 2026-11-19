@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { page } from '$app/state';
 	import Tile from '#lib/ui/Tile.svelte';
 </script>
 
@@ -34,13 +35,38 @@
 			<h2>What we don’t do</h2>
 			<ul>
 				<li>No ads, no selling or sharing your data.</li>
-				<li>No AI looks at your drawings: scoring is plain image maths, in your browser.</li>
+				<li>
+					No AI scores or critiques your drawings: scoring is plain image maths, in your browser.
+				</li>
 				<li>
 					Your full drawings never leave your browser; only small thumbnails are saved to your
-					account.
+					account{page.data.community ? ', unless you choose to share one (below)' : ''}.
 				</li>
 			</ul>
 		</Tile>
+		{#if page.data.community}
+			<Tile span={2} tone="yellow">
+				<h2>Sharing with the community</h2>
+				<ul>
+					<li>
+						Only drawings you press <b>Share</b> on are uploaded, with the reference they were drawn from
+						and their score.
+					</li>
+					<li>
+						Before it’s shown, an automatic safety filter on our own server checks it isn’t
+						inappropriate. That is its only job; it doesn’t judge your drawing.
+					</li>
+					<li>
+						Other signed-in students see the drawing, never your name or email. Their comparisons
+						and 1–5 ratings are stored without comments.
+					</li>
+					<li>
+						Delete a shared drawing any time in <a href="/community/mine">My shared drawings</a>;
+						deleting your account removes them all.
+					</li>
+				</ul>
+			</Tile>
+		{/if}
 		<Tile span={2} tone="lilac">
 			<h2>Your controls</h2>
 			<ul>

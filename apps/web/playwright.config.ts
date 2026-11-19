@@ -6,14 +6,23 @@ export default defineConfig({
 		{
 			command: 'npm run build && npm run preview',
 			port: 4173,
-			// throwaway database for e2e runs
-			env: { DATABASE_PATH: `${process.env.TMPDIR ?? '/tmp'}/pp-e2e-${Date.now()}.db` }
+			env: {
+				// throwaway database for e2e runs
+				DATABASE_PATH: `${process.env.TMPDIR ?? '/tmp'}/pp-e2e-${Date.now()}.db`,
+				// community critique on, with a fake safety check (e2e/fake-ref-service.mjs)
+				COMMUNITY: 'on',
+				REF_SERVICE_URL: 'http://127.0.0.1:8799'
+			}
 		},
+		{ command: 'node e2e/fake-ref-service.mjs', url: 'http://127.0.0.1:8799/api/health' },
 		// `pnpm dev` serves files differently (e.g. WASM from outside apps/web), so smoke-test it too.
 		{
 			command: 'npx vite dev --port 5179 --strictPort',
 			port: 5179,
-			env: { DATABASE_PATH: `${process.env.TMPDIR ?? '/tmp'}/pp-e2e-dev-${Date.now()}.db` }
+			env: {
+				DATABASE_PATH: `${process.env.TMPDIR ?? '/tmp'}/pp-e2e-dev-${Date.now()}.db`,
+				COMMUNITY: 'off'
+			}
 		}
 	],
 	projects: [

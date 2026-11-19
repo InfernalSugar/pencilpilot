@@ -53,7 +53,52 @@ const MIGRATIONS: string[] = [
 		created_at INTEGER NOT NULL
 	);
 	CREATE INDEX tip_votes_rule ON tip_votes(rule_id);
-	CREATE UNIQUE INDEX tip_votes_once ON tip_votes(user_id, attempt_at, rule_id) WHERE user_id IS NOT NULL;`
+	CREATE UNIQUE INDEX tip_votes_once ON tip_votes(user_id, attempt_at, rule_id) WHERE user_id IS NOT NULL;`,
+	// community critique (lib/server/community.ts)
+	`CREATE TABLE shared_drawings (
+		id TEXT PRIMARY KEY,
+		user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		attempt_at INTEGER,
+		reference_id TEXT NOT NULL,
+		reference_json TEXT NOT NULL,
+		category TEXT NOT NULL,
+		png BLOB NOT NULL,
+		score REAL,
+		rating REAL NOT NULL DEFAULT 1000,
+		comparisons INTEGER NOT NULL DEFAULT 0,
+		wins INTEGER NOT NULL DEFAULT 0,
+		hidden INTEGER NOT NULL DEFAULT 0,
+		created_at INTEGER NOT NULL
+	);
+	CREATE INDEX shared_ref ON shared_drawings(reference_id, hidden);
+	CREATE INDEX shared_user ON shared_drawings(user_id, created_at);
+	CREATE UNIQUE INDEX shared_attempt ON shared_drawings(user_id, attempt_at) WHERE attempt_at IS NOT NULL;
+	CREATE TABLE closer_votes (
+		voter_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		a_id TEXT NOT NULL REFERENCES shared_drawings(id) ON DELETE CASCADE,
+		b_id TEXT NOT NULL REFERENCES shared_drawings(id) ON DELETE CASCADE,
+		winner_id TEXT NOT NULL,
+		created_at INTEGER NOT NULL,
+		PRIMARY KEY (voter_id, a_id, b_id)
+	);
+	CREATE TABLE rubric_ratings (
+		rater_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		drawing_id TEXT NOT NULL REFERENCES shared_drawings(id) ON DELETE CASCADE,
+		proportions INTEGER NOT NULL CHECK (proportions BETWEEN 1 AND 5),
+		lines INTEGER NOT NULL CHECK (lines BETWEEN 1 AND 5),
+		shading INTEGER NOT NULL CHECK (shading BETWEEN 1 AND 5),
+		overall INTEGER NOT NULL CHECK (overall BETWEEN 1 AND 5),
+		created_at INTEGER NOT NULL,
+		PRIMARY KEY (rater_id, drawing_id)
+	);
+	CREATE INDEX rubric_drawing ON rubric_ratings(drawing_id);
+	CREATE TABLE drawing_reports (
+		reporter_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		drawing_id TEXT NOT NULL REFERENCES shared_drawings(id) ON DELETE CASCADE,
+		reason TEXT NOT NULL,
+		created_at INTEGER NOT NULL,
+		PRIMARY KEY (reporter_id, drawing_id)
+	);`
 ];
 
 export function openDb(path: string): DB {
