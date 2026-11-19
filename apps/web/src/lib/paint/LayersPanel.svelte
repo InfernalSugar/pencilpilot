@@ -1,5 +1,5 @@
 <script lang="ts" module>
-	import type { GroupSettings, LayerSettings } from './PaintCanvas.svelte';
+	import type { GroupSettings, ImportResult, LayerSettings } from './PaintCanvas.svelte';
 
 	/** What the panel needs from the canvas (PaintCanvas's exported functions). */
 	export interface LayerControls {
@@ -19,6 +19,7 @@
 		editMask(id: number, on: boolean): void;
 		maskThumbnail(id: number, w: number, h: number): ImageData | null;
 		moveLayerTo(id: number, to: number, group: number): void;
+		importImage(file: Blob, name?: string): Promise<ImportResult>;
 		addGroup(layer: number): number;
 		setGroup(id: number, patch: Partial<GroupSettings>): void;
 		previewGroup(id: number, patch: Partial<GroupSettings>): void;
@@ -87,6 +88,24 @@
 		while (status.layers[top + 1]?.group === active.group) top++;
 		controls?.moveLayerTo(active.id, top, 0);
 	}
+	let picker: HTMLInputElement;
+	let importMsg = $state('');
+	function importMessage(r: ImportResult): string {
+		return {
+			ok: '',
+			'too-many': 'You’ve reached the layer limit (32).',
+			unreadable: 'That file couldn’t be opened as a picture.',
+			busy: 'Finish what you’re doing first, then import again.',
+			'too-big': 'That picture is too big (30 MB at most).'
+		}[r];
+	}
+	async function importPicked() {
+		const file = picker.files?.[0];
+		picker.value = '';
+		if (!file || !controls) return;
+		importMsg = importMessage(await controls.importImage(file, file.name));
+	}
+
 	function pickLayer(id: number) {
 		selectedGroup = null;
 		controls?.selectLayer(id);
@@ -194,6 +213,28 @@
 		</button>
 		<button
 			type="button"
+			aria-label="Import picture"
+			title="Import a picture as a new layer (it stays on this device)"
+			disabled={status.layers.length >= MAX_LAYERS}
+			onclick={() => picker.click()}
+		>
+			<svg viewBox="0 0 24 24" aria-hidden="true">
+				<rect x="3" y="5" width="18" height="14" rx="2" /><circle cx="9" cy="10" r="1.6" /><path
+					d="M21 16l-5-5-9 8"
+				/>
+			</svg>
+		</button>
+		<input
+			bind:this={picker}
+			class="file"
+			type="file"
+			accept="image/*"
+			tabindex="-1"
+			aria-hidden="true"
+			onchange={importPicked}
+		/>
+		<button
+			type="button"
 			class="danger"
 			aria-label="Delete layer"
 			title="Delete layer"
@@ -205,6 +246,8 @@
 			</svg>
 		</button>
 	</div>
+
+	{#if importMsg}<p class="import-msg" role="alert">{importMsg}</p>{/if}
 
 	{#if group}
 		<div class="settings" role="group" aria-label="Group {group.name}">
@@ -745,6 +788,15 @@
 		border: 1px solid var(--pp-track);
 		/* checkerboard = transparent */
 		background: repeating-conic-gradient(#e9e6de 0 25%, #fff 0 50%) 0 0 / 10px 10px;
+	}
+	.file {
+		display: none;
+	}
+	.import-msg {
+		margin: 0;
+		font-size: 13px;
+		font-weight: 600;
+		color: var(--pp-accent-strong);
 	}
 	.mask-btn {
 		flex: none;

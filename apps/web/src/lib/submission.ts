@@ -34,6 +34,8 @@ export interface Submission {
 	timeLimit?: number;
 	/** drawn with a tracing picture showing: tips only, never scored or counted */
 	traced?: boolean;
+	/** an imported picture was showing when it was handed in (so it's treated like tracing) */
+	imported?: boolean;
 	/** how the tracing picture was placed, so the comparison matches what was traced */
 	trace?: { source: 'reference' | 'own'; transform: TraceTransform; ownUrl?: string };
 }
