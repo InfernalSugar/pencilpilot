@@ -620,6 +620,7 @@ impl Painter {
         let mut props = LayerProps::named(g.name.clone());
         props.opacity = g.opacity;
         props.visible = g.visible;
+        props.imported = m.iter().any(|&i| self.layers[i].props.imported);
         let mut edits = vec![Edit::Tiles {
             layer: bottom_id,
             snap,
@@ -1016,6 +1017,7 @@ impl Painter {
             return false;
         };
         let mut props = props;
+        props.imported = self.layers[idx].props.imported; // not the caller's to change
         props.opacity = props.opacity.clamp(0.0, 1.0);
         props.name = props.name.chars().take(60).collect();
         if props.name.trim().is_empty() {
@@ -1036,6 +1038,8 @@ impl Painter {
         let Some(idx) = self.index_of(id) else {
             return false;
         };
+        let mut before = before;
+        before.imported = self.layers[idx].props.imported;
         if self.layers[idx].props == before {
             return false;
         }
@@ -1086,6 +1090,11 @@ impl Painter {
         }
         let lower_id = lower.id;
         let lower_masked = lower.mask.is_some();
+        let taint = upper.props.imported && !lower.props.imported;
+        let lower_props = LayerProps {
+            imported: true,
+            ..lower.props.clone()
+        };
         let mut edits = vec![Edit::Tiles {
             layer: lower_id,
             mask: self.editing_mask(lower_id),
@@ -1095,6 +1104,12 @@ impl Painter {
             edits.push(Edit::SetMask {
                 layer: lower_id,
                 mask: None,
+            });
+        }
+        if taint {
+            edits.push(Edit::Props {
+                layer: lower_id,
+                props: lower_props,
             });
         }
         edits.push(Edit::Remove { index: upper_idx });
@@ -1952,6 +1967,67 @@ impl Painter {
         true
     }
 
+    // ---- imported pictures ----
+
+    /// Add a layer holding a picture (straight-alpha sRGB RGBA8, canvas size),
+    /// above the active layer and in its group. One undo step. Returns its id (0 = couldn't).
+    #[allow(clippy::needless_range_loop)]
+    pub fn add_image_layer(&mut self, name: &str, rgba: &[u8]) -> u32 {
+        let (w, h) = (self.width as usize, self.height as usize);
+        if !self.idle() || self.layers.len() >= MAX_LAYERS || rgba.len() != w * h * 4 {
+            return 0;
+        }
+        let ts = TILE_SIZE;
+        let mut tiles = TileMap::new();
+        for ty in 0..h.div_ceil(ts) {
+            for tx in 0..w.div_ceil(ts) {
+                let mut t = empty_tile();
+                let mut any = false;
+                for py in 0..ts {
+                    for px in 0..ts {
+                        let (x, y) = (tx * ts + px, ty * ts + py);
+                        if x >= w || y >= h {
+                            continue;
+                        }
+                        let i = (y * w + x) * 4;
+                        if rgba[i + 3] == 0 {
+                            continue;
+                        }
+                        let c = [rgba[i], rgba[i + 1], rgba[i + 2]].map(|v| v as f32 / 255.0);
+                        t[py][px] = premul_fix15(c, rgba[i + 3] as f32 / 255.0);
+                        any = true;
+                    }
+                }
+                if any {
+                    tiles.insert((tx as i32, ty as i32), t);
+                }
+            }
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        let index = self
+            .index_of(self.active)
+            .map_or(self.layers.len(), |i| i + 1);
+        let mut props = LayerProps::named(if name.trim().is_empty() {
+            format!("Picture {id}")
+        } else {
+            name.chars().take(60).collect()
+        });
+        props.imported = true;
+        let mut layer = Layer::new(id, props);
+        layer.group = index
+            .checked_sub(1)
+            .and_then(|i| self.layers.get(i))
+            .map_or(0, |l| l.group);
+        layer.surface.tiles = tiles;
+        self.perform(Edit::Insert {
+            index,
+            layer: Box::new(layer),
+        });
+        self.active = id;
+        id
+    }
+
     // ---- adjustments and gradients: previewed live, one undo step ----
 
     /// Start adjusting the active layer (or painting a gradient on it).
@@ -2345,7 +2421,7 @@ impl Painter {
             .map(|l| {
                 let p = &l.props;
                 format!(
-                    r#"{{"id":{},"name":{},"visible":{},"opacity":{},"blend":"{}","locked":{},"alphaLock":{},"clip":{},"mask":{},"editingMask":{},"group":{},"empty":{}}}"#,
+                    r#"{{"id":{},"name":{},"visible":{},"opacity":{},"blend":"{}","locked":{},"alphaLock":{},"clip":{},"mask":{},"editingMask":{},"group":{},"imported":{},"empty":{}}}"#,
                     l.id,
                     json_str(&p.name),
                     p.visible,
@@ -2357,6 +2433,7 @@ impl Painter {
                     l.mask.is_some(),
                     l.editing_mask,
                     l.group,
+                    p.imported,
                     l.is_empty()
                 )
             })
@@ -3448,6 +3525,42 @@ mod tests {
         assert!(px(&p, 4, 10)[2] > 200 && px(&p, 4, 10)[0] < 40);
         assert!(px(&p, 250, 10)[0] > 240);
         assert!(!p.adjust_commit());
+    }
+
+    #[test]
+    fn imported_pictures_are_marked_and_stay_marked() {
+        let mut p = Painter::new(100, 70);
+        let b = pen();
+        line(&mut p, &b, 20.0);
+        let mut rgba = vec![0u8; 100 * 70 * 4];
+        for y in 30..60 {
+            for x in 10..90 {
+                let i = (y * 100 + x) * 4;
+                rgba[i..i + 4].copy_from_slice(&[0, 0, 255, 255]);
+            }
+        }
+        assert_eq!(p.add_image_layer("photo", &rgba[..10]), 0, "wrong size");
+        let id = p.add_image_layer("photo", &rgba);
+        assert!(id > 0);
+        p.flush();
+        assert_eq!(px(&p, 50, 45), [0, 0, 255]);
+        assert!(p.layers_json().contains(r#""name":"photo""#));
+        assert!(p.layers_json().contains(r#""imported":true"#));
+        // settings can't clear the mark
+        let mut pr = props(&p, id);
+        pr.imported = false;
+        pr.opacity = 0.5;
+        p.set_layer_props(id, pr, true);
+        assert!(p.layers_json().contains(r#""imported":true"#));
+        // merging it down passes the mark on; undo takes it back
+        assert!(p.merge_down(id));
+        assert!(p.layers_json().contains(r#""imported":true"#));
+        assert!(p.undo());
+        assert!(p.undo());
+        assert!(p.undo());
+        assert!(!p.layers_json().contains(r#""imported":true"#));
+        p.flush();
+        assert_eq!(px(&p, 50, 45), [255, 255, 255]);
     }
 
     #[test]

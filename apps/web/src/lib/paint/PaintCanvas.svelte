@@ -19,9 +19,20 @@
 		editingMask: boolean;
 		/** the layer's group (0 = none) */
 		group: number;
+		/** holds an imported picture (or paint merged with one) */
+		imported: boolean;
 		empty: boolean;
 	}
-	export type LayerSettings = Omit<LayerInfo, 'id' | 'empty' | 'mask' | 'editingMask' | 'group'>;
+	export type LayerSettings = Omit<
+		LayerInfo,
+		'id' | 'empty' | 'mask' | 'editingMask' | 'group' | 'imported'
+	>;
+
+	/** What happened to a picture brought in with `importImage`. */
+	export type ImportResult = 'ok' | 'too-many' | 'unreadable' | 'busy' | 'too-big';
+
+	/** Pictures bigger than this (bytes) aren't read. */
+	export const MAX_IMPORT_BYTES = 30 * 1024 * 1024;
 
 	/** A layer group: its eye and opacity apply to each of its layers. */
 	export interface GroupInfo {
@@ -137,6 +148,8 @@
 		onguides,
 		liquifySize = 60,
 		liquifyStrength = 0.6,
+		allowImport = false,
+		onimport,
 		gradientKind = 'linear',
 		gradientEnd = 'transparent',
 		maxHeight = '78vh',
@@ -170,6 +183,10 @@
 			| 'liquify'
 			| 'guides'
 			| 'gradient';
+		/** pictures can be dropped onto the canvas (as a new layer) */
+		allowImport?: boolean;
+		/** a dropped picture was imported (or why not) */
+		onimport?: (r: ImportResult) => void;
 		/** gradient: straight or round */
 		gradientKind?: 'linear' | 'radial';
 		/** gradient: fades from the brush colour to this colour, or to transparent */
@@ -677,11 +694,59 @@
 		changed(done);
 	}
 
-	// ColorDrop: drag a colour swatch onto the canvas to fill there.
+	// ---- imported pictures ----
+
+	/**
+	 * Bring a picture in as a new layer above the current one, fitted inside the
+	 * canvas and centred (move or resize it afterwards with Transform). The
+	 * picture never leaves the browser.
+	 */
+	export async function importImage(file: Blob, name = ''): Promise<ImportResult> {
+		if (!paint) return 'busy';
+		if (file.size > MAX_IMPORT_BYTES) return 'too-big';
+		if (layerList().length >= 32) return 'too-many';
+		let bmp: ImageBitmap;
+		try {
+			bmp = await createImageBitmap(file);
+		} catch {
+			return 'unreadable';
+		}
+		try {
+			const k = Math.min(width / bmp.width, height / bmp.height);
+			const [w, h] = [bmp.width * k, bmp.height * k];
+			const c = document.createElement('canvas');
+			[c.width, c.height] = [width, height];
+			const g = c.getContext('2d')!;
+			g.imageSmoothingQuality = 'high';
+			g.drawImage(bmp, (width - w) / 2, (height - h) / 2, w, h);
+			const rgba = g.getImageData(0, 0, width, height).data;
+			const id = paint.addImageLayer(
+				name.replace(/\.[a-z0-9]+$/i, '').slice(0, 60),
+				new Uint8Array(rgba.buffer)
+			);
+			if (!id) return 'busy';
+			changed(true);
+			return 'ok';
+		} finally {
+			bmp.close();
+		}
+	}
+
+	// ColorDrop: drag a colour swatch onto the canvas to fill there; drop a picture to import it.
 	function dragOver(e: DragEvent) {
-		if (e.dataTransfer?.types.includes('application/x-pp-color')) e.preventDefault();
+		const types = e.dataTransfer?.types ?? [];
+		if (types.includes('application/x-pp-color') || (allowImport && types.includes('Files')))
+			e.preventDefault();
 	}
 	function drop(e: DragEvent) {
+		const file = allowImport
+			? [...(e.dataTransfer?.files ?? [])].find((f) => f.type.startsWith('image/'))
+			: undefined;
+		if (file) {
+			e.preventDefault();
+			if (!locked) void importImage(file, file.name).then((r) => onimport?.(r));
+			return;
+		}
 		const hex = e.dataTransfer?.getData('application/x-pp-color');
 		if (!hex || !/^#[0-9a-f]{6}$/i.test(hex) || locked) return;
 		e.preventDefault();

@@ -84,6 +84,8 @@ pub struct LayerProps {
     pub alpha_lock: bool,
     /// clipping mask: only show where the layer below (the nearest unclipped one) has paint
     pub clip: bool,
+    /// holds an imported picture (or paint merged with one): set by the engine only
+    pub imported: bool,
 }
 
 impl LayerProps {
@@ -96,6 +98,7 @@ impl LayerProps {
             locked: false,
             alpha_lock: false,
             clip: false,
+            imported: false,
         }
     }
 }
