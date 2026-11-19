@@ -166,4 +166,6 @@ Finished sessions are saved in `localStorage['pp.drills']` as `{ id, at, avg, ro
    model that only sorts reference pictures, never grades drawings; get it with
    `crates/ref-filters/fetch-model.sh clip`). Without `--dry-run` it re-files pictures in the wrong
    category/topic and moves bad ones to `rejected.json`. Topic `prompts` and the `_sorting` block in
-   `content/topics.json` drive it.
+   `content/topics.json` drive it. It also rejects pictures that are not one drawable subject (sheets,
+   icon sets, patterns, text): topics are `"subject": "single"` by default or `"scene"` for wide views,
+   and a topic's `avoid` prompts list what it must not show.

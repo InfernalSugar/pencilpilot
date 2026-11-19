@@ -16,6 +16,13 @@ use serde_json::Value;
 pub trait TopicCheck: Send + Sync + 'static {
     /// Where does `img`, found for `category`/`topic`, belong?
     fn check(&self, img: &DynamicImage, category: &str, topic: &str) -> Result<Decision, String>;
+
+    /// Id of the sorting rules (prompts, cut-offs, rule version). When it
+    /// differs from the one stored with the pool's `sorted` set, every
+    /// picture is checked again. `None`: no model, nothing is checked.
+    fn rules(&self) -> Option<String> {
+        None
+    }
 }
 
 /// No model (dev/tests only): every picture stays where its search put it.
@@ -50,6 +57,10 @@ impl TopicCheck for ClipTopicCheck {
         let e = self.vision.embed(img).map_err(|e| e.to_string())?;
         Ok(self.sorter.decide(&e, category, topic))
     }
+
+    fn rules(&self) -> Option<String> {
+        Some(self.sorter.fingerprint())
+    }
 }
 
 /// Where a picture goes after the check: `Ok((category, topic))` to keep or
@@ -68,12 +79,16 @@ pub fn destination(d: Decision, category: &str, topic: &str) -> Result<(String, 
 pub mod tests {
     use super::*;
 
-    /// Test double: a fixed decision for every picture.
+    /// Test double: a fixed decision for every picture, under rules "fixed".
     pub struct FixedCheck(pub Decision);
 
     impl TopicCheck for FixedCheck {
         fn check(&self, _: &DynamicImage, _: &str, _: &str) -> Result<Decision, String> {
             Ok(self.0.clone())
+        }
+
+        fn rules(&self) -> Option<String> {
+            Some("fixed".into())
         }
     }
 
@@ -130,7 +145,32 @@ pub mod tests {
         let spec = SortSpec::from_topics_json(&topics).expect("valid _sorting block");
         for c in ["anime", "real-life", "animals", "environment", "cartoon"] {
             let n = topics[c].as_array().unwrap().len();
-            assert_eq!(spec.topics.iter().filter(|t| t.0 == c).count(), n, "{c}");
+            assert_eq!(
+                spec.topics.iter().filter(|t| t.category == c).count(),
+                n,
+                "{c}"
+            );
+        }
+        // the subject check is on: wide-view topics are scenes, the rest
+        // (characters above all) want one clear subject
+        let sub = spec.subject.as_ref().expect("_sorting.subject");
+        assert!(sub.reject.contains_key("sheet"));
+        let scenes = [
+            "anime/scenery",
+            "environment/city",
+            "environment/interiors",
+            "environment/plants",
+            "environment/skies-water",
+            "environment/landscapes",
+        ];
+        for t in &spec.topics {
+            let key = format!("{}/{}", t.category, t.id);
+            let want = if scenes.contains(&key.as_str()) {
+                "scene"
+            } else {
+                "single"
+            };
+            assert_eq!(t.kind, want, "{key}");
         }
     }
 }
