@@ -14,11 +14,18 @@
 //! Config (env, or the repo's git-ignored `.env`): `PIXABAY_API_KEY`;
 //! optional `REF_DATA_DIR` (default `data/ref-service`), `REF_PORT` (8787),
 //! `REF_TOPICS` (content/topics.json), `REF_TARGET` (fresh pictures kept
-//! ready per requested slot, default 6).
+//! ready per requested slot, default 6), `REF_NSFW_MODEL`, `REF_CLIP_DIR`
+//! (the picture sorter, default crates/ref-filters/models/clip-vit-b32).
+//! Both models come from `crates/ref-filters/fetch-model.sh`.
+//!
+//! `ref-service recheck [--dry-run]` runs the topic check over the existing
+//! pool (stop the server first) and prints counts per category/topic.
 
 mod model;
 mod pixabay;
 mod pool;
+mod recheck;
+mod sorting;
 mod vet;
 
 use std::collections::HashMap;
@@ -39,6 +46,8 @@ use tracing::{info, warn};
 use model::{CATEGORIES, LiveRef, Slot, Topic, image_type, kind_allowed};
 use pixabay::Pixabay;
 use pool::PoolState;
+use ref_filters::sort::Decision;
+use sorting::{ClipTopicCheck, NoTopicCheck, TopicCheck, destination};
 use vet::{FiltersVetter, Vetter, pixabay_flags_ok};
 
 const LICENSE: &str = "Pixabay Content License";
@@ -51,6 +60,8 @@ struct App {
     wake: Notify,
     pixabay: Pixabay,
     vetter: Box<dyn Vetter>,
+    /// picture sorter: is it really this category/topic? (ADR-0009)
+    sorter: Box<dyn TopicCheck>,
     topics: HashMap<String, Vec<Topic>>,
     data: PathBuf,
     target: usize,
@@ -93,9 +104,13 @@ fn env_or_dotenv(name: &str) -> Option<String> {
     })
 }
 
+fn read_topics_json(path: &Path) -> Value {
+    serde_json::from_str(&std::fs::read_to_string(path).expect("topics.json"))
+        .expect("topics.json is JSON")
+}
+
 fn load_topics(path: &Path) -> HashMap<String, Vec<Topic>> {
-    let v: Value = serde_json::from_str(&std::fs::read_to_string(path).expect("topics.json"))
-        .expect("topics.json is JSON");
+    let v = read_topics_json(path);
     CATEGORIES
         .iter()
         .filter_map(|c| {
@@ -103,6 +118,92 @@ fn load_topics(path: &Path) -> HashMap<String, Vec<Topic>> {
             Some((c.to_string(), list))
         })
         .collect()
+}
+
+fn data_dir() -> PathBuf {
+    env_or_dotenv("REF_DATA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo_root().join("data/ref-service"))
+}
+
+fn topics_path() -> PathBuf {
+    env_or_dotenv("REF_TOPICS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo_root().join("content/topics.json"))
+}
+
+fn load_pool(data: &Path) -> PoolState {
+    std::fs::read_to_string(data.join("pool.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+/// The picture sorter (ADR-0009). Refuse to run without it unless explicitly allowed.
+fn load_sorter(topics: &Path) -> Box<dyn TopicCheck> {
+    let dir = env_or_dotenv("REF_CLIP_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo_root().join("crates/ref-filters/models/clip-vit-b32"));
+    match ClipTopicCheck::load(&dir, &read_topics_json(topics)) {
+        Ok(s) => {
+            info!(model = %dir.display(), "picture sorter loaded");
+            Box::new(s)
+        }
+        Err(e) if env_or_dotenv("REF_ALLOW_NO_SORTER").as_deref() == Some("1") => {
+            warn!("picture sorter NOT loaded ({e}); REF_ALLOW_NO_SORTER=1, dev only!");
+            Box::new(NoTopicCheck)
+        }
+        Err(e) => panic!(
+            "picture sorter not available ({e}). Run crates/ref-filters/fetch-model.sh \
+             (or set REF_ALLOW_NO_SORTER=1 for local experiments)."
+        ),
+    }
+}
+
+/// `ref-service recheck [--dry-run]`
+fn recheck_main(args: &[String]) {
+    let apply = !args.iter().any(|a| a == "--dry-run");
+    let data = data_dir();
+    let topics = topics_path();
+    let mut pool = load_pool(&data);
+    let purged = if apply {
+        purge_wrong_kind(&mut pool, &data.join("images"))
+    } else {
+        pool.remove_where(|r| !kind_allowed(&r.category, &r.page_url))
+            .len()
+    };
+    let sorter = load_sorter(&topics);
+    let mut last = std::time::Instant::now();
+    let rep = recheck::recheck(
+        &mut pool,
+        &data.join("images"),
+        &*sorter,
+        apply,
+        false,
+        |i, n| {
+            if last.elapsed() > Duration::from_secs(10) {
+                eprintln!("  {i}/{n}");
+                last = std::time::Instant::now();
+            }
+        },
+    );
+    for (id, from, change, tags) in &rep.changes {
+        println!("{id:<12} {from:<24} {change:?}  [{tags}]");
+    }
+    println!();
+    if purged > 0 {
+        println!("{purged} drawings removed from photo-only categories first");
+    }
+    rep.print();
+    if apply {
+        let text = serde_json::to_string(&pool).expect("pool serialises");
+        let tmp = data.join("pool.json.tmp");
+        std::fs::write(&tmp, text).expect("write pool");
+        std::fs::rename(&tmp, data.join("pool.json")).expect("save pool");
+        println!("saved {}", data.join("pool.json").display());
+    } else {
+        println!("dry run: nothing changed");
+    }
 }
 
 #[tokio::main]
@@ -113,14 +214,15 @@ async fn main() {
         )
         .init();
 
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("recheck") {
+        return tokio::task::block_in_place(|| recheck_main(&args[1..]));
+    }
+
     let key = env_or_dotenv("PIXABAY_API_KEY").expect("PIXABAY_API_KEY not set");
-    let data = env_or_dotenv("REF_DATA_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| repo_root().join("data/ref-service"));
+    let data = data_dir();
     std::fs::create_dir_all(data.join("images")).expect("data dir");
-    let topics_path = env_or_dotenv("REF_TOPICS")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| repo_root().join("content/topics.json"));
+    let topics_path = topics_path();
     let port: u16 = env_or_dotenv("REF_PORT")
         .and_then(|p| p.parse().ok())
         .unwrap_or(8787);
@@ -146,14 +248,39 @@ async fn main() {
         .and_then(|t| t.parse().ok())
         .unwrap_or(6);
 
-    let mut pool: PoolState = std::fs::read_to_string(data.join("pool.json"))
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default();
+    let sorter = load_sorter(&topics_path);
+
+    let mut pool = load_pool(&data);
     info!(refs = pool.refs.len(), "loaded pool");
     let purged = purge_wrong_kind(&mut pool, &data.join("images"));
     if purged > 0 {
         warn!(purged, "removed drawings from photo-only categories");
+    }
+    // Pictures the sorter hasn't seen yet (e.g. from before ADR-0009): check
+    // them once now. Takes ~0.1 s per picture; later starts skip them.
+    let rep = recheck::recheck(
+        &mut pool,
+        &data.join("images"),
+        &*sorter,
+        true,
+        true,
+        |i, n| {
+            if i % 100 == 0 && i > 0 {
+                info!("sorting existing pictures: {i}/{n}");
+            }
+        },
+    );
+    let changed = rep.changes.len();
+    if !rep.per_topic.is_empty() || purged > 0 {
+        let removed = rep
+            .changes
+            .iter()
+            .filter(|c| matches!(c.2, recheck::Change::Removed { .. }))
+            .count();
+        warn!(changed, removed, "sorted existing pictures (ADR-0009)");
+        let text = serde_json::to_string(&pool).expect("pool serialises");
+        std::fs::write(data.join("pool.json.tmp"), text).expect("write pool");
+        std::fs::rename(data.join("pool.json.tmp"), data.join("pool.json")).expect("save pool");
     }
 
     let app = Arc::new(App {
@@ -161,6 +288,7 @@ async fn main() {
         wake: Notify::new(),
         pixabay: Pixabay::new(key, data.join("search-cache")),
         vetter: Box::new(FiltersVetter(filters)),
+        sorter,
         topics: load_topics(&topics_path),
         data,
         target,
@@ -460,6 +588,16 @@ async fn refill_step(app: &App, slot: &Slot) -> Result<(), String> {
         let vetted = tokio::task::block_in_place(|| {
             let img = vet::on_white(image::load_from_memory(&bytes).map_err(|e| e.to_string())?);
             let v = app.vetter.vet(&img)?;
+            // Is it really this category/topic? Keep, re-file or reject (ADR-0009).
+            let decision = app
+                .sorter
+                .check(&img, &slot.category, &slot.topic)
+                .map_err(|e| format!("sorter_error ({e})"))?;
+            let checked = decision != Decision::Unchecked;
+            let dest = destination(decision, &slot.category, &slot.topic)?;
+            if !kind_allowed(&dest.0, hit["pageURL"].as_str().unwrap_or("")) {
+                return Err(format!("wrong_kind_for:{}/{}", dest.0, dest.1));
+            }
             // re-encode as JPEG ≤ 1280 px (consistent format, strips metadata)
             let img = if img.width().max(img.height()) > 1280 {
                 img.resize(1280, 1280, image::imageops::FilterType::Triangle)
@@ -469,26 +607,31 @@ async fn refill_step(app: &App, slot: &Slot) -> Result<(), String> {
             img.to_rgb8()
                 .save_with_format(images.join(format!("{id}.jpg")), image::ImageFormat::Jpeg)
                 .map_err(|e| e.to_string())?;
-            Ok::<_, String>((v, img.width(), img.height()))
+            Ok::<_, String>((v, dest, checked, img.width(), img.height()))
         });
-        let (v, w, h) = match vetted {
+        let (v, (category, topic), checked, w, h) = match vetted {
             Ok(x) => x,
             Err(why) => {
                 tracing::debug!(sid, why, "rejected");
                 let mut p = app.pool.lock().await;
                 for r in why.split(',') {
-                    *p.rejected.entry(r.to_string()).or_insert(0) += 1;
+                    // "off_topic:anime/scenery" counts as "off_topic"
+                    let code = r.split([':', ' ']).next().unwrap_or(r);
+                    *p.rejected.entry(code.to_string()).or_insert(0) += 1;
                 }
                 continue;
             }
         };
+        if (category.as_str(), topic.as_str()) != (slot.category.as_str(), slot.topic.as_str()) {
+            info!(sid, from = %slot.key(), to = %format!("{category}/{topic}"), "re-filed");
+        }
         let user = hit["user"].as_str().unwrap_or("").to_string();
         let r = LiveRef {
             id: id.clone(),
             source: "pixabay".into(),
             source_id: sid,
-            category: slot.category.clone(),
-            topic: slot.topic.clone(),
+            category,
+            topic,
             page_url: hit["pageURL"].as_str().unwrap_or("").into(),
             author_url: format!(
                 "https://pixabay.com/users/{}-{}/",
@@ -513,7 +656,13 @@ async fn refill_step(app: &App, slot: &Slot) -> Result<(), String> {
             image_url: format!("/refimg/{id}.jpg"),
             live: true,
         };
-        if app.pool.lock().await.add(r, v.phash) {
+        let mut p = app.pool.lock().await;
+        let ok = p.add(r, v.phash);
+        if ok && checked {
+            p.sorted.insert(id.clone());
+        }
+        drop(p);
+        if ok {
             added += 1;
         } else {
             tokio::fs::remove_file(images.join(format!("{id}.jpg")))
@@ -544,6 +693,7 @@ mod tests {
             wake: Notify::new(),
             pixabay: Pixabay::new("test".into(), dir.join("cache")),
             vetter: Box::new(FiltersVetter(ref_filters::Filters::without_nsfw())),
+            sorter: Box::new(NoTopicCheck),
             topics: load_topics(&repo_root().join("content/topics.json")),
             data: dir,
             target: 3,

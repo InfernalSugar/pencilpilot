@@ -8,7 +8,8 @@ Start here.
 | [ADR-0001 Stack](adr/0001-stack.md) | SvelteKit + Rust/WASM grader, monorepo layout |
 | [ADR-0002 No AI grading](adr/0002-no-ai-grading.md) | Why grading and feedback are maths + hand-written rules |
 | [ADR-0003 Reference images](adr/0003-reference-images.md) | Where images come from and how they stay licence-clean and SFW |
-| [ADR-0005 Endless references](adr/0005-endless-references.md) | Live, auto-vetted Pixabay pool; AI only as an NSFW guard |
+| [ADR-0005 Endless references](adr/0005-endless-references.md) | Live, auto-vetted Pixabay pool; real photos only in real life/animals/environment |
+| [ADR-0009 Picture sorter](adr/0009-picture-sorter.md) | AI only as an NSFW guard and to sort reference pictures (local CLIP); never for grading |
 | [LICENSING.md](LICENSING.md) | Licence rules for code, content, and reference images |
 | [CONTENT_GUIDE.md](CONTENT_GUIDE.md) | How to write rules, tips, lessons and drills |
 

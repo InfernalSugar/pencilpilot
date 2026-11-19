@@ -104,7 +104,7 @@
       "query": "portrait",
       "title": "",
       "keypoints": [],
-      "topic": "hands",
+      "topic": "people",
       "difficulty": 51.6,
       "tier": 3
     },
@@ -312,7 +312,7 @@
       "query": "still life",
       "title": "",
       "keypoints": [],
-      "topic": "still-life",
+      "topic": "food",
       "difficulty": 45.4,
       "tier": 2
     },
@@ -354,7 +354,7 @@
       "query": "still life",
       "title": "",
       "keypoints": [],
-      "topic": "food",
+      "topic": "still-life",
       "difficulty": 46.6,
       "tier": 2
     },

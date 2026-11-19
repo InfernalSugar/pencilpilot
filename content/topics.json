@@ -23,6 +23,11 @@
 				"samurai illustration",
 				"anime fight",
 				"ninja illustration"
+			],
+			"prompts": [
+				"an anime illustration of a warrior fighting with a sword",
+				"an anime action scene with a dynamic fighting pose",
+				"a manga drawing of a samurai or ninja in battle"
 			]
 		},
 		{
@@ -39,6 +44,11 @@
 				"chibi",
 				"kawaii character",
 				"cute anime"
+			],
+			"prompts": [
+				"a cute chibi anime character with a big head and a tiny body",
+				"a kawaii chibi drawing",
+				"an adorable little chibi mascot"
 			]
 		},
 		{
@@ -60,6 +70,11 @@
 				"anime landscape",
 				"anime city",
 				"anime sky"
+			],
+			"prompts": [
+				"an anime landscape scene",
+				"an anime background painting of a town or a sky",
+				"anime scenery of nature, buildings and clouds"
 			]
 		},
 		{
@@ -79,6 +94,11 @@
 				"anime girl full body",
 				"anime boy standing",
 				"manga character pose"
+			],
+			"prompts": [
+				"a full-body anime character standing, drawn from head to toe",
+				"an anime illustration of a whole character in a pose",
+				"a manga drawing of a full figure walking or dancing"
 			]
 		},
 		{
@@ -101,6 +121,11 @@
 				"anime boy",
 				"manga face",
 				"anime portrait"
+			],
+			"prompts": [
+				"an anime portrait of a character's face",
+				"a close-up anime drawing of a character's head and shoulders",
+				"a manga character portrait with an expression"
 			]
 		}
 	],
@@ -121,6 +146,11 @@
 				"hand",
 				"hands gesture",
 				"fingers"
+			],
+			"prompts": [
+				"a close-up photo of a human hand",
+				"a photo of hands making a gesture",
+				"a photo of fingers"
 			]
 		},
 		{
@@ -143,6 +173,11 @@
 				"bread",
 				"coffee cup",
 				"vegetables"
+			],
+			"prompts": [
+				"a photo of food",
+				"a photo of fruit or vegetables",
+				"a photo of a meal, bread, cake or a drink"
 			]
 		},
 		{
@@ -164,6 +199,12 @@
 				"vintage car",
 				"motorcycle",
 				"sailboat"
+			],
+			"prompts": [
+				"a photo of a car",
+				"a photo of a bicycle or a motorcycle",
+				"a photo of a boat or a ship",
+				"a photo of a vehicle"
 			]
 		},
 		{
@@ -193,6 +234,12 @@
 				"teapot",
 				"old books",
 				"shoes"
+			],
+			"prompts": [
+				"a still life photo of objects on a table",
+				"a photo of a vase, a teapot or a bottle",
+				"a photo of an everyday object",
+				"a photo of old books or a pair of shoes"
 			]
 		},
 		{
@@ -215,6 +262,11 @@
 				"portrait man",
 				"person sitting",
 				"elderly portrait"
+			],
+			"prompts": [
+				"a portrait photo of a person",
+				"a photo of a man or a woman",
+				"a photo of a person sitting or standing"
 			]
 		}
 	],
@@ -240,6 +292,11 @@
 				"owl",
 				"parrot",
 				"sparrow"
+			],
+			"prompts": [
+				"a photo of a bird",
+				"a photo of an owl or an eagle",
+				"a photo of a parrot or a sparrow"
 			]
 		},
 		{
@@ -262,6 +319,12 @@
 				"sea turtle",
 				"whale",
 				"jellyfish"
+			],
+			"prompts": [
+				"a photo of a fish",
+				"a photo of a sea turtle",
+				"a photo of a whale, a dolphin or a shark",
+				"a photo of a jellyfish or an octopus"
 			]
 		},
 		{
@@ -283,6 +346,12 @@
 				"bee",
 				"ladybug",
 				"dragonfly"
+			],
+			"prompts": [
+				"a photo of an insect",
+				"a photo of a butterfly",
+				"a photo of a bee, a beetle or a ladybug",
+				"a photo of a dragonfly"
 			]
 		},
 		{
@@ -306,6 +375,12 @@
 				"rabbit",
 				"kitten",
 				"puppy"
+			],
+			"prompts": [
+				"a photo of a cat",
+				"a photo of a dog",
+				"a photo of a rabbit",
+				"a photo of a pet"
 			]
 		},
 		{
@@ -334,6 +409,12 @@
 				"bear",
 				"elephant",
 				"squirrel"
+			],
+			"prompts": [
+				"a photo of a wild animal",
+				"a photo of a fox, a deer or a squirrel",
+				"a photo of a lion, a tiger or a bear",
+				"a photo of an elephant"
 			]
 		}
 	],
@@ -356,6 +437,12 @@
 				"cafe interior",
 				"staircase",
 				"kitchen interior"
+			],
+			"prompts": [
+				"a photo of a room interior",
+				"a photo of a cafe or a kitchen interior",
+				"a photo of a staircase",
+				"a photo of a library inside"
 			]
 		},
 		{
@@ -377,6 +464,12 @@
 				"old town",
 				"bridge",
 				"building facade"
+			],
+			"prompts": [
+				"a photo of a city street",
+				"a photo of buildings and architecture",
+				"a photo of a bridge",
+				"a photo of an old town"
 			]
 		},
 		{
@@ -397,6 +490,12 @@
 				"flower",
 				"leaf",
 				"succulent"
+			],
+			"prompts": [
+				"a photo of a tree",
+				"a photo of a flower",
+				"a close-up photo of leaves",
+				"a photo of a plant"
 			]
 		},
 		{
@@ -419,6 +518,12 @@
 				"sea waves",
 				"lake",
 				"waterfall"
+			],
+			"prompts": [
+				"a photo of clouds in the sky",
+				"a photo of the sea and waves",
+				"a photo of a lake or a river",
+				"a photo of a waterfall"
 			]
 		},
 		{
@@ -439,6 +544,12 @@
 				"hills landscape",
 				"field",
 				"valley"
+			],
+			"prompts": [
+				"a landscape photo of mountains",
+				"a photo of rolling hills",
+				"a photo of a field",
+				"a photo of a valley"
 			]
 		}
 	],
@@ -462,6 +573,11 @@
 				"cartoon cat",
 				"cartoon dog",
 				"cartoon bird"
+			],
+			"prompts": [
+				"a cartoon drawing of an animal",
+				"a cartoon cat or a cartoon dog",
+				"a cute cartoon bird, bear or fox"
 			]
 		},
 		{
@@ -482,6 +598,11 @@
 				"cartoon food",
 				"cartoon object",
 				"cartoon fruit"
+			],
+			"prompts": [
+				"a cartoon drawing of an object",
+				"a cartoon drawing of food or fruit",
+				"a cartoon toy, house or car"
 			]
 		},
 		{
@@ -504,6 +625,11 @@
 				"cartoon boy",
 				"cartoon girl",
 				"cartoon monster"
+			],
+			"prompts": [
+				"a cartoon character",
+				"a cartoon drawing of a boy, a girl or a grown-up",
+				"a cartoon monster or creature"
 			]
 		}
 	],
@@ -556,5 +682,70 @@
 				"simple shapes"
 			]
 		}
-	]
+	],
+	"_sorting": {
+		"_comment": "Picture sorter (ADR-0009): a local CLIP model matches each reference picture against these prompts and the topics' `prompts`. Used only to sort reference pictures, never to grade or critique drawings. A topic is the mean of its prompts. Style: reject if the category's allowed styles get less than minStyle. Topic: compared with every topic of every category in the same group; re-file if the best beats the own topic by margin and has at least minBest, reject if the own topic has less than rejectBelow, otherwise keep. Categories not listed here (fundamentals) are not checked.",
+		"margin": 0.25,
+		"minBest": 0.5,
+		"rejectBelow": 0.05,
+		"minStyle": 0.25,
+		"styles": {
+			"photo": [
+				"a photo",
+				"a photograph",
+				"a high quality photo of a real thing"
+			],
+			"anime": [
+				"an anime illustration",
+				"a manga-style drawing",
+				"anime art"
+			],
+			"cartoon": [
+				"a cartoon drawing",
+				"flat vector clip art",
+				"a simple cartoon illustration"
+			],
+			"drawing": [
+				"a pencil sketch",
+				"a painting",
+				"a line drawing"
+			]
+		},
+		"categories": {
+			"anime": {
+				"group": "drawn",
+				"styles": [
+					"anime",
+					"cartoon",
+					"drawing"
+				]
+			},
+			"real-life": {
+				"group": "photo",
+				"styles": [
+					"photo"
+				]
+			},
+			"animals": {
+				"group": "photo",
+				"styles": [
+					"photo"
+				]
+			},
+			"environment": {
+				"group": "photo",
+				"styles": [
+					"photo"
+				]
+			},
+			"cartoon": {
+				"group": "drawn",
+				"styles": [
+					"anime",
+					"cartoon",
+					"drawing"
+				]
+			}
+		}
+	}
 }

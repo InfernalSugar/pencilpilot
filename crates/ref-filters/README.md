@@ -3,9 +3,15 @@
 Auto-vets reference pictures fetched live from Pixabay before students see
 them. Used by `crates/ref-service`.
 
-Everything is plain image maths (ADR-0002) **except one NSFW classifier, used
-only as a safety guard**. It never affects scores, tiers or feedback. Category
-and topic are not this crate's job (the server uses search terms and tags).
+Everything is plain image maths (ADR-0002) **except two learned models**, and
+neither ever affects scores, tiers or feedback on drawings:
+
+* an **NSFW classifier, used only as a safety guard** (ADR-0005);
+* **CLIP, used only to sort reference pictures** into category and topic
+  (`clip` and `sort` modules, ADR-0009; see [Picture sorter](#picture-sorter-clip-sorting-only)).
+
+Get both with `crates/ref-filters/fetch-model.sh` (or `fetch-model.sh nsfw` /
+`fetch-model.sh clip`).
 
 ```rust
 use ref_filters::{Filters, Thresholds, decode, hamming};
@@ -142,3 +148,57 @@ photo, text tilted 4°) were all flagged as `text_heavy`. A photo with a
 single two-word title was not. pHash: resizing to 640 px and re-encoding as
 JPEG moves a sample by at most 4 bits. The closest two different samples are
 14 bits apart, and 99.8 % of pairs are ≥ 20.
+
+## Picture sorter (CLIP, sorting only)
+
+Used **only** to decide which category and topic a reference picture belongs
+to (ADR-0009). It never sees students' drawings and never affects scores,
+tiers or feedback.
+
+| | |
+|---|---|
+| Model | OpenAI **CLIP ViT-B/32** (`openai/clip-vit-base-patch32`) |
+| Licence | **MIT** |
+| Files | ONNX export by Xenova (transformers.js): <https://huggingface.co/Xenova/clip-vit-base-patch32>, revision `6b7c523703ae26e39be4b03774966f8571c7f523` |
+| Size | `onnx/vision_model.onnx` 351,685,709 B, `onnx/text_model.onnx` 254,058,553 B, plus `vocab.json` and `merges.txt` (≈ 580 MiB in total) |
+| SHA-256 | pinned in `fetch-model.sh` |
+| Runtime | `tract-onnx` 0.23, batch fixed to 1. ≈ 0.1 s per picture on one core. The text tower is dropped after the prompts are embedded |
+
+`fetch-model.sh clip` downloads to `models/clip-vit-b32/` (git-ignored,
+**never commit it**). Tests that need the files skip when they are missing.
+
+We use the fp32 export because the int8 export runs about 50 times slower on
+tract (≈ 5 s per picture). The Rust pipeline matches onnxruntime with the
+Hugging Face tokenizer: logits agree to ±0.02, and the token ids are identical.
+
+* Preprocessing (`clip::preprocess`): composite onto white, bicubic resize
+  so the short side is 224, centre crop 224×224, scale to 0–1, CLIP
+  mean/std, NCHW.
+* Tokenizer (`clip::Tokenizer`): CLIP's byte-level BPE (lower-case, no ftfy),
+  padded with end-of-text to 77.
+
+`sort::Sorter` does zero-shot matching against the `prompts` in
+content/topics.json and the `_sorting` block there. That block holds the
+style prompts, the allowed styles and group of each category, and the
+cut-offs. The decision rules are documented in `src/sort.rs`.
+
+Calibrate with:
+
+```sh
+# list.tsv: id <TAB> category <TAB> topic <TAB> image path
+cargo run --release -p pencilpilot-ref-filters --example sort_scan -- \
+    crates/ref-filters/models/clip-vit-b32 content/topics.json list.tsv
+```
+
+Calibration (2026-11-19) on 609 live pool pictures and 127 manifest pictures:
+
+* We dropped the `render`, `painting` and `graphic` styles. They claimed
+  many real studio photos (clean backgrounds) and isolated cartoon objects.
+* Anime and cartoon accept each other's styles plus `drawing`. Whether a
+  picture is anime or cartoon is settled by the cross-group topic match, not
+  by the style gate.
+* Most re-files were right on visual review. For example, anime landscapes
+  went from Characters to Scenery, cartoon kittens from Anime › Chibi to
+  Cartoon › Animals, and a building photo from Animals › Birds to
+  Environment › City.
+* A few re-files are debatable, such as hair clip art moved to Characters.

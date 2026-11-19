@@ -14,8 +14,14 @@
 //!   (images are never committed: Pixabay forbids hotlinking and standalone
 //!   redistribution, so each machine/deploy downloads its own copies).
 //!
+//! * `sort` checks every manifest with the local picture sorter (ADR-0009)
+//!   and re-files or removes pictures in the wrong category/topic. Tag rules
+//!   (`topic_for`) are only the first guess; the model has the final say.
+//!
 //! The API key is read from `PIXABAY_API_KEY` (environment or the repo's
 //! git-ignored `.env`).
+
+mod sort;
 
 use std::collections::HashSet;
 use std::fs;
@@ -631,9 +637,10 @@ fn main() {
             args.iter().any(|a| a == "--report"),
             args.iter().any(|a| a == "--retopic"),
         ),
+        Some("sort") => sort::run(args.iter().any(|a| a == "--dry-run")),
         _ => {
             eprintln!(
-                "usage:\n  ref-importer fetch <category> <query> [--type photo|illustration|vector] [--count N] [--topic ID]\n  ref-importer sync\n  ref-importer classify [--report] [--retopic]\n  ref-importer optimise\n  ref-importer status"
+                "usage:\n  ref-importer fetch <category> <query> [--type photo|illustration|vector] [--count N] [--topic ID]\n  ref-importer sync\n  ref-importer classify [--report] [--retopic]\n  ref-importer sort [--dry-run]\n  ref-importer optimise\n  ref-importer status"
             );
             std::process::exit(2);
         }

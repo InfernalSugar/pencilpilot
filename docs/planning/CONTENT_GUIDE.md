@@ -162,3 +162,8 @@ Finished sessions are saved in `localStorage['pp.drills']` as `{ id, at, avg, ro
    committed**: `apps/web/static/references/` is git-ignored. On a fresh machine or deploy run
    `pnpm refs sync` to download them again.
 4. `pnpm refs status` shows counts.
+5. `pnpm refs sort --dry-run` checks every manifest with the local picture sorter (ADR-0009: a CLIP
+   model that only sorts reference pictures, never grades drawings; get it with
+   `crates/ref-filters/fetch-model.sh clip`). Without `--dry-run` it re-files pictures in the wrong
+   category/topic and moves bad ones to `rejected.json`. Topic `prompts` and the `_sorting` block in
+   `content/topics.json` drive it.

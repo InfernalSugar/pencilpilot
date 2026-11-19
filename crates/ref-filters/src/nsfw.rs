@@ -1,6 +1,7 @@
 //! NSFW safety guard: Yahoo open_nsfw (ResNet-50 "thin", BSD-2-Clause) as
-//! ONNX, run with `tract` (pure Rust). This is the only learned model in the
-//! crate and it is used **only** to keep unsafe pictures away from students,
+//! ONNX, run with `tract` (pure Rust). One of two learned models in the
+//! crate (the other, CLIP, only sorts reference pictures: ADR-0009); this one
+//! is used **only** to keep unsafe pictures away from students,
 //! never for scoring (ADR-0002). See README.md for provenance.
 
 use std::io::Cursor;

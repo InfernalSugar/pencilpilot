@@ -32,6 +32,9 @@ pub struct PoolState {
     /// reason code → number of pictures rejected for it (monitoring)
     #[serde(default)]
     pub rejected: BTreeMap<String, u32>,
+    /// ids the picture sorter (ADR-0009) has checked; the rest are checked at startup
+    #[serde(default)]
+    pub sorted: HashSet<String>,
     /// slot key → (slot, request count)
     #[serde(skip)]
     pub demand: HashMap<String, (Slot, u32)>,
@@ -152,9 +155,55 @@ impl PoolState {
         self.fresh.retain(|_, q| !q.is_empty());
         self.library.retain(|_, l| !l.is_empty());
         self.phashes.retain(|(id, _)| !ids.contains(id));
+        self.sorted.retain(|id| !ids.contains(id));
         let mut out: Vec<LiveRef> = ids.iter().filter_map(|id| self.refs.remove(id)).collect();
         out.sort_by(|a, b| a.id.cmp(&b.id));
         out
+    }
+
+    /// Move a reference to another category/topic (same tier), keeping its
+    /// place as fresh or already served. Returns false if `id` is unknown.
+    pub fn refile(&mut self, id: &str, category: &str, topic: &str) -> bool {
+        let Some(r) = self.refs.get_mut(id) else {
+            return false;
+        };
+        let from = Slot {
+            category: r.category.clone(),
+            topic: r.topic.clone(),
+            tier: r.tier,
+        }
+        .key();
+        r.category = category.to_string();
+        r.topic = topic.to_string();
+        let to = Slot {
+            category: category.to_string(),
+            topic: topic.to_string(),
+            tier: r.tier,
+        }
+        .key();
+        if from == to {
+            return true;
+        }
+        if let Some(q) = self.fresh.get_mut(&from) {
+            let before = q.len();
+            q.retain(|x| x != id);
+            if q.len() < before {
+                self.fresh
+                    .entry(to.clone())
+                    .or_default()
+                    .push_back(id.to_string());
+            }
+        }
+        if let Some(l) = self.library.get_mut(&from) {
+            let before = l.len();
+            l.retain(|x| x != id);
+            if l.len() < before {
+                self.library.entry(to).or_default().push(id.to_string());
+            }
+        }
+        self.fresh.retain(|_, q| !q.is_empty());
+        self.library.retain(|_, l| !l.is_empty());
+        true
     }
 
     /// The slot most in need of refilling: asked-for slots below `target`
@@ -308,6 +357,25 @@ mod tests {
             assert_eq!(p.take(&s, &[], &mut rng).unwrap().id, "p");
         }
         assert!(p.remove_where(|_| false).is_empty());
+    }
+
+    #[test]
+    fn refile_moves_fresh_and_served_pictures() {
+        let mut p = PoolState::default();
+        let mut rng = StdRng::seed_from_u64(4);
+        p.add(r("a", "anime", "characters", 2), None);
+        p.add(r("b", "anime", "characters", 2), None);
+        let chars = slot("anime", "characters", 2);
+        let scenery = slot("anime", "scenery", 2);
+        assert_eq!(p.take(&chars, &[], &mut rng).unwrap().id, "a"); // a is served
+        assert!(p.refile("a", "anime", "scenery"));
+        assert!(p.refile("b", "anime", "scenery"));
+        assert!(!p.refile("zzz", "anime", "scenery"));
+        assert_eq!(p.fresh_len(&scenery), 1);
+        assert_eq!(p.library[&scenery.key()], ["a"]);
+        assert!(p.take(&chars, &[], &mut rng).is_none());
+        assert_eq!(p.refs["a"].topic, "scenery");
+        assert_eq!(p.take(&scenery, &[], &mut rng).unwrap().id, "b");
     }
 
     #[test]
