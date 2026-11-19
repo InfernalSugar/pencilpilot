@@ -35,6 +35,15 @@ const CATEGORIES: &[&str] = &[
     "cartoon",
     "fundamentals",
 ];
+/// Categories that show real photos only (same rule as ref-service's
+/// `model::PHOTO_ONLY`).
+const PHOTO_ONLY: &[&str] = &["real-life", "animals", "environment"];
+
+/// True if `page_url` (`https://pixabay.com/<photos|vectors|illustrations>/…`)
+/// is allowed in `category`.
+fn kind_allowed(category: &str, page_url: &str) -> bool {
+    !PHOTO_ONLY.contains(&category) || page_url.contains("pixabay.com/photos/")
+}
 const LICENSE: &str = "Pixabay Content License";
 const LICENSE_URL: &str = "https://pixabay.com/service/license-summary/";
 
@@ -305,6 +314,10 @@ fn fetch(category: &str, query: &str, kind: &str, count: usize, topic: Option<&s
         CATEGORIES.contains(&category),
         "unknown category {category}; use one of {CATEGORIES:?}"
     );
+    assert!(
+        kind == "photo" || !PHOTO_ONLY.contains(&category),
+        "{category} shows real photos only: drop --type {kind}"
+    );
     let key = api_key();
     let known = known_ids();
     let cand_path = refs_dir().join("candidates.json");
@@ -326,6 +339,11 @@ fn fetch(category: &str, query: &str, kind: &str, count: usize, topic: Option<&s
             if let Some(why) = auto_reject(&hit) {
                 skipped += 1;
                 eprintln!("  skip {id}: {why}");
+                continue;
+            }
+            if !kind_allowed(category, hit["pageURL"].as_str().unwrap_or("")) {
+                skipped += 1;
+                eprintln!("  skip {id}: not a photo");
                 continue;
             }
             let Some(url) = sized_url(&hit) else { continue };
@@ -684,6 +702,31 @@ mod tests {
             auto_reject(&json!({"isGRated": true, "tags": "cat"})).is_some(),
             "unknown AI flag is rejected"
         );
+    }
+
+    #[test]
+    fn photo_only_categories_hold_only_photos() {
+        assert!(kind_allowed("animals", "https://pixabay.com/photos/cat-1/"));
+        assert!(!kind_allowed(
+            "animals",
+            "https://pixabay.com/vectors/cat-1/"
+        ));
+        assert!(kind_allowed("anime", "https://pixabay.com/vectors/girl-1/"));
+        // the committed manifests follow the rule
+        for f in CATEGORIES
+            .iter()
+            .map(|c| format!("{c}.json"))
+            .chain(["candidates.json".to_string()])
+        {
+            for r in read_json::<RefList>(&refs_dir().join(&f)).references {
+                assert!(
+                    kind_allowed(&r.category, &r.page_url),
+                    "{f}: {} is not a photo but is in {}",
+                    r.id,
+                    r.category
+                );
+            }
+        }
     }
 
     #[test]

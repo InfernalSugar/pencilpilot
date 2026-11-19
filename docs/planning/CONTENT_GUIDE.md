@@ -152,6 +152,8 @@ Finished sessions are saved in `localStorage['pp.drills']` as `{ id, at, avg, ro
 ## References (how to add pictures)
 1. **Fetch candidates** (needs `PIXABAY_API_KEY` in the git-ignored `.env`):
    `pnpm refs fetch animals "horse" --count 8` (`--type illustration` or `--type vector` for anime/cartoon).
+   Real life, animals and environment are **real photos only** (any tier): the importer refuses other
+   types there, and a test checks the committed manifests. Beginner-friendliness comes from the tier.
    AI-generated, non-G-rated, low-quality and franchise/NSFW-tagged images are skipped automatically.
 2. **Review** at http://localhost:5173/dev/references (dev server only). Approve only pictures that are
    safe for all ages, clearly hand-made (check hands, eyes, text), not a franchise character, and good to
