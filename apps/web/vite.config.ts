@@ -4,20 +4,27 @@ import adapter from '@sveltejs/adapter-node';
 import { sveltekit } from '@sveltejs/kit/vite';
 import { attachLobbySockets } from './src/lib/server/lobby/socket';
 
+const REF_SERVICE = process.env.REF_SERVICE_URL ?? 'http://127.0.0.1:8787';
+// Endless references: the Rust ref-service (cargo run -p pencilpilot-ref-service).
+const refProxy = Object.fromEntries(
+	['/api/ref', '/api/report', '/api/health', '/api/pool', '/refimg'].map((p) => [p, REF_SERVICE])
+);
+
 export default defineConfig({
 	// one .env at the repo root (git-ignored) for every app and tool
 	envDir: '../..',
 	server: {
 		// The WASM packages live in crates/*/pkg, outside apps/web; let the dev server serve them.
 		fs: { allow: [searchForWorkspaceRoot(process.cwd())] },
-		// Endless references: the Rust ref-service (cargo run -p pencilpilot-ref-service).
-		proxy: Object.fromEntries(
-			['/api/ref', '/api/report', '/api/health', '/api/pool', '/refimg'].map((p) => [
-				p,
-				process.env.REF_SERVICE_URL ?? 'http://127.0.0.1:8787'
-			])
-		)
+		proxy: {
+			...refProxy,
+			// The owner's picture review (/dev/pictures), dev server only. xfwd passes the
+			// browser's address on, so the ref-service refuses anyone but this computer.
+			'/api/admin': { target: REF_SERVICE, xfwd: true }
+		}
 	},
+	// `vite preview` would reuse server.proxy: never the admin API there
+	preview: { proxy: refProxy },
 	plugins: [
 		// Private lobbies: live connections on /lobby-ws (production: server.js does the same).
 		{

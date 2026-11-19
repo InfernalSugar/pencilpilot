@@ -20,6 +20,17 @@ pub const DUPLICATE_BITS: u32 = 10;
 pub const MISS_LIMIT: u32 = 6;
 pub const PAUSE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
+/// A reference taken out with [`PoolState::take_out`], ready to be put back.
+#[derive(Debug, Clone)]
+pub struct Removed {
+    pub r: LiveRef,
+    phash: Option<u64>,
+    fresh: Vec<String>,
+    library: Vec<String>,
+    sorted: bool,
+    blocked: bool,
+}
+
 #[derive(Default, Serialize, Deserialize)]
 pub struct PoolState {
     pub refs: HashMap<String, LiveRef>,
@@ -42,6 +53,10 @@ pub struct PoolState {
     /// other rules mean every picture is checked again
     #[serde(default)]
     pub sorted_rules: Option<String>,
+    /// ids the site owner has reviewed (from `reviews.jsonl`, filled at
+    /// load): their decision wins, so rule changes never re-sort or remove them
+    #[serde(skip)]
+    pub reviewed: HashSet<String>,
     /// slot key → (slot, request count)
     #[serde(skip)]
     pub demand: HashMap<String, (Slot, u32)>,
@@ -191,6 +206,15 @@ impl PoolState {
     /// Move a reference to another category/topic (same tier), keeping its
     /// place as fresh or already served. Returns false if `id` is unknown.
     pub fn refile(&mut self, id: &str, category: &str, topic: &str) -> bool {
+        let Some(tier) = self.refs.get(id).map(|r| r.tier) else {
+            return false;
+        };
+        self.reslot(id, category, topic, tier)
+    }
+
+    /// Move a reference to another category/topic/tier, keeping its place as
+    /// fresh or already served. Returns false if `id` is unknown.
+    pub fn reslot(&mut self, id: &str, category: &str, topic: &str, tier: u8) -> bool {
         let Some(r) = self.refs.get_mut(id) else {
             return false;
         };
@@ -202,10 +226,11 @@ impl PoolState {
         .key();
         r.category = category.to_string();
         r.topic = topic.to_string();
+        r.tier = tier;
         let to = Slot {
             category: category.to_string(),
             topic: topic.to_string(),
-            tier: r.tier,
+            tier,
         }
         .key();
         if from == to {
@@ -230,6 +255,89 @@ impl PoolState {
         }
         self.fresh.retain(|_, q| !q.is_empty());
         self.library.retain(|_, l| !l.is_empty());
+        true
+    }
+
+    /// Take one reference out of the pool completely (like [`Self::remove_where`]),
+    /// keeping everything needed to [`Self::put_back`] it unchanged.
+    pub fn take_out(&mut self, id: &str) -> Option<Removed> {
+        let r = self.refs.remove(id)?;
+        let mut fresh = Vec::new();
+        for (k, q) in self.fresh.iter_mut() {
+            let before = q.len();
+            q.retain(|x| x != id);
+            if q.len() < before {
+                fresh.push(k.clone());
+            }
+        }
+        let mut library = Vec::new();
+        for (k, l) in self.library.iter_mut() {
+            let before = l.len();
+            l.retain(|x| x != id);
+            if l.len() < before {
+                library.push(k.clone());
+            }
+        }
+        self.fresh.retain(|_, q| !q.is_empty());
+        self.library.retain(|_, l| !l.is_empty());
+        let phash = self
+            .phashes
+            .iter()
+            .position(|(x, _)| x == id)
+            .map(|i| self.phashes.remove(i).1);
+        let sorted = self.sorted.remove(id);
+        let blocked = self.blocked.contains(id);
+        Some(Removed {
+            r,
+            phash,
+            fresh,
+            library,
+            sorted,
+            blocked,
+        })
+    }
+
+    /// Undo [`Self::take_out`] (also lifts a block added since).
+    pub fn put_back(&mut self, x: Removed) {
+        let id = x.r.id.clone();
+        for k in x.fresh {
+            self.fresh.entry(k).or_default().push_back(id.clone());
+        }
+        for k in x.library {
+            self.library.entry(k).or_default().push(id.clone());
+        }
+        if let Some(h) = x.phash {
+            self.phashes.push((id.clone(), h));
+        }
+        if x.sorted {
+            self.sorted.insert(id.clone());
+        }
+        if x.blocked {
+            self.blocked.insert(id.clone());
+        } else {
+            self.blocked.remove(&id);
+        }
+        self.refs.insert(id, x.r);
+    }
+
+    /// Lift a block: the reference is served again (from the served library
+    /// of its slot). Returns false if it wasn't blocked.
+    pub fn unblock(&mut self, id: &str) -> bool {
+        if !self.blocked.remove(id) {
+            return false;
+        }
+        if let Some(r) = self.refs.get(id) {
+            let key = Slot {
+                category: r.category.clone(),
+                topic: r.topic.clone(),
+                tier: r.tier,
+            }
+            .key();
+            let l = self.library.entry(key).or_default();
+            if !l.iter().any(|x| x == id) {
+                l.push(id.to_string());
+            }
+        }
         true
     }
 
@@ -432,6 +540,31 @@ mod tests {
         assert!(p.take(&chars, &[], &mut rng).is_none());
         assert_eq!(p.refs["a"].topic, "scenery");
         assert_eq!(p.take(&scenery, &[], &mut rng).unwrap().id, "b");
+    }
+
+    #[test]
+    fn take_out_and_put_back_round_trip() {
+        let mut p = PoolState::default();
+        let mut rng = StdRng::seed_from_u64(5);
+        p.add(r("a", "animals", "pets", 1), Some(0xFF));
+        p.add(r("b", "animals", "pets", 1), Some(0xFF00_0000));
+        let s = slot("animals", "pets", 1);
+        assert_eq!(p.take(&s, &[], &mut rng).unwrap().id, "a"); // a served
+        p.sorted.insert("a".into());
+        let x = p.take_out("a").unwrap();
+        assert!(p.take_out("a").is_none());
+        assert!(!p.refs.contains_key("a") && !p.sorted.contains("a"));
+        assert!(p.phashes.iter().all(|(id, _)| id != "a"));
+        p.put_back(x);
+        assert_eq!(p.library[&s.key()], ["a"]);
+        assert!(p.sorted.contains("a"));
+        assert_eq!(p.phashes.len(), 2);
+        // reslot changes the tier too; unblock serves a blocked picture again
+        assert!(p.reslot("b", "animals", "wildlife", 3));
+        assert_eq!(p.fresh_len(&slot("animals", "wildlife", 3)), 1);
+        p.block("a");
+        assert!(p.unblock("a") && !p.unblock("a"));
+        assert_eq!(p.library[&s.key()], ["a"]);
     }
 
     #[test]

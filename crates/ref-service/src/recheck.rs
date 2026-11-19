@@ -8,6 +8,7 @@ use std::path::Path;
 
 use crate::model::kind_allowed;
 use crate::pool::PoolState;
+use crate::reviews::{Effective, Outcome, Place};
 use crate::sorting::{TopicCheck, destination};
 use ref_filters::sort::Decision;
 
@@ -98,6 +99,8 @@ pub fn recheck(
         .refs
         .keys()
         .filter(|id| all || !pool.sorted.contains(*id))
+        // the site owner's decision wins over any rule change
+        .filter(|id| !pool.reviewed.contains(*id))
         .cloned()
         .collect();
     if apply && all {
@@ -167,6 +170,141 @@ pub fn recheck(
         }
     }
     rep
+}
+
+/// `recheck --labels`: how often the sorter, run now, agrees with the site
+/// owner's review decisions.
+#[derive(Debug, Default)]
+pub struct Agreement {
+    /// "category/topic" (where the sorter had filed it) → counts[owner][sorter],
+    /// each 0 keep, 1 move, 2 reject
+    pub per_topic: BTreeMap<String, [[usize; 3]; 3]>,
+    /// "category/topic" → pictures where the sorter does exactly what the
+    /// owner did (a move must go to the same topic)
+    pub exact: BTreeMap<String, usize>,
+    /// (id, from, owner's outcome, sorter's outcome)
+    pub disagreements: Vec<(String, String, String, String)>,
+    /// reviewed pictures whose file is gone
+    pub missing: Vec<String>,
+}
+
+/// Run `check` over every reviewed picture (file from `image_for`) at the
+/// place the sorter had put it, and compare with the owner's outcome.
+pub fn agreement(
+    labels: &std::collections::HashMap<String, Effective>,
+    image_for: impl Fn(&str) -> Option<std::path::PathBuf>,
+    check: &dyn TopicCheck,
+) -> Agreement {
+    let mut out = Agreement::default();
+    let mut ids: Vec<&String> = labels.keys().collect();
+    ids.sort();
+    for id in ids {
+        let e = &labels[id];
+        let from = e.from.key();
+        let decision = image_for(id)
+            .and_then(|p| std::fs::read(p).ok())
+            .and_then(|b| ref_filters::decode(&b).ok())
+            .and_then(|img| check.check(&img, &e.from.category, &e.from.topic).ok());
+        let Some(decision) = decision else {
+            out.missing.push(id.clone());
+            continue;
+        };
+        let sorter = match destination(decision, &e.from.category, &e.from.topic) {
+            Ok((c, t)) if c == e.from.category && t == e.from.topic => Outcome::Keep,
+            Ok((c, t)) if kind_allowed(&c, &e.kind) => Outcome::Move(Place {
+                category: c,
+                topic: t,
+                tier: e.from.tier,
+            }),
+            _ => Outcome::Reject,
+        };
+        out.per_topic.entry(from.clone()).or_default()[e.outcome.index()][sorter.index()] += 1;
+        let same = match (&e.outcome, &sorter) {
+            (Outcome::Move(a), Outcome::Move(b)) => a.key() == b.key(),
+            (a, b) => a.index() == b.index(),
+        };
+        let n = out.exact.entry(from.clone()).or_default();
+        if same {
+            *n += 1;
+        } else {
+            out.disagreements
+                .push((id.clone(), from, e.outcome.label(), sorter.label()));
+        }
+    }
+    out
+}
+
+impl Agreement {
+    pub fn print(&self) {
+        for (id, from, owner, sorter) in &self.disagreements {
+            println!("{id:<14} {from:<24} owner {owner:<28} sorter {sorter}");
+        }
+        if !self.disagreements.is_empty() {
+            println!();
+        }
+        println!("rows: the owner's decision; columns: the sorter's (k keep, m move, r reject)");
+        println!(
+            "{:<26} {:>5} {:>7}   {:>4} {:>4} {:>4}   {:>4} {:>4} {:>4}   {:>4} {:>4} {:>4}",
+            "category/topic",
+            "n",
+            "agree",
+            "k→k",
+            "k→m",
+            "k→r",
+            "m→k",
+            "m→m",
+            "m→r",
+            "r→k",
+            "r→m",
+            "r→r"
+        );
+        let mut tot = [[0usize; 3]; 3];
+        let mut tot_exact = 0;
+        for (k, m) in &self.per_topic {
+            let n: usize = m.iter().flatten().sum();
+            let ex = self.exact.get(k).copied().unwrap_or(0);
+            tot_exact += ex;
+            println!(
+                "{k:<26} {n:>5} {:>6.0}%   {:>4} {:>4} {:>4}   {:>4} {:>4} {:>4}   {:>4} {:>4} {:>4}",
+                100.0 * ex as f64 / n.max(1) as f64,
+                m[0][0],
+                m[0][1],
+                m[0][2],
+                m[1][0],
+                m[1][1],
+                m[1][2],
+                m[2][0],
+                m[2][1],
+                m[2][2]
+            );
+            for (i, row) in m.iter().enumerate() {
+                for (j, x) in row.iter().enumerate() {
+                    tot[i][j] += x;
+                }
+            }
+        }
+        let n: usize = tot.iter().flatten().sum();
+        println!(
+            "{:<26} {n:>5} {:>6.0}%   {:>4} {:>4} {:>4}   {:>4} {:>4} {:>4}   {:>4} {:>4} {:>4}",
+            "total",
+            100.0 * tot_exact as f64 / n.max(1) as f64,
+            tot[0][0],
+            tot[0][1],
+            tot[0][2],
+            tot[1][0],
+            tot[1][1],
+            tot[1][2],
+            tot[2][0],
+            tot[2][1],
+            tot[2][2]
+        );
+        if !self.missing.is_empty() {
+            println!(
+                "{} reviewed pictures without a file (skipped)",
+                self.missing.len()
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -307,6 +445,68 @@ mod tests {
         );
         assert_eq!(p.sorted_rules.as_deref(), Some("v2"));
         assert!(p.sorted.contains("a"));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn reviewed_pictures_survive_a_rules_change() {
+        let (mut p, dir) = setup("reviewed");
+        p.reviewed.insert("a".into());
+        let check = FixedCheck(Decision::Reject {
+            reason: "off_topic:anime/scenery".into(),
+        });
+        let rep = recheck(&mut p, &dir, &check, true, true, |_, _| {});
+        assert!(rep.rules_changed);
+        assert!(p.refs.contains_key("a"), "the owner kept it");
+        assert!(dir.join("a.jpg").exists());
+        assert!(!p.refs.contains_key("b"), "unreviewed: the rules apply");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn agreement_with_the_owner() {
+        use crate::reviews::{Record, effective};
+        let (_, dir) = setup("agree");
+        let chars = Place {
+            category: "anime".into(),
+            topic: "characters".into(),
+            tier: 2,
+        };
+        let rec = |seq, id: &str, d: &str, to: Option<Place>| Record {
+            seq,
+            id: id.into(),
+            decision: d.into(),
+            undoes: None,
+            from: Some(chars.clone()),
+            to,
+            at: 0,
+            source: String::new(),
+            kind: "illustration".into(),
+            sorter: serde_json::Value::Null,
+        };
+        let scenery = Place {
+            topic: "scenery".into(),
+            ..chars.clone()
+        };
+        let labels = effective(&[
+            rec(1, "a", "move", Some(scenery)),
+            rec(2, "b", "keep", None),
+            rec(3, "nofile", "reject", None),
+        ]);
+        let check = FixedCheck(Decision::Refile {
+            category: "anime".into(),
+            topic: "scenery".into(),
+            p_from: 0.1,
+            p_to: 0.9,
+        });
+        let ag = agreement(&labels, |id| Some(dir.join(format!("{id}.jpg"))), &check);
+        // owner moved a → scenery (sorter agrees), kept b (sorter would move it)
+        assert_eq!(ag.per_topic["anime/characters"][1][1], 1);
+        assert_eq!(ag.per_topic["anime/characters"][0][1], 1);
+        assert_eq!(ag.exact["anime/characters"], 1);
+        assert_eq!(ag.disagreements.len(), 1);
+        assert_eq!(ag.disagreements[0].0, "b");
+        assert_eq!(ag.missing, ["nofile"]);
         std::fs::remove_dir_all(dir).ok();
     }
 

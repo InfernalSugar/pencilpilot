@@ -26,11 +26,23 @@
 //!
 //! `ref-service recheck [--dry-run]` runs the topic check over the existing
 //! pool (stop the server first) and prints counts per category/topic.
+//! Pictures the site owner has reviewed are left alone.
+//!
+//! `ref-service recheck --labels data/ref-service/reviews.jsonl` changes
+//! nothing: it runs the sorter over the owner's reviewed pictures and prints
+//! how often it agrees with them (a confusion table per topic), to measure
+//! prompt or cut-off changes.
+//!
+//! `REF_ADMIN=1` (set by `pnpm dev`, never in production) turns on the
+//! owner's picture review API under `/api/admin/*`, for requests from this
+//! computer only (see `admin`).
 
+mod admin;
 mod budget;
 mod model;
 mod pool;
 mod recheck;
+mod reviews;
 mod sorting;
 mod sources;
 mod vet;
@@ -74,6 +86,10 @@ struct App {
     cursors: Mutex<HashMap<(SourceId, String, String), u32>>,
     /// slot key → refill steps so far (picks the source and the query)
     turns: Mutex<HashMap<String, usize>>,
+    /// `REF_ADMIN=1`: the owner's review API is on (dev only)
+    admin: bool,
+    /// the owner's review decisions. Lock order: `reviews`, then `pool`.
+    reviews: Mutex<reviews::Log>,
 }
 
 impl App {
@@ -167,12 +183,44 @@ fn load_sorter(topics: &Path) -> Box<dyn TopicCheck> {
     }
 }
 
-/// `ref-service recheck [--dry-run]`
+/// `ref-service recheck --labels <reviews.jsonl>`: the sorter vs the owner.
+fn labels_main(path: &Path) {
+    let data = data_dir();
+    let labels = reviews::effective(&reviews::read_log(path));
+    if labels.is_empty() {
+        println!("no reviewed pictures in {}", path.display());
+        return;
+    }
+    let sorter = load_sorter(&topics_path());
+    let images = data.join("images");
+    let kept = data.join(admin::LABELS_DIR);
+    let ag = recheck::agreement(
+        &labels,
+        |id| {
+            let f = format!("{id}.jpg");
+            [images.join(&f), kept.join(&f)]
+                .into_iter()
+                .find(|p| p.exists())
+        },
+        &*sorter,
+    );
+    ag.print();
+}
+
+/// `ref-service recheck [--dry-run] [--labels <reviews.jsonl>]`
 fn recheck_main(args: &[String]) {
+    if let Some(i) = args.iter().position(|a| a == "--labels") {
+        let path = args
+            .get(i + 1)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| data_dir().join("reviews.jsonl"));
+        return labels_main(&path);
+    }
     let apply = !args.iter().any(|a| a == "--dry-run");
     let data = data_dir();
     let topics = topics_path();
     let mut pool = load_pool(&data);
+    pool.reviewed = reviews::Log::open(data.join("reviews.jsonl")).reviewed_ids();
     let purged = purge_disallowed(&mut pool, &data.join("images"), apply);
     let sorter = load_sorter(&topics);
     let mut last = std::time::Instant::now();
@@ -266,7 +314,13 @@ async fn main() {
     let sorter = load_sorter(&topics_path);
 
     let mut pool = load_pool(&data);
-    info!(refs = pool.refs.len(), "loaded pool");
+    let review_log = reviews::Log::open(data.join("reviews.jsonl"));
+    pool.reviewed = review_log.reviewed_ids();
+    info!(
+        refs = pool.refs.len(),
+        reviewed = pool.reviewed.len(),
+        "loaded pool"
+    );
     let purged = purge_disallowed(&mut pool, &data.join("images"), true);
     if !purged.is_empty() {
         let mut why: std::collections::BTreeMap<String, usize> = Default::default();
@@ -311,6 +365,11 @@ async fn main() {
     }
 
     let sources = load_sources(&data);
+    // only from the real environment (not .env), so it can't leak into production
+    let admin = std::env::var("REF_ADMIN").as_deref() == Ok("1");
+    if admin {
+        warn!("REF_ADMIN=1: owner's picture review API on /api/admin (localhost only, dev only)");
+    }
     let app = Arc::new(App {
         pool: Mutex::new(pool),
         wake: Notify::new(),
@@ -322,6 +381,8 @@ async fn main() {
         target,
         cursors: Mutex::new(HashMap::new()),
         turns: Mutex::new(HashMap::new()),
+        admin,
+        reviews: Mutex::new(review_log),
     });
 
     tokio::spawn(refill_worker(app.clone()));
@@ -331,12 +392,15 @@ async fn main() {
         .await
         .expect("bind");
     info!("ref-service on http://127.0.0.1:{port}");
-    axum::serve(listener, router)
-        .with_graceful_shutdown(async {
-            tokio::signal::ctrl_c().await.ok();
-        })
-        .await
-        .expect("server");
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async {
+        tokio::signal::ctrl_c().await.ok();
+    })
+    .await
+    .expect("server");
 }
 
 /// The picture sources to use: all of them unless `REF_SOURCES` names some.
@@ -399,7 +463,12 @@ fn disallowed(r: &LiveRef) -> Option<String> {
 /// Returns them with the reason.
 fn purge_disallowed(pool: &mut PoolState, images: &Path, apply: bool) -> Vec<(LiveRef, String)> {
     let mut why = HashMap::new();
-    for r in pool.refs.values() {
+    // the site owner's decision wins over the rules
+    for r in pool
+        .refs
+        .values()
+        .filter(|r| !pool.reviewed.contains(&r.id))
+    {
         if let Some(w) = disallowed(r) {
             why.insert(r.id.clone(), w);
         }
@@ -432,6 +501,7 @@ fn purge_disallowed(pool: &mut PoolState, images: &Path, apply: bool) -> Vec<(Li
 
 fn routes(app: Arc<App>) -> Router {
     Router::new()
+        .merge(admin::router(app.clone()))
         .route("/api/health", get(|| async { "ok" }))
         .route("/api/ref", get(get_ref))
         .route("/api/report", post(report))
@@ -875,6 +945,8 @@ mod tests {
             vetter: Box::new(FiltersVetter(ref_filters::Filters::without_nsfw())),
             sorter: Box::new(NoTopicCheck),
             topics: load_topics(&repo_root().join("content/topics.json")),
+            admin: false,
+            reviews: Mutex::new(reviews::Log::open(dir.join("reviews.jsonl"))),
             data: dir,
             target: 3,
             cursors: Mutex::new(HashMap::new()),
@@ -947,6 +1019,8 @@ mod tests {
             vetter: Box::new(FiltersVetter(ref_filters::Filters::without_nsfw())),
             sorter: Box::new(NoTopicCheck),
             topics: load_topics(&repo_root().join("content/topics.json")),
+            admin: false,
+            reviews: Mutex::new(reviews::Log::open(dir.join("reviews.jsonl"))),
             data: dir,
             target: 3,
             cursors: Mutex::new(HashMap::new()),
