@@ -137,6 +137,8 @@
 		onguides,
 		liquifySize = 60,
 		liquifyStrength = 0.6,
+		gradientKind = 'linear',
+		gradientEnd = 'transparent',
 		maxHeight = '78vh',
 		viewControls = true
 	}: {
@@ -166,7 +168,12 @@
 			| 'select-wand'
 			| 'transform'
 			| 'liquify'
-			| 'guides';
+			| 'guides'
+			| 'gradient';
+		/** gradient: straight or round */
+		gradientKind?: 'linear' | 'radial';
+		/** gradient: fades from the brush colour to this colour, or to transparent */
+		gradientEnd?: string | 'transparent';
 		/** grid, perspective and ruler guides (null = none) */
 		guides?: GuideSettings | null;
 		/** guides moved (vanishing points or the ruler dragged with the 'guides' tool) */
@@ -1137,6 +1144,78 @@
 	// ---- liquify ----
 
 	let liq: { id: number; x: number; y: number } | null = null;
+
+	// ---- gradient: drag from start to end, previewed live ----
+	let grad = $state<{ id: number; from: Pt; to: Pt } | null>(null);
+
+	const unit = (hex: string): [number, number, number] => {
+		const n = parseInt(hex.slice(1), 16) || 0;
+		return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
+	};
+
+	function gradientShow() {
+		if (!paint || !grad) return;
+		const c0 = unit(color);
+		const end = gradientEnd === 'transparent' ? null : unit(gradientEnd);
+		const c1 = end ?? c0;
+		paint.gradientPreview(
+			gradientKind === 'radial',
+			grad.from[0],
+			grad.from[1],
+			grad.to[0],
+			grad.to[1],
+			...c0,
+			opacity,
+			...c1,
+			end ? opacity : 0
+		);
+		schedule();
+	}
+
+	// ---- adjustments (the draw page's Adjust panel) ----
+
+	/** Start adjusting the active layer; false if it's locked or hidden. */
+	export function adjustBegin(): boolean {
+		return !!paint?.adjustBegin();
+	}
+
+	export interface Adjustments {
+		hue: number;
+		saturation: number;
+		brightness: number;
+		contrast: number;
+		blur: number;
+		/** paint the layer this colour (keeps its transparency) */
+		recolour: string | null;
+	}
+
+	export function adjustPreview(a: Adjustments) {
+		if (!paint?.isAdjusting()) return;
+		const [r, g, b] = a.recolour ? unit(a.recolour) : [0, 0, 0];
+		paint.adjustPreview(
+			a.hue,
+			a.saturation,
+			a.brightness,
+			a.contrast,
+			a.blur,
+			!!a.recolour,
+			r,
+			g,
+			b
+		);
+		schedule();
+	}
+
+	/** keep the adjustment (one undo step) */
+	export function adjustCommit() {
+		if (paint?.isAdjusting()) changed(paint.adjustCommit());
+	}
+
+	export function adjustCancel() {
+		if (!paint?.isAdjusting()) return;
+		paint.adjustCancel();
+		schedule();
+	}
 	/** where the liquify brush circle is drawn (canvas px) */
 	let hoverAt = $state<[number, number] | null>(null);
 
@@ -1356,6 +1435,16 @@
 			liq = { id: e.pointerId, x, y };
 			return;
 		}
+		if (tool === 'gradient') {
+			if (!paint.adjustBegin()) {
+				const l = shownLayers().find((x) => x.id === paint!.activeLayer);
+				return onblocked?.(l && !l.visible ? 'hidden' : 'locked');
+			}
+			capture(e);
+			const p = toCanvas(e.clientX, e.clientY);
+			grad = { id: e.pointerId, from: p, to: p };
+			return;
+		}
 		if (tool === 'fill') return fillAt(e.clientX, e.clientY);
 		if (tool === 'select-wand') {
 			const [cx, cy] = toCanvas(e.clientX, e.clientY);
@@ -1403,6 +1492,11 @@
 	function move(e: PointerEvent) {
 		if (guideDrag) return guideMove(toCanvas(e.clientX, e.clientY));
 		if (tool === 'liquify') hoverAt = toCanvas(e.clientX, e.clientY);
+		if (grad && e.pointerId === grad.id) {
+			grad = { ...grad, to: toCanvas(e.clientX, e.clientY) };
+			gradientShow();
+			return;
+		}
 		if (liq && e.pointerId === liq.id && paint) {
 			const events = e.getCoalescedEvents?.() ?? [];
 			for (const ev of events.length ? events : [e]) {
@@ -1473,6 +1567,15 @@
 		if (liq && e.pointerId === liq.id && paint) {
 			liq = null;
 			changed(paint.liquifyEnd());
+			return;
+		}
+		if (grad && e.pointerId === grad.id && paint) {
+			const { from, to } = grad;
+			grad = null;
+			// a tap (no drag) paints nothing
+			if (Math.hypot(to[0] - from[0], to[1] - from[1]) * fit * zoom < 4) paint.adjustCancel();
+			else changed(paint.adjustCommit());
+			schedule();
 			return;
 		}
 		if (xfDrag) {
@@ -1893,6 +1996,14 @@
 				{/if}
 			</svg>
 		{/if}
+		{#if grad}
+			{@const hr = 6 / Math.max(0.01, fit * zoom)}
+			<svg class="xf" viewBox="0 0 {width} {height}" preserveAspectRatio="none" aria-hidden="true">
+				<line class="grad" x1={grad.from[0]} y1={grad.from[1]} x2={grad.to[0]} y2={grad.to[1]} />
+				<circle class="grad" cx={grad.from[0]} cy={grad.from[1]} r={hr} />
+				<circle class="grad" cx={grad.to[0]} cy={grad.to[1]} r={hr} />
+			</svg>
+		{/if}
 		{#if tool === 'liquify' && hoverAt}
 			<svg class="xf" viewBox="0 0 {width} {height}" preserveAspectRatio="none" aria-hidden="true">
 				<circle class="liq" cx={hoverAt[0]} cy={hoverAt[1]} r={liquifySize} />
@@ -2098,6 +2209,12 @@
 	.guides .handle {
 		fill: #fff;
 		stroke: #e8492f;
+		stroke-width: 2;
+		vector-effect: non-scaling-stroke;
+	}
+	.xf .grad {
+		fill: #fff;
+		stroke: #16161a;
 		stroke-width: 2;
 		vector-effect: non-scaling-stroke;
 	}

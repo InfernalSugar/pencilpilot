@@ -19,6 +19,7 @@ use std::collections::{HashMap, HashSet};
 use hokusai::tile::empty_tile;
 use hokusai::{Brush, BrushSetting, BrushState, TILE_SIZE, TilePixels, TiledSurface};
 
+pub mod adjust;
 pub mod layers;
 pub mod wasm;
 
@@ -27,8 +28,8 @@ use layers::{
     TileSource, composite_pixel, json_str, mask_value, merge_pixel, premul_fix15, unpremul_srgb,
 };
 
-type TileKey = (i32, i32);
-type TileMap = HashMap<TileKey, Box<TilePixels>>;
+pub(crate) type TileKey = (i32, i32);
+pub(crate) type TileMap = HashMap<TileKey, Box<TilePixels>>;
 /// Tiles as they were before an edit. `None` = the tile did not exist.
 type Snapshot = HashMap<TileKey, Option<Box<TilePixels>>>;
 
@@ -338,6 +339,8 @@ pub struct Painter {
     dirty: HashSet<TileKey>,
     /// the selection: 255 = selected, per canvas pixel (None = no selection)
     selection: Option<Vec<u8>>,
+    /// an adjustment / gradient being previewed: (layer, its tiles before)
+    adjusting: Option<(u32, TileMap)>,
     /// a transform in progress (see `transform_begin`)
     transform: Option<Box<TransformSession>>,
     /// a liquify stroke in progress: (layer, its tiles before the stroke)
@@ -368,6 +371,7 @@ impl Painter {
             alpha_lock_stroke: false,
             dirty: HashSet::new(),
             selection: None,
+            adjusting: None,
             transform: None,
             liquify: None,
             symmetry: None,
@@ -739,7 +743,10 @@ impl Painter {
 
     /// No tool is busy with pixels (so surfaces can be swapped).
     fn idle(&self) -> bool {
-        self.stroking.is_none() && self.transform.is_none() && self.liquify.is_none()
+        self.stroking.is_none()
+            && self.transform.is_none()
+            && self.liquify.is_none()
+            && self.adjusting.is_none()
     }
 
     fn stop_mask_editing(&mut self) {
@@ -1101,7 +1108,7 @@ impl Painter {
     /// Start a stroke on the active layer. Returns false (and paints nothing)
     /// if that layer is locked or hidden.
     pub fn begin_stroke(&mut self) -> bool {
-        if self.transform.is_some() {
+        if self.transform.is_some() || self.adjusting.is_some() {
             return false;
         }
         let Some(idx) = self.index_of(self.active) else {
@@ -1564,7 +1571,7 @@ impl Painter {
     /// selection) so they can be moved, scaled, rotated and flipped. Returns
     /// the lifted box `[x0, y0, x1, y1]` (empty if there's nothing to lift).
     pub fn transform_begin(&mut self) -> Vec<f32> {
-        if self.transform.is_some() || self.stroking.is_some() {
+        if self.transform.is_some() || self.stroking.is_some() || self.adjusting.is_some() {
             return Vec::new();
         }
         let (w, h) = (self.width as i64, self.height as i64);
@@ -1811,7 +1818,7 @@ impl Painter {
 
     /// Start a liquify stroke on the active layer (false if locked/hidden/busy).
     pub fn liquify_begin(&mut self) -> bool {
-        if self.liquify.is_some() || self.transform.is_some() || self.stroking.is_some() {
+        if !self.idle() {
             return false;
         }
         let Some(li) = self.index_of(self.active) else {
@@ -1945,6 +1952,97 @@ impl Painter {
         true
     }
 
+    // ---- adjustments and gradients: previewed live, one undo step ----
+
+    /// Start adjusting the active layer (or painting a gradient on it).
+    pub fn adjust_begin(&mut self) -> bool {
+        if !self.idle() {
+            return false;
+        }
+        let Some(li) = self.index_of(self.active) else {
+            return false;
+        };
+        if self.layers[li].props.locked || !self.shown(li) {
+            return false;
+        }
+        let l = &self.layers[li];
+        self.adjusting = Some((l.id, l.surface.tiles.clone()));
+        true
+    }
+
+    pub fn is_adjusting(&self) -> bool {
+        self.adjusting.is_some()
+    }
+
+    fn adjust_show(&mut self, make: impl FnOnce(&TileMap, &adjust::Area<'_>) -> TileMap) {
+        let Some((layer, original)) = &self.adjusting else {
+            return;
+        };
+        let Some(li) = self.index_of(*layer) else {
+            return;
+        };
+        let area = adjust::Area {
+            width: self.width,
+            height: self.height,
+            selection: self.selection.as_deref(),
+            keep_alpha: self.layers[li].props.alpha_lock,
+        };
+        let next = make(original, &area);
+        let s = &mut self.layers[li].surface;
+        let keys: Vec<TileKey> = s.tiles.keys().chain(next.keys()).copied().collect();
+        s.dirty.extend(keys);
+        s.tiles = next;
+    }
+
+    /// Show the layer with these colour adjustments (from the original each time).
+    pub fn adjust_preview(&mut self, a: adjust::ColourAdjust) {
+        self.adjust_show(|o, area| adjust::adjust_tiles(o, &a, area));
+    }
+
+    /// Show the layer with this gradient painted over it.
+    pub fn gradient_preview(&mut self, g: adjust::Gradient) {
+        self.adjust_show(|o, area| adjust::gradient_tiles(o, &g, area));
+    }
+
+    /// Keep what's previewed as one undo step. False if nothing changed.
+    pub fn adjust_commit(&mut self) -> bool {
+        let Some((layer, original)) = self.adjusting.take() else {
+            return false;
+        };
+        let Some(li) = self.index_of(layer) else {
+            return false;
+        };
+        let now = &self.layers[li].surface.tiles;
+        let mut snap = Snapshot::new();
+        for key in original.keys().chain(now.keys()) {
+            if original.get(key) != now.get(key) {
+                snap.insert(*key, original.get(key).cloned());
+            }
+        }
+        if snap.is_empty() {
+            return false;
+        }
+        self.push_undo(Edit::Tiles {
+            layer,
+            mask: self.editing_mask(layer),
+            snap,
+        });
+        true
+    }
+
+    /// Put the layer back as it was.
+    pub fn adjust_cancel(&mut self) {
+        let Some((layer, original)) = self.adjusting.take() else {
+            return;
+        };
+        if let Some(li) = self.index_of(layer) {
+            let s = &mut self.layers[li].surface;
+            let keys: Vec<TileKey> = s.tiles.keys().chain(original.keys()).copied().collect();
+            s.dirty.extend(keys);
+            s.tiles = original;
+        }
+    }
+
     // ---- shared canvases: other people's strokes ----
 
     /// Add a layer without an undo step (e.g. a layer for another person). Returns its id.
@@ -2030,6 +2128,7 @@ impl Painter {
     }
 
     pub fn undo(&mut self) -> bool {
+        self.adjust_cancel();
         if self.stroking.is_some() {
             return false;
         }
@@ -2047,6 +2146,7 @@ impl Painter {
     }
 
     pub fn redo(&mut self) -> bool {
+        self.adjust_cancel();
         if self.stroking.is_some() {
             return false;
         }
@@ -3296,6 +3396,58 @@ mod tests {
         assert_eq!(p.layers().len(), 2);
         p.undo();
         assert_eq!(p.layers().len(), 4);
+    }
+
+    #[test]
+    fn adjustments_preview_commit_cancel_and_undo() {
+        let mut p = Painter::new(256, 128);
+        let mut fat = pen();
+        fat.get_mut(BrushSetting::Radius).base_value = 2.5;
+        set_brush_rgb(&mut fat, 200, 30, 30);
+        line(&mut p, &fat, 60.0);
+        p.flush();
+        let before = p.rgba().to_vec();
+        assert!(p.adjust_begin());
+        assert!(!p.begin_stroke(), "no painting while adjusting");
+        p.adjust_preview(adjust::ColourAdjust {
+            hue: 120.0,
+            ..Default::default()
+        });
+        p.flush();
+        let c = px(&p, 100, 60);
+        assert!(c[1] > c[0] + 60, "red turned green: {c:?}");
+        p.adjust_cancel();
+        p.flush();
+        assert_eq!(p.rgba(), &before[..]);
+        // commit is one undo step
+        assert!(p.adjust_begin());
+        p.adjust_preview(adjust::ColourAdjust {
+            saturation: -1.0,
+            ..Default::default()
+        });
+        assert!(p.adjust_commit());
+        p.flush();
+        let c = px(&p, 100, 60);
+        assert!(c[0].abs_diff(c[1]) < 8, "grey: {c:?}");
+        assert!(p.undo());
+        p.flush();
+        assert_eq!(p.rgba(), &before[..]);
+        // gradient
+        assert!(p.adjust_begin());
+        p.gradient_preview(adjust::Gradient {
+            kind: adjust::GradientKind::Linear,
+            from: (0.0, 0.0),
+            to: (256.0, 0.0),
+            c0: [0.0, 0.0, 1.0],
+            a0: 1.0,
+            c1: [0.0, 0.0, 1.0],
+            a1: 0.0,
+        });
+        assert!(p.adjust_commit());
+        p.flush();
+        assert!(px(&p, 4, 10)[2] > 200 && px(&p, 4, 10)[0] < 40);
+        assert!(px(&p, 250, 10)[0] > 240);
+        assert!(!p.adjust_commit());
     }
 
     #[test]
