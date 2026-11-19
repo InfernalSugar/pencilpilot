@@ -12,17 +12,25 @@ export interface StrokePoint {
 export interface Stroke {
 	brushId: string;
 	eraser: boolean;
+	/** the layer it was painted on (paint engine layer id) */
+	layer?: number;
 	points: StrokePoint[];
 }
 
-type Action = { kind: 'stroke'; stroke: Stroke } | { kind: 'clear'; removed: Stroke[] };
+type Action =
+	| { kind: 'stroke'; stroke: Stroke }
+	| { kind: 'clear'; layer: number; removed: Stroke[] }
+	| { kind: 'merge'; from: number; to: number; moved: Stroke[] }
+	/** add / delete / move / settings: no strokes change, but it's an undo step */
+	| { kind: 'layer' };
 
 /**
- * Keeps the list of visible strokes in step with the paint engine's undo/redo,
- * so what we send to the grader always matches what is on screen.
+ * Mirrors the paint engine's undo history one-to-one (every engine step has a
+ * matching action), so the strokes we send to the grader always match what is
+ * on screen. Strokes on deleted or hidden layers are filtered out at export.
  */
 export class StrokeLog {
-	#visible: Stroke[] = [];
+	#all: Stroke[] = [];
 	#undo: Action[] = [];
 	#redo: Action[] = [];
 	readonly limit: number;
@@ -31,28 +39,45 @@ export class StrokeLog {
 		this.limit = limit;
 	}
 
+	/** every stroke that is currently applied, on any layer */
 	get strokes(): readonly Stroke[] {
-		return this.#visible;
+		return this.#all;
 	}
 
+	/** strokes on the given layers (strokes without a layer always count) */
+	on(layers: Set<number>): Stroke[] {
+		return this.#all.filter((s) => s.layer === undefined || layers.has(s.layer));
+	}
+
+	/** One finished stroke. Empty strokes still take an undo step (the engine records one). */
 	add(stroke: Stroke) {
-		if (stroke.points.length === 0) return;
-		this.#visible.push(stroke);
+		if (stroke.points.length) this.#all.push(stroke);
 		this.#push({ kind: 'stroke', stroke });
 	}
 
-	clear() {
-		if (this.#visible.length === 0) return;
-		const removed = this.#visible;
-		this.#visible = [];
-		this.#push({ kind: 'clear', removed });
+	/** The engine erased `layer`. */
+	clear(layer: number) {
+		const removed = this.#all.filter((s) => s.layer === layer);
+		this.#all = this.#all.filter((s) => s.layer !== layer);
+		this.#push({ kind: 'clear', layer, removed });
+	}
+
+	/** The engine merged layer `from` into `to`. */
+	merge(from: number, to: number) {
+		const moved = this.#all.filter((s) => s.layer === from);
+		for (const s of moved) s.layer = to;
+		this.#push({ kind: 'merge', from, to, moved });
+	}
+
+	/** Any other undoable layer change. */
+	layerChange() {
+		this.#push({ kind: 'layer' });
 	}
 
 	undo(): boolean {
 		const a = this.#undo.pop();
 		if (!a) return false;
-		if (a.kind === 'stroke') this.#visible.pop();
-		else this.#visible = a.removed;
+		this.#revert(a);
 		this.#redo.push(a);
 		return true;
 	}
@@ -60,13 +85,26 @@ export class StrokeLog {
 	redo(): boolean {
 		const a = this.#redo.pop();
 		if (!a) return false;
-		if (a.kind === 'stroke') this.#visible.push(a.stroke);
-		else {
-			a.removed = this.#visible;
-			this.#visible = [];
-		}
+		this.#reapply(a);
 		this.#undo.push(a);
 		return true;
+	}
+
+	#revert(a: Action) {
+		if (a.kind === 'stroke') {
+			const i = this.#all.lastIndexOf(a.stroke);
+			if (i >= 0) this.#all.splice(i, 1);
+		} else if (a.kind === 'clear') this.#all.push(...a.removed);
+		else if (a.kind === 'merge') for (const s of a.moved) s.layer = a.from;
+	}
+
+	#reapply(a: Action) {
+		if (a.kind === 'stroke') {
+			if (a.stroke.points.length) this.#all.push(a.stroke);
+		} else if (a.kind === 'clear') {
+			const gone = new Set(a.removed);
+			this.#all = this.#all.filter((s) => !gone.has(s));
+		} else if (a.kind === 'merge') for (const s of a.moved) s.layer = a.to;
 	}
 
 	#push(a: Action) {

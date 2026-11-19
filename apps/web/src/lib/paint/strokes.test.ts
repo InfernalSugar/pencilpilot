@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { StrokeLog, type Stroke } from './strokes';
 
-const s = (id: string): Stroke => ({
+const s = (id: string, layer = 1): Stroke => ({
 	brushId: id,
 	eraser: false,
+	layer,
 	points: [{ x: 0, y: 0, pressure: 0.5, t: 0 }]
 });
 const ids = (log: StrokeLog) => log.strokes.map((x) => x.brushId);
@@ -19,26 +20,49 @@ describe('StrokeLog', () => {
 		expect(ids(log)).toEqual(['a', 'b']);
 	});
 
-	it('clear is undoable and a new stroke drops redo', () => {
+	it('clearing a layer only removes its strokes, undoably; a new stroke drops redo', () => {
 		const log = new StrokeLog();
-		log.add(s('a'));
-		log.clear();
-		expect(ids(log)).toEqual([]);
+		log.add(s('a', 1));
+		log.add(s('b', 2));
+		log.clear(1);
+		expect(ids(log)).toEqual(['b']);
 		log.undo();
-		expect(ids(log)).toEqual(['a']);
+		expect(ids(log).sort()).toEqual(['a', 'b']);
 		log.redo();
-		expect(ids(log)).toEqual([]);
+		expect(ids(log)).toEqual(['b']);
 		log.undo();
 		log.undo();
 		log.add(s('c'));
 		expect(log.redo()).toBe(false);
-		expect(ids(log)).toEqual(['c']);
+		expect(ids(log)).toEqual(['a', 'c']);
 	});
 
-	it('ignores empty strokes and respects the limit', () => {
+	it('merging moves strokes to the lower layer and back on undo', () => {
+		const log = new StrokeLog();
+		log.add(s('a', 1));
+		log.add(s('b', 2));
+		log.merge(2, 1);
+		expect(log.on(new Set([1])).map((x) => x.brushId)).toEqual(['a', 'b']);
+		log.undo();
+		expect(log.on(new Set([1])).map((x) => x.brushId)).toEqual(['a']);
+		expect(log.on(new Set([2])).map((x) => x.brushId)).toEqual(['b']);
+	});
+
+	it('layer changes and empty strokes are undo steps too (one-to-one with the engine)', () => {
+		const log = new StrokeLog();
+		log.add(s('a'));
+		log.layerChange();
+		log.add({ brushId: 'x', eraser: false, layer: 1, points: [] });
+		expect(ids(log)).toEqual(['a']);
+		expect(log.undo()).toBe(true); // empty stroke
+		expect(log.undo()).toBe(true); // layer change
+		expect(ids(log)).toEqual(['a']);
+		expect(log.undo()).toBe(true);
+		expect(ids(log)).toEqual([]);
+	});
+
+	it('respects the limit', () => {
 		const log = new StrokeLog(3);
-		log.add({ brushId: 'x', eraser: false, points: [] });
-		expect(log.strokes.length).toBe(0);
 		for (const id of ['1', '2', '3', '4', '5']) log.add(s(id));
 		let n = 0;
 		while (log.undo()) n++;

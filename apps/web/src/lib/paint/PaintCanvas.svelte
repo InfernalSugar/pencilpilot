@@ -1,10 +1,42 @@
 <script lang="ts" module>
+	export type BlendMode =
+		'normal' | 'multiply' | 'screen' | 'overlay' | 'darken' | 'lighten' | 'add';
+
+	export interface LayerInfo {
+		id: number;
+		name: string;
+		visible: boolean;
+		/** 0–1 */
+		opacity: number;
+		blend: BlendMode;
+		locked: boolean;
+		alphaLock: boolean;
+		empty: boolean;
+	}
+	export type LayerSettings = Omit<LayerInfo, 'id' | 'empty'>;
+
 	export interface CanvasStatus {
 		canUndo: boolean;
 		canRedo: boolean;
 		blank: boolean;
 		strokes: number;
+		/** bottom → top */
+		layers: LayerInfo[];
+		active: number;
+		/** bumps on every change (for refreshing layer thumbnails) */
+		version: number;
 	}
+
+	/** Status before the engine has loaded. */
+	export const BLANK_STATUS: CanvasStatus = {
+		canUndo: false,
+		canRedo: false,
+		blank: true,
+		strokes: 0,
+		layers: [],
+		active: 0,
+		version: 0
+	};
 
 	export interface DrawingExport {
 		width: number;
@@ -31,7 +63,8 @@
 		size = 1,
 		opacity = 1,
 		color = '#16161a',
-		onchange
+		onchange,
+		onblocked
 	}: {
 		width?: number;
 		height?: number;
@@ -42,6 +75,8 @@
 		opacity?: number;
 		color?: string;
 		onchange?: (s: CanvasStatus) => void;
+		/** a stroke was refused because the active layer is locked or hidden */
+		onblocked?: (why: 'locked' | 'hidden') => void;
 	} = $props();
 
 	let el: HTMLCanvasElement;
@@ -115,14 +150,40 @@
 		brush.setEraser(er);
 	}
 
+	let version = 0;
+
+	function layerList(): LayerInfo[] {
+		return paint ? (JSON.parse(paint.layersJson()) as LayerInfo[]) : [];
+	}
+
+	function visibleLayerIds(): Set<number> {
+		return new Set(
+			layerList()
+				.filter((l) => l.visible && l.opacity > 0)
+				.map((l) => l.id)
+		);
+	}
+
 	function notify() {
 		if (!paint) return;
+		const layers = layerList();
 		onchange?.({
 			canUndo: paint.canUndo(),
 			canRedo: paint.canRedo(),
 			blank: paint.isBlank(),
-			strokes: log.strokes.length
+			strokes: log.on(new Set(layers.filter((l) => l.visible).map((l) => l.id))).length,
+			layers,
+			active: paint.activeLayer,
+			version: ++version
 		});
+	}
+
+	/** run an engine change, keep the history in step, then redraw */
+	function changed(recorded: boolean, logIt: () => void = () => log.layerChange()) {
+		if (recorded) logIt();
+		schedule();
+		notify();
+		return recorded;
 	}
 
 	function schedule() {
@@ -157,9 +218,13 @@
 
 	function down(e: PointerEvent) {
 		if (!paint || !brush || (e.pointerType === 'mouse' && e.button !== 0)) return;
+		if (!paint.beginStroke()) {
+			const l = layerList().find((x) => x.id === paint!.activeLayer);
+			onblocked?.(l && !l.visible ? 'hidden' : 'locked');
+			return;
+		}
 		el.setPointerCapture(e.pointerId);
-		paint.beginStroke();
-		current = { brushId, eraser, points: [] };
+		current = { brushId, eraser, layer: paint.activeLayer, points: [] };
 		lastT = e.timeStamp;
 		feed(e);
 		schedule();
@@ -193,11 +258,96 @@
 		notify();
 	}
 
+	/** Erase the active layer. */
 	export function clear() {
-		paint?.clear();
-		log.clear();
+		if (!paint) return;
+		const layer = paint.activeLayer;
+		changed(paint.clear(), () => log.clear(layer));
+	}
+
+	// ---- layers ----
+
+	export function selectLayer(id: number) {
+		if (paint?.setActiveLayer(id)) notify();
+	}
+
+	export function addLayer(name = '') {
+		if (paint) changed(paint.addLayer(name) !== 0);
+	}
+
+	export function duplicateLayer(id: number) {
+		if (paint) changed(paint.duplicateLayer(id) !== 0);
+	}
+
+	export function deleteLayer(id: number) {
+		if (paint) changed(paint.deleteLayer(id));
+	}
+
+	/** `to`: 0 = bottom */
+	export function moveLayer(id: number, to: number) {
+		if (paint) changed(paint.moveLayer(id, to));
+	}
+
+	export function mergeDown(id: number) {
+		if (!paint) return;
+		const layers = layerList();
+		const i = layers.findIndex((l) => l.id === id);
+		const below = layers[i - 1]?.id;
+		if (below === undefined) return;
+		changed(paint.mergeDown(id), () => log.merge(id, below));
+	}
+
+	function settings(id: number): LayerSettings | null {
+		const l = layerList().find((x) => x.id === id);
+		if (!l) return null;
+		const { name, visible, opacity, blend, locked, alphaLock } = l;
+		return { name, visible, opacity, blend, locked, alphaLock };
+	}
+
+	function setRaw(id: number, s: LayerSettings, record: boolean) {
+		return paint!.setLayer(
+			id,
+			s.name,
+			s.visible,
+			s.opacity,
+			s.blend,
+			s.locked,
+			s.alphaLock,
+			record
+		);
+	}
+
+	/** Change layer settings as one undo step. */
+	export function setLayer(id: number, patch: Partial<LayerSettings>) {
+		const cur = paint && settings(id);
+		if (!cur) return;
+		changed(setRaw(id, { ...cur, ...patch }, true));
+	}
+
+	let previewing: { id: number; before: LayerSettings } | null = null;
+
+	/** Live preview (e.g. while dragging the opacity slider); finish with `commitLayer`. */
+	export function previewLayer(id: number, patch: Partial<LayerSettings>) {
+		const cur = paint && settings(id);
+		if (!cur) return;
+		if (previewing?.id !== id) previewing = { id, before: cur };
+		setRaw(id, { ...cur, ...patch }, false);
 		schedule();
 		notify();
+	}
+
+	export function commitLayer() {
+		if (!paint || !previewing) return;
+		const { id, before } = previewing;
+		previewing = null;
+		const b = before;
+		changed(paint.commitLayer(id, b.name, b.visible, b.opacity, b.blend, b.locked, b.alphaLock));
+	}
+
+	/** Straight-alpha preview of one layer. */
+	export function layerThumbnail(id: number, w: number, h: number): ImageData | null {
+		if (!paint) return null;
+		return new ImageData(new Uint8ClampedArray(paint.layerThumbnail(id, w, h)), w, h);
 	}
 
 	export function exportDrawing(): DrawingExport | null {
@@ -208,7 +358,7 @@
 			height,
 			png: el.toDataURL('image/png'),
 			gray: toGray(ctx.getImageData(0, 0, width, height).data),
-			strokes: structuredClone(log.strokes as Stroke[])
+			strokes: structuredClone(log.on(visibleLayerIds()))
 		};
 	}
 </script>
