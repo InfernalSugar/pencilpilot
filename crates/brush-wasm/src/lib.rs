@@ -521,6 +521,22 @@ impl Painter {
         });
     }
 
+    /// Abandon the stroke in progress (e.g. a second finger turned it into a
+    /// pinch): its pixels are restored and nothing goes into the history.
+    pub fn cancel_stroke(&mut self) {
+        let Some(id) = self.stroking.take() else {
+            return;
+        };
+        if let Some(l) = self.layers.iter_mut().find(|l| l.id == id)
+            && let Some(snap) = l.surface.recording.take()
+        {
+            l.surface.swap_in(snap);
+        }
+        self.state.reset();
+        self.stroke_brush = None;
+        self.alpha_lock_stroke = false;
+    }
+
     fn push_undo(&mut self, e: Edit) {
         self.undo.push(e);
         if self.undo.len() > UNDO_LIMIT {
@@ -1099,6 +1115,26 @@ mod tests {
             "hairline visible"
         );
         assert!(p.layer_thumbnail(2, 8, 8).iter().all(|&v| v == 0));
+    }
+
+    #[test]
+    fn cancelled_strokes_leave_no_trace() {
+        let mut p = Painter::new(256, 128);
+        let b = pen();
+        line(&mut p, &b, 30.0);
+        p.flush();
+        let before = p.rgba().to_vec();
+        p.begin_stroke();
+        for i in 0..=20 {
+            p.stroke_to(&b, 20.0 + i as f32 * 8.0, 90.0, 1.0, 0.0, 0.0, 0.01);
+        }
+        p.cancel_stroke();
+        p.flush();
+        assert_eq!(p.rgba(), &before[..]);
+        assert!(
+            p.undo() && !p.can_undo(),
+            "only the first stroke is in the history"
+        );
     }
 
     #[test]

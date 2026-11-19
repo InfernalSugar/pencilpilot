@@ -265,9 +265,16 @@
 							{grade}
 							bind:mode
 							highlight={focused}
+							aspect={sub.width / sub.height}
 						/>
 					{:else}
-						<div class="frame"><img src={sub.png} alt="Your submitted drawing" /></div>
+						<div
+							class="frame"
+							style="aspect-ratio: {sub.width} / {sub.height}; width: min(100%, calc(75vh * {sub.width /
+								sub.height}))"
+						>
+							<img src={sub.png} alt="Your submitted drawing" />
+						</div>
 					{/if}
 				</div>
 			</Tile>
@@ -488,7 +495,7 @@
 		grid-auto-rows: minmax(200px, auto);
 	}
 	.frame {
-		aspect-ratio: 4 / 3;
+		margin-inline: auto;
 		background: #fff;
 		border-radius: 20px;
 		overflow: hidden;
