@@ -121,18 +121,21 @@ Procreate / Photoshop-style tools. Groups 1 and 2 first (owner's choice).
   A push (forward warp) brush to nudge parts of a layer into place, with size and strength; undoable as one step.
 
 **Group 3: Drawing guides**
-- **M11-T10** Drawing guides `web`
+- **M11-T10** Drawing guides `web` ✅ #121, #122
   Grid, perspective guides (1/2/3 point) and symmetry (strokes mirrored live, vertical / horizontal / quadrant / radial).
+  Built: square/isometric grid; perspective with Assist (strokes lock to the vanishing directions); symmetry drawn by the engine, so all copies are one undo step.
 - **M11-T11** Ruler `web`
-  A movable ruler; strokes near it snap straight along its edge.
+  A movable ruler; strokes near it snap straight along its edge. ✅ #121
 
 **Group 4: Layers, advanced**
 - **M11-T12** Clipping masks `brush` `web`
-  Clip a layer to the one below (paint only inside it).
+  Clip a layer to the one below (paint only inside it). ✅ #123
 - **M11-T13** Layer masks `brush` `web`
-  Hide parts of a layer without erasing (paint black/white on the mask).
+  Hide parts of a layer without erasing (paint black/white on the mask). ✅ #124 (every tool works on the mask; apply / delete; merge bakes it in)
 - **M11-T14** Layer groups `brush` `web`
-  Group layers; group visibility, opacity and blend.
+  Group layers; group visibility, opacity and blend. ✅ #125 as pass-through groups (visibility, opacity, collapse, move, merge, ungroup, delete). An isolated group blend mode is not built.
+
+  Known limits (groups 1–4): fills, transforms, liquify and mask painting aren't in the recorded strokes, so replays and lobbies don't show them.
 
 **Group 5: Adjustments**
 - **M11-T15** Adjustments and gradient `brush` `web`
