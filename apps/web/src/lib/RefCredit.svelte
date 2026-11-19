@@ -32,7 +32,7 @@
 
 {#snippet licenseLink()}
 	{#if license}
-		{' '}· <a href={reference.licenseUrl} target="_blank" rel="noreferrer">{reference.license}</a>
+		&nbsp;· <a href={reference.licenseUrl} target="_blank" rel="noreferrer">{reference.license}</a>
 	{/if}
 {/snippet}
 
