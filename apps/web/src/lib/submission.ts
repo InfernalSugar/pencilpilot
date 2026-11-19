@@ -20,8 +20,10 @@ export interface Submission {
 	strokes: number;
 	points: number;
 	brushes: string[];
-	/** raw pen input, for the grader's line-confidence metrics */
+	/** raw pen input, for the grader's line-confidence metrics (and replays) */
 	strokeData: Stroke[];
+	/** layer settings the strokes were painted with, bottom → top (for replays) */
+	layers?: { id: number; opacity: number; blend: string }[];
 	/** a rough sketch (graded on the big picture, ADR-0007) */
 	mode?: 'finished' | 'sketch';
 	/** seconds, for timed drawings */
