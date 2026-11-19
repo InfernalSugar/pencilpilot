@@ -1,4 +1,7 @@
 <script lang="ts">
+	import { dailyReference, dayOf } from '#lib/daily.js';
+	import { imageUrl, titleOf } from '#lib/references.js';
+	const todayRef = dailyReference(dayOf());
 	import Tile from '#lib/ui/Tile.svelte';
 	import Button from '#lib/ui/Button.svelte';
 	import { onMount } from 'svelte';
@@ -78,12 +81,18 @@
 
 		<Tile tone="lilac" span={2}>
 			<div class="challenge">
-				<div class="ref-ph">Reference</div>
+				{#if todayRef}
+					<img class="ref-ph" src={imageUrl(todayRef)} alt="Today’s picture: {titleOf(todayRef)}" />
+				{:else}
+					<div class="ref-ph">Reference</div>
+				{/if}
 				<div class="challenge-body">
 					<span class="pp-eyebrow lilac">Today’s challenge</span>
-					<h2 class="challenge-title">A new reference every day</h2>
-					<span class="note">References arrive in milestone M5. Free drawing works sooner.</span>
-					<Button href="/draw" variant="dark">Open the canvas</Button>
+					<h2 class="challenge-title">
+						{todayRef ? titleOf(todayRef) : 'A new picture every day'}
+					</h2>
+					<span class="note">The same picture for everyone. See how you compare.</span>
+					<Button href="/daily" variant="dark">Today’s challenge →</Button>
 				</div>
 			</div>
 		</Tile>
@@ -234,6 +243,11 @@
 		color: var(--pp-muted);
 		font-weight: 600;
 		font-size: 13px;
+	}
+	img.ref-ph {
+		width: 200px;
+		height: 180px;
+		object-fit: contain;
 	}
 	.challenge-body {
 		flex: 1 1 220px;

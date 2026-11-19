@@ -30,6 +30,11 @@ export const GET: RequestHandler = ({ locals }) => {
 					)
 					.all(locals.user.id) as { png: Buffer }[]
 			).map((d) => ({ ...d, png: `data:image/png;base64,${d.png.toString('base64')}` })),
+			dailyChallenges: db
+				.prepare(
+					'SELECT day, ref_id, score, attempt_at, created_at FROM daily_scores WHERE user_id = ?'
+				)
+				.all(locals.user.id),
 			communityJudgements: {
 				closer: db
 					.prepare('SELECT a_id, b_id, winner_id, created_at FROM closer_votes WHERE voter_id = ?')

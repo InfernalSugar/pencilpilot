@@ -98,7 +98,18 @@ const MIGRATIONS: string[] = [
 		reason TEXT NOT NULL,
 		created_at INTEGER NOT NULL,
 		PRIMARY KEY (reporter_id, drawing_id)
-	);`
+	);`,
+	// daily challenge (lib/server/daily.ts): first scored try per person per day
+	`CREATE TABLE daily_scores (
+		day TEXT NOT NULL,
+		user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		ref_id TEXT NOT NULL,
+		score REAL NOT NULL CHECK (score BETWEEN 1 AND 10),
+		attempt_at INTEGER,
+		created_at INTEGER NOT NULL,
+		PRIMARY KEY (day, user_id)
+	);
+	CREATE INDEX daily_user ON daily_scores(user_id, day);`
 ];
 
 export function openDb(path: string): DB {

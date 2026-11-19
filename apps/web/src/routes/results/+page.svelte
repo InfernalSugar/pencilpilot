@@ -26,6 +26,7 @@
 		type Graded
 	} from '#lib/grade-submission.js';
 	import ReplayPlayer from '#lib/results/ReplayPlayer.svelte';
+	import { percentile } from '#lib/daily.js';
 	import { sessionDrawing, timeLabel } from '#lib/timed.js';
 
 	let sub = $state<Submission | null>(null);
@@ -44,6 +45,46 @@
 	const traced = $derived(!!sub?.traced);
 	let graded = $state<Graded | null>(null);
 	let showReplay = $state(false);
+	/** daily challenge: how this try compares with everyone's today */
+	let dailyResult = $state<{
+		counted: boolean;
+		mine: number | null;
+		beat: number | null;
+		players: number;
+		streak: number;
+	} | null>(null);
+
+	async function countDaily(s: Submission, score: number) {
+		if (!s.daily || s.traced) return;
+		let counted = false;
+		let mine: number | null = null;
+		let streak = 0;
+		if (page.data.user) {
+			const res = await fetch('/api/daily', {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({
+					day: s.daily,
+					refId: s.referenceId,
+					score,
+					attemptAt: s.at ?? null
+				})
+			}).catch(() => null);
+			if (res?.ok) ({ counted, mine, streak } = await res.json());
+		}
+		const stats = await fetch(`/api/daily?day=${s.daily}`)
+			.then((r) => (r.ok ? r.json() : null))
+			.catch(() => null);
+		const scores: number[] = stats?.scores ?? [];
+		const mineOrThis = mine ?? score;
+		dailyResult = {
+			counted,
+			mine,
+			beat: Math.round(percentile(mineOrThis, mine === null ? [...scores, score] : scores) * 100),
+			players: scores.length,
+			streak: streak || stats?.streak || 0
+		};
+	}
 	const canReplay = $derived(!!sub?.strokeData?.some((s) => s.points.length));
 	let share = $state<{ state: 'idle' | 'busy' | 'done' | 'error'; message?: string }>({
 		state: 'idle'
@@ -129,6 +170,7 @@
 			const g = await gradeSubmission(sub);
 			graded = g;
 			grade = g.grade;
+			void countDaily(sub, g.grade.score);
 			fb = g.fb;
 			compareSrc = g.compareSrc;
 			// Tracing is practice: tips, but no score, progress, streak or level-up.
@@ -282,6 +324,34 @@
 				</Tile>
 			{/if}
 		</div>
+
+		{#if dailyResult && sub}
+			<section class="daily" aria-label="Today’s challenge">
+				<span class="pp-eyebrow">Today’s challenge</span>
+				<p class="daily-line">
+					{#if dailyResult.counted}
+						{#if dailyResult.players > 1}
+							Counted! Better than <b>{dailyResult.beat}%</b> of today’s
+							{dailyResult.players - 1} other players.
+						{:else}
+							Counted! You’re the first one in today.
+						{/if}
+					{:else if dailyResult.mine !== null}
+						Your first try today ({dailyResult.mine.toFixed(1)}) is the one that counts. This one
+						would beat {dailyResult.beat}% of today’s players.
+					{:else if dailyResult.players}
+						This would beat {dailyResult.beat}% of today’s {dailyResult.players} players.
+						<a href="/login?next=/daily">Sign in</a> to be counted.
+					{:else}
+						No one has been counted yet today. <a href="/login?next=/daily">Sign in</a> to be the first.
+					{/if}
+				</p>
+				<p class="daily-meta">
+					{#if dailyResult.streak}Daily streak: <b>{dailyResult.streak}</b> ·{/if}
+					<a href="/daily">Today’s challenge page</a>
+				</p>
+			</section>
+		{/if}
 
 		{#if canReplay}
 			<section class="replay-section" aria-label="Replay">
@@ -443,6 +513,24 @@
 </div>
 
 <style>
+	.daily {
+		margin-top: var(--pp-gap);
+		padding: 24px 28px;
+		border-radius: var(--pp-radius-tile);
+		background: var(--pp-yellow);
+		color: var(--pp-ink);
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+	.daily-line {
+		margin: 0;
+		font: 600 20px var(--pp-font-body);
+	}
+	.daily-meta {
+		margin: 0;
+		font-size: 14px;
+	}
 	.replay-section {
 		margin-top: var(--pp-gap);
 		padding: 28px;
