@@ -1969,13 +1969,12 @@ impl Painter {
 
     // ---- imported pictures ----
 
-    /// Add a layer holding a picture (straight-alpha sRGB RGBA8, canvas size),
-    /// above the active layer and in its group. One undo step. Returns its id (0 = couldn't).
+    /// Tiles for a canvas-size straight-alpha sRGB RGBA8 picture (None: wrong size).
     #[allow(clippy::needless_range_loop)]
-    pub fn add_image_layer(&mut self, name: &str, rgba: &[u8]) -> u32 {
+    fn picture_tiles(&self, rgba: &[u8]) -> Option<TileMap> {
         let (w, h) = (self.width as usize, self.height as usize);
-        if !self.idle() || self.layers.len() >= MAX_LAYERS || rgba.len() != w * h * 4 {
-            return 0;
+        if rgba.len() != w * h * 4 {
+            return None;
         }
         let ts = TILE_SIZE;
         let mut tiles = TileMap::new();
@@ -2003,17 +2002,27 @@ impl Painter {
                 }
             }
         }
+        Some(tiles)
+    }
+
+    fn add_pixels_layer(&mut self, name: String, rgba: &[u8], imported: bool) -> u32 {
+        if !self.idle() || self.layers.len() >= MAX_LAYERS {
+            return 0;
+        }
+        let Some(tiles) = self.picture_tiles(rgba) else {
+            return 0;
+        };
         let id = self.next_id;
         self.next_id += 1;
         let index = self
             .index_of(self.active)
             .map_or(self.layers.len(), |i| i + 1);
         let mut props = LayerProps::named(if name.trim().is_empty() {
-            format!("Picture {id}")
+            format!("Layer {id}")
         } else {
             name.chars().take(60).collect()
         });
-        props.imported = true;
+        props.imported = imported;
         let mut layer = Layer::new(id, props);
         layer.group = index
             .checked_sub(1)
@@ -2026,6 +2035,48 @@ impl Painter {
         });
         self.active = id;
         id
+    }
+
+    /// Add a layer holding a picture (straight-alpha sRGB RGBA8, canvas size),
+    /// above the active layer and in its group. One undo step. Returns its id (0 = couldn't).
+    pub fn add_image_layer(&mut self, name: &str, rgba: &[u8]) -> u32 {
+        let name = if name.trim().is_empty() {
+            format!("Picture {}", self.next_id)
+        } else {
+            name.to_string()
+        };
+        self.add_pixels_layer(name, rgba, true)
+    }
+
+    /// Bring back a saved layer's pixels (the drawing history). `imported` keeps a
+    /// layer that held an imported picture marked as such.
+    pub fn restore_layer(&mut self, name: &str, rgba: &[u8], imported: bool) -> u32 {
+        self.add_pixels_layer(name.to_string(), rgba, imported)
+    }
+
+    /// Give a layer a mask from a saved greyscale picture (one byte per canvas
+    /// pixel, 255 = shown). Not an undo step: for restoring a drawing.
+    pub fn restore_mask(&mut self, id: u32, gray: &[u8]) -> bool {
+        let (w, h) = (self.width as usize, self.height as usize);
+        if !self.idle() || gray.len() != w * h {
+            return false;
+        }
+        let Some(idx) = self.index_of(id) else {
+            return false;
+        };
+        // a mask pixel of grey g is black paint with alpha 1 - g (white = nothing painted)
+        let rgba: Vec<u8> = gray.iter().flat_map(|&g| [0, 0, 0, 255 - g]).collect();
+        let Some(tiles) = self.picture_tiles(&rgba) else {
+            return false;
+        };
+        let l = &mut self.layers[idx];
+        l.set_editing(false);
+        l.mask = Some(UndoSurface {
+            tiles,
+            ..UndoSurface::default()
+        });
+        self.mark_layer(idx);
+        true
     }
 
     // ---- adjustments and gradients: previewed live, one undo step ----
@@ -3613,6 +3664,35 @@ mod tests {
         }
         assert_eq!(out[0..4], [0, 0, 0, 0]);
         assert!(p.layer_rgba(999).is_empty());
+    }
+
+    #[test]
+    fn restored_layers_and_masks_come_back_as_saved() {
+        let mut p = Painter::new(100, 70);
+        let mut rgba = vec![0u8; 100 * 70 * 4];
+        let i = (35 * 100 + 50) * 4;
+        rgba[i..i + 4].copy_from_slice(&[200, 100, 50, 255]);
+        let id = p.restore_layer("Ink", &rgba, false);
+        assert!(id > 0);
+        assert!(p.layers_json().contains(r#""name":"Ink""#));
+        assert!(!p.layers_json().contains(r#""imported":true"#));
+        let back = p.layer_rgba(id);
+        assert!(back[i].abs_diff(200) <= 2 && back[i + 3] == 255);
+        // a mask: left half hidden (0), right half shown (255), a grey in the middle
+        let mut gray = vec![255u8; 100 * 70];
+        for y in 0..70 {
+            for x in 0..50 {
+                gray[y * 100 + x] = 0;
+            }
+        }
+        gray[35 * 100 + 50] = 128;
+        assert!(p.restore_mask(id, &gray));
+        assert!(p.layers_json().contains(r#""mask":true"#));
+        let m = p.mask_thumbnail(id, 100, 70);
+        assert!(m[(10 * 100 + 10) * 4] < 5, "hidden");
+        assert!(m[(10 * 100 + 90) * 4] > 250, "shown");
+        assert!(m[(35 * 100 + 50) * 4].abs_diff(128) <= 3, "grey");
+        assert!(!p.restore_mask(id, &gray[..10]));
     }
 
     #[test]

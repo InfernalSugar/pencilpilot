@@ -95,6 +95,13 @@ export class StrokeLog {
 		this.#push({ kind: 'layer' });
 	}
 
+	/** Start over with these strokes (a drawing brought back from the history); no undo. */
+	reset(strokes: Stroke[]) {
+		this.#all = [...strokes];
+		this.#undo = [];
+		this.#redo = [];
+	}
+
 	/** Forget undo/redo (the engine's history was cleared too); strokes stay. */
 	forgetHistory() {
 		this.#undo = [];
