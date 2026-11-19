@@ -203,6 +203,91 @@ impl PaintCanvas {
         self.inner.layer_thumbnail(id, w, h)
     }
 
+    // ---- adjustments and gradients ----
+
+    /// Start adjusting the active layer (or a gradient on it); false if it can't be.
+    #[wasm_bindgen(js_name = adjustBegin)]
+    pub fn adjust_begin(&mut self) -> bool {
+        self.inner.adjust_begin()
+    }
+
+    #[wasm_bindgen(js_name = isAdjusting)]
+    pub fn is_adjusting(&self) -> bool {
+        self.inner.is_adjusting()
+    }
+
+    /// Preview colour adjustments: hue (degrees), saturation / brightness /
+    /// contrast (−1…1), blur radius (px), and an optional recolour (sRGB 0–1).
+    #[allow(clippy::too_many_arguments)]
+    #[wasm_bindgen(js_name = adjustPreview)]
+    pub fn adjust_preview(
+        &mut self,
+        hue: f32,
+        saturation: f32,
+        brightness: f32,
+        contrast: f32,
+        blur: f32,
+        recolour: bool,
+        r: f32,
+        g: f32,
+        b: f32,
+    ) {
+        self.inner.adjust_preview(crate::adjust::ColourAdjust {
+            hue,
+            saturation,
+            brightness,
+            contrast,
+            blur,
+            recolour: recolour.then_some([r, g, b]),
+        });
+    }
+
+    /// Preview a gradient from (x0, y0) to (x1, y1), colours sRGB 0–1 with alpha.
+    #[allow(clippy::too_many_arguments)]
+    #[wasm_bindgen(js_name = gradientPreview)]
+    pub fn gradient_preview(
+        &mut self,
+        radial: bool,
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+        r0: f32,
+        g0: f32,
+        b0: f32,
+        a0: f32,
+        r1: f32,
+        g1: f32,
+        b1: f32,
+        a1: f32,
+    ) {
+        use crate::adjust::{Gradient, GradientKind};
+        self.inner.gradient_preview(Gradient {
+            kind: if radial {
+                GradientKind::Radial
+            } else {
+                GradientKind::Linear
+            },
+            from: (x0, y0),
+            to: (x1, y1),
+            c0: [r0, g0, b0],
+            a0,
+            c1: [r1, g1, b1],
+            a1,
+        });
+    }
+
+    /// Keep the preview (one undo step); false if nothing changed.
+    #[wasm_bindgen(js_name = adjustCommit)]
+    pub fn adjust_commit(&mut self) -> bool {
+        self.inner.adjust_commit()
+    }
+
+    #[wasm_bindgen(js_name = adjustCancel)]
+    pub fn adjust_cancel(&mut self) {
+        self.inner.adjust_cancel()
+    }
+
     // ---- layer groups ----
 
     #[wasm_bindgen(js_name = groupsJson)]

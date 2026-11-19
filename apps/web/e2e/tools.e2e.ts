@@ -777,3 +777,90 @@ const redOrInk = (page: Page, y0: number, y1: number) =>
 		},
 		[y0, y1]
 	);
+
+/** average colour of the inked pixels in a band of rows */
+const avgInk = (page: Page, y0: number, y1: number) =>
+	canvas(page).evaluate(
+		(c: HTMLCanvasElement, [y0, y1]) => {
+			const top = Math.round(c.height * y0);
+			const d = c
+				.getContext('2d')!
+				.getImageData(0, top, c.width, Math.round(c.height * y1) - top).data;
+			const s = [0, 0, 0];
+			let n = 0;
+			for (let i = 0; i < d.length; i += 4)
+				if (d[i] + d[i + 1] + d[i + 2] < 720) {
+					s[0] += d[i];
+					s[1] += d[i + 1];
+					s[2] += d[i + 2];
+					n++;
+				}
+			return { n, rgb: s.map((v) => (n ? v / n : 255)) };
+		},
+		[y0, y1]
+	);
+
+test('adjust: hue and saturation preview live, Cancel restores, Apply is one undo step', async ({
+	page
+}) => {
+	await ready(page);
+	for (let i = 0; i < 6; i++) await page.keyboard.press(']');
+	await page.getByRole('radio', { name: 'Colour #e8492f' }).click();
+	for (const y of [0.48, 0.5, 0.52]) await drag(page, [0.2, y], [0.8, y], 12);
+	await expect.poll(async () => (await avgInk(page, 0.4, 0.6)).n).toBeGreaterThan(200);
+	const red = (await avgInk(page, 0.4, 0.6)).rgb;
+	expect(red[0]).toBeGreaterThan(red[2] + 40);
+
+	await page.getByRole('button', { name: 'Adjust', exact: true }).click();
+	const panel = page.getByRole('group', { name: 'Adjust layer' });
+	await panel.getByLabel(/^Saturation/).fill('-100');
+	await expect
+		.poll(async () => {
+			const [r, , b] = (await avgInk(page, 0.4, 0.6)).rgb;
+			return Math.abs(r - b);
+		})
+		.toBeLessThan(15);
+	await panel.getByRole('button', { name: 'Cancel' }).click();
+	await expect.poll(async () => (await avgInk(page, 0.4, 0.6)).rgb[0]).toBeGreaterThan(red[2] + 40);
+
+	// hue +180: red becomes blue-ish; Apply, then one undo brings red back
+	await page.getByRole('button', { name: 'Adjust', exact: true }).click();
+	await panel.getByLabel(/^Hue/).fill('180');
+	await panel.getByRole('button', { name: 'Apply' }).click();
+	await expect(panel).toHaveCount(0);
+	await expect
+		.poll(async () => {
+			const [r, , b] = (await avgInk(page, 0.4, 0.6)).rgb;
+			return b - r;
+		})
+		.toBeGreaterThan(20);
+	await page.getByRole('button', { name: /Undo/ }).click();
+	await expect.poll(async () => (await avgInk(page, 0.4, 0.6)).rgb[0]).toBeGreaterThan(red[2] + 40);
+});
+
+test('gradient: drag paints a fade; a tap paints nothing; undo removes it', async ({ page }) => {
+	await ready(page);
+	await page.getByRole('radio', { name: 'Colour #3d6bff' }).click();
+	await page.getByRole('button', { name: 'Gradient' }).click();
+	// a tap: nothing
+	const b = await box(page);
+	await page.mouse.click(b.x + b.width * 0.5, b.y + b.height * 0.5);
+	await expect.poll(async () => (await inkFrac(page)).w).toBeLessThanOrEqual(0);
+	await drag(page, [0.05, 0.5], [0.95, 0.5], 10);
+	// strong blue on the left, paper on the right
+	await expect.poll(async () => (await pixel(page, 0.03, 0.2))[2]).toBeGreaterThan(200);
+	expect((await pixel(page, 0.03, 0.2))[0]).toBeLessThan(120);
+	expect((await pixel(page, 0.98, 0.8))[0]).toBeGreaterThan(240);
+	const mid = await pixel(page, 0.5, 0.8);
+	expect(mid[0]).toBeGreaterThan(100);
+	expect(mid[0]).toBeLessThan(230);
+	await page.getByRole('button', { name: /Undo/ }).click();
+	await expect.poll(async () => (await pixel(page, 0.03, 0.2))[0]).toBeGreaterThan(240);
+	// round, to a colour
+	const g = page.getByRole('group', { name: 'Gradient' });
+	await g.getByRole('radio', { name: 'Round' }).click();
+	await g.getByRole('radio', { name: 'To a colour' }).click();
+	await drag(page, [0.5, 0.5], [0.5, 0.05], 8);
+	await expect.poll(async () => (await pixel(page, 0.5, 0.5))[2]).toBeGreaterThan(200);
+	expect((await pixel(page, 0.02, 0.02))[0]).toBeLessThan(240);
+});
