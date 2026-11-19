@@ -130,6 +130,33 @@ impl PoolState {
         known
     }
 
+    /// Remove every reference for which `drop` is true from the pool (refs,
+    /// fresh and served queues, near-duplicate hashes). Their Pixabay ids stay
+    /// in `seen`, so they are never downloaded again. Returns the removed refs.
+    pub fn remove_where(&mut self, mut drop: impl FnMut(&LiveRef) -> bool) -> Vec<LiveRef> {
+        let ids: HashSet<String> = self
+            .refs
+            .values()
+            .filter(|r| drop(r))
+            .map(|r| r.id.clone())
+            .collect();
+        if ids.is_empty() {
+            return Vec::new();
+        }
+        for q in self.fresh.values_mut() {
+            q.retain(|x| !ids.contains(x));
+        }
+        for l in self.library.values_mut() {
+            l.retain(|x| !ids.contains(x));
+        }
+        self.fresh.retain(|_, q| !q.is_empty());
+        self.library.retain(|_, l| !l.is_empty());
+        self.phashes.retain(|(id, _)| !ids.contains(id));
+        let mut out: Vec<LiveRef> = ids.iter().filter_map(|id| self.refs.remove(id)).collect();
+        out.sort_by(|a, b| a.id.cmp(&b.id));
+        out
+    }
+
     /// The slot most in need of refilling: asked-for slots below `target`
     /// fresh pictures, fewest first, then most requested.
     pub fn neediest(&self, target: usize) -> Option<Slot> {
@@ -251,6 +278,36 @@ mod tests {
         assert!(p.add(r("a", "animals", "pets", 1), Some(0xFFFF_0000)));
         assert!(!p.add(r("b", "animals", "pets", 1), Some(0xFFFF_0003)));
         assert!(p.add(r("c", "animals", "pets", 1), Some(0x0000_FFFF)));
+    }
+
+    #[test]
+    fn remove_where_purges_everywhere_but_keeps_seen() {
+        let mut p = PoolState::default();
+        let mut rng = StdRng::seed_from_u64(3);
+        let mut vector = r("v", "real-life", "vehicles", 1);
+        vector.page_url = "https://pixabay.com/vectors/pizza-courier-1454239/".into();
+        vector.source_id = 1454239;
+        let mut photo = r("p", "real-life", "vehicles", 1);
+        photo.page_url = "https://pixabay.com/photos/bike-2/".into();
+        p.seen.insert(1454239);
+        p.add(vector, Some(0xFFFF_0000));
+        p.add(photo, Some(0x0000_FFFF));
+        let s = slot("real-life", "vehicles", 1);
+        // serve "v" once so it is in the library too
+        assert_eq!(p.take(&s, &[], &mut rng).unwrap().id, "v");
+
+        let gone = p.remove_where(|r| !crate::model::kind_allowed(&r.category, &r.page_url));
+        assert_eq!(
+            gone.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["v"]
+        );
+        assert!(!p.refs.contains_key("v"));
+        assert!(p.phashes.iter().all(|(id, _)| id != "v"));
+        assert!(p.seen.contains(&1454239), "never re-downloaded");
+        for _ in 0..5 {
+            assert_eq!(p.take(&s, &[], &mut rng).unwrap().id, "p");
+        }
+        assert!(p.remove_where(|_| false).is_empty());
     }
 
     #[test]
