@@ -11,7 +11,13 @@
 	import RefViewer from '#lib/paint/RefViewer.svelte';
 	import { addToSession, clockOf, startSession, timeLabel } from '#lib/timed.js';
 	import ColorPanel, { rememberColor } from '#lib/paint/ColorPanel.svelte';
-	import { anyGuide, defaultGuides, type GuideSettings } from '#lib/paint/guides.js';
+	import {
+		anyGuide,
+		defaultGuides,
+		SYMMETRY_MODES,
+		symmetryOn,
+		type GuideSettings
+	} from '#lib/paint/guides.js';
 	import TracePanel, { TRACE_DEFAULTS, type TraceState } from '#lib/paint/TracePanel.svelte';
 	import { savedSize, saveSize, type CanvasSize } from '#lib/paint/canvas-size.js';
 	import BrushPicker from '#lib/paint/BrushPicker.svelte';
@@ -68,7 +74,8 @@
 		guides = {
 			grid: { ...g.grid, size: Math.round(g.grid.size * Math.min(kx, ky)) },
 			perspective: { ...g.perspective, vps: g.perspective.vps.map(sc) },
-			ruler: { ...g.ruler, a: sc(g.ruler.a), b: sc(g.ruler.b) }
+			ruler: { ...g.ruler, a: sc(g.ruler.a), b: sc(g.ruler.b) },
+			symmetry: g.symmetry ? { ...g.symmetry, c: sc(g.symmetry.c) } : defaultGuides(w, h).symmetry
 		};
 	}
 	/** pen pressure and tilt on/off (remembered) */
@@ -1216,7 +1223,39 @@
 						>
 							Ruler
 						</button>
-						{#if guides.perspective.points || guides.ruler.on}
+						<span class="opt-label">Symmetry</span>
+						<div class="seg" role="radiogroup" aria-label="Symmetry">
+							{#each SYMMETRY_MODES as m (m)}
+								<button
+									type="button"
+									class="tool"
+									role="radio"
+									aria-checked={guides.symmetry.mode === m}
+									onclick={() =>
+										setGuides({ ...guides, symmetry: { ...guides.symmetry, mode: m } })}
+								>
+									{m === 'off' ? 'Off' : m[0].toUpperCase() + m.slice(1)}
+								</button>
+							{/each}
+						</div>
+						{#if guides.symmetry.mode === 'radial'}
+							<label class="slider">
+								<span>Copies <b>{guides.symmetry.n}</b></span>
+								<input
+									type="range"
+									min="2"
+									max="24"
+									step="1"
+									value={guides.symmetry.n}
+									oninput={(e) =>
+										setGuides({
+											...guides,
+											symmetry: { ...guides.symmetry, n: +e.currentTarget.value }
+										})}
+								/>
+							</label>
+						{/if}
+						{#if guides.perspective.points || guides.ruler.on || symmetryOn(guides)}
 							<button
 								type="button"
 								class="tool"

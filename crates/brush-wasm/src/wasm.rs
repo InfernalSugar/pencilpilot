@@ -3,7 +3,7 @@
 use hokusai::{Brush, BrushSetting};
 use wasm_bindgen::prelude::*;
 
-use crate::{Blend, LayerProps, Painter, set_brush_rgb};
+use crate::{Blend, LayerProps, Painter, Symmetry, SymmetryMode, set_brush_rgb};
 
 /// A MyPaint brush loaded from a `.myb` file.
 #[wasm_bindgen]
@@ -226,6 +226,22 @@ impl PaintCanvas {
     ) -> bool {
         self.inner
             .fill(x, y, [r, g, b], opacity, tolerance, all_layers, grow, gap)
+    }
+
+    // ---- symmetry ----
+
+    /// `mode`: 0 off, 1 vertical, 2 horizontal, 3 quadrant, 4 radial (`n` copies); centre (cx, cy).
+    #[wasm_bindgen(js_name = setSymmetry)]
+    pub fn set_symmetry(&mut self, mode: u8, n: u32, cx: f32, cy: f32) {
+        let mode = match mode {
+            1 => Some(SymmetryMode::Vertical),
+            2 => Some(SymmetryMode::Horizontal),
+            3 => Some(SymmetryMode::Quadrant),
+            4 => Some(SymmetryMode::Radial(n)),
+            _ => None,
+        };
+        self.inner
+            .set_symmetry(mode.map(|mode| Symmetry { mode, cx, cy }));
     }
 
     // ---- liquify ----
