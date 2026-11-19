@@ -51,6 +51,7 @@ test('draw, undo, redo, switch brush, submit', async ({ page }) => {
 	await page.getByRole('button', { name: /Redo/ }).click();
 	await expect.poll(() => inkPixels(page)).toBe(after);
 
+	await page.getByRole('tab', { name: /^Brushes/ }).click();
 	await page.getByRole('tab', { name: 'Markers' }).click();
 	await page.getByRole('button', { name: /^Marker fat/ }).click();
 	await scribble(page, 0.7);
@@ -65,6 +66,7 @@ test('draw, undo, redo, switch brush, submit', async ({ page }) => {
 
 test('brush search finds brushes across categories', async ({ page }) => {
 	await page.goto('/draw');
+	await page.getByRole('tab', { name: /^Brushes/ }).click();
 	await page.getByRole('searchbox').fill('watercolor');
 	await expect(page.getByRole('list', { name: 'Brushes' }).getByRole('listitem')).not.toHaveCount(
 		0
@@ -264,8 +266,8 @@ test('tracing your own picture: line it up, draw, get tips but no score', async 
 	await tracing.getByRole('button', { name: 'Done moving' }).click();
 
 	await scribble(page);
-	await expect(page.getByRole('button', { name: 'Get tips →' })).toBeEnabled();
-	await page.getByRole('button', { name: 'Get tips →' }).click();
+	await expect(page.getByRole('button', { name: /Get tips/ })).toBeEnabled();
+	await page.getByRole('button', { name: /Get tips/ }).click();
 	await expect(page).toHaveURL(/\/results$/);
 	await expect(page.getByText('Traced', { exact: true })).toBeVisible();
 	await expect(page.getByTestId('score')).toHaveCount(0);

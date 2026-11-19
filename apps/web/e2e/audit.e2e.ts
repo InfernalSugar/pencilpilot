@@ -118,14 +118,17 @@ test('keyboard users can skip the header', async ({ page }) => {
 	await expect(page.locator('main')).toBeFocused();
 });
 
-test('phone draw page puts the canvas before the brush list', async ({ page }) => {
+test('phone draw page: canvas and tools on screen, panels in a bottom sheet', async ({ page }) => {
 	await page.setViewportSize({ width: 375, height: 740 });
 	await page.goto('/draw');
 	const canvas = page.getByLabel(/Drawing canvas/);
 	await expect(canvas).toBeInViewport();
-	const toggle = page.getByRole('button', { name: 'Change' });
-	await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+	await expect(page.getByRole('button', { name: 'Brush (B)' })).toBeInViewport();
+	await expect(page.getByRole('button', { name: /Submit drawing/ })).toBeInViewport();
+	// the side panel is out of the way until asked for
 	await expect(page.getByRole('tab', { name: 'Markers' })).toBeHidden();
-	await toggle.click();
+	await page.getByRole('button', { name: 'Brushes', exact: true }).click();
 	await expect(page.getByRole('tab', { name: 'Markers' })).toBeVisible();
+	await page.getByRole('button', { name: 'Close the panel' }).first().click();
+	await expect(page.getByRole('tab', { name: 'Markers' })).toBeHidden();
 });

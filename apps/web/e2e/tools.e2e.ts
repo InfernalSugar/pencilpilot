@@ -384,7 +384,8 @@ test('transform: move with a drag, keep with Enter, undo', async ({ page }) => {
 	await expect.poll(async () => (await inkFrac(page)).y0).toBeLessThan(0.35);
 	await page.keyboard.press('v');
 	await expect(page.locator('svg.xf')).toBeVisible();
-	await drag(page, [0.5, 0.3], [0.5, 0.6], 8);
+	// grab the line away from the edge handles (the top-middle one sits near x 0.5)
+	await drag(page, [0.3, 0.3], [0.3, 0.6], 8);
 	await page.keyboard.press('Enter');
 	await expect(page.locator('svg.xf')).toHaveCount(0);
 	await expect(page.getByRole('button', { name: 'Brush (B)' })).toHaveAttribute(

@@ -153,7 +153,8 @@
 		gradientKind = 'linear',
 		gradientEnd = 'transparent',
 		maxHeight = '78vh',
-		viewControls = true
+		viewControls = true,
+		fill = false
 	}: {
 		width?: number;
 		height?: number;
@@ -232,6 +233,8 @@
 		maxHeight?: string;
 		/** show the zoom / rotate / mirror bar */
 		viewControls?: boolean;
+		/** fill the parent's height (the sheet is fitted and centred) instead of keeping the canvas's shape */
+		fill?: boolean;
 	} = $props();
 
 	let el: HTMLCanvasElement;
@@ -1984,7 +1987,7 @@
 	class:liquifying={tool === 'liquify'}
 	class:editing-guides={tool === 'guides'}
 	bind:this={vp}
-	style="aspect-ratio: {width} / {height}; max-height: {maxHeight}"
+	style={fill ? 'height: 100%' : `aspect-ratio: ${width} / ${height}; max-height: ${maxHeight}`}
 	onpointerdown={down}
 	onpointermove={move}
 	onpointerup={up}
