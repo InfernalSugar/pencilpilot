@@ -25,7 +25,8 @@
 	<link rel="icon" href={favicon} />
 </svelte:head>
 
+<a class="skip-link" href="#main">Skip to content</a>
 <SiteHeader user={data.user} />
-<main>
+<main id="main" tabindex="-1">
 	{@render children()}
 </main>

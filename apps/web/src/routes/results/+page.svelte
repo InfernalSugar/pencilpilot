@@ -504,7 +504,7 @@
 		font-weight: 700;
 	}
 	.num.first {
-		background: var(--pp-accent);
+		background: var(--pp-accent-strong);
 	}
 	.fix-text {
 		margin: 0;

@@ -163,7 +163,7 @@
 		</Tile>
 
 		{#if data.next}
-			<Tile area="next" href="/lessons/{data.next.id}" label="Up next: {data.next.title}">
+			<Tile area="next" href="/lessons/{data.next.id}">
 				<span class="pp-eyebrow">Up next</span>
 				<h2 class="next-title">{data.next.title}</h2>
 				<p class="next-sum">{data.next.summary}</p>
