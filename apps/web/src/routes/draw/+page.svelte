@@ -5,7 +5,11 @@
 	import { page } from '$app/state';
 	import Tile from '#lib/ui/Tile.svelte';
 	import Button from '#lib/ui/Button.svelte';
-	import PaintCanvas, { BLANK_STATUS, type CanvasStatus } from '#lib/paint/PaintCanvas.svelte';
+	import PaintCanvas, {
+		BLANK_STATUS,
+		type CanvasStatus,
+		type ImportResult
+	} from '#lib/paint/PaintCanvas.svelte';
 	import LayersPanel from '#lib/paint/LayersPanel.svelte';
 	import CanvasSizePicker from '#lib/paint/CanvasSizePicker.svelte';
 	import RefViewer from '#lib/paint/RefViewer.svelte';
@@ -59,6 +63,28 @@
 		| 'gradient';
 	let tool = $state<Tool>('brush');
 	let gradientKind = $state<'linear' | 'radial'>('linear');
+	let importNote = $state('');
+	const importText = (r: ImportResult) =>
+		({
+			ok: '',
+			'too-many': 'You’ve reached the layer limit (32).',
+			unreadable: 'That file couldn’t be opened as a picture.',
+			busy: 'Finish what you’re doing first, then import again.',
+			'too-big': 'That picture is too big (30 MB at most).'
+		})[r];
+	// paste a picture (Ctrl+V) to import it as a layer
+	$effect(() => {
+		const onPaste = (e: ClipboardEvent) => {
+			const t = e.target as HTMLElement | null;
+			if (t?.closest('input, textarea, [contenteditable]')) return;
+			const file = [...(e.clipboardData?.files ?? [])].find((f) => f.type.startsWith('image/'));
+			if (!file || !canvas) return;
+			e.preventDefault();
+			void canvas.importImage(file, 'Pasted picture').then((r) => (importNote = importText(r)));
+		};
+		window.addEventListener('paste', onPaste);
+		return () => window.removeEventListener('paste', onPaste);
+	});
 	let gradientEnd = $state<string>('transparent');
 	let gradientEndColor = $state('#3d6bff');
 
@@ -516,7 +542,8 @@
 				blend: l.blend,
 				...(l.clip ? { clip: true } : {})
 			})),
-			traced,
+			traced: traced || d.layers.some((l) => l.imported),
+			...(d.layers.some((l) => l.imported) ? { imported: true } : {}),
 			trace: traced
 				? {
 						source: trace.source,
@@ -786,6 +813,8 @@
 						ontransformend={onTransformEnd}
 						{liquifySize}
 						{liquifyStrength}
+						allowImport
+						onimport={(r) => (importNote = importText(r))}
 						{gradientKind}
 						gradientEnd={gradientEnd === 'transparent' ? 'transparent' : gradientEndColor}
 						{penPressure}
@@ -1367,6 +1396,7 @@
 					</div>
 				{/if}
 				{#if adjustMsg}<p class="adjust-msg" role="alert">{adjustMsg}</p>{/if}
+				{#if importNote}<p class="adjust-msg" role="alert">{importNote}</p>{/if}
 				{#if adjustOpen}
 					<div class="fill-opts adjust-opts" role="group" aria-label="Adjust layer">
 						{#each [['hue', 'Hue', -180, 180, 1, '°'], ['saturation', 'Saturation', -100, 100, 1, '%'], ['brightness', 'Brightness', -100, 100, 1, '%'], ['contrast', 'Contrast', -100, 100, 1, '%'], ['blur', 'Blur', 0, 40, 1, ' px']] as [key, label, min, max, st, u] (key)}

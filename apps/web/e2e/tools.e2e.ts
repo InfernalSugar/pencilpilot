@@ -864,3 +864,52 @@ test('gradient: drag paints a fade; a tap paints nothing; undo removes it', asyn
 	await expect.poll(async () => (await pixel(page, 0.5, 0.5))[2]).toBeGreaterThan(200);
 	expect((await pixel(page, 0.02, 0.02))[0]).toBeLessThan(240);
 });
+
+/** a small PNG: a blue square on transparency */
+async function bluePng(page: Page): Promise<Buffer> {
+	const url = await page.evaluate(() => {
+		const c = document.createElement('canvas');
+		[c.width, c.height] = [40, 40];
+		const g = c.getContext('2d')!;
+		g.fillStyle = '#0000ff';
+		g.fillRect(10, 10, 20, 20);
+		return c.toDataURL('image/png');
+	});
+	return Buffer.from(url.split(',')[1], 'base64');
+}
+
+test('import picture: a new layer, undoable; handing it in visible means not scored', async ({
+	page
+}) => {
+	await ready(page);
+	const png = await bluePng(page);
+	await page.locator('.layers input[type=file]').setInputFiles({
+		name: 'square.png',
+		mimeType: 'image/png',
+		buffer: png
+	});
+	const layers = page.getByRole('list', { name: 'Layers, top to bottom' });
+	await expect(layers.getByRole('button', { name: 'square', exact: true })).toBeVisible();
+	// fitted inside the canvas and centred: blue in the middle, paper at the edge
+	await expect.poll(async () => (await pixel(page, 0.5, 0.5))[2]).toBeGreaterThan(200);
+	expect((await pixel(page, 0.5, 0.5))[0]).toBeLessThan(40);
+	expect((await pixel(page, 0.02, 0.5))[0]).toBeGreaterThan(240);
+	await page.getByRole('button', { name: /Undo/ }).click();
+	await expect(layers.getByRole('button', { name: 'square', exact: true })).toHaveCount(0);
+	await expect.poll(async () => (await pixel(page, 0.5, 0.5))[0]).toBeGreaterThan(240);
+	// a file that isn't a picture
+	await page.locator('.layers input[type=file]').setInputFiles({
+		name: 'notes.png',
+		mimeType: 'image/png',
+		buffer: Buffer.from('not a picture')
+	});
+	await expect(page.getByRole('alert').filter({ hasText: 'couldn’t be opened' })).toBeVisible();
+	// import again, draw, hand in: not scored
+	await page.getByRole('button', { name: /Redo/ }).click();
+	await expect(layers.getByRole('button', { name: 'square', exact: true })).toBeVisible();
+	await drag(page, [0.2, 0.2], [0.4, 0.3], 8);
+	await page.getByRole('button', { name: /Submit drawing/ }).click();
+	await expect(page).toHaveURL(/\/results$/);
+	await expect(page.getByText('Not scored')).toBeVisible();
+	await expect(page.getByText(/includes an imported picture/)).toBeVisible();
+});

@@ -257,10 +257,18 @@
 			<Tile tone="ink">
 				<span class="pp-eyebrow on-ink">Your score</span>
 				{#if traced}
-					<span class="big word">Traced</span>
-					<span class="note">
-						Tracing practice isn’t scored and doesn’t count toward your progress.
-					</span>
+					{#if sub?.imported}
+						<span class="big word">Not scored</span>
+						<span class="note">
+							It includes an imported picture, so it isn’t scored and doesn’t count toward your
+							progress. Hide the picture layer before handing in to get a score.
+						</span>
+					{:else}
+						<span class="big word">Traced</span>
+						<span class="note">
+							Tracing practice isn’t scored and doesn’t count toward your progress.
+						</span>
+					{/if}
 				{:else if grade}
 					<ScoreReveal score={grade.score} />
 					<span class="note">{grade.passed ? 'Passed! Great match.' : 'out of 10'}</span>

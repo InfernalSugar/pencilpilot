@@ -203,6 +203,12 @@ impl PaintCanvas {
         self.inner.layer_thumbnail(id, w, h)
     }
 
+    /// Add a layer holding a picture (straight-alpha sRGB RGBA8, canvas size). Returns its id (0 = couldn't).
+    #[wasm_bindgen(js_name = addImageLayer)]
+    pub fn add_image_layer(&mut self, name: &str, rgba: &[u8]) -> u32 {
+        self.inner.add_image_layer(name, rgba)
+    }
+
     // ---- adjustments and gradients ----
 
     /// Start adjusting the active layer (or a gradient on it); false if it can't be.
@@ -606,5 +612,7 @@ fn layer_props(
         locked,
         alpha_lock,
         clip,
+        // kept from the layer by the engine
+        imported: false,
     }
 }
