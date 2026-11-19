@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { page } from '$app/state';
 	import { onMount } from 'svelte';
 	import Tile from '#lib/ui/Tile.svelte';
 	import Button from '#lib/ui/Button.svelte';
@@ -111,7 +112,14 @@
 			</Tile>
 			<Tile tone="yellow">
 				<span class="pp-eyebrow ink">Tip</span>
-				<p>Progress is saved in this browser. Accounts arrive later.</p>
+				{#if page.data.user}
+					<p>Your progress is saved to your account, so it follows you to any device.</p>
+				{:else}
+					<p>
+						Progress is saved in this browser. <a href="/signup">Create a free account</a> to keep it
+						on every device.
+					</p>
+				{/if}
 			</Tile>
 		</div>
 	{:else if loaded}

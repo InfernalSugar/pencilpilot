@@ -152,6 +152,16 @@ async function load() {
 	await ready;
 }
 
+/**
+ * Start downloading and compiling the grader in the background (call while the
+ * student is still drawing) so the results page can grade straight away.
+ */
+export function warmGrader() {
+	const go = () => void load().catch(() => (ready = undefined));
+	if ('requestIdleCallback' in window) requestIdleCallback(go, { timeout: 4000 });
+	else setTimeout(go, 1500);
+}
+
 /** Grade a grayscale drawing against a grayscale reference (both width*height bytes). */
 export async function gradeImages(
 	width: number,

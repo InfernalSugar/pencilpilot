@@ -51,7 +51,7 @@
 		transform: none;
 	}
 	.primary {
-		background: var(--pp-accent);
+		background: var(--pp-accent-strong);
 		color: #fff;
 	}
 	.primary:hover {

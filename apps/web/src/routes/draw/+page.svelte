@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { warmGrader } from '#lib/grader.js';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import Tile from '#lib/ui/Tile.svelte';
@@ -31,6 +32,8 @@
 	let reference = $state<Reference | undefined>(byId(page.url.searchParams.get('ref')));
 	let refLoading = $state(false);
 	let peek = $state(false);
+	/** phones/tablets fold the brush panel away so the canvas comes first */
+	let brushesOpen = $state(false);
 	let reportOpen = $state(false);
 	let reported = $state(false);
 
@@ -112,6 +115,7 @@
 	);
 
 	onMount(() => {
+		warmGrader();
 		loadManifest().then((m) => (manifest = m));
 		if (!reference) loadReference();
 		const id = setInterval(() => {
@@ -203,7 +207,7 @@
 	</div>
 
 	<div class="layout">
-		<div class="side">
+		<div class="ref-area">
 			{#if reference}
 				<Tile as="section" label="Reference">
 					<div class="tile-head">
@@ -265,16 +269,29 @@
 					<p class="muted-dark">Free draw for now. References are being curated.</p>
 				</Tile>
 			{/if}
+		</div>
+		<div class="brush-area">
 			<Tile as="section" label="Brushes">
 				<div class="tile-head">
 					<h2>Brushes</h2>
 					<span class="current">{brushName}</span>
+					<button
+						type="button"
+						class="brush-toggle"
+						aria-expanded={brushesOpen}
+						aria-controls="brush-body"
+						onclick={() => (brushesOpen = !brushesOpen)}
+					>
+						{brushesOpen ? 'Hide' : 'Change'}
+					</button>
 				</div>
-				{#if manifest}
-					<BrushPicker {manifest} bind:selected={brushId} />
-				{:else}
-					<p class="muted">Loading brushes…</p>
-				{/if}
+				<div id="brush-body" class="brush-body" class:closed={!brushesOpen}>
+					{#if manifest}
+						<BrushPicker {manifest} bind:selected={brushId} />
+					{:else}
+						<p class="muted">Loading brushes…</p>
+					{/if}
+				</div>
 			</Tile>
 		</div>
 
@@ -518,12 +535,51 @@
 	.layout {
 		display: grid;
 		grid-template-columns: 340px minmax(0, 1fr);
+		grid-template-rows: auto 1fr;
+		grid-template-areas: 'ref canvas' 'brushes canvas';
 		gap: var(--pp-gap);
 		align-items: start;
 	}
+	.ref-area:empty {
+		display: none;
+	}
+	.ref-area {
+		grid-area: ref;
+		min-width: 0;
+	}
+	.brush-area {
+		grid-area: brushes;
+		min-width: 0;
+	}
+	.canvas-col {
+		grid-area: canvas;
+	}
+	.brush-toggle {
+		display: none;
+	}
+	/* Tablets and phones: reference, then the canvas, then a folded-away brush panel. */
 	@media (max-width: 960px) {
 		.layout {
 			grid-template-columns: minmax(0, 1fr);
+			grid-template-rows: none;
+			grid-template-areas: 'ref' 'canvas' 'brushes';
+		}
+		.layout .ref-img img {
+			max-height: 34vh;
+		}
+		.brush-toggle {
+			display: block;
+			margin-left: auto;
+			padding: 8px 14px;
+			border: 0;
+			border-radius: 999px;
+			background: var(--pp-ink);
+			color: #fff;
+			font: 600 14px var(--pp-font-body);
+			cursor: pointer;
+		}
+		.brush-body.closed {
+			display: none;
 		}
 	}
 	.tile-head {
@@ -544,12 +600,6 @@
 		color: var(--pp-muted);
 	}
 	.canvas-col {
-		display: flex;
-		flex-direction: column;
-		gap: var(--pp-gap);
-		min-width: 0;
-	}
-	.side {
 		display: flex;
 		flex-direction: column;
 		gap: var(--pp-gap);
@@ -690,7 +740,7 @@
 		cursor: pointer;
 	}
 	.tool[aria-pressed='true'] {
-		background: var(--pp-accent);
+		background: var(--pp-accent-strong);
 		color: #fff;
 	}
 	.tool:disabled {

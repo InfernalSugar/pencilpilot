@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { warmGrader } from '../grader';
 	import { page } from '$app/state';
 	import Tile from '#lib/ui/Tile.svelte';
 	import Button from '#lib/ui/Button.svelte';
@@ -149,6 +150,7 @@
 	}
 
 	onMount(() => {
+		warmGrader();
 		brush = drill.brush;
 		const fromUrl = Number(page.url.searchParams.get('seed'));
 		seed = Number.isFinite(fromUrl) && fromUrl > 0 ? fromUrl : Date.now() % 2147483647;
@@ -486,7 +488,7 @@
 		font-variant-numeric: tabular-nums;
 	}
 	.timer.urgent {
-		background: var(--pp-accent);
+		background: var(--pp-accent-strong);
 		color: #fff;
 	}
 	.layout {
@@ -499,8 +501,9 @@
 		.layout {
 			grid-template-columns: minmax(0, 1fr);
 		}
-		/* Phone/tablet: target, then canvas, then the how-to. */
-		.side {
+		/* Phone/tablet: target, then canvas, then the how-to. (.layout raises specificity over the
+		   base `.side` rule further down.) */
+		.layout .side {
 			display: contents;
 		}
 		.slot-target {
@@ -672,7 +675,7 @@
 	}
 	.tool[aria-pressed='true'],
 	.tool[aria-checked='true'] {
-		background: var(--pp-accent);
+		background: var(--pp-accent-strong);
 		color: #fff;
 	}
 	.tool:disabled {

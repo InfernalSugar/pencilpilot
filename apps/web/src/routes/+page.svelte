@@ -309,7 +309,7 @@
 		display: grid;
 		place-items: center;
 		border-radius: 999px;
-		background: var(--pp-accent);
+		background: var(--pp-accent-strong);
 		color: #fff;
 		font-weight: 700;
 	}
