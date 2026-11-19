@@ -68,6 +68,8 @@ const MEASUREMENTS: &[&str] = &[
     "contrast_ratio",
     "ssim",
     "ink_coverage",
+    "structure",
+    "relevance",
     "line_confidence",
     "smoothness",
     "curvature_jitter",
@@ -551,8 +553,8 @@ fn tips_have_variants_numbers_and_no_unfilled_placeholders() {
             r.id,
             tip.variants.len()
         );
-        // ink coverage is a tiny fraction: those tips don't quote it
-        if r.measurement != "ink_coverage" {
+        // ink coverage is a tiny fraction and exclusive tips (not the reference) quote no number
+        if r.measurement != "ink_coverage" && !r.exclusive {
             assert!(
                 tip.variants.iter().all(|v| v.contains("{n}")),
                 "{}: every variant should quote the number",

@@ -323,20 +323,28 @@
 			{#if grade}
 				<Tile>
 					<h2>Breakdown</h2>
-					<ul class="bars">
-						{#each skills as s (s.name)}
-							<li>
-								<span class="row"><span>{s.label}</span><b>{pct(s.value)}</b></span>
-								<span class="track">
-									<span
-										class="fill"
-										class:low={fixSkills.has(s.skill)}
-										style="width: {pct(s.value)}"
-									></span>
-								</span>
-							</li>
-						{/each}
-					</ul>
+					{#if grade.flags.includes('unrelated')}
+						<!-- coverage-style measures (big shapes, light & dark) reward any ink in the right area -->
+						<p class="note">
+							Your lines don’t follow the reference’s shapes yet, so there’s nothing to break down.
+							Start with its main outline.
+						</p>
+					{:else}
+						<ul class="bars">
+							{#each skills as s (s.name)}
+								<li>
+									<span class="row"><span>{s.label}</span><b>{pct(s.value)}</b></span>
+									<span class="track">
+										<span
+											class="fill"
+											class:low={fixSkills.has(s.skill)}
+											style="width: {pct(s.value)}"
+										></span>
+									</span>
+								</li>
+							{/each}
+						</ul>
+					{/if}
 				</Tile>
 			{/if}
 			{#if fb?.praise}

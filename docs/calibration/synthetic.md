@@ -6,21 +6,21 @@ Each approved reference is turned into perfect line art (strongest ~8% of edges)
 
 | Category | Mistake | L0 | L1 | L2 | L3 | ρ | OK |
 |---|---|---|---|---|---|---|---|
-| animals | missing | 9.3 | 6.1 | 2.8 | 2.2 | -0.87 | ✅ |
-| animals | scale | 9.3 | 5.3 | 4.5 | 4.0 | -0.64 | ✅ |
-| animals | scribble | 9.3 | 6.2 | 4.2 | 2.9 | -0.69 | ✅ |
-| animals | shift | 9.3 | 4.7 | 3.3 | 2.8 | -0.72 | ✅ |
-| animals | wobble | 9.3 | 9.1 | 4.8 | 3.3 | -0.81 | ✅ |
-| anime | missing | 9.7 | 7.6 | 2.8 | 1.0 | -0.90 | ✅ |
-| anime | scale | 9.7 | 8.0 | 7.3 | 6.5 | -0.75 | ✅ |
-| anime | scribble | 9.7 | 6.8 | 4.8 | 3.7 | -0.80 | ✅ |
-| anime | shift | 9.7 | 7.6 | 6.9 | 6.0 | -0.68 | ✅ |
-| anime | wobble | 9.7 | 9.2 | 7.2 | 5.8 | -0.89 | ✅ |
-| real-life | missing | 9.1 | 5.7 | 1.8 | 1.2 | -0.90 | ✅ |
-| real-life | scale | 9.1 | 5.8 | 5.5 | 4.4 | -0.71 | ✅ |
-| real-life | scribble | 9.1 | 6.4 | 4.6 | 3.8 | -0.78 | ✅ |
-| real-life | shift | 9.1 | 5.2 | 4.7 | 3.9 | -0.68 | ✅ |
-| real-life | wobble | 9.1 | 8.7 | 5.4 | 4.3 | -0.86 | ✅ |
+| animals | missing | 9.3 | 6.2 | 2.8 | 2.3 | -0.85 | ✅ |
+| animals | scale | 9.3 | 5.4 | 4.5 | 4.0 | -0.66 | ✅ |
+| animals | scribble | 9.3 | 6.3 | 4.2 | 2.9 | -0.70 | ✅ |
+| animals | shift | 9.3 | 4.8 | 3.8 | 2.4 | -0.77 | ✅ |
+| animals | wobble | 9.3 | 9.1 | 4.8 | 1.9 | -0.88 | ✅ |
+| anime | missing | 9.7 | 7.6 | 2.8 | 1.0 | -0.92 | ✅ |
+| anime | scale | 9.7 | 8.0 | 7.3 | 6.5 | -0.74 | ✅ |
+| anime | scribble | 9.7 | 6.9 | 4.5 | 3.3 | -0.83 | ✅ |
+| anime | shift | 9.7 | 7.6 | 6.9 | 5.9 | -0.70 | ✅ |
+| anime | wobble | 9.7 | 9.2 | 7.2 | 3.8 | -0.90 | ✅ |
+| real-life | missing | 9.1 | 5.7 | 1.8 | 1.1 | -0.90 | ✅ |
+| real-life | scale | 9.1 | 5.8 | 5.0 | 4.5 | -0.70 | ✅ |
+| real-life | scribble | 9.1 | 6.5 | 4.6 | 3.6 | -0.79 | ✅ |
+| real-life | shift | 9.1 | 5.2 | 4.8 | 3.9 | -0.68 | ✅ |
+| real-life | wobble | 9.1 | 8.7 | 5.4 | 2.4 | -0.90 | ✅ |
 
 18 references; 0 row(s) flagged ⚠️ (perfect < 7, or scores not falling clearly).
 

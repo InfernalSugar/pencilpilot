@@ -550,6 +550,22 @@ skill = "outline"
 number = "pct"
 lesson = "seeing-the-whole-subject"
 drill = "contour-in-one-minute"
+exclusive = true
+
+# The drawing doesn't depict the reference (scribbles, hatching or another
+# subject over the right area): `relevance` from the grader's line-direction
+# check. Exclusive, so no praise for big shapes / light & dark that only
+# came from ink being in the right place.
+[[rule]]
+id = "not-the-reference"
+measurement = "relevance"
+below = 0.5
+severity = 5
+skill = "outline"
+number = "pct"
+lesson = "seeing-the-whole-subject"
+drill = "contour-in-one-minute"
+exclusive = true
 
 # ════════════════════════════════════════════════════════════════════
 # SILHOUETTE (big shapes)

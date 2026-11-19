@@ -16,6 +16,7 @@ Each method gives a 0–1 similarity, and they are blended with per-category wei
 | Grid comparison | *where* the errors are |
 | Light/dark (blurred tone map) | shading and values |
 | SSIM | general structural likeness |
+| Line-direction correlation (structure tensor) | relevance: does the drawing depict the reference at all? Low relevance caps the score near 1 |
 | Stroke quality | line confidence (smoothness, retraces, speed) |
 
 Drawings are auto-aligned before comparison, a passing threshold keeps tiny errors near 10, and weights are tuned against human-labelled samples (M8).

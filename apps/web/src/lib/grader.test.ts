@@ -70,6 +70,26 @@ describe('grader wasm', () => {
 		expect(g.flags).toContain('blank');
 	});
 
+	it('flags drawings that do not depict the reference, unless the gate is off', () => {
+		// diagonal hatching over the disc's area: right place, nothing like a disc
+		const hatch = new Uint8Array(W * H).fill(255);
+		for (let y = 30; y < 120; y++) {
+			for (let x = 55; x < 145; x++) if ((x + y) % 6 === 0) hatch[y * W + x] = 20;
+		}
+		const g = grade(W, H, hatch, disc(false), { category: 'anime' }) as Grade;
+		expect(g.flags).toContain('unrelated');
+		expect(g.score).toBeLessThanOrEqual(2);
+		expect(measurement(g, 'relevance')).toBeLessThan(0.5);
+		const off = grade(W, H, hatch, disc(false), { relevanceGate: false }) as Grade;
+		expect(off.flags).not.toContain('unrelated');
+		const fb = feedback(g.measurements, 'anime', 1) as Feedback;
+		expect(fb.fixes.map((f) => f.id)).toEqual(['not-the-reference']);
+		expect(fb.praise).toBeNull();
+		// a real copy is not flagged
+		const ok = grade(W, H, disc(true), disc(false), { category: 'anime' }) as Grade;
+		expect(ok.flags).not.toContain('unrelated');
+	});
+
 	it('turns measurements into ranked tips with real numbers', () => {
 		const fb = feedback(
 			[
