@@ -146,9 +146,10 @@ export function recordGraded(sub: Submission, g: Graded): boolean {
 		refId: ref.id,
 		title: titleOf(ref),
 		fixes: fb.fixes.map((f) => f.id),
-		// sketches don't feed the skill radar: their lines and shading aren't judged
+		// sketches don't feed the skill radar: their lines and shading aren't judged;
+		// nor do drawings of something else (their "big shapes" etc. mean nothing)
 		skills:
-			sub.mode === 'sketch'
+			sub.mode === 'sketch' || grade.flags.includes('unrelated')
 				? {}
 				: Object.fromEntries(
 						SKILLS.map((s) => [s.skill, measurement(grade, s.name)]).filter(

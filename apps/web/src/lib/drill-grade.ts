@@ -58,7 +58,9 @@ export async function gradeRound(
 		category: 'fundamentals',
 		strokes: drawing.strokes,
 		weights: drill.weights,
-		curve: drill.curve
+		curve: drill.curve,
+		// value drills are shading and hatching, which the line-direction check can't judge
+		relevanceGate: drill.kind !== 'values'
 	});
 	if (g.flags.includes('blank')) return blank;
 	const lineConfidence = measurement(g, 'line_confidence') ?? null;

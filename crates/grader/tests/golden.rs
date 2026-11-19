@@ -9,7 +9,7 @@ use grader::{Grade, GradeOptions, Gray, Stroke, StrokePoint, grade, grade_with};
 fn show(name: &str, g: &Grade) {
     let m = |n: &str| g.measurement(n).unwrap_or(f32::NAN);
     eprintln!(
-        "{name:<28} score {:5.2}  sim {:.3}  place {:.2} scale {:.2} asp {:+.2} off ({:+.2},{:+.2})  outline {:.2} sil {:.2} grid {:.2} worst {:.2} tone {:.2} contrast {:.2} ssim {:.2}  align s{:.2} r{:+.1} ({:+.0},{:+.0}) {:?}",
+        "{name:<28} score {:5.2}  sim {:.3}  place {:.2} scale {:.2} asp {:+.2} off ({:+.2},{:+.2})  outline {:.2} sil {:.2} grid {:.2} worst {:.2} tone {:.2} contrast {:.2} ssim {:.2} structure {:+.2}  align s{:.2} r{:+.1} ({:+.0},{:+.0}) {:?}",
         g.score,
         g.similarity,
         m("placement"),
@@ -24,6 +24,7 @@ fn show(name: &str, g: &Grade) {
         m("tone"),
         m("contrast_ratio"),
         m("ssim"),
+        m("structure"),
         g.alignment.scale,
         g.alignment.rotation,
         g.alignment.dx,
@@ -35,6 +36,14 @@ fn show(name: &str, g: &Grade) {
 fn run(name: &str, d: &Gray, r: &Gray) -> Grade {
     let g = grade(d, r).unwrap();
     show(name, &g);
+    let ungated = GradeOptions {
+        relevance_gate: Some(false),
+        ..Default::default()
+    };
+    let before = grade_with(d, r, &ungated).unwrap().score;
+    if (before - g.score).abs() > 0.01 {
+        eprintln!("{:<28} (without the relevance gate: {before:.2})", "");
+    }
     g
 }
 

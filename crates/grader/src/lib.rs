@@ -29,6 +29,10 @@
 //!    tone to compare, so it is not marked down for it.
 //! 9. **line_confidence** — stroke smoothness, retraces, speed (optional).
 //! 10. **keypoints** — Procrustes fit of tapped points (optional).
+//! 11. **relevance** — does it depict the reference at all? Correlation of
+//!     local line directions (`relevance.rs`); low relevance caps the
+//!     score near 1 and flags the grade `unrelated`, because the coverage
+//!     measures above reward any ink in the right area.
 //!
 //! The weighted mean of the similarities (weights per [`Category`]) goes
 //! through a [`ScoreCurve`] to give the 1–10 score.
@@ -39,6 +43,7 @@ mod edges;
 mod img;
 pub mod keypoints;
 mod metrics;
+mod relevance;
 pub mod score;
 pub mod sketch;
 pub mod strokes;
@@ -108,6 +113,11 @@ pub struct GradeOptions {
     pub curve: Option<ScoreCurve>,
     pub strokes: Vec<Stroke>,
     pub keypoints: Vec<KeypointPair>,
+    /// Cap the score of drawings that don't depict the reference (see the
+    /// `relevance` measurement and the `unrelated` flag). On unless `false`;
+    /// exercises where shading or texture is the point (value drills) turn
+    /// it off.
+    pub relevance_gate: Option<bool>,
 }
 
 /// What kind of drawing is being graded.
@@ -196,6 +206,14 @@ pub const MEASUREMENT_DOCS: &[(&str, &str)] = &[
     (
         "angles",
         "0–1: main line directions of the drawing vs the reference (orientation histograms); sketch mode leans on it",
+    ),
+    (
+        "structure",
+        "raw −1…1: correlation of local line directions, drawing vs reference edges, near the drawing (≈0 = unrelated scribbles or hatching)",
+    ),
+    (
+        "relevance",
+        "0–1: does the drawing depict the reference at all (from structure); below 0.5 the grade is flagged unrelated and its score capped near 1",
     ),
     (
         "passes",
@@ -297,7 +315,8 @@ pub struct BBoxInfo {
 pub struct Grade {
     /// Final score, 1.0–10.0.
     pub score: f32,
-    /// Weighted mean similarity (0–1) before the curve.
+    /// Weighted mean similarity (0–1) before the curve (pulled down when the
+    /// drawing is unrelated, see the `relevance` measurement).
     pub similarity: f32,
     /// `similarity` reached the curve's passing threshold.
     pub passed: bool,
@@ -307,7 +326,8 @@ pub struct Grade {
     pub alignment: Alignment,
     pub bbox: BBoxInfo,
     pub keypoints: Option<KeypointResult>,
-    /// `blank`, `reference_blank`, `alignment_at_limit`.
+    /// `blank`, `reference_blank`, `alignment_at_limit`, `unrelated` (the
+    /// drawing doesn't depict the reference; its score is capped near 1).
     pub flags: Vec<String>,
 }
 
@@ -570,6 +590,32 @@ pub fn grade_with(
     // Main line directions: drawing outline vs the depicted reference edges.
     let angles = metrics::orientation_similarity(&a_tone, &ref_tone, &a_line, &depicted);
     out.push("angles", angles);
+    // Does it depict the reference at all? Line directions of the drawing
+    // vs the reference edges. A traced letterbox frame is neither evidence
+    // for nor against (it has no reference edges): lines near it are left
+    // out, with room for a frame drawn a little off.
+    let near_frame = img::dilate(&frame, 2.0 * metrics::sigma_px(w, h));
+    let mut judged = a_line.clone();
+    for (l, f) in judged.d.iter_mut().zip(&near_frame.d) {
+        *l &= !*f;
+    }
+    let structure = relevance::structure_correlation(
+        &a_tone,
+        &judged,
+        &ref_tone,
+        &ref_detail,
+        &ref_strength,
+        // the usual tolerance in sketch mode too: blurring wider makes
+        // random lines line up by chance
+        metrics::sigma_px(w, h),
+    );
+    // No lines to judge (a fully painted drawing, all ink): no evidence
+    // either way, so no gate.
+    let relevance = structure.map_or(1.0, relevance::relevance);
+    if let Some(s) = structure {
+        out.push("structure", s);
+    }
+    out.push("relevance", relevance);
     if let Some(p) = passes {
         out.push("passes", p);
     }
@@ -611,6 +657,15 @@ pub fn grade_with(
         parts.iter().map(|p| p.0.max(0.0) * p.1).sum::<f32>() / wsum
     } else {
         0.0
+    };
+    let gate = opts.relevance_gate.unwrap_or(true) && !ref_pts.is_empty();
+    if gate && relevance < relevance::FLAG_BELOW {
+        flags.push("unrelated".to_string());
+    }
+    let similarity = if gate {
+        relevance::cap(similarity, relevance, &curve)
+    } else {
+        similarity
     };
     let fs = f as f32;
     Ok(Grade {
