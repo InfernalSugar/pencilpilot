@@ -563,6 +563,13 @@ impl Painter {
         true
     }
 
+    /// Forget the undo/redo history (e.g. after setting up starter layers,
+    /// so the first undo doesn't take the setup apart).
+    pub fn clear_history(&mut self) {
+        self.undo.clear();
+        self.redo.clear();
+    }
+
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
     }

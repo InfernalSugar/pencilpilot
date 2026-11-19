@@ -16,7 +16,13 @@
 		type FeedbackItem,
 		type Grade
 	} from '#lib/grader.js';
-	import { gradable, gradeSubmission, recordGraded, SKILLS } from '#lib/grade-submission.js';
+	import {
+		gradable,
+		gradeSubmission,
+		recordGraded,
+		SKETCH_SKILLS,
+		SKILLS
+	} from '#lib/grade-submission.js';
 	import { sessionDrawing, timeLabel } from '#lib/timed.js';
 
 	let sub = $state<Submission | null>(null);
@@ -101,9 +107,9 @@
 
 	const skills = $derived(
 		grade
-			? SKILLS.map((s) => ({ ...s, value: measurement(grade!, s.name) ?? -1 })).filter(
-					(s) => s.value >= 0
-				)
+			? (sub?.mode === 'sketch' ? SKETCH_SKILLS : SKILLS)
+					.map((s) => ({ ...s, value: measurement(grade!, s.name) ?? -1 }))
+					.filter((s) => s.value >= 0)
 			: []
 	);
 	const fixSkills = $derived(new Set(fb?.fixes.map((f) => f.skill) ?? []));
@@ -165,7 +171,9 @@
 				<span class="pp-eyebrow">
 					Results{reference
 						? ` · ${reference.category} · ${tierName(tierOf(reference))}`
-						: ''}{sub.timeLimit ? ` · ${timeLabel(sub.timeLimit)} drawing` : ''}
+						: ''}{sub.mode === 'sketch' ? ' · sketch' : ''}{sub.timeLimit
+						? ` · ${timeLabel(sub.timeLimit)} ${sub.mode === 'sketch' ? 'sketch' : 'drawing'}`
+						: ''}
 				</span>
 				<h1>{reference ? titleOf(reference) : 'Your drawing'}</h1>
 			</div>

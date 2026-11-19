@@ -232,3 +232,54 @@ pub(crate) fn mass_bbox(pts: &[(f32, f32, f32)], trim: f32) -> Option<(f32, f32,
     let (y0, y1) = q(pts.iter().map(|p| (p.1, p.2)).collect());
     Some((x0 - 0.5, y0 - 0.5, x1 + 0.5, y1 + 0.5))
 }
+
+/// How alike the main line directions are (0–1): magnitude-weighted
+/// histograms of edge orientation (12 bins over 180°, softly binned) at the
+/// masked pixels of each image, compared by cosine similarity.
+pub(crate) fn orientation_similarity(
+    drawing: &Plane,
+    reference: &Plane,
+    drawing_mask: &Mask,
+    reference_mask: &Mask,
+) -> f32 {
+    const BINS: usize = 12;
+    let hist = |p: &Plane, m: &Mask| {
+        let near = crate::img::dilate(m, 1.0);
+        let mut hgram = [0f32; BINS];
+        if p.w < 3 || p.h < 3 {
+            return hgram;
+        }
+        let g = |x: usize, y: usize| p.d[y * p.w + x];
+        for y in 1..p.h - 1 {
+            for x in 1..p.w - 1 {
+                if !near.d[y * p.w + x] {
+                    continue;
+                }
+                let gx = (g(x + 1, y - 1) + 2.0 * g(x + 1, y) + g(x + 1, y + 1))
+                    - (g(x - 1, y - 1) + 2.0 * g(x - 1, y) + g(x - 1, y + 1));
+                let gy = (g(x - 1, y + 1) + 2.0 * g(x, y + 1) + g(x + 1, y + 1))
+                    - (g(x - 1, y - 1) + 2.0 * g(x, y - 1) + g(x + 1, y - 1));
+                let mag = gx.hypot(gy);
+                if mag <= 1e-3 {
+                    continue;
+                }
+                let a = gy.atan2(gx).rem_euclid(std::f32::consts::PI);
+                let pos = a / std::f32::consts::PI * BINS as f32 - 0.5;
+                let i0 = pos.floor();
+                let frac = pos - i0;
+                let i0 = (i0 as i64).rem_euclid(BINS as i64) as usize;
+                hgram[i0] += mag * (1.0 - frac);
+                hgram[(i0 + 1) % BINS] += mag * frac;
+            }
+        }
+        hgram
+    };
+    let (a, b) = (hist(drawing, drawing_mask), hist(reference, reference_mask));
+    let dot: f32 = a.iter().zip(&b).map(|(x, y)| x * y).sum();
+    let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if na <= 0.0 || nb <= 0.0 {
+        return 0.0;
+    }
+    (dot / (na * nb)).clamp(0.0, 1.0)
+}

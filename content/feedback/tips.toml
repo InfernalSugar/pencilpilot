@@ -817,3 +817,21 @@ variants = [
   "Your proportions are close to the reference, so the subject looks natural. Great measuring.",
   "Features and parts land in the right places. That careful measuring shows.",
 ]
+
+# ════════════════════════════════════════════════════════════════════
+# SKETCH MODE
+# ════════════════════════════════════════════════════════════════════
+
+[tip.sketch-many-passes]
+title = "Lots of passes on each line"
+variants = [
+  "Your lines were drawn about {n} times over. That's normal in a sketch and it doesn't cost you points, but each pass is a guess. Try hovering over the line first, then one or two confident strokes.",
+  "Around {n} passes per line. Rough is fine! To get faster, ghost the motion above the paper a couple of times, then commit to one stroke and move on.",
+]
+
+[tip.sketch-angles-off]
+title = "The main angles drifted"
+variants = [
+  "The big directions only match about {n}%. Before drawing a long line, hold your pencil along it in the reference, tilt it to match, and carry that angle to the page.",
+  "At about {n}% angle match, some main lines lean the wrong way. Look for the longest lines first (a back, a horizon, a limb) and check each one against a vertical before adding the rest.",
+]

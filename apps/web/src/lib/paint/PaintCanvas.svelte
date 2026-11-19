@@ -616,16 +616,39 @@
 		return new ImageData(new Uint8ClampedArray(paint.layerThumbnail(id, w, h)), w, h);
 	}
 
-	export function exportDrawing(): DrawingExport | null {
-		if (!ctx) return null;
+	/**
+	 * The drawing as shown, minus the `exclude` layers (e.g. sketch-mode
+	 * construction lines), with the strokes on the layers that remain.
+	 */
+	export function exportDrawing(opts: { exclude?: number[] } = {}): DrawingExport | null {
+		if (!ctx || !paint) return null;
+		const hide = (opts.exclude ?? []).filter((id) => layerList().some((l) => l.id === id));
+		const restore: [number, LayerSettings][] = [];
+		for (const id of hide) {
+			const s = settings(id)!;
+			restore.push([id, s]);
+			setRaw(id, { ...s, visible: false }, false);
+		}
 		render();
-		return {
+		const ids = visibleLayerIds();
+		const out = {
 			width,
 			height,
 			png: el.toDataURL('image/png'),
 			gray: toGray(ctx.getImageData(0, 0, width, height).data),
-			strokes: structuredClone(log.on(visibleLayerIds()))
+			strokes: structuredClone(log.on(ids))
 		};
+		// put the hidden layers back (in the same task, so nothing flickers)
+		for (const [id, s] of restore) setRaw(id, s, false);
+		if (restore.length) render();
+		return out;
+	}
+
+	/** Forget undo/redo (after setting up starter layers). */
+	export function clearHistory() {
+		paint?.clearHistory();
+		log.forgetHistory();
+		notify();
 	}
 </script>
 

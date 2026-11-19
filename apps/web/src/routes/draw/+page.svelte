@@ -190,6 +190,40 @@
 	let seconds = $state(0);
 	let timerOn = $state(true);
 
+	// Sketch mode (?mode=sketch, ADR-0007): a Construction layer under a Sketch layer.
+	const drawMode: 'finished' | 'sketch' =
+		page.url.searchParams.get('mode') === 'sketch' ? 'sketch' : 'finished';
+	const CONSTRUCTION_BLUE = '#3d6bff';
+	let constructionId = $state(0);
+	let setupFor = '';
+	let colorBeforeConstruction = '';
+	$effect(() => {
+		const key = `${canvasSize.width}x${canvasSize.height}-${round}`;
+		if (drawMode !== 'sketch' || !canvas || status.layers.length !== 1 || setupFor === key) return;
+		setupFor = key;
+		const sketchId = status.layers[0].id;
+		canvas.setLayer(sketchId, { name: 'Sketch' });
+		canvas.addLayer('Construction');
+		const cid = status.active;
+		canvas.moveLayer(cid, 0);
+		canvas.setLayer(cid, { opacity: 0.5 });
+		canvas.clearHistory();
+		constructionId = cid;
+	});
+	// Construction lines in blue; back to the student's colour on other layers.
+	$effect(() => {
+		if (drawMode !== 'sketch' || !constructionId) return;
+		if (status.active === constructionId) {
+			if (color !== CONSTRUCTION_BLUE) {
+				colorBeforeConstruction = color;
+				color = CONSTRUCTION_BLUE;
+			}
+		} else if (color === CONSTRUCTION_BLUE && colorBeforeConstruction) {
+			color = colorBeforeConstruction;
+			colorBeforeConstruction = '';
+		}
+	});
+
 	// Timed rounds (?time=120) and gesture sessions (?session=gesture&count=10&time=60).
 	const timeLimit = Math.max(0, Math.min(3600, Number(page.url.searchParams.get('time')) || 0));
 	const sessionMode =
@@ -253,7 +287,8 @@
 				time: timeLimit,
 				category: category.id,
 				topic: filter.topic,
-				tier: filter.tier
+				tier: filter.tier,
+				mode: drawMode
 			});
 		const id = setInterval(() => {
 			if (timerOn && !status.blank) seconds++;
@@ -288,7 +323,10 @@
 	}
 
 	function buildSubmission(): Submission | null {
-		const d = canvas?.exportDrawing();
+		// construction lines are never graded
+		const d = canvas?.exportDrawing({
+			exclude: drawMode === 'sketch' && constructionId ? [constructionId] : []
+		});
 		if (!d) return null;
 		return {
 			at: Date.now(),
@@ -313,7 +351,8 @@
 						ownUrl: trace.source === 'own' ? (trace.ownUrl ?? undefined) : undefined
 					}
 				: undefined,
-			...(timeLimit ? { timeLimit } : {})
+			...(timeLimit ? { timeLimit } : {}),
+			...(drawMode === 'sketch' ? { mode: 'sketch' as const } : {})
 		};
 	}
 
@@ -332,7 +371,7 @@
 	<div class="top">
 		<div>
 			<span class="pp-eyebrow">
-				{category ? `${category.name} · ` : ''}{reference
+				{drawMode === 'sketch' ? 'Sketch · ' : ''}{category ? `${category.name} · ` : ''}{reference
 					? [topicName(reference.category, reference.topic), tierName(tierOf(reference))]
 							.filter(Boolean)
 							.join(' · ')
@@ -539,6 +578,13 @@
 		</div>
 
 		<div class="canvas-col">
+			{#if drawMode === 'sketch'}
+				<p class="sketch-note">
+					<b>Sketch mode:</b> rough, scratchy lines are fine. Put guide lines on the
+					<b>Construction</b> layer: they’re never marked as mistakes. Scored on proportions, big shapes
+					and angles.
+				</p>
+			{/if}
 			<div class="canvas-tile">
 				{#key `${canvasSize.width}x${canvasSize.height}-${round}`}
 					<PaintCanvas
@@ -927,6 +973,17 @@
 		color: #fff;
 		font: 600 13px var(--pp-font-body);
 		cursor: pointer;
+	}
+	.sketch-note {
+		margin: 0;
+		padding: 12px 16px;
+		border-radius: 16px;
+		background: var(--pp-lilac);
+		color: var(--pp-lilac-ink);
+		font-size: 14px;
+	}
+	.sketch-note b {
+		color: var(--pp-ink);
 	}
 	.round {
 		display: flex;

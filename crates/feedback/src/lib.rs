@@ -63,6 +63,42 @@ pub struct Rule {
     pub gate: Option<String>,
     pub gate_min: Option<f32>,
     pub gate_max: Option<f32>,
+    /// Drawing modes the rule applies to (`finished`, `sketch`). Empty = both,
+    /// except rules on [`FINISHED_ONLY`] measurements, which skip sketches.
+    #[serde(default)]
+    pub modes: Vec<String>,
+}
+
+/// Measurements a sketch isn't judged on (ADR-0007): line neatness and
+/// shading. Their rules and praise only apply to finished drawings unless a
+/// rule lists `modes` itself.
+pub const FINISHED_ONLY: &[&str] = &[
+    "tone",
+    "contrast_ratio",
+    "ssim",
+    "shading",
+    "line_confidence",
+    "smoothness",
+    "curvature_jitter",
+    "retrace_ratio",
+    "speed_consistency",
+    "speed_cv",
+    "stroke_count",
+];
+
+impl Rule {
+    /// Whether this rule is used for drawings of `mode` ("finished" or "sketch").
+    pub fn applies_to_mode(&self, mode: &str) -> bool {
+        if !self.modes.is_empty() {
+            return self.modes.iter().any(|m| m == mode);
+        }
+        mode != "sketch"
+            || !(FINISHED_ONLY.contains(&self.measurement.as_str())
+                || self
+                    .gate
+                    .as_deref()
+                    .is_some_and(|g| FINISHED_ONLY.contains(&g)))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -225,11 +261,22 @@ fn variant(tip: &Tip, seed: u32, salt: usize) -> &str {
     &tip.variants[i]
 }
 
-/// Build feedback for one graded drawing.
+/// Build feedback for one graded finished drawing.
 pub fn feedback(
     lib: &Library,
     measurements: &[(String, f32)],
     category: &str,
+    seed: u32,
+) -> Feedback {
+    feedback_for(lib, measurements, category, "finished", seed)
+}
+
+/// Build feedback for one graded drawing of `mode` ("finished" or "sketch").
+pub fn feedback_for(
+    lib: &Library,
+    measurements: &[(String, f32)],
+    category: &str,
+    mode: &str,
     seed: u32,
 ) -> Feedback {
     let get = |name: &str| {
@@ -245,6 +292,9 @@ pub fn feedback(
     let mut fired: Vec<(f32, usize, &Rule, f32)> = Vec::new();
     for (i, r) in lib.rules.iter().enumerate() {
         if !r.categories.is_empty() && !r.categories.iter().any(|c| c == category) {
+            continue;
+        }
+        if !r.applies_to_mode(mode) {
             continue;
         }
         if let Some(g) = &r.gate {
@@ -287,6 +337,7 @@ pub fn feedback(
     let praise = PRAISE_SKILLS
         .iter()
         .filter(|(skill, _)| !skills.iter().any(|s| s == skill))
+        .filter(|(_, m)| mode != "sketch" || !FINISHED_ONLY.contains(m))
         .filter_map(|(skill, m)| get(m).map(|v| (*skill, *m, v)))
         .filter(|(_, _, v)| *v >= PRAISE_MIN)
         .max_by(|a, b| a.2.total_cmp(&b.2))
@@ -310,6 +361,49 @@ pub fn feedback(
         });
 
     Feedback { fixes, praise }
+}
+
+#[cfg(test)]
+mod mode_tests {
+    use super::*;
+
+    fn m(v: &[(&str, f32)]) -> Vec<(String, f32)> {
+        v.iter().map(|(n, x)| (n.to_string(), *x)).collect()
+    }
+
+    #[test]
+    fn sketches_skip_line_and_shading_tips_and_get_their_own() {
+        let lib = Library::builtin();
+        let shaky = m(&[
+            ("line_confidence", 0.1),
+            ("smoothness", 0.1),
+            ("shading", 0.5),
+            ("tone", 0.2),
+        ]);
+        assert!(
+            !feedback_for(lib, &shaky, "animals", "finished", 0)
+                .fixes
+                .is_empty()
+        );
+        assert!(
+            feedback_for(lib, &shaky, "animals", "sketch", 0)
+                .fixes
+                .is_empty()
+        );
+
+        let rough = m(&[("passes", 5.0), ("angles", 0.6)]);
+        let ids: Vec<String> = feedback_for(lib, &rough, "animals", "sketch", 0)
+            .fixes
+            .into_iter()
+            .map(|f| f.id)
+            .collect();
+        assert!(ids.contains(&"sketch-angles-off".to_string()), "{ids:?}");
+        assert!(
+            feedback_for(lib, &rough, "animals", "finished", 0)
+                .fixes
+                .is_empty()
+        );
+    }
 }
 
 impl PartialEq for Rule {

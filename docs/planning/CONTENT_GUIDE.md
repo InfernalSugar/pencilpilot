@@ -19,6 +19,7 @@ overlay = "bbox"              # what "Show me" highlights: bbox | offset | grid 
 lesson = "measuring-with-units"
 drill = "block-in-boxes"
 categories = ["real-life"]    # optional: only for these categories
+modes = ["sketch"]          # optional: "finished" / "sketch" (line and shading rules skip sketches by default)
 ```
 The engine (`crates/feedback`) shows the top 3 fixes (one per skill) plus praise for the strongest skill.
 Content is embedded at build time, so run `pnpm wasm` after editing.

@@ -30,6 +30,9 @@ pub struct Weights {
     pub ssim: f32,
     pub line_confidence: f32,
     pub keypoints: f32,
+    /// Main line directions vs the reference's (sketch mode leans on it).
+    #[serde(default)]
+    pub angles: f32,
 }
 
 impl Default for Weights {
@@ -37,6 +40,21 @@ impl Default for Weights {
         Self::for_category(Category::Fundamentals)
     }
 }
+
+/// Sketch mode (ADR-0007): what a sketch is for. Proportions and placement,
+/// big shapes and main angles; a loose outline; line neatness, shading and
+/// SSIM don't count.
+pub const SKETCH_WEIGHTS: Weights = Weights {
+    placement: 0.45,
+    outline: 0.10,
+    silhouette: 0.15,
+    grid: 0.10,
+    tone: 0.0,
+    ssim: 0.0,
+    line_confidence: 0.0,
+    keypoints: 0.20,
+    angles: 0.20,
+};
 
 /// Default weights. Outline and proportion (keypoints) lead for anime and
 /// fundamentals; tone and overall structure (SSIM) matter more for
@@ -53,6 +71,7 @@ pub const DEFAULT_WEIGHTS: [(Category, Weights); 5] = [
             ssim: 0.04,
             line_confidence: 0.12,
             keypoints: 0.20,
+            angles: 0.0,
         },
     ),
     (
@@ -66,6 +85,7 @@ pub const DEFAULT_WEIGHTS: [(Category, Weights); 5] = [
             ssim: 0.04,
             line_confidence: 0.12,
             keypoints: 0.25,
+            angles: 0.0,
         },
     ),
     (
@@ -79,6 +99,7 @@ pub const DEFAULT_WEIGHTS: [(Category, Weights); 5] = [
             ssim: 0.06,
             line_confidence: 0.08,
             keypoints: 0.15,
+            angles: 0.0,
         },
     ),
     (
@@ -92,6 +113,7 @@ pub const DEFAULT_WEIGHTS: [(Category, Weights); 5] = [
             ssim: 0.12,
             line_confidence: 0.06,
             keypoints: 0.15,
+            angles: 0.0,
         },
     ),
     (
@@ -105,6 +127,7 @@ pub const DEFAULT_WEIGHTS: [(Category, Weights); 5] = [
             ssim: 0.15,
             line_confidence: 0.05,
             keypoints: 0.05,
+            angles: 0.0,
         },
     ),
 ];
