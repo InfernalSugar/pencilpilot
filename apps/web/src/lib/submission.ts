@@ -23,7 +23,7 @@ export interface Submission {
 	/** raw pen input, for the grader's line-confidence metrics (and replays) */
 	strokeData: Stroke[];
 	/** layer settings the strokes were painted with, bottom → top (for replays) */
-	layers?: { id: number; opacity: number; blend: string }[];
+	layers?: { id: number; opacity: number; blend: string; clip?: boolean }[];
 	/** a rough sketch (graded on the big picture, ADR-0007) */
 	mode?: 'finished' | 'sketch';
 	/** the daily challenge day (YYYY-MM-DD) this drawing was for */

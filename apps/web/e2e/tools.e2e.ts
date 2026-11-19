@@ -635,3 +635,39 @@ test('symmetry: strokes are mirrored live, one undo removes all copies, the cent
 	await drag(page, [0.5, 0.5], [0.3, 0.5], 6);
 	await expect.poll(() => page.locator('svg.guides line.axis').getAttribute('x1')).not.toBe(x);
 });
+
+/** red pixels in the rows y0..y1 (canvas fractions) */
+const redIn = (page: Page, y0: number, y1: number) =>
+	canvas(page).evaluate(
+		(c: HTMLCanvasElement, [y0, y1]) => {
+			const top = Math.round(c.height * y0);
+			const d = c
+				.getContext('2d')!
+				.getImageData(0, top, c.width, Math.round(c.height * y1) - top).data;
+			let n = 0;
+			for (let i = 0; i < d.length; i += 4) if (d[i] - d[i + 1] > 20 && d[i] - d[i + 2] > 15) n++;
+			return n;
+		},
+		[y0, y1]
+	);
+
+test('clipping mask: a clipped layer only shows over the layer below', async ({ page }) => {
+	await ready(page);
+	// base: a dark line across y 0.5
+	for (let i = 0; i < 3; i++) await page.keyboard.press(']');
+	await drag(page, [0.2, 0.5], [0.8, 0.5], 12);
+	// new layer: a fat red stroke across it, sticking out above and below
+	await page.getByRole('button', { name: 'New layer' }).click();
+	await page.getByRole('radio', { name: 'Colour #e8492f' }).click();
+	await drag(page, [0.5, 0.3], [0.5, 0.7], 16);
+	await expect.poll(() => redIn(page, 0.33, 0.45)).toBeGreaterThan(20);
+	const clip = page.getByRole('button', { name: 'Clip to below' });
+	await clip.click();
+	await expect(clip).toHaveAttribute('aria-pressed', 'true');
+	// outside the base line: gone; on it: still red
+	await expect.poll(() => redIn(page, 0.33, 0.45)).toBe(0);
+	expect(await redIn(page, 0.47, 0.53)).toBeGreaterThan(0);
+	// undo brings the spill back
+	await page.getByRole('button', { name: /Undo/ }).click();
+	await expect.poll(() => redIn(page, 0.33, 0.45)).toBeGreaterThan(20);
+});
