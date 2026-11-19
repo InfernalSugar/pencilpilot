@@ -93,7 +93,7 @@
       "query": "anime",
       "title": "",
       "keypoints": [],
-      "topic": "scenery",
+      "topic": "characters",
       "difficulty": 65.6,
       "tier": 4
     },
@@ -238,7 +238,7 @@
       "query": "anime",
       "title": "",
       "keypoints": [],
-      "topic": "chibi",
+      "topic": "characters",
       "difficulty": 61.6,
       "tier": 3
     }
