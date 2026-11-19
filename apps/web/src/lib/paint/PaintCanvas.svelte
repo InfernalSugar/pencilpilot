@@ -67,6 +67,7 @@
 	import { onMount } from 'svelte';
 	import { loadBrush, loadEngine, PaintCanvas, type PaintBrush } from './brushes';
 	import { StrokeLog, type Stroke } from './strokes';
+	import { recognise, resample } from './quickshape';
 	import { toGray } from '../grader';
 
 	let {
@@ -90,6 +91,10 @@
 		smoothing = 0,
 		onpick,
 		ongesture,
+		fillTolerance = 0.12,
+		fillAllLayers = true,
+		quickShape = true,
+		onshape,
 		maxHeight = '78vh',
 		viewControls = true
 	}: {
@@ -110,7 +115,15 @@
 		/** where the overlay sits: offset (fraction of the canvas), scale and rotation (degrees) */
 		overlayTransform?: { x: number; y: number; scale: number; rotate: number };
 		/** what a press on the canvas does */
-		tool?: 'brush' | 'picker';
+		tool?: 'brush' | 'picker' | 'fill';
+		/** fill: how different a colour may be and still be filled (0–1) */
+		fillTolerance?: number;
+		/** fill: sample what you see (true) or the current layer only */
+		fillAllLayers?: boolean;
+		/** hold at the end of a stroke to snap it to a clean shape */
+		quickShape?: boolean;
+		/** a stroke snapped to a shape */
+		onshape?: (kind: string) => void;
 		/** 0–1: steadies strokes (lazy brush, like Procreate's StreamLine) */
 		smoothing?: number;
 		/** a colour was picked (eyedropper tool, Alt+click, or a finger held still) */
@@ -547,6 +560,91 @@
 		if (c) onpick?.(c);
 	}
 
+	// ---- fill ----
+
+	/** Fill at a client position with `hex` (default: the current colour). */
+	function fillAt(clientX: number, clientY: number, hex = color) {
+		if (!paint) return;
+		const [cx, cy] = toCanvas(clientX, clientY);
+		if (cx < 0 || cy < 0 || cx >= width || cy >= height) return;
+		const l = layerList().find((x) => x.id === paint!.activeLayer);
+		if (l && (l.locked || !l.visible)) return onblocked?.(l.visible ? 'locked' : 'hidden');
+		const n = parseInt(hex.slice(1), 16) || 0;
+		const done = paint.fill(
+			Math.floor(cx),
+			Math.floor(cy),
+			(n >> 16) & 255,
+			(n >> 8) & 255,
+			n & 255,
+			opacity,
+			fillTolerance,
+			fillAllLayers,
+			2,
+			3
+		);
+		changed(done);
+	}
+
+	// ColorDrop: drag a colour swatch onto the canvas to fill there.
+	function dragOver(e: DragEvent) {
+		if (e.dataTransfer?.types.includes('application/x-pp-color')) e.preventDefault();
+	}
+	function drop(e: DragEvent) {
+		const hex = e.dataTransfer?.getData('application/x-pp-color');
+		if (!hex || !/^#[0-9a-f]{6}$/i.test(hex) || locked) return;
+		e.preventDefault();
+		fillAt(e.clientX, e.clientY, hex);
+	}
+
+	// ---- QuickShape: hold still at the end of a stroke ----
+
+	const HOLD_MS = 550;
+	let shapeTimer: ReturnType<typeof setTimeout> | undefined;
+	let holdAnchor: { x: number; y: number } | null = null;
+	let snapped = false;
+
+	function armShape(e: PointerEvent) {
+		if (!quickShape || snapped || !current) return;
+		if (holdAnchor && Math.hypot(e.clientX - holdAnchor.x, e.clientY - holdAnchor.y) < 4) return;
+		holdAnchor = { x: e.clientX, y: e.clientY };
+		clearTimeout(shapeTimer);
+		shapeTimer = setTimeout(snapShape, HOLD_MS);
+	}
+
+	function snapShape() {
+		if (!paint || !brush || !current || snapped) return;
+		const pts = current.points.map((p) => [p.x, p.y] as [number, number]);
+		const shape = recognise(pts);
+		if (!shape) return;
+		const pressure = current.points.reduce((s, p) => s + p.pressure, 0) / current.points.length;
+		const path = resample(shape.points, 3);
+		// redraw: drop the hand-drawn stroke, draw the clean one in its place
+		paint.cancelStroke();
+		if (onlive) {
+			flushLive();
+			onlive({ type: 'cancel', k: liveK });
+			liveK++;
+			onlive({ type: 'begin', k: liveK, style: { brushId, color, size, opacity, eraser } });
+		}
+		if (!paint.beginStroke()) return;
+		const t = current.points.at(-1)?.t ?? 0;
+		current.points = [];
+		for (const [x, y] of path) {
+			paint.strokeTo(brush, x, y, pressure, 0, 0, 0.008);
+			current.points.push({ x: Math.round(x * 10) / 10, y: Math.round(y * 10) / 10, pressure, t });
+			if (onlive)
+				livePts.push(
+					Math.round(x * 10) / 10,
+					Math.round(y * 10) / 10,
+					Math.round(pressure * 1000) / 1000,
+					8
+				);
+		}
+		snapped = true;
+		schedule();
+		onshape?.(shape.kind);
+	}
+
 	// ---- smoothing (lazy brush): the pen point follows the pointer on a short leash ----
 
 	let smooth: { x: number; y: number; p: number } | null = null;
@@ -700,6 +798,7 @@
 			return;
 		}
 		if (locked) return;
+		if (tool === 'fill') return fillAt(e.clientX, e.clientY);
 		if (adjustOverlay && overlaySrc) {
 			capture(e);
 			const [cx, cy] = toCanvas(e.clientX, e.clientY);
@@ -716,6 +815,9 @@
 		lastT = e.timeStamp;
 		smooth = null;
 		lastRaw = null;
+		snapped = false;
+		holdAnchor = null;
+		clearTimeout(shapeTimer);
 		if (onlive) {
 			liveK++;
 			onlive({ type: 'begin', k: liveK, style: { brushId, color, size, opacity, eraser } });
@@ -763,8 +865,10 @@
 			return;
 		}
 		if (!current) return;
+		if (snapped) return; // the shape is set; lift the pen to finish
 		const events = e.getCoalescedEvents?.() ?? [];
 		for (const ev of events.length ? events : [e]) feed(ev);
+		armShape(e);
 		schedule();
 	}
 
@@ -792,8 +896,10 @@
 		}
 		if (panning && e.pointerId === panning.id) panning = null;
 		if (moving && e.pointerId === moving.id) moving = null;
+		clearTimeout(shapeTimer);
 		if (!current || !paint || !brush) return;
-		catchUp();
+		if (!snapped) catchUp();
+		snapped = false;
 		paint.endStroke(brush);
 		log.add(current);
 		current = null;
@@ -994,6 +1100,7 @@
 	class:grab={spaceHeld}
 	class:moving-overlay={adjustOverlay && !!overlaySrc}
 	class:picker={tool === 'picker'}
+	class:filling={tool === 'fill'}
 	bind:this={vp}
 	style="aspect-ratio: {width} / {height}; max-height: {maxHeight}"
 	onpointerdown={down}
@@ -1001,6 +1108,8 @@
 	onpointerup={up}
 	onpointercancel={up}
 	onlostpointercapture={up}
+	ondragover={dragOver}
+	ondrop={drop}
 	onpointerenter={() => (hovering = true)}
 	onpointerleave={() => (hovering = false)}
 	role="presentation"
@@ -1101,6 +1210,9 @@
 			url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="white" stroke="black" stroke-width="1.6"><path d="m2 22 1-4 9-9 3 3-9 9Z"/><path d="m14 7 3-3a2.1 2.1 0 0 1 3 3l-3 3"/></svg>')
 				2 22,
 			crosshair;
+	}
+	.viewport.filling {
+		cursor: cell;
 	}
 	.viewport.moving-overlay {
 		cursor: move;

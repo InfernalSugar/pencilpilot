@@ -209,6 +209,25 @@ impl PaintCanvas {
         self.inner.redo()
     }
 
+    /// Flood-fill the active layer from (x, y); see `Painter::fill`. One undo step.
+    #[allow(clippy::too_many_arguments)]
+    pub fn fill(
+        &mut self,
+        x: u32,
+        y: u32,
+        r: u8,
+        g: u8,
+        b: u8,
+        opacity: f32,
+        tolerance: f32,
+        all_layers: bool,
+        grow: u32,
+        gap: u32,
+    ) -> bool {
+        self.inner
+            .fill(x, y, [r, g, b], opacity, tolerance, all_layers, grow, gap)
+    }
+
     /// A layer without an undo step (for another person on a shared canvas).
     #[wasm_bindgen(js_name = addLayerSilent)]
     pub fn add_layer_silent(&mut self, name: &str) -> u32 {

@@ -176,3 +176,99 @@ test('colour panel: wheel, hex, recent colours and my palette', async ({ page })
 	await panel.getByRole('button', { name: 'Edit' }).click();
 	await expect(panel.getByRole('button', { name: /^Remove #/ })).toHaveCount(1);
 });
+
+/** a closed square drawn with the default (grainy) pencil, by mouse */
+async function square(page: Page) {
+	const b = await box(page);
+	const P = (x: number, y: number) => [b.x + b.width * x, b.y + b.height * y] as const;
+	const corners = [P(0.3, 0.3), P(0.6, 0.3), P(0.6, 0.7), P(0.3, 0.7), P(0.3, 0.3)];
+	await page.mouse.move(...corners[0]);
+	await page.mouse.down();
+	for (let i = 1; i < corners.length; i++) await page.mouse.move(...corners[i], { steps: 25 });
+	await page.mouse.up();
+}
+
+const pixel = (page: Page, x: number, y: number) =>
+	canvas(page).evaluate(
+		(c: HTMLCanvasElement, [x, y]) =>
+			Array.from(
+				c.getContext('2d')!.getImageData(Math.round(c.width * x), Math.round(c.height * y), 1, 1)
+					.data
+			),
+		[x, y]
+	);
+
+test('fill: fills inside grainy pencil lines without leaking, undoable, and ColorDrop', async ({
+	page
+}) => {
+	await ready(page);
+	await square(page);
+	await page.getByRole('radio', { name: 'Colour #3d6bff' }).click();
+	await page.keyboard.press('g');
+	await expect(page.getByRole('button', { name: 'Fill (G)' })).toHaveAttribute(
+		'aria-pressed',
+		'true'
+	);
+	let b = await box(page);
+	await page.mouse.click(b.x + b.width * 0.45, b.y + b.height * 0.5);
+	await expect.poll(async () => (await pixel(page, 0.45, 0.5))[2]).toBeGreaterThan(200);
+	expect((await pixel(page, 0.45, 0.5))[0]).toBeLessThan(120);
+	// outside the square: still white
+	expect(await pixel(page, 0.8, 0.5)).toEqual([255, 255, 255, 255]);
+	await page.getByRole('button', { name: /Undo/ }).click();
+	await expect.poll(async () => (await pixel(page, 0.45, 0.5))[0]).toBe(255);
+
+	// ColorDrop: drag a swatch onto the square
+	await page.keyboard.press('b');
+	b = await box(page);
+	await page
+		.getByRole('radio', { name: 'Colour #1f9d74' })
+		.dragTo(canvas(page), { targetPosition: { x: b.width * 0.45, y: b.height * 0.5 } });
+	await expect.poll(async () => (await pixel(page, 0.45, 0.5))[1]).toBeGreaterThan(120);
+	expect((await pixel(page, 0.45, 0.5))[0]).toBeLessThan(100);
+});
+
+test('QuickShape: hold at the end of a wobbly line or loop to snap it', async ({ page }) => {
+	await ready(page);
+	let b = await box(page);
+	// a wobbly line, then hold
+	await page.mouse.move(b.x + b.width * 0.1, b.y + b.height * 0.2);
+	await page.mouse.down();
+	for (let i = 1; i <= 30; i++)
+		await page.mouse.move(
+			b.x + b.width * (0.1 + i * 0.02),
+			b.y + b.height * (0.2 + (i % 2) * 0.008)
+		);
+	await page.waitForTimeout(800);
+	await expect(page.getByRole('status').filter({ hasText: 'Snapped to a line' })).toBeVisible();
+	await page.mouse.up();
+
+	// a rough circle, then hold
+	b = await box(page);
+	const [cx, cy, r] = [b.x + b.width * 0.5, b.y + b.height * 0.6, b.height * 0.2];
+	await page.mouse.move(cx + r, cy);
+	await page.mouse.down();
+	for (let i = 1; i <= 48; i++) {
+		const t = (i / 46) * Math.PI * 2;
+		await page.mouse.move(cx + r * Math.cos(t) * (1 + (i % 3) * 0.02), cy + r * Math.sin(t));
+	}
+	await page.waitForTimeout(800);
+	await expect(
+		page.getByRole('status').filter({ hasText: /Snapped to a (circle|ellipse)/ })
+	).toBeVisible();
+	await page.mouse.up();
+	await expect(page.getByRole('button', { name: /Undo/ })).toBeEnabled();
+
+	// switched off: no snapping
+	await page.getByRole('button', { name: 'QuickShape' }).click();
+	b = await box(page);
+	await page.mouse.move(b.x + b.width * 0.1, b.y + b.height * 0.9);
+	await page.mouse.down();
+	for (let i = 1; i <= 20; i++)
+		await page.mouse.move(b.x + b.width * (0.1 + i * 0.03), b.y + b.height * 0.9);
+	await page.waitForTimeout(800);
+	await page.mouse.up();
+	await expect(page.getByRole('status').filter({ hasText: 'Snapped' })).toHaveCount(0, {
+		timeout: 2500
+	});
+});
