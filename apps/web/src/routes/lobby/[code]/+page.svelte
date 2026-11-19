@@ -88,58 +88,63 @@
 
 <svelte:head><title>Lobby {code} · PencilPilot</title></svelte:head>
 
-<div class="pp-page">
-	{#if fatal}
-		<Tile tone="lilac">
-			<h1>Can’t join this lobby</h1>
-			<p>{fatal}</p>
-			<div><Button href="/lobby">Back to lobbies</Button></div>
-		</Tile>
-	{:else if askName}
-		<Tile as="section" label="Join">
-			<span class="pp-eyebrow">Lobby {code}</span>
-			<h1>Join the lobby</h1>
-			<form
-				class="name"
-				onsubmit={(e) => {
-					e.preventDefault();
-					void join(name);
-				}}
-			>
-				<label>
-					<span>Your name (others will see it)</span>
-					<input bind:value={name} maxlength="24" required autocomplete="nickname" />
-				</label>
-				<Button type="submit" disabled={joining || !name.trim()}>
-					{joining ? 'Joining…' : 'Join'}
-				</Button>
-			</form>
-			<p class="small">
-				Or <a href="/login?next=/lobby/{code}">sign in</a> to play with your account.
-			</p>
-		</Tile>
-	{:else if !lobby}
-		<p class="status" role="status">Joining lobby {code}…</p>
-	{:else}
-		<div class="head">
-			<span class="pp-eyebrow">
-				Lobby {lobby.code} · {lobby.settings.mode === 'free' ? 'Free draw' : 'Competition'}
-			</span>
-			{#if conn !== 'open'}<span class="conn" role="status">Reconnecting…</span>{/if}
-		</div>
-		{#if lobby.phase === 'waiting'}
-			<h1>Lobby</h1>
-			<WaitingRoom {lobby} {you} {send} />
-		{:else if lobby.phase === 'free'}
-			<FreeDraw bind:this={free} {lobby} {you} {send} />
-		{:else if lobby.phase === 'drawing' || lobby.phase === 'collecting'}
-			<RoundDraw bind:this={round} {lobby} {you} {send} {left} />
+{#if lobby && lobby.phase === 'free'}
+	<FreeDraw bind:this={free} {lobby} {you} {send} reconnecting={conn !== 'open'} />
+{:else if lobby && (lobby.phase === 'drawing' || lobby.phase === 'collecting')}
+	<RoundDraw bind:this={round} {lobby} {you} {send} {left} reconnecting={conn !== 'open'} />
+{:else}
+	<div class="pp-page">
+		{#if fatal}
+			<Tile tone="lilac">
+				<h1>Can’t join this lobby</h1>
+				<p>{fatal}</p>
+				<div><Button href="/lobby">Back to lobbies</Button></div>
+			</Tile>
+		{:else if askName}
+			<Tile as="section" label="Join">
+				<span class="pp-eyebrow">Lobby {code}</span>
+				<h1>Join the lobby</h1>
+				<form
+					class="name"
+					onsubmit={(e) => {
+						e.preventDefault();
+						void join(name);
+					}}
+				>
+					<label>
+						<span>Your name (others will see it)</span>
+						<input bind:value={name} maxlength="24" required autocomplete="nickname" />
+					</label>
+					<Button type="submit" disabled={joining || !name.trim()}>
+						{joining ? 'Joining…' : 'Join'}
+					</Button>
+				</form>
+				<p class="small">
+					Or <a href="/login?next=/lobby/{code}">sign in</a> to play with your account.
+				</p>
+			</Tile>
+		{:else if !lobby}
+			<p class="status" role="status">Joining lobby {code}…</p>
 		{:else}
-			<Results {lobby} {you} {send} />
+			<div class="head">
+				<span class="pp-eyebrow">
+					Lobby {lobby.code} · {lobby.settings.mode === 'free' ? 'Free draw' : 'Competition'}
+				</span>
+				{#if conn !== 'open'}<span class="conn" role="status">Reconnecting…</span>{/if}
+			</div>
+			{#if lobby.phase === 'waiting'}
+				<h1>Lobby</h1>
+				<WaitingRoom {lobby} {you} {send} />
+			{:else}
+				<Results {lobby} {you} {send} />
+			{/if}
 		{/if}
-	{/if}
-	{#if toast}<p class="toast" role="alert">{toast}</p>{/if}
-</div>
+		{#if toast}<p class="toast" role="alert">{toast}</p>{/if}
+	</div>
+{/if}
+{#if toast && lobby && ['free', 'drawing', 'collecting'].includes(lobby.phase)}
+	<p class="toast" role="alert">{toast}</p>
+{/if}
 
 <style>
 	h1 {

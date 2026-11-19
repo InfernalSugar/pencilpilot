@@ -200,8 +200,12 @@ test('canvas size: pick a shape, and confirm before clearing a drawing', async (
 	await settledInk(page);
 	await page.getByRole('button', { name: '600 × 800' }).click();
 	await page.getByRole('radio', { name: /Custom/ }).check();
-	await page.getByLabel('Width').fill('5000');
-	await expect(page.getByRole('alert').filter({ hasText: 'At most 2048' })).toBeVisible();
+	await page.getByLabel('Width').fill('9000');
+	await expect(page.getByRole('alert').filter({ hasText: 'At most 8192' })).toBeVisible();
+	// 4K is allowed, with a memory note
+	await page.getByLabel('Width').fill('3840');
+	await page.getByLabel('Height').fill('2160');
+	await expect(page.getByText(/Big canvas|Very big canvas/)).toBeVisible();
 	await page.getByLabel('Width').fill('1000');
 	await page.getByLabel('Height').fill('1000');
 	await page.getByRole('button', { name: 'Use this size' }).click();
