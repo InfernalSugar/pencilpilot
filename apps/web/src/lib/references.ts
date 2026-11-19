@@ -28,6 +28,10 @@ export interface Reference {
 	imageUrl?: string;
 	/** true for Endless references fetched live from the ref-service */
 	live?: boolean;
+	/** the student's own picture (it stays in their browser) */
+	own?: boolean;
+	/** own pictures: which category's grading to use */
+	gradeAs?: string;
 }
 
 const files = import.meta.glob<{ references: Reference[] }>(
