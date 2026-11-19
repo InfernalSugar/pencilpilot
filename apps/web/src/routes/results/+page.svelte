@@ -122,22 +122,55 @@
 		}
 	}
 
-	/** Dev only: keep this drawing + grade as a calibration sample for /dev/rate. */
+	/**
+	 * Dev only: every graded drawing becomes a calibration sample for /dev/rate
+	 * (once per drawing), with the grader's measurements and a copy of the reference.
+	 */
 	async function saveForCalibration() {
-		if (!sub || !reference || !grade) return;
+		if (!sub || !reference || !grade || sub.traced) return;
+		const key = 'pp.calSaved';
+		const at = String(sub.at ?? '');
+		let done: string[] = [];
+		try {
+			done = JSON.parse(sessionStorage.getItem(key) ?? '[]');
+		} catch {
+			/* storage blocked */
+		}
+		if (at && done.includes(at)) return void (calSaved = true);
+		let refImage: string | undefined;
+		try {
+			const blob = await (await fetch(imageUrl(reference))).blob();
+			refImage = await new Promise<string>((ok, bad) => {
+				const r = new FileReader();
+				r.onload = () => ok(String(r.result));
+				r.onerror = bad;
+				r.readAsDataURL(blob);
+			});
+		} catch {
+			/* keep the sample without its own copy of the reference */
+		}
 		const res = await fetch('/dev/calibration', {
 			method: 'POST',
 			headers: { 'content-type': 'application/json' },
 			body: JSON.stringify({
-				category: reference.category,
+				category: reference.gradeAs ?? reference.category,
 				refId: reference.id,
 				refUrl: imageUrl(reference),
 				similarity: grade.similarity,
 				score: grade.score,
-				png: sub.png
+				measurements: Object.fromEntries(grade.measurements.map((m) => [m.name, m.value])),
+				mode: sub.mode ?? 'finished',
+				png: sub.png,
+				refImage
 			})
 		});
 		calSaved = res.ok;
+		if (res.ok && at)
+			try {
+				sessionStorage.setItem(key, JSON.stringify([...done.slice(-200), at]));
+			} catch {
+				/* storage blocked */
+			}
 	}
 
 	async function vote(f: FeedbackItem, v: 1 | -1) {
@@ -181,6 +214,7 @@
 			void countDaily(sub, g.grade.score);
 			fb = g.fb;
 			compareSrc = g.compareSrc;
+			if (dev) void saveForCalibration();
 			// Tracing is practice: tips, but no score, progress, streak or level-up.
 			// own pictures too: scored, but not part of category progress
 			if (sub.traced || !g.ref || g.ref.own) return;
@@ -574,10 +608,9 @@
 		{/if}
 		{#if dev && grade && reference && !traced}
 			<p class="credit">
-				<button type="button" class="chip" onclick={saveForCalibration} disabled={calSaved}>
-					{calSaved ? 'Saved for calibration ✓' : 'Save for calibration (dev)'}
-				</button>
-				· <a href="/dev/rate">Rate drawings</a> · <a href="/dev/feedback">Tip ratings</a>
+				{calSaved ? 'Saved for rating ✓' : 'Saving for rating…'} (dev) ·
+				<a href="/dev/rate">Rate drawings</a>
+				· <a href="/dev/feedback">Tip ratings</a>
 			</p>
 		{/if}
 	{/if}
