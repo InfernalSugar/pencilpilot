@@ -1491,6 +1491,7 @@
 	}
 	.group {
 		display: flex;
+		flex-wrap: wrap;
 		gap: 6px;
 		align-items: center;
 	}

@@ -303,7 +303,10 @@ test('selections: rectangle keeps strokes inside, clear selected, shortcuts', as
 			.getImageData(0, Math.round(c.height * 0.5) - 3, c.width, 6).data;
 		let [l, r] = [0, 0];
 		for (let i = 0; i < row.length; i += 4)
-			if (row[i] < 225) (i / 4) % c.width < c.width / 2 ? l++ : r++;
+			if (row[i] < 225) {
+				if ((i / 4) % c.width < c.width / 2) l++;
+				else r++;
+			}
 		return { l, r };
 	});
 	expect(half.l).toBeGreaterThan(20);
