@@ -410,7 +410,7 @@
       "query": "dog",
       "title": "",
       "keypoints": [],
-      "topic": "wildlife",
+      "topic": "pets",
       "difficulty": 35.2,
       "tier": 2
     },
@@ -835,7 +835,7 @@
       "query": "portrait",
       "title": "",
       "keypoints": [],
-      "topic": "wildlife",
+      "topic": "pets",
       "difficulty": 38.1,
       "tier": 2
     },

@@ -1,9 +1,12 @@
 //! Auto-vetting of reference pictures fetched live (Pixabay) before students
 //! see them.
 //!
-//! Everything here is plain image maths (ADR-0002), with one exception: an
-//! NSFW classifier used **only as a safety guard**, never for scoring or
-//! feedback. Category and topic are not this crate's job.
+//! Everything here is plain image maths (ADR-0002), with two exceptions, and
+//! neither is ever used for scoring or feedback on drawings:
+//!
+//! * an NSFW classifier, used **only as a safety guard** (ADR-0005);
+//! * CLIP ([`clip`], [`sort`]), used **only to sort reference pictures** into
+//!   category and topic (ADR-0009).
 //!
 //! ```no_run
 //! use ref_filters::Filters;
@@ -28,8 +31,10 @@
 //! | `nsfw_error`      | yes   | the model failed on this image (fail closed)                |
 //! | `nsfw_unchecked`  | no    | built with [`Filters::without_nsfw`]; see `nsfw_checked`    |
 
+pub mod clip;
 mod nsfw;
 mod phash;
+pub mod sort;
 mod text;
 mod work;
 
