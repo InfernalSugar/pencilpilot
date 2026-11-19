@@ -197,6 +197,8 @@ pub struct Painter {
     selection: Option<Vec<u8>>,
     /// a transform in progress (see `transform_begin`)
     transform: Option<Box<TransformSession>>,
+    /// a liquify stroke in progress: (layer, its tiles before the stroke)
+    liquify: Option<(u32, TileMap)>,
 }
 
 impl Painter {
@@ -218,6 +220,7 @@ impl Painter {
             dirty: HashSet::new(),
             selection: None,
             transform: None,
+            liquify: None,
         }
     }
 
@@ -1154,6 +1157,140 @@ impl Painter {
             *tiles = t.original;
             self.dirty.extend(tiles.keys().copied());
         }
+    }
+
+    // ---- liquify: push pixels around like wet paint ----
+
+    /// Start a liquify stroke on the active layer (false if locked/hidden/busy).
+    pub fn liquify_begin(&mut self) -> bool {
+        if self.liquify.is_some() || self.transform.is_some() || self.stroking.is_some() {
+            return false;
+        }
+        let Some(li) = self.index_of(self.active) else {
+            return false;
+        };
+        let l = &self.layers[li];
+        if l.props.locked || !l.props.visible {
+            return false;
+        }
+        self.liquify = Some((l.id, l.surface.tiles.clone()));
+        true
+    }
+
+    /// Push the pixels around (x, y) by (dx, dy): a forward warp, strongest in
+    /// the middle and fading to nothing at `radius`. Only selected pixels move.
+    pub fn liquify_push(&mut self, x: f32, y: f32, dx: f32, dy: f32, radius: f32, strength: f32) {
+        let Some((layer, _)) = &self.liquify else {
+            return;
+        };
+        let layer = *layer;
+        let Some(li) = self.index_of(layer) else {
+            return;
+        };
+        let (w, h) = (self.width as i64, self.height as i64);
+        let r = radius.max(2.0);
+        let reach = r + dx.abs().max(dy.abs()) + 2.0;
+        let (x0, y0) = (
+            ((x - reach).floor() as i64).max(0),
+            ((y - reach).floor() as i64).max(0),
+        );
+        let (x1, y1) = (
+            ((x + reach).ceil() as i64).min(w - 1),
+            ((y + reach).ceil() as i64).min(h - 1),
+        );
+        if x0 > x1 || y0 > y1 {
+            return;
+        }
+        let ts = TILE_SIZE as i64;
+        let tiles = &mut self.layers[li].surface.tiles;
+        // read the area first, so every pixel samples the same (old) picture
+        let (bw, bh) = ((x1 - x0 + 1) as usize, (y1 - y0 + 1) as usize);
+        let get = |tiles: &TileMap, cx: i64, cy: i64| -> [u16; 4] {
+            let key = (cx.div_euclid(ts) as i32, cy.div_euclid(ts) as i32);
+            tiles.get(&key).map_or([0; 4], |t| {
+                t[cy.rem_euclid(ts) as usize][cx.rem_euclid(ts) as usize]
+            })
+        };
+        let mut old = vec![[0u16; 4]; bw * bh];
+        for yy in 0..bh {
+            for xx in 0..bw {
+                old[yy * bw + xx] = get(tiles, x0 + xx as i64, y0 + yy as i64);
+            }
+        }
+        let sample = |sx: f32, sy: f32| -> [u16; 4] {
+            let (fx, fy) = (sx - x0 as f32 - 0.5, sy - y0 as f32 - 0.5);
+            let (ix, iy) = (fx.floor(), fy.floor());
+            let (tx, ty) = (fx - ix, fy - iy);
+            let at = |xi: i64, yi: i64| -> [f32; 4] {
+                if xi < 0 || yi < 0 || xi >= bw as i64 || yi >= bh as i64 {
+                    return [0.0; 4];
+                }
+                old[yi as usize * bw + xi as usize].map(|v| v as f32)
+            };
+            let (ix, iy) = (ix as i64, iy as i64);
+            let (a, b, c, d) = (
+                at(ix, iy),
+                at(ix + 1, iy),
+                at(ix, iy + 1),
+                at(ix + 1, iy + 1),
+            );
+            let mut o = [0u16; 4];
+            for k in 0..4 {
+                o[k] = (a[k] * (1.0 - tx) * (1.0 - ty)
+                    + b[k] * tx * (1.0 - ty)
+                    + c[k] * (1.0 - tx) * ty
+                    + d[k] * tx * ty)
+                    .round()
+                    .clamp(0.0, 32768.0) as u16;
+            }
+            o
+        };
+        let sel = self.selection.as_ref();
+        let s = strength.clamp(0.0, 1.0);
+        for yy in 0..bh {
+            for xx in 0..bw {
+                let (cx, cy) = (x0 + xx as i64, y0 + yy as i64);
+                if sel.is_some_and(|m| m[(cy * w + cx) as usize] == 0) {
+                    continue;
+                }
+                let (px, py) = (cx as f32 + 0.5, cy as f32 + 0.5);
+                let d2 = ((px - x).powi(2) + (py - y).powi(2)) / (r * r);
+                if d2 >= 1.0 {
+                    continue;
+                }
+                let fall = (1.0 - d2).powi(2) * s;
+                let v = sample(px - dx * fall, py - dy * fall);
+                if v == old[yy * bw + xx] {
+                    continue;
+                }
+                let key = (cx.div_euclid(ts) as i32, cy.div_euclid(ts) as i32);
+                let t = tiles.entry(key).or_insert_with(empty_tile);
+                t[cy.rem_euclid(ts) as usize][cx.rem_euclid(ts) as usize] = v;
+                self.dirty.insert(key);
+            }
+        }
+    }
+
+    /// Finish the liquify stroke: one undo step (false if nothing changed).
+    pub fn liquify_end(&mut self) -> bool {
+        let Some((layer, original)) = self.liquify.take() else {
+            return false;
+        };
+        let Some(li) = self.index_of(layer) else {
+            return false;
+        };
+        let now = &self.layers[li].surface.tiles;
+        let mut snap = Snapshot::new();
+        for key in original.keys().chain(now.keys()) {
+            if original.get(key) != now.get(key) {
+                snap.insert(*key, original.get(key).cloned());
+            }
+        }
+        if snap.is_empty() {
+            return false;
+        }
+        self.push_undo(Edit::Tiles { layer, snap });
+        true
     }
 
     // ---- shared canvases: other people's strokes ----
@@ -2179,6 +2316,35 @@ mod tests {
         lock.locked = true;
         q.set_layer_props(id, lock, true);
         assert!(q.transform_begin().is_empty());
+    }
+
+    #[test]
+    fn liquify_pushes_paint_and_undoes() {
+        let mut p = Painter::new(256, 128);
+        let b = pen();
+        line(&mut p, &b, 60.0); // horizontal at y 60
+        p.flush();
+        let before = p.rgba().to_vec();
+        assert!(p.liquify_begin());
+        for _ in 0..10 {
+            p.liquify_push(100.0, 60.0, 0.0, 3.0, 25.0, 1.0); // push down at x 100
+        }
+        assert!(p.liquify_end());
+        p.flush();
+        assert!(
+            px(&p, 100, 60)[0] > 200,
+            "the line moved away from y 60 at x 100"
+        );
+        let moved = (61..=100).any(|y| px(&p, 100, y)[0] < 120);
+        assert!(moved, "…to somewhere below");
+        assert!(px(&p, 30, 60)[0] < 120, "far away it didn't move");
+        assert!(p.undo());
+        p.flush();
+        assert_eq!(p.rgba(), &before[..]);
+        // nothing to push: no undo step
+        assert!(p.liquify_begin());
+        p.liquify_push(200.0, 10.0, 3.0, 0.0, 10.0, 1.0);
+        assert!(!p.liquify_end());
     }
 
     #[test]

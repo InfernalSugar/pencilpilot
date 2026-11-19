@@ -430,3 +430,32 @@ test('transform: an empty layer has nothing to move', async ({ page }) => {
 		'true'
 	);
 });
+
+test('liquify: push part of a line into place, one undo step', async ({ page }) => {
+	await ready(page);
+	for (let i = 0; i < 6; i++) await page.keyboard.press(']');
+	await zigzag(page, 0.5, 0);
+	const column = (x: number) =>
+		canvas(page).evaluate((c: HTMLCanvasElement, x) => {
+			const d = c.getContext('2d')!.getImageData(Math.round(c.width * x), 0, 1, c.height).data;
+			let [sum, n] = [0, 0];
+			for (let y = 0; y < c.height; y++)
+				if (d[y * 4] < 200) {
+					sum += y / c.height;
+					n++;
+				}
+			return n ? sum / n : -1;
+		}, x);
+	await expect.poll(() => column(0.5)).toBeGreaterThan(0.45);
+	const startY = await column(0.5);
+	await page.keyboard.press('k');
+	await expect(page.getByRole('button', { name: 'Liquify (K)' })).toHaveAttribute(
+		'aria-pressed',
+		'true'
+	);
+	for (let i = 0; i < 3; i++) await drag(page, [0.5, 0.47], [0.5, 0.62], 12);
+	await expect.poll(() => column(0.5)).toBeGreaterThan(startY + 0.03);
+	expect(Math.abs((await column(0.2)) - startY)).toBeLessThan(0.02); // far away: unchanged
+	for (let i = 0; i < 3; i++) await page.getByRole('button', { name: /Undo/ }).click();
+	await expect.poll(async () => Math.abs((await column(0.5)) - startY)).toBeLessThan(0.005);
+});

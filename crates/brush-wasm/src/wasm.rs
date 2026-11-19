@@ -228,6 +228,25 @@ impl PaintCanvas {
             .fill(x, y, [r, g, b], opacity, tolerance, all_layers, grow, gap)
     }
 
+    // ---- liquify ----
+
+    #[wasm_bindgen(js_name = liquifyBegin)]
+    pub fn liquify_begin(&mut self) -> bool {
+        self.inner.liquify_begin()
+    }
+
+    /// Push pixels around (x, y) by (dx, dy) within `radius`.
+    #[wasm_bindgen(js_name = liquifyPush)]
+    pub fn liquify_push(&mut self, x: f32, y: f32, dx: f32, dy: f32, radius: f32, strength: f32) {
+        self.inner.liquify_push(x, y, dx, dy, radius, strength);
+    }
+
+    /// One undo step; false if nothing changed.
+    #[wasm_bindgen(js_name = liquifyEnd)]
+    pub fn liquify_end(&mut self) -> bool {
+        self.inner.liquify_end()
+    }
+
     // ---- transform ----
 
     /// Lift the selection (or the whole layer); returns its box [x0, y0, x1, y1] or [].
