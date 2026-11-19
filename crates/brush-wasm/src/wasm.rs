@@ -228,6 +228,36 @@ impl PaintCanvas {
             .fill(x, y, [r, g, b], opacity, tolerance, all_layers, grow, gap)
     }
 
+    // ---- transform ----
+
+    /// Lift the selection (or the whole layer); returns its box [x0, y0, x1, y1] or [].
+    #[wasm_bindgen(js_name = transformBegin)]
+    pub fn transform_begin(&mut self) -> Vec<f32> {
+        self.inner.transform_begin()
+    }
+
+    /// Preview with matrix dest = (a x + c y + e, b x + d y + f).
+    #[wasm_bindgen(js_name = transformPreview)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn transform_preview(&mut self, a: f32, b: f32, c: f32, d: f32, e: f32, f: f32) -> bool {
+        self.inner.transform_preview([a, b, c, d, e, f])
+    }
+
+    #[wasm_bindgen(js_name = transformCommit)]
+    pub fn transform_commit(&mut self) -> bool {
+        self.inner.transform_commit()
+    }
+
+    #[wasm_bindgen(js_name = transformCancel)]
+    pub fn transform_cancel(&mut self) {
+        self.inner.transform_cancel();
+    }
+
+    #[wasm_bindgen(js_name = isTransforming)]
+    pub fn is_transforming(&self) -> bool {
+        self.inner.transforming()
+    }
+
     // ---- selection (not part of the undo history) ----
 
     /// Set the selection from a canvas-sized mask (byte > 127 = selected);
