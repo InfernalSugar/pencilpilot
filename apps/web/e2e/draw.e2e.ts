@@ -274,3 +274,43 @@ test('tracing your own picture: line it up, draw, get tips but no score', async 
 	const history = await page.evaluate(() => localStorage.getItem('pp.attempts'));
 	expect(history ?? '[]').toBe('[]');
 });
+
+test('what you draw is visible on screen (nothing covers the canvas)', async ({ page }) => {
+	await page.goto('/draw');
+	const c = page.getByLabel(/Drawing canvas/);
+	await expect(c).toHaveAttribute('data-ready', 'true', { timeout: 15_000 });
+	await c.scrollIntoViewIfNeeded();
+	const b = (await c.boundingBox())!;
+	await page.keyboard.press(']');
+	await page.keyboard.press(']');
+	await page.mouse.move(b.x + b.width * 0.2, b.y + b.height * 0.5);
+	await page.mouse.down();
+	for (let i = 1; i <= 20; i++)
+		await page.mouse.move(b.x + b.width * (0.2 + i * 0.03), b.y + b.height * 0.5);
+	await page.mouse.up();
+	// read the screen itself, not the canvas pixels
+	await expect
+		.poll(async () => {
+			const png = await page.screenshot({
+				clip: {
+					x: b.x + b.width * 0.25,
+					y: b.y + b.height * 0.4,
+					width: b.width * 0.4,
+					height: b.height * 0.2
+				}
+			});
+			return page.evaluate(async (data) => {
+				const img = await createImageBitmap(
+					await (await fetch(`data:image/png;base64,${data}`)).blob()
+				);
+				const cv = new OffscreenCanvas(img.width, img.height);
+				const g = cv.getContext('2d')!;
+				g.drawImage(img, 0, 0);
+				const d = g.getImageData(0, 0, img.width, img.height).data;
+				let n = 0;
+				for (let i = 0; i < d.length; i += 4) if (d[i] < 200) n++;
+				return n;
+			}, png.toString('base64'));
+		})
+		.toBeGreaterThan(30);
+});
