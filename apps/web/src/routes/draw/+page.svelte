@@ -40,8 +40,17 @@
 	let refLoading = $state(false);
 	/** brush (draw / erase) or the eyedropper */
 	type Tool =
-		'brush' | 'picker' | 'fill' | 'select-rect' | 'select-lasso' | 'select-wand' | 'transform';
+		| 'brush'
+		| 'picker'
+		| 'fill'
+		| 'select-rect'
+		| 'select-lasso'
+		| 'select-wand'
+		| 'transform'
+		| 'liquify';
 	let tool = $state<Tool>('brush');
+	let liquifySize = $state(60);
+	let liquifyStrength = $state(0.6);
 	let selectMode = $state<'replace' | 'add' | 'subtract'>('replace');
 	let wandTolerance = $state(0.15);
 	const SELECT_TOOLS: { id: Tool; label: string; key: string; icon: string }[] = [
@@ -381,6 +390,7 @@
 		} else if (!mod && k === 'i') tool = tool === 'picker' ? 'brush' : 'picker';
 		else if (!mod && k === 'g') tool = tool === 'fill' ? 'brush' : 'fill';
 		else if (!mod && k === 'v') tool = tool === 'transform' ? 'brush' : 'transform';
+		else if (!mod && k === 'k') tool = tool === 'liquify' ? 'brush' : 'liquify';
 		else if (tool === 'transform' && e.key === 'Enter') canvas?.transformCommit();
 		else if (tool === 'transform' && e.key === 'Escape') canvas?.transformCancel();
 		else if (!mod && (k === 'm' || k === 'l' || k === 'w')) {
@@ -700,6 +710,8 @@
 						{selectMode}
 						{wandTolerance}
 						ontransformend={onTransformEnd}
+						{liquifySize}
+						{liquifyStrength}
 						overlaySrc={traceSrc}
 						overlayOpacity={trace.opacity}
 						overlayTransform={trace}
@@ -884,6 +896,28 @@
 							/>
 						</svg>
 					</button>
+					<button
+						type="button"
+						class="tool"
+						aria-pressed={tool === 'liquify'}
+						aria-label="Liquify (K)"
+						title="Liquify (K): push parts of the layer into place"
+						onclick={() => (tool = tool === 'liquify' ? 'brush' : 'liquify')}
+					>
+						<svg
+							width="22"
+							height="22"
+							viewBox="0 0 24 24"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="2.1"
+							stroke-linecap="round"
+							stroke-linejoin="round"
+							aria-hidden="true"
+						>
+							<path d="M3 12c3-6 6 6 9 0s6 6 9 0" /><path d="M3 18c3-6 6 6 9 0s6 6 9 0" />
+						</svg>
+					</button>
 				</div>
 				<div class="group">
 					<button
@@ -1045,6 +1079,18 @@
 				>
 					QuickShape
 				</button>
+				{#if tool === 'liquify'}
+					<div class="fill-opts" role="group" aria-label="Liquify">
+						<label class="slider">
+							<span>Size <b>{liquifySize}</b></span>
+							<input type="range" min="10" max="200" step="2" bind:value={liquifySize} />
+						</label>
+						<label class="slider">
+							<span>Strength <b>{Math.round(liquifyStrength * 100)}%</b></span>
+							<input type="range" min="0.1" max="1" step="0.05" bind:value={liquifyStrength} />
+						</label>
+					</div>
+				{/if}
 				{#if tool === 'transform'}
 					<div class="fill-opts" role="group" aria-label="Transform">
 						<button type="button" class="tool" onclick={() => canvas?.transformFlip('x')}>
