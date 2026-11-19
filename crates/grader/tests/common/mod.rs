@@ -315,3 +315,4 @@ pub fn subject_line_art() -> Gray {
     }
     d
 }
+pub mod fixtures;

@@ -67,6 +67,11 @@ pub struct Rule {
     /// except rules on [`FINISHED_ONLY`] measurements, which skip sketches.
     #[serde(default)]
     pub modes: Vec<String>,
+    /// When it fires, this rule's tip is the only feedback (no other fixes,
+    /// no praise): a blank canvas, or a drawing that doesn't depict the
+    /// reference, where every other measurement is meaningless.
+    #[serde(default)]
+    pub exclusive: bool,
 }
 
 /// Measurements a sketch isn't judged on (ADR-0007): line neatness and
@@ -287,8 +292,9 @@ pub fn feedback_for(
             .filter(|v| v.is_finite())
     };
 
-    // A blank canvas only gets the blank tip.
-    let blank = lib.rules.iter().find(|r| r.id == "blank-canvas");
+    // An exclusive rule (blank canvas, a drawing that isn't of the
+    // reference) is the only feedback: no other fixes and no praise, since
+    // the other measurements mean nothing then. The first one in file order wins.
     let mut fired: Vec<(f32, usize, &Rule, f32)> = Vec::new();
     for (i, r) in lib.rules.iter().enumerate() {
         if !r.categories.is_empty() && !r.categories.iter().any(|c| c == category) {
@@ -308,7 +314,7 @@ pub fn feedback_for(
             continue;
         };
         if let Some(s) = severity(r, v) {
-            if Some(r) == blank.filter(|b| b.id == r.id) {
+            if r.exclusive {
                 let tip = &lib.tips[&r.id];
                 return Feedback {
                     fixes: vec![item(r, tip, v, s, seed, i)],
@@ -540,6 +546,32 @@ mod tests {
         );
         assert_eq!(ids(&f), ["blank-canvas"]);
         assert!(f.praise.is_none());
+    }
+
+    /// The user's report: scribbles over an anime picture got "big shapes
+    /// 81%, light & dark 69%" and the praise "The big shapes are right".
+    #[test]
+    fn unrelated_drawing_gets_only_the_not_the_reference_tip() {
+        let ms = m(&[
+            ("placement", 0.5),
+            ("outline", 0.55),
+            ("silhouette", 0.81),
+            ("tone", 0.69),
+            ("line_confidence", 0.34),
+            ("ink_coverage", 0.2),
+            ("relevance", 0.0),
+        ]);
+        for mode in ["finished", "sketch"] {
+            let f = feedback_for(lib(), &ms, "anime", mode, 3);
+            assert_eq!(ids(&f), ["not-the-reference"], "{mode}");
+            assert!(f.praise.is_none(), "{mode}");
+        }
+        // a genuine drawing (relevance 1) is unaffected
+        let mut ok = ms.clone();
+        ok.last_mut().unwrap().1 = 1.0;
+        let f = feedback(lib(), &ok, "anime", 3);
+        assert!(!ids(&f).contains(&"not-the-reference"));
+        assert!(f.praise.is_some());
     }
 
     #[test]

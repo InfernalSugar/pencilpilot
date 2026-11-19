@@ -1,7 +1,8 @@
 //! Calibration for PencilPilot's grader (M8-T01).
 //!
 //! ```text
-//! cargo run --release -p calibrate -- synthetic [--per 6] [--out docs/calibration/synthetic.md]
+//! cargo run --release -p calibrate -- synthetic [--per 6] [--out docs/calibration/synthetic.md] [--no-gate]
+//! cargo run --release -p calibrate -- relevance [--per 6] [--out docs/calibration/relevance.md]
 //! cargo run --release -p calibrate -- fit [--labels data/calibration/labels.jsonl]
 //! ```
 //!
@@ -12,6 +13,8 @@
 //!   mean scores per level and the Spearman correlation (level vs score).
 //! * **fit**: fits the score curve (floor / pass) to human 1–10 labels collected
 //!   on the dev rating page (`/dev/rate`), per category and overall.
+
+mod relevance;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -25,7 +28,7 @@ use serde_json::Value;
 const W: u32 = 800;
 const H: u32 = 600;
 
-fn root() -> PathBuf {
+pub(crate) fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
@@ -45,7 +48,7 @@ pub fn grader_category(c: &str) -> Category {
 // ── Images ──────────────────────────────────────────────────────────────
 
 /// Decode (sniffing the format), put transparency on white, fit into the canvas.
-fn load_fitted(path: &Path) -> Option<GrayImage> {
+pub(crate) fn load_fitted(path: &Path) -> Option<GrayImage> {
     let img = image::ImageReader::open(path)
         .ok()?
         .with_guessed_format()
@@ -194,7 +197,7 @@ pub fn perturb(art: &GrayImage, family: &str, level: usize, seed: u64) -> GrayIm
     }
 }
 
-fn to_gray(g: &GrayImage) -> Gray {
+pub(crate) fn to_gray(g: &GrayImage) -> Gray {
     Gray::new(g.width(), g.height(), g.as_raw().clone()).expect("sizes match")
 }
 
@@ -233,7 +236,7 @@ pub fn spearman(xs: &[f32], ys: &[f32]) -> f32 {
 
 // ── synthetic ───────────────────────────────────────────────────────────
 
-fn synthetic(per: usize, out: &Path) {
+fn synthetic(per: usize, out: &Path, no_gate: bool) {
     let refs_dir = root().join("content/references");
     let images = root().join("apps/web/static/references");
     // (category, family) → level → scores
@@ -259,6 +262,7 @@ fn synthetic(per: usize, out: &Path) {
             used += 1;
             let opts = GradeOptions {
                 category: grader_category(&name),
+                relevance_gate: Some(!no_gate),
                 ..Default::default()
             };
             let art = line_art(&reference);
@@ -428,13 +432,22 @@ fn main() {
             &flag(&args, "--out")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| root().join("docs/calibration/synthetic.md")),
+            args.iter().any(|a| a == "--no-gate"),
+        ),
+        Some("relevance") => relevance::run(
+            flag(&args, "--per")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(6),
+            &flag(&args, "--out")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| root().join("docs/calibration/relevance.md")),
         ),
         Some("fit") => fit(&flag(&args, "--labels")
             .map(PathBuf::from)
             .unwrap_or_else(|| root().join("data/calibration/labels.jsonl"))),
         _ => {
             eprintln!(
-                "usage: calibrate synthetic [--per N] [--out FILE] | calibrate fit [--labels FILE]"
+                "usage: calibrate synthetic [--per N] [--out FILE] [--no-gate] | calibrate relevance [--per N] [--out FILE] | calibrate fit [--labels FILE]"
             );
             std::process::exit(2);
         }

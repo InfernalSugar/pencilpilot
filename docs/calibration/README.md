@@ -86,3 +86,52 @@ After the fairness fix, line art isn't marked down for missing shading, so tips 
 shading (flat, too dark, values misplaced, edges, …) now require `shading ≥ 0.1` via the
 engine's new `gate` field. The gentle "add some shading" nudges (`no-shading`,
 `scene-no-shading`) still appear for line art.
+
+## Relevance gate: drawings that don't depict the reference (2026-11-19)
+
+**Problem.** Dense scribbles over an anime picture scored 4.2 with "big shapes 81 %, light & dark 69 %"
+and the praise "The big shapes are right". Silhouette IoU, the blurred tone map and chamfer recall all
+reward *any* mass of ink in the right area.
+
+**Measure** (`crates/grader/src/relevance.rs`, measurements `structure` and `relevance`). Each image
+becomes a field of local line directions (doubled-angle structure-tensor vectors, scaled by
+coherence) on the drawing's lines and on the reference's edges (weighted by edge strength), blurred
+by the outline tolerance σ and correlated over the area near the drawing. Copies, even rough or
+partial ones, line up (≈ 0.6–1); scribbles and hatching don't (≈ 0), because unrelated directions
+cancel out. `relevance` = smoothstep of that correlation from 0.33 to 0.55. Below 0.5 the grade gets
+the flag `unrelated`; the similarity is blended towards the one that scores ≈ 1.7 (order kept, so
+unrelated drawings land at 1.7–1.9). The feedback rule `not-the-reference` is *exclusive* like the
+blank-canvas one: no other tips and no praise. Sketch mode uses the same tolerance (a wider blur lets
+random lines line up by chance). Value drills turn the gate off (`relevanceGate: false`). A fully
+painted drawing with no lines left is not judged. ≈ +5 ms per grade (34 ms total at 800×600, release).
+
+Candidates tried and dropped: oriented chamfer precision/recall (cos 2Δθ) separated worse on real
+references (genuine perfect copies down to 0.24); mean-centred correlation hurt busy line art (anime
+copies 0.98 → 0.78); adding the drawing's tonal edges (for painted drawings) diluted hatched shading;
+reference-coherence weighting and wider blurs changed little.
+
+**Fixtures** (`crates/grader/tests/relevance.rs`, `--nocapture` prints the table): 4 references
+(stick-figure photo, shaded disc, textured photo, anime bust), each with good copies, rough attempts
+(wobble 10–18 px, shifted + small, big + wobbly, half missing, short lines, hairy sketch, shaded) and
+unrelated drawings over the same area (dense / sparse scribbles, scribbles inside the silhouette,
+hatching, cross-hatching, a house, a car), graded finished and as sketches (with strokes):
+
+| Group | Finished: before → after | Sketch: before → after |
+|---|---|---|
+| Good (8) | 10.00 → 10.00 | 10.00 → 10.00 |
+| Rough (36) | 8.78 (1.0–10) → 8.78, none changed | 8.63 (1.0–10) → 8.63, none changed |
+| Unrelated (36) | 5.44 (1.7–8.4) → 2.41 (1.7–8.4) | 7.89 (1.0–10) → 2.45 (1.0–9.5) |
+
+The user’s case (dense scribbles over the anime bust): 6.7 → 1.8 finished, 8.5 → 2.1 sketch.
+
+**Real references** (`cargo run --release -p calibrate -- relevance`, report `relevance.md`):
+18 references × (5 mistake families × levels 0–2 + 7 unrelated drawings), finished and sketch.
+Genuine attempts: 5 of 540 lowered by ≥ 0.1 (all on one dark anime picture whose synthetic copy is
+a few scattered fragments). Unrelated scribbles: 6.1–9.3 → 1.8–1.9 on average.
+`calibrate synthetic` (with vs `--no-gate`): every L0 and L1 cell unchanged; L2 within 0.6; L3
+(25 px warp, 40 stray strokes) drops a further 1–2 points.
+
+**Known gap.** Parallel hatching that runs along a subject's dominant direction (vertical lines over
+an upright cat, cross-hatching over an anime picture full of diagonal hair) can still look related
+(2 of 18 references). Telling that apart from a genuine drawing of a one-direction subject needs
+more than line directions.

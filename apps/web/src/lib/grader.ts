@@ -48,6 +48,11 @@ export interface GradeOptions {
 	/** Recorded strokes, for line-confidence metrics. */
 	strokes?: readonly Stroke[];
 	keypoints?: KeypointPair[];
+	/**
+	 * Cap the score of drawings that don't depict the reference (flag `unrelated`).
+	 * On unless `false`; value drills turn it off (shading is the point there).
+	 */
+	relevanceGate?: boolean;
 }
 
 /**
@@ -84,7 +89,9 @@ export type MeasurementName =
 	| 'keypoint_max_error'
 	| 'angle_error'
 	| 'angles'
-	| 'passes';
+	| 'passes'
+	| 'structure'
+	| 'relevance';
 
 export interface Measurement {
 	name: MeasurementName;
@@ -136,7 +143,8 @@ export interface KeypointResult {
 	rotation: number;
 }
 
-export type GradeFlag = 'blank' | 'reference_blank' | 'alignment_at_limit';
+/** `unrelated`: the drawing doesn't depict the reference (lines don't follow its shapes); score capped near 1. */
+export type GradeFlag = 'blank' | 'reference_blank' | 'alignment_at_limit' | 'unrelated';
 
 export interface Grade {
 	/** 1–10 */

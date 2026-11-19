@@ -266,6 +266,14 @@ variants = [
   "Nothing to grade yet! Put down a quick outline of the reference, even a wobbly one, and try again.",
 ]
 
+[tip.not-the-reference]
+title = "This doesn’t look like the reference yet"
+variants = [
+  "Your lines don’t follow the shapes in the reference, so there’s nothing to compare yet. Start with the main outline of the subject: one light line around its outside edge, then the biggest shapes inside it.",
+  "We couldn’t match your lines to the picture: they run in different directions from its edges. Look at the reference, find its outer edge and trace that path with your eye, then draw that outline first. Shading and detail come after.",
+  "Scribbles and shading over the right area don’t tell us how well you see the subject. Start with its main outline, drawn lightly, and check it against the reference before adding anything else.",
+]
+
 # ════════════════════════════════════════════════════════════════════
 # SILHOUETTE
 # ════════════════════════════════════════════════════════════════════
