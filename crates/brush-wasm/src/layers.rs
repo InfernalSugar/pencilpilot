@@ -149,6 +149,9 @@ pub struct TileSource<'a> {
     pub blend: Blend,
     pub visible: bool,
     pub clip: bool,
+    /// the layer mask here: `None` = no mask; `Some(None)` = a mask with nothing
+    /// painted in this tile (fully shown)
+    pub mask: Option<Option<&'a TilePixels>>,
 }
 
 /// Composite the sources (bottom → top) for one pixel over white paper → sRGB8.
@@ -161,7 +164,11 @@ pub fn composite_pixel(sources: &[TileSource<'_>], row: usize, col: usize) -> [u
         let (cs, a) = s
             .tile
             .map_or(([0.0; 3], 0.0), |t| unpremul_srgb(t[row][col]));
-        let mut a = a * s.opacity;
+        let m = match s.mask {
+            Some(Some(t)) => mask_value(t[row][col]),
+            _ => 1.0,
+        };
+        let mut a = a * s.opacity * m;
         if s.clip {
             a *= base;
         } else {
@@ -176,6 +183,14 @@ pub fn composite_pixel(sources: &[TileSource<'_>], row: usize, col: usize) -> [u
         }
     }
     dst.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)
+}
+
+/// How much a layer mask pixel lets through (0–1): white paint shows, black
+/// hides, greys in between; unpainted mask (transparent) shows everything.
+pub fn mask_value(px: [u16; 4]) -> f32 {
+    let (c, a) = unpremul_srgb(px);
+    let lum = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    (1.0 - a + a * lum).clamp(0.0, 1.0)
 }
 
 /// W3C compositing of `src` (with extra `opacity` and `blend`) onto a possibly
