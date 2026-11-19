@@ -51,6 +51,7 @@ test('draw, undo, redo, switch brush, submit', async ({ page }) => {
 	await page.getByRole('button', { name: /Redo/ }).click();
 	await expect.poll(() => inkPixels(page)).toBe(after);
 
+	await page.getByRole('tab', { name: /^Brushes/ }).click();
 	await page.getByRole('tab', { name: 'Markers' }).click();
 	await page.getByRole('button', { name: /^Marker fat/ }).click();
 	await scribble(page, 0.7);
@@ -65,6 +66,7 @@ test('draw, undo, redo, switch brush, submit', async ({ page }) => {
 
 test('brush search finds brushes across categories', async ({ page }) => {
 	await page.goto('/draw');
+	await page.getByRole('tab', { name: /^Brushes/ }).click();
 	await page.getByRole('searchbox').fill('watercolor');
 	await expect(page.getByRole('list', { name: 'Brushes' }).getByRole('listitem')).not.toHaveCount(
 		0
@@ -264,8 +266,8 @@ test('tracing your own picture: line it up, draw, get tips but no score', async 
 	await tracing.getByRole('button', { name: 'Done moving' }).click();
 
 	await scribble(page);
-	await expect(page.getByRole('button', { name: 'Get tips →' })).toBeEnabled();
-	await page.getByRole('button', { name: 'Get tips →' }).click();
+	await expect(page.getByRole('button', { name: /Get tips/ })).toBeEnabled();
+	await page.getByRole('button', { name: /Get tips/ }).click();
 	await expect(page).toHaveURL(/\/results$/);
 	await expect(page.getByText('Traced', { exact: true })).toBeVisible();
 	await expect(page.getByTestId('score')).toHaveCount(0);
@@ -313,4 +315,23 @@ test('what you draw is visible on screen (nothing covers the canvas)', async ({ 
 			}, png.toString('base64'));
 		})
 		.toBeGreaterThan(30);
+});
+
+test('big canvases are graded too (1600 × 1200)', async ({ page }) => {
+	await page.addInitScript(() =>
+		localStorage.setItem('pp.canvasSize', JSON.stringify({ width: 1600, height: 1200 }))
+	);
+	await page.goto('/draw?category=animals');
+	const c = page.getByLabel(/Drawing canvas, 1600 by 1200/);
+	await expect(c).toHaveAttribute('data-ready', 'true', { timeout: 15_000 });
+	const b = (await c.boundingBox())!;
+	await page.mouse.move(b.x + b.width * 0.2, b.y + b.height * 0.4);
+	await page.mouse.down();
+	for (let i = 1; i <= 20; i++)
+		await page.mouse.move(b.x + b.width * (0.2 + i * 0.03), b.y + b.height * 0.5);
+	await page.mouse.up();
+	await page.getByRole('button', { name: /Submit drawing/ }).click();
+	await expect(page).toHaveURL(/\/results$/);
+	await expect(page.getByText(/out of 10/)).toBeVisible({ timeout: 20_000 });
+	await expect(page.getByText(/Could not grade/)).toHaveCount(0);
 });

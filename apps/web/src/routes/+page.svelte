@@ -306,6 +306,8 @@
 		gap: var(--pp-gap);
 	}
 	.cat {
+		container-type: inline-size;
+		min-width: 0;
 		min-height: 150px;
 		padding: 20px;
 		background: var(--pp-surface);
@@ -341,7 +343,9 @@
 	.cat-name {
 		font-family: var(--pp-font-display);
 		font-weight: 700;
-		font-size: 24px;
+		/* scales with the card so long names (Fundamentals) never spill out */
+		font-size: clamp(17px, 13cqi, 24px);
+		overflow-wrap: anywhere;
 	}
 	.cat-blurb {
 		font-size: 14px;

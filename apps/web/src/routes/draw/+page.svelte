@@ -176,7 +176,6 @@
 		shapeTimer = setTimeout(() => (shapeNote = ''), 1800);
 	}
 	let smoothing = $state(0);
-	let colorOpen = $state(false);
 	function picked(c: string) {
 		color = c;
 		eraser = false;
@@ -210,8 +209,6 @@
 		if (tracing && !reference) trace = { ...trace, source: 'own' };
 		if (!tracing) trace = { ...trace, adjusting: false };
 	}
-	/** phones/tablets fold the brush panel away so the canvas comes first */
-	let brushesOpen = $state(false);
 	let reportOpen = $state(false);
 	let reported = $state(false);
 
@@ -289,10 +286,34 @@
 		loadGuides();
 	}
 
-	// Reference panel: resizable sidebar, or a floating window.
-	const SIDE_MIN = 260;
-	const SIDE_MAX = 640;
-	let sideW = $state(340);
+	// Side dock (reference + Layers / Brushes / Colour tabs). Always shown on wide
+	// screens; a slide-over (tablet) or bottom sheet (phone) on narrow ones.
+	const DOCK_TABS = [
+		{ id: 'layers', label: 'Layers' },
+		{ id: 'brushes', label: 'Brushes' },
+		{ id: 'colour', label: 'Colour' }
+	] as const;
+	type DockTab = (typeof DOCK_TABS)[number]['id'];
+	let dockTab = $state<DockTab>('layers');
+	let dockOpen = $state(false);
+	function setTab(t: DockTab) {
+		dockTab = t;
+		remember('pp.dockTab', t);
+	}
+	function openDock(t: DockTab) {
+		setTab(t);
+		dockOpen = true;
+	}
+	function toggleDock(t: DockTab) {
+		if (dockOpen && dockTab === t) dockOpen = false;
+		else openDock(t);
+	}
+	/** the studio fills the window below the site header */
+	let studioH = $state('calc(100dvh - 72px)');
+	function fitStudio() {
+		const h = document.querySelector('body header')?.getBoundingClientRect().height ?? 72;
+		studioH = `calc(100dvh - ${Math.round(h)}px)`;
+	}
 	let refFloating = $state(false);
 	let floatBox = $state({ x: 24, y: 120, w: 360, h: 420 });
 	function remember(key: string, value: unknown) {
@@ -309,11 +330,6 @@
 			return fallback;
 		}
 	}
-	function setSide(w: number) {
-		sideW = Math.round(Math.max(SIDE_MIN, Math.min(SIDE_MAX, w)));
-		remember('pp.sideWidth', sideW);
-	}
-	let sideDrag: { x: number; w: number } | null = null;
 	function setFloating(on: boolean) {
 		refFloating = on;
 		remember('pp.refFloating', on);
@@ -329,8 +345,6 @@
 		remember('pp.refFloat', floatBox);
 	}
 
-	/** phones/tablets fold the layers panel away too */
-	let layersOpen = $state(false);
 	/** "this layer is locked/hidden" notice after a refused stroke */
 	let blocked = $state<'' | 'locked' | 'hidden'>('');
 	let blockedTimer: ReturnType<typeof setTimeout> | undefined;
@@ -348,6 +362,8 @@
 	const daily = page.url.searchParams.get('daily');
 	/** personal challenge day (?personal=YYYY-MM-DD): the picture is fixed too */
 	const personal = page.url.searchParams.get('personal');
+	/** where the back button goes */
+	const backHref = $derived(daily ? '/daily' : category ? `/practice/${category.id}` : '/');
 
 	// Sketch mode (?mode=sketch, ADR-0007): a Construction layer under a Sketch layer.
 	const drawMode: 'finished' | 'sketch' =
@@ -435,7 +451,10 @@
 	onMount(() => {
 		warmGrader();
 		canvasSize = savedSize();
-		sideW = recall('pp.sideWidth', 340);
+		dockTab = recall<DockTab>('pp.dockTab', 'layers');
+		if (!DOCK_TABS.some((t) => t.id === dockTab)) dockTab = 'layers';
+		fitStudio();
+		window.addEventListener('resize', fitStudio);
 		refFloating = recall('pp.refFloating', false);
 		floatBox = recall('pp.refFloat', floatBox);
 		smoothing = recall('pp.smoothing', 0);
@@ -457,7 +476,10 @@
 			if (timerOn && !status.blank) seconds++;
 			tickTimed();
 		}, 1000);
-		return () => clearInterval(id);
+		return () => {
+			clearInterval(id);
+			window.removeEventListener('resize', fitStudio);
+		};
 	});
 
 	function onkey(e: KeyboardEvent) {
@@ -569,9 +591,24 @@
 <svelte:window onkeydown={onkey} />
 <svelte:head><title>Draw · PencilPilot</title></svelte:head>
 
-<div class="pp-page">
-	<div class="top">
-		<div>
+<div class="studio" style="--studio-h: {studioH}">
+	<header class="sbar">
+		<a class="icon-btn back" href={backHref} aria-label="Back" title="Back">
+			<svg
+				width="20"
+				height="20"
+				viewBox="0 0 24 24"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="2.5"
+				stroke-linecap="round"
+				stroke-linejoin="round"
+				aria-hidden="true"
+			>
+				<path d="M15 5l-7 7 7 7" />
+			</svg>
+		</a>
+		<div class="title">
 			<span class="pp-eyebrow">
 				{daily ? 'Today’s challenge · ' : ''}{personal ? 'Your challenge · ' : ''}{drawMode ===
 				'sketch'
@@ -584,7 +621,7 @@
 			</span>
 			<h1>{reference ? titleOf(reference) : 'Draw anything'}</h1>
 		</div>
-		<div class="top-actions">
+		<div class="sbar-actions">
 			{#if sessionMode}
 				<span class="round" aria-label="Picture {round + 1} of {sessionCount}">
 					{round + 1} / {sessionCount}
@@ -634,538 +671,379 @@
 					<span aria-label="Time spent">{clock}</span>
 				</button>
 			{/if}
+			<div class="undo-group" role="group" aria-label="History">
+				<button
+					type="button"
+					class="tool"
+					aria-label="Undo (Ctrl+Z)"
+					title="Undo (Ctrl+Z)"
+					disabled={!status.canUndo}
+					onclick={() => {
+						if (adjustOpen) closeAdjust(false);
+						canvas?.undo();
+					}}
+				>
+					<svg
+						width="22"
+						height="22"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2.3"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						aria-hidden="true"
+					>
+						<path d="M9 14 4 9l5-5" /><path d="M4 9h11a5 5 0 0 1 0 10h-3" />
+					</svg>
+				</button>
+				<button
+					type="button"
+					class="tool"
+					aria-label="Redo (Ctrl+Shift+Z)"
+					title="Redo (Ctrl+Shift+Z)"
+					disabled={!status.canRedo}
+					onclick={() => canvas?.redo()}
+				>
+					<svg
+						width="22"
+						height="22"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2.3"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						aria-hidden="true"
+					>
+						<path d="m15 14 5-5-5-5" /><path d="M20 9H9a5 5 0 0 0 0 10h3" />
+					</svg>
+				</button>
+				{#if confirmClear}
+					<button
+						type="button"
+						class="tool danger"
+						onclick={() => {
+							canvas?.clear();
+							confirmClear = false;
+						}}
+					>
+						Clear layer?
+					</button>
+					<button type="button" class="tool" onclick={() => (confirmClear = false)}>Keep</button>
+				{:else}
+					<button
+						type="button"
+						class="tool"
+						aria-label="Clear layer"
+						title="Clear the current layer"
+						disabled={status.blank}
+						onclick={() => (confirmClear = true)}
+					>
+						<svg
+							width="22"
+							height="22"
+							viewBox="0 0 24 24"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="2.3"
+							stroke-linecap="round"
+							stroke-linejoin="round"
+							aria-hidden="true"
+						>
+							<path d="M4 7h16M6 7l1 13h10l1-13M9 7V4h6v3" />
+						</svg>
+					</button>
+				{/if}
+			</div>
+			<button
+				type="button"
+				class="icon-btn dock-btn"
+				aria-label="Layers"
+				aria-pressed={dockOpen && dockTab === 'layers'}
+				title="Layers"
+				onclick={() => toggleDock('layers')}
+			>
+				<svg
+					width="20"
+					height="20"
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="2.2"
+					stroke-linejoin="round"
+					aria-hidden="true"
+				>
+					<path d="m12 3 9 5-9 5-9-5Z" /><path d="m3 13 9 5 9-5" />
+				</svg>
+			</button>
+			<button
+				type="button"
+				class="icon-btn dock-btn"
+				aria-label="Brushes"
+				aria-pressed={dockOpen && dockTab === 'brushes'}
+				title="Brushes"
+				onclick={() => toggleDock('brushes')}
+			>
+				<svg
+					width="20"
+					height="20"
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="2.2"
+					stroke-linecap="round"
+					stroke-linejoin="round"
+					aria-hidden="true"
+				>
+					<path d="M9.5 14.5 19 5a2 2 0 0 1 3 3l-9.5 9.5" /><path
+						d="M7 16c-2 0-3 1.5-3 3.5 0 .8-.6 1.5-1.5 1.5H7a4 4 0 0 0 4-4c0-1.3-1-2-2-2Z"
+					/>
+				</svg>
+			</button>
 			{#if !sessionMode}
 				<CanvasSizePicker size={canvasSize} blank={status.blank} onpick={pickSize} />
-				<Button onclick={submit} disabled={status.blank || timeUp}>
-					{traced ? 'Get tips →' : timeLimit ? 'Done early →' : 'Submit drawing →'}
+				<Button
+					onclick={submit}
+					disabled={status.blank || timeUp}
+					aria-label={traced ? 'Get tips' : timeLimit ? 'Done early' : 'Submit drawing'}
+				>
+					{#if traced}Get tips →{:else if timeLimit}Done early →{:else}<span>
+							Submit<span class="wide-only">&nbsp;drawing</span> →
+						</span>{/if}
 				</Button>
 			{/if}
 		</div>
-	</div>
+	</header>
 
-	<div class="layout" style="--side: {sideW}px; --ref-max-h: {Math.round(sideW * 0.95)}px">
-		<div class="ref-area">
-			{#if reference}
-				<Tile as="section" label="Reference">
-					<div class="tile-head">
-						<h2>Reference</h2>
-						{#if category && !daily && !personal}
-							<button
-								type="button"
-								class="link-btn"
-								disabled={!status.blank}
-								title={status.blank ? 'Show a different reference' : 'Clear the canvas to switch'}
-								onclick={nextReference}
-							>
-								New one ↻
-							</button>
-						{/if}
-					</div>
-					{#if refFloating}
-						<p class="muted">The picture is in a floating window.</p>
-						<button type="button" class="link-btn" onclick={() => setFloating(false)}>
-							Put it back here
-						</button>
-					{:else}
-						{#key reference.id}
-							<RefViewer src={imageUrl(reference)} alt="Reference: {reference.tags.join(', ')}" />
-						{/key}
-						<button
-							type="button"
-							class="link-btn small float-btn"
-							onclick={() => setFloating(true)}
+	<div class="work">
+		<div class="rail" role="toolbar" aria-label="Drawing tools" aria-orientation="vertical">
+			<div class="rail-tools">
+				<button
+					type="button"
+					class="tool"
+					aria-pressed={!eraser && tool === 'brush'}
+					aria-label="Brush (B)"
+					title="Brush (B)"
+					onclick={() => {
+						eraser = false;
+						tool = 'brush';
+					}}
+				>
+					<svg
+						width="22"
+						height="22"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2.3"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						aria-hidden="true"
+					>
+						<path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
+					</svg>
+				</button>
+				<button
+					type="button"
+					class="tool"
+					aria-pressed={eraser && tool === 'brush'}
+					aria-label="Eraser (E)"
+					title="Eraser (E) — uses the current brush shape"
+					onclick={() => {
+						eraser = true;
+						tool = 'brush';
+					}}
+				>
+					<svg
+						width="22"
+						height="22"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2.3"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						aria-hidden="true"
+					>
+						<path d="m7 21-4-4L14 6l5 5-8 10Z" /><path d="M22 21H7" />
+					</svg>
+				</button>
+				<button
+					type="button"
+					class="tool"
+					aria-pressed={tool === 'picker'}
+					aria-label="Eyedropper (I)"
+					title="Eyedropper (I): pick a colour from the canvas. Alt+click works too."
+					onclick={() => (tool = tool === 'picker' ? 'brush' : 'picker')}
+				>
+					<svg
+						width="22"
+						height="22"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2.3"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						aria-hidden="true"
+					>
+						<path d="m2 22 1-4 9-9 3 3-9 9Z" /><path d="m14 7 3-3a2.1 2.1 0 0 1 3 3l-3 3" /><path
+							d="m11 6 7 7"
+						/>
+					</svg>
+				</button>
+				<button
+					type="button"
+					class="tool"
+					aria-pressed={tool === 'fill'}
+					aria-label="Fill (G)"
+					title="Fill (G): fill an area with the colour. Or drag a colour swatch onto the canvas."
+					onclick={() => (tool = tool === 'fill' ? 'brush' : 'fill')}
+				>
+					<svg
+						width="22"
+						height="22"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2.3"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						aria-hidden="true"
+					>
+						<path d="m19 11-8-8-8.5 8.5a2.1 2.1 0 0 0 0 3L8 20a2.1 2.1 0 0 0 3 0Z" /><path
+							d="m5 2 5 5"
+						/><path d="M2 13h15" /><path d="M22 20a2 2 0 1 1-4 0c0-1.6 2-3 2-3s2 1.4 2 3Z" />
+					</svg>
+				</button>
+				{#each SELECT_TOOLS as t (t.id)}
+					<button
+						type="button"
+						class="tool"
+						aria-pressed={tool === t.id}
+						aria-label={t.label}
+						title="{t.label}. Shift adds, Alt subtracts."
+						onclick={() => (tool = tool === t.id ? 'brush' : t.id)}
+					>
+						<svg
+							width="22"
+							height="22"
+							viewBox="0 0 24 24"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="2.1"
+							stroke-linecap="round"
+							stroke-linejoin="round"
+							stroke-dasharray={t.id === 'select-wand' ? undefined : '3 2.5'}
+							aria-hidden="true"
 						>
-							Float this picture ⧉
-						</button>
-					{/if}
-					<p class="credit">
-						By <a href={reference.authorUrl} target="_blank" rel="noreferrer">{reference.author}</a>
-						via
-						<a href={reference.pageUrl} target="_blank" rel="noreferrer">Pixabay</a> ·
-						<a href={reference.licenseUrl} target="_blank" rel="noreferrer">{reference.license}</a>
-						{#if reference.live}· <span class="badge-live">Endless</span>{/if}
-					</p>
-					{#if reported}
-						<p class="credit" role="status">Thanks! That picture is blocked for everyone.</p>
-					{:else if reportOpen}
-						<div class="report" role="group" aria-label="Report this picture">
-							<span>What’s wrong?</span>
-							<button type="button" onclick={() => report('unsafe')}>Not safe</button>
-							<button type="button" onclick={() => report('ai_made')}>Looks AI-made</button>
-							<button type="button" onclick={() => report('not_drawable')}>Can’t draw this</button>
-							<button type="button" class="cancel" onclick={() => (reportOpen = false)}>
-								Cancel
-							</button>
-						</div>
-					{:else}
-						<button type="button" class="link-btn small" onclick={() => (reportOpen = true)}>
-							Report picture
-						</button>
-					{/if}
-				</Tile>
-			{:else if refLoading}
-				<Tile as="section" label="Reference">
-					<div class="tile-head"><h2>Reference</h2></div>
-					<div class="ref-skeleton" aria-busy="true">Finding a picture…</div>
-				</Tile>
-			{:else if category}
-				<Tile tone="lilac" as="section" label="Reference">
-					<h2>No {category.name.toLowerCase()} references yet</h2>
-					<p class="muted-dark">Free draw for now. References are being curated.</p>
-				</Tile>
-			{/if}
-		</div>
-		<!-- ARIA window-splitter pattern: a focusable separator resized with the arrow keys -->
-		<!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
-		<div
-			class="splitter"
-			role="separator"
-			aria-orientation="vertical"
-			aria-label="Resize the side panel"
-			aria-valuemin={SIDE_MIN}
-			aria-valuemax={SIDE_MAX}
-			aria-valuenow={sideW}
-			tabindex="0"
-			onpointerdown={(e) => {
-				e.currentTarget.setPointerCapture(e.pointerId);
-				sideDrag = { x: e.clientX, w: sideW };
-			}}
-			onpointermove={(e) => sideDrag && setSide(sideDrag.w + e.clientX - sideDrag.x)}
-			onpointerup={() => (sideDrag = null)}
-			onkeydown={(e) => {
-				if (e.key === 'ArrowLeft') setSide(sideW - 20);
-				if (e.key === 'ArrowRight') setSide(sideW + 20);
-			}}
-		></div>
-		<div class="layers-area">
-			<Tile as="section" label="Layers">
-				<div class="tile-head">
-					<h2>Layers</h2>
-					<span class="current">{activeLayerName}</span>
-					<button
-						type="button"
-						class="brush-toggle"
-						aria-expanded={layersOpen}
-						aria-controls="layers-body"
-						onclick={() => (layersOpen = !layersOpen)}
-					>
-						{layersOpen ? 'Hide' : 'Show'}
+							<path d={t.icon} />
+						</svg>
 					</button>
-				</div>
-				<div id="layers-body" class="brush-body" class:closed={!layersOpen}>
-					<LayersPanel {status} controls={canvas} />
-				</div>
-			</Tile>
-		</div>
-		<div class="brush-area">
-			<Tile as="section" label="Brushes">
-				<div class="tile-head">
-					<h2>Brushes</h2>
-					<span class="current">{brushName}</span>
-					<button
-						type="button"
-						class="brush-toggle"
-						aria-expanded={brushesOpen}
-						aria-controls="brush-body"
-						onclick={() => (brushesOpen = !brushesOpen)}
+				{/each}
+				<button
+					type="button"
+					class="tool"
+					aria-pressed={tool === 'transform'}
+					aria-label="Transform (V)"
+					title="Transform (V): move, scale, rotate or flip the selection (or the whole layer)"
+					onclick={() => (tool = tool === 'transform' ? 'brush' : 'transform')}
+				>
+					<svg
+						width="22"
+						height="22"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2.1"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						aria-hidden="true"
 					>
-						{brushesOpen ? 'Hide' : 'Change'}
-					</button>
-				</div>
-				<div id="brush-body" class="brush-body" class:closed={!brushesOpen}>
-					{#if manifest}
-						<BrushPicker {manifest} bind:selected={brushId} />
-					{:else}
-						<p class="muted">Loading brushes…</p>
-					{/if}
-				</div>
-			</Tile>
-		</div>
-
-		<div class="canvas-col">
-			{#if drawMode === 'sketch'}
-				<p class="sketch-note">
-					<b>Sketch mode:</b> rough, scratchy lines are fine. Put guide lines on the
-					<b>Construction</b> layer: they’re never marked as mistakes. Scored on proportions, big shapes
-					and angles.
-				</p>
-			{/if}
-			<div class="canvas-tile">
-				{#key `${canvasSize.width}x${canvasSize.height}-${round}`}
-					<PaintCanvas
-						bind:this={canvas}
-						width={canvasSize.width}
-						height={canvasSize.height}
-						{brushId}
-						{eraser}
-						{size}
-						{opacity}
-						{color}
-						{tool}
-						{smoothing}
-						onpick={picked}
-						{fillTolerance}
-						{fillAllLayers}
-						{quickShape}
-						onshape={onShape}
-						{selectMode}
-						{wandTolerance}
-						ontransformend={onTransformEnd}
-						{liquifySize}
-						{liquifyStrength}
-						allowImport
-						onimport={(r) => (importNote = importText(r))}
-						{gradientKind}
-						gradientEnd={gradientEnd === 'transparent' ? 'transparent' : gradientEndColor}
-						{penPressure}
-						{guides}
-						onguides={setGuides}
-						overlaySrc={traceSrc}
-						overlayOpacity={trace.opacity}
-						overlayTransform={trace}
-						adjustOverlay={trace.adjusting}
-						onoverlaymove={(dx, dy) => (trace = { ...trace, x: trace.x + dx, y: trace.y + dy })}
-						onchange={(s) => (status = s)}
-						onblocked={onBlocked}
-						locked={timeUp}
-					/>
-				{/key}
-				{#if timeUp}
-					<div class="times-up" role="alert">
-						<b>Time’s up!</b>
-						{#if sessionMode}
-							<span>{round + 1 >= sessionCount ? 'Grading your session…' : 'Next picture…'}</span>
-						{:else if status.blank}
-							<span>Nothing drawn this time.</span>
-							<button type="button" onclick={tryAgain}>Try again</button>
-						{:else}
-							<span>Grading your {timeLabel(timeLimit)} drawing…</span>
-						{/if}
-					</div>
-				{/if}
-				{#if shapeNote}
-					<p class="blocked" role="status">{shapeNote}</p>
-				{/if}
-				{#if blocked}
-					<p class="blocked" role="status">
-						{blocked === 'hidden'
-							? `“${activeLayerName}” is hidden. Show it or pick another layer to draw.`
-							: `“${activeLayerName}” is locked. Unlock it or pick another layer to draw.`}
-					</p>
-				{/if}
+						<path
+							d="M12 2v20M2 12h20M12 2l-3 3M12 2l3 3M12 22l-3-3M12 22l3-3M2 12l3-3M2 12l3 3M22 12l-3-3M22 12l-3 3"
+						/>
+					</svg>
+				</button>
+				<button
+					type="button"
+					class="tool"
+					aria-pressed={tool === 'liquify'}
+					aria-label="Liquify (K)"
+					title="Liquify (K): push parts of the layer into place"
+					onclick={() => (tool = tool === 'liquify' ? 'brush' : 'liquify')}
+				>
+					<svg
+						width="22"
+						height="22"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2.1"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						aria-hidden="true"
+					>
+						<path d="M3 12c3-6 6 6 9 0s6 6 9 0" /><path d="M3 18c3-6 6 6 9 0s6 6 9 0" />
+					</svg>
+				</button>
+				<button
+					type="button"
+					class="tool"
+					aria-pressed={tool === 'gradient'}
+					aria-label="Gradient"
+					title="Gradient: drag across the canvas"
+					onclick={() => (tool = tool === 'gradient' ? 'brush' : 'gradient')}
+				>
+					<svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true">
+						<defs>
+							<linearGradient id="gr-ic" x1="0" x2="1">
+								<stop offset="0" stop-color="currentColor" />
+								<stop offset="1" stop-color="currentColor" stop-opacity="0" />
+							</linearGradient>
+						</defs>
+						<rect
+							x="3"
+							y="5"
+							width="18"
+							height="14"
+							rx="3"
+							fill="url(#gr-ic)"
+							stroke="currentColor"
+							stroke-width="2"
+						/>
+					</svg>
+				</button>
+				<button
+					type="button"
+					class="tool"
+					aria-pressed={adjustOpen}
+					aria-expanded={adjustOpen}
+					aria-label="Adjust"
+					title="Adjust the layer: colour, brightness, blur"
+					onclick={openAdjust}
+				>
+					<svg
+						width="22"
+						height="22"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2.1"
+						stroke-linecap="round"
+						aria-hidden="true"
+					>
+						<path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0" /><circle
+							cx="16"
+							cy="6"
+							r="2"
+						/><circle cx="10" cy="12" r="2" /><circle cx="18" cy="18" r="2" />
+					</svg>
+				</button>
 			</div>
-
-			<div class="toolbar" role="toolbar" aria-label="Drawing tools">
-				<div class="group">
-					<button
-						type="button"
-						class="tool"
-						aria-pressed={!eraser && tool === 'brush'}
-						aria-label="Brush (B)"
-						title="Brush (B)"
-						onclick={() => {
-							eraser = false;
-							tool = 'brush';
-						}}
-					>
-						<svg
-							width="22"
-							height="22"
-							viewBox="0 0 24 24"
-							fill="none"
-							stroke="currentColor"
-							stroke-width="2.3"
-							stroke-linecap="round"
-							stroke-linejoin="round"
-							aria-hidden="true"
-						>
-							<path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
-						</svg>
-					</button>
-					<button
-						type="button"
-						class="tool"
-						aria-pressed={eraser && tool === 'brush'}
-						aria-label="Eraser (E)"
-						title="Eraser (E) — uses the current brush shape"
-						onclick={() => {
-							eraser = true;
-							tool = 'brush';
-						}}
-					>
-						<svg
-							width="22"
-							height="22"
-							viewBox="0 0 24 24"
-							fill="none"
-							stroke="currentColor"
-							stroke-width="2.3"
-							stroke-linecap="round"
-							stroke-linejoin="round"
-							aria-hidden="true"
-						>
-							<path d="m7 21-4-4L14 6l5 5-8 10Z" /><path d="M22 21H7" />
-						</svg>
-					</button>
-					<button
-						type="button"
-						class="tool"
-						aria-pressed={tool === 'picker'}
-						aria-label="Eyedropper (I)"
-						title="Eyedropper (I): pick a colour from the canvas. Alt+click works too."
-						onclick={() => (tool = tool === 'picker' ? 'brush' : 'picker')}
-					>
-						<svg
-							width="22"
-							height="22"
-							viewBox="0 0 24 24"
-							fill="none"
-							stroke="currentColor"
-							stroke-width="2.3"
-							stroke-linecap="round"
-							stroke-linejoin="round"
-							aria-hidden="true"
-						>
-							<path d="m2 22 1-4 9-9 3 3-9 9Z" /><path d="m14 7 3-3a2.1 2.1 0 0 1 3 3l-3 3" /><path
-								d="m11 6 7 7"
-							/>
-						</svg>
-					</button>
-					<button
-						type="button"
-						class="tool"
-						aria-pressed={tool === 'fill'}
-						aria-label="Fill (G)"
-						title="Fill (G): fill an area with the colour. Or drag a colour swatch onto the canvas."
-						onclick={() => (tool = tool === 'fill' ? 'brush' : 'fill')}
-					>
-						<svg
-							width="22"
-							height="22"
-							viewBox="0 0 24 24"
-							fill="none"
-							stroke="currentColor"
-							stroke-width="2.3"
-							stroke-linecap="round"
-							stroke-linejoin="round"
-							aria-hidden="true"
-						>
-							<path d="m19 11-8-8-8.5 8.5a2.1 2.1 0 0 0 0 3L8 20a2.1 2.1 0 0 0 3 0Z" /><path
-								d="m5 2 5 5"
-							/><path d="M2 13h15" /><path d="M22 20a2 2 0 1 1-4 0c0-1.6 2-3 2-3s2 1.4 2 3Z" />
-						</svg>
-					</button>
-					{#each SELECT_TOOLS as t (t.id)}
-						<button
-							type="button"
-							class="tool"
-							aria-pressed={tool === t.id}
-							aria-label={t.label}
-							title="{t.label}. Shift adds, Alt subtracts."
-							onclick={() => (tool = tool === t.id ? 'brush' : t.id)}
-						>
-							<svg
-								width="22"
-								height="22"
-								viewBox="0 0 24 24"
-								fill="none"
-								stroke="currentColor"
-								stroke-width="2.1"
-								stroke-linecap="round"
-								stroke-linejoin="round"
-								stroke-dasharray={t.id === 'select-wand' ? undefined : '3 2.5'}
-								aria-hidden="true"
-							>
-								<path d={t.icon} />
-							</svg>
-						</button>
-					{/each}
-					<button
-						type="button"
-						class="tool"
-						aria-pressed={tool === 'transform'}
-						aria-label="Transform (V)"
-						title="Transform (V): move, scale, rotate or flip the selection (or the whole layer)"
-						onclick={() => (tool = tool === 'transform' ? 'brush' : 'transform')}
-					>
-						<svg
-							width="22"
-							height="22"
-							viewBox="0 0 24 24"
-							fill="none"
-							stroke="currentColor"
-							stroke-width="2.1"
-							stroke-linecap="round"
-							stroke-linejoin="round"
-							aria-hidden="true"
-						>
-							<path
-								d="M12 2v20M2 12h20M12 2l-3 3M12 2l3 3M12 22l-3-3M12 22l3-3M2 12l3-3M2 12l3 3M22 12l-3-3M22 12l-3 3"
-							/>
-						</svg>
-					</button>
-					<button
-						type="button"
-						class="tool"
-						aria-pressed={tool === 'liquify'}
-						aria-label="Liquify (K)"
-						title="Liquify (K): push parts of the layer into place"
-						onclick={() => (tool = tool === 'liquify' ? 'brush' : 'liquify')}
-					>
-						<svg
-							width="22"
-							height="22"
-							viewBox="0 0 24 24"
-							fill="none"
-							stroke="currentColor"
-							stroke-width="2.1"
-							stroke-linecap="round"
-							stroke-linejoin="round"
-							aria-hidden="true"
-						>
-							<path d="M3 12c3-6 6 6 9 0s6 6 9 0" /><path d="M3 18c3-6 6 6 9 0s6 6 9 0" />
-						</svg>
-					</button>
-					<button
-						type="button"
-						class="tool"
-						aria-pressed={tool === 'gradient'}
-						aria-label="Gradient"
-						title="Gradient: drag across the canvas"
-						onclick={() => (tool = tool === 'gradient' ? 'brush' : 'gradient')}
-					>
-						<svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true">
-							<defs>
-								<linearGradient id="gr-ic" x1="0" x2="1">
-									<stop offset="0" stop-color="currentColor" />
-									<stop offset="1" stop-color="currentColor" stop-opacity="0" />
-								</linearGradient>
-							</defs>
-							<rect
-								x="3"
-								y="5"
-								width="18"
-								height="14"
-								rx="3"
-								fill="url(#gr-ic)"
-								stroke="currentColor"
-								stroke-width="2"
-							/>
-						</svg>
-					</button>
-					<button
-						type="button"
-						class="tool"
-						aria-pressed={adjustOpen}
-						aria-expanded={adjustOpen}
-						aria-label="Adjust"
-						title="Adjust the layer: colour, brightness, blur"
-						onclick={openAdjust}
-					>
-						<svg
-							width="22"
-							height="22"
-							viewBox="0 0 24 24"
-							fill="none"
-							stroke="currentColor"
-							stroke-width="2.1"
-							stroke-linecap="round"
-							aria-hidden="true"
-						>
-							<path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0" /><circle
-								cx="16"
-								cy="6"
-								r="2"
-							/><circle cx="10" cy="12" r="2" /><circle cx="18" cy="18" r="2" />
-						</svg>
-					</button>
-				</div>
-				<div class="group">
-					<button
-						type="button"
-						class="tool"
-						aria-label="Undo (Ctrl+Z)"
-						title="Undo (Ctrl+Z)"
-						disabled={!status.canUndo}
-						onclick={() => {
-							if (adjustOpen) closeAdjust(false);
-							canvas?.undo();
-						}}
-					>
-						<svg
-							width="22"
-							height="22"
-							viewBox="0 0 24 24"
-							fill="none"
-							stroke="currentColor"
-							stroke-width="2.3"
-							stroke-linecap="round"
-							stroke-linejoin="round"
-							aria-hidden="true"
-						>
-							<path d="M9 14 4 9l5-5" /><path d="M4 9h11a5 5 0 0 1 0 10h-3" />
-						</svg>
-					</button>
-					<button
-						type="button"
-						class="tool"
-						aria-label="Redo (Ctrl+Shift+Z)"
-						title="Redo (Ctrl+Shift+Z)"
-						disabled={!status.canRedo}
-						onclick={() => canvas?.redo()}
-					>
-						<svg
-							width="22"
-							height="22"
-							viewBox="0 0 24 24"
-							fill="none"
-							stroke="currentColor"
-							stroke-width="2.3"
-							stroke-linecap="round"
-							stroke-linejoin="round"
-							aria-hidden="true"
-						>
-							<path d="m15 14 5-5-5-5" /><path d="M20 9H9a5 5 0 0 0 0 10h3" />
-						</svg>
-					</button>
-					{#if confirmClear}
-						<button
-							type="button"
-							class="tool danger"
-							onclick={() => {
-								canvas?.clear();
-								confirmClear = false;
-							}}
-						>
-							Clear layer?
-						</button>
-						<button type="button" class="tool" onclick={() => (confirmClear = false)}>Keep</button>
-					{:else}
-						<button
-							type="button"
-							class="tool"
-							aria-label="Clear layer"
-							title="Clear the current layer"
-							disabled={status.blank}
-							onclick={() => (confirmClear = true)}
-						>
-							<svg
-								width="22"
-								height="22"
-								viewBox="0 0 24 24"
-								fill="none"
-								stroke="currentColor"
-								stroke-width="2.3"
-								stroke-linecap="round"
-								stroke-linejoin="round"
-								aria-hidden="true"
-							>
-								<path d="M4 7h16M6 7l1 13h10l1-13M9 7V4h6v3" />
-							</svg>
-						</button>
-					{/if}
-				</div>
-				<label class="slider">
+			<div class="rail-sliders">
+				<label class="slider rail-slider">
 					<span>Size <b>{Math.round(size * 100)}%</b></span>
 					<input
 						type="range"
@@ -1176,19 +1054,16 @@
 						oninput={(e) => (size = +(2 ** +e.currentTarget.value).toFixed(2))}
 					/>
 				</label>
-				<label class="slider">
+				<label class="slider rail-slider">
 					<span>Opacity <b>{Math.round(opacity * 100)}%</b></span>
 					<input type="range" min="0.05" max="1" step="0.05" bind:value={opacity} />
 				</label>
-				<button
-					type="button"
-					class="tool"
-					aria-pressed={tracing}
-					title="Show a picture faintly inside the canvas to trace over (no score)"
-					onclick={toggleTracing}
-				>
-					Trace
-				</button>
+			</div>
+		</div>
+
+		<div class="center">
+			<div class="opts" role="group" aria-label="Brush options">
+				<span class="brush-name">{brushName}</span>
 				<div class="group swatches" role="radiogroup" aria-label="Colour">
 					{#each SWATCHES as c (c)}
 						<button
@@ -1203,21 +1078,14 @@
 							onclick={() => (color = c)}
 						></button>
 					{/each}
-					<div class="color-more">
-						<button
-							type="button"
-							class="swatch custom"
-							aria-label="More colours"
-							aria-expanded={colorOpen}
-							title="Colour wheel, recent colours and palettes"
-							onclick={() => (colorOpen = !colorOpen)}
-						></button>
-						{#if colorOpen}
-							<div class="color-pop">
-								<ColorPanel bind:color onclose={() => (colorOpen = false)} />
-							</div>
-						{/if}
-					</div>
+					<button
+						type="button"
+						class="swatch custom"
+						aria-label="More colours"
+						aria-expanded={dockTab === 'colour' && dockOpen}
+						title="Colour wheel, recent colours and palettes"
+						onclick={() => openDock('colour')}
+					></button>
 				</div>
 				<label class="slider">
 					<span>Smoothing <b>{Math.round(smoothing * 100)}%</b></span>
@@ -1265,6 +1133,17 @@
 				>
 					QuickShape
 				</button>
+				<button
+					type="button"
+					class="tool"
+					aria-pressed={tracing}
+					title="Show a picture faintly inside the canvas to trace over (no score)"
+					onclick={toggleTracing}
+				>
+					Trace
+				</button>
+			</div>
+			<div class="ctx">
 				{#if guidesOpen}
 					<div class="fill-opts guides-opts" role="group" aria-label="Guides">
 						<span class="opt-label">Grid</span>
@@ -1564,9 +1443,236 @@
 				{/if}
 			</div>
 			{#if tracing}
-				<TracePanel bind:trace hasReference={!!reference} onclose={toggleTracing} />
+				<div class="ctx">
+					{#if tracing}
+						<TracePanel bind:trace hasReference={!!reference} onclose={toggleTracing} />
+					{/if}
+				</div>
 			{/if}
+			{#if drawMode === 'sketch'}
+				<p class="sketch-note">
+					<b>Sketch mode:</b> rough, scratchy lines are fine. Put guide lines on the
+					<b>Construction</b> layer: they’re never marked as mistakes. Scored on proportions, big shapes
+					and angles.
+				</p>
+			{/if}
+			<div class="stage canvas-tile">
+				{#key `${canvasSize.width}x${canvasSize.height}-${round}`}
+					<PaintCanvas
+						bind:this={canvas}
+						fill
+						width={canvasSize.width}
+						height={canvasSize.height}
+						{brushId}
+						{eraser}
+						{size}
+						{opacity}
+						{color}
+						{tool}
+						{smoothing}
+						onpick={picked}
+						{fillTolerance}
+						{fillAllLayers}
+						{quickShape}
+						onshape={onShape}
+						{selectMode}
+						{wandTolerance}
+						ontransformend={onTransformEnd}
+						{liquifySize}
+						{liquifyStrength}
+						allowImport
+						onimport={(r) => (importNote = importText(r))}
+						{gradientKind}
+						gradientEnd={gradientEnd === 'transparent' ? 'transparent' : gradientEndColor}
+						{penPressure}
+						{guides}
+						onguides={setGuides}
+						overlaySrc={traceSrc}
+						overlayOpacity={trace.opacity}
+						overlayTransform={trace}
+						adjustOverlay={trace.adjusting}
+						onoverlaymove={(dx, dy) => (trace = { ...trace, x: trace.x + dx, y: trace.y + dy })}
+						onchange={(s) => (status = s)}
+						onblocked={onBlocked}
+						locked={timeUp}
+					/>
+				{/key}
+				{#if timeUp}
+					<div class="times-up" role="alert">
+						<b>Time’s up!</b>
+						{#if sessionMode}
+							<span>{round + 1 >= sessionCount ? 'Grading your session…' : 'Next picture…'}</span>
+						{:else if status.blank}
+							<span>Nothing drawn this time.</span>
+							<button type="button" onclick={tryAgain}>Try again</button>
+						{:else}
+							<span>Grading your {timeLabel(timeLimit)} drawing…</span>
+						{/if}
+					</div>
+				{/if}
+				{#if shapeNote}
+					<p class="blocked" role="status">{shapeNote}</p>
+				{/if}
+				{#if blocked}
+					<p class="blocked" role="status">
+						{blocked === 'hidden'
+							? `“${activeLayerName}” is hidden. Show it or pick another layer to draw.`
+							: `“${activeLayerName}” is locked. Unlock it or pick another layer to draw.`}
+					</p>
+				{/if}
+				{#if reference && !refFloating}
+					<div class="pip" aria-label="Reference (small)">
+						<div class="pip-bar">
+							<span>Reference</span>
+							<button
+								type="button"
+								aria-label="Show the reference in the panel"
+								onclick={() => openDock('layers')}
+							>
+								⤢
+							</button>
+						</div>
+						{#key reference.id}
+							<img src={imageUrl(reference)} alt="" />
+						{/key}
+					</div>
+				{/if}
+			</div>
 		</div>
+
+		{#if dockOpen}
+			<button
+				type="button"
+				class="scrim"
+				aria-label="Close the panel"
+				onclick={() => (dockOpen = false)}
+			></button>
+		{/if}
+		<aside class="dock" class:open={dockOpen} aria-label="Side panel">
+			<button
+				type="button"
+				class="dock-close"
+				aria-label="Close the panel"
+				onclick={() => (dockOpen = false)}
+			>
+				×
+			</button>
+			<div class="ref-card">
+				{#if reference}
+					<Tile as="section" label="Reference">
+						<div class="tile-head">
+							<h2>Reference</h2>
+							{#if category && !daily && !personal}
+								<button
+									type="button"
+									class="link-btn"
+									disabled={!status.blank}
+									title={status.blank ? 'Show a different reference' : 'Clear the canvas to switch'}
+									onclick={nextReference}
+								>
+									New one ↻
+								</button>
+							{/if}
+						</div>
+						{#if refFloating}
+							<p class="muted">The picture is in a floating window.</p>
+							<button type="button" class="link-btn" onclick={() => setFloating(false)}>
+								Put it back here
+							</button>
+						{:else}
+							{#key reference.id}
+								<RefViewer src={imageUrl(reference)} alt="Reference: {reference.tags.join(', ')}" />
+							{/key}
+							<button
+								type="button"
+								class="link-btn small float-btn"
+								onclick={() => setFloating(true)}
+							>
+								Float this picture ⧉
+							</button>
+						{/if}
+						<p class="credit">
+							By <a href={reference.authorUrl} target="_blank" rel="noreferrer">
+								{reference.author}
+							</a>
+							via
+							<a href={reference.pageUrl} target="_blank" rel="noreferrer">Pixabay</a> ·
+							<a href={reference.licenseUrl} target="_blank" rel="noreferrer">
+								{reference.license}
+							</a>
+							{#if reference.live}· <span class="badge-live">Endless</span>{/if}
+						</p>
+						{#if reported}
+							<p class="credit" role="status">Thanks! That picture is blocked for everyone.</p>
+						{:else if reportOpen}
+							<div class="report" role="group" aria-label="Report this picture">
+								<span>What’s wrong?</span>
+								<button type="button" onclick={() => report('unsafe')}>Not safe</button>
+								<button type="button" onclick={() => report('ai_made')}>Looks AI-made</button>
+								<button type="button" onclick={() => report('not_drawable')}>
+									Can’t draw this
+								</button>
+								<button type="button" class="cancel" onclick={() => (reportOpen = false)}>
+									Cancel
+								</button>
+							</div>
+						{:else}
+							<button type="button" class="link-btn small" onclick={() => (reportOpen = true)}>
+								Report picture
+							</button>
+						{/if}
+					</Tile>
+				{:else if refLoading}
+					<Tile as="section" label="Reference">
+						<div class="tile-head"><h2>Reference</h2></div>
+						<div class="ref-skeleton" aria-busy="true">Finding a picture…</div>
+					</Tile>
+				{:else if category}
+					<Tile tone="lilac" as="section" label="Reference">
+						<h2>No {category.name.toLowerCase()} references yet</h2>
+						<p class="muted-dark">Free draw for now. References are being curated.</p>
+					</Tile>
+				{/if}
+			</div>
+			<div class="tabs" role="tablist" aria-label="Panels">
+				{#each DOCK_TABS as t (t.id)}
+					<button
+						type="button"
+						role="tab"
+						id="tab-{t.id}"
+						aria-selected={dockTab === t.id}
+						aria-controls="panel-{t.id}"
+						class="tab"
+						onclick={() => setTab(t.id)}
+					>
+						{t.label}
+						{#if t.id === 'layers'}<span class="tab-meta">{activeLayerName}</span>{/if}
+						{#if t.id === 'brushes'}<span class="tab-meta">{brushName}</span>{/if}
+					</button>
+				{/each}
+			</div>
+			<div class="tab-panel" role="tabpanel" id="panel-{dockTab}" aria-labelledby="tab-{dockTab}">
+				{#if dockTab === 'layers'}
+					<section aria-label="Layers">
+						<LayersPanel {status} controls={canvas} />
+					</section>
+				{:else if dockTab === 'brushes'}
+					<section aria-label="Brushes">
+						{#if manifest}
+							<BrushPicker {manifest} bind:selected={brushId} />
+						{:else}
+							<p class="muted">Loading brushes…</p>
+						{/if}
+					</section>
+				{:else}
+					<ColorPanel bind:color onclose={() => setTab('layers')} />
+				{/if}
+			</div>
+			<p class="hint">
+				Shortcuts: <kbd>B</kbd> brush · <kbd>E</kbd> eraser · <kbd>[</kbd> <kbd>]</kbd> size ·
+				<kbd>Ctrl</kbd>+<kbd>Z</kbd> undo · <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> redo.
+			</p>
+		</aside>
 	</div>
 	{#if refFloating && reference}
 		<section
@@ -1608,23 +1714,9 @@
 			{/key}
 		</section>
 	{/if}
-
-	<p class="hint">
-		Shortcuts: <kbd>B</kbd> brush · <kbd>E</kbd> eraser · <kbd>[</kbd> <kbd>]</kbd> size ·
-		<kbd>Ctrl</kbd>+<kbd>Z</kbd> undo · <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> redo. Pen pressure
-		and tilt work with tablets (switch them off with Pen pressure).
-	</p>
 </div>
 
 <style>
-	.top {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 16px;
-		align-items: center;
-		justify-content: space-between;
-		margin-bottom: 16px;
-	}
 	h1 {
 		font-size: 30px;
 		letter-spacing: -0.8px;
@@ -1633,11 +1725,6 @@
 		font-size: 20px;
 		font-weight: 700;
 		letter-spacing: -0.3px;
-	}
-	.top-actions {
-		display: flex;
-		gap: 12px;
-		align-items: center;
 	}
 	.timer {
 		display: flex;
@@ -1654,50 +1741,6 @@
 	}
 	.timer[aria-pressed='false'] {
 		background: var(--pp-surface-sunk);
-	}
-	.layout {
-		display: grid;
-		grid-template-columns: var(--side, 340px) 0 minmax(0, 1fr);
-		grid-template-rows: auto auto 1fr;
-		grid-template-areas: 'ref split canvas' 'layers split canvas' 'brushes split canvas';
-		column-gap: calc(var(--pp-gap) / 2);
-		gap: var(--pp-gap);
-		align-items: start;
-	}
-	.ref-area:empty {
-		display: none;
-	}
-	.ref-area {
-		grid-area: ref;
-		min-width: 0;
-	}
-	.brush-area {
-		grid-area: brushes;
-		min-width: 0;
-	}
-	.layers-area {
-		grid-area: layers;
-		min-width: 0;
-	}
-	.splitter {
-		grid-area: split;
-		position: relative;
-		align-self: stretch;
-		cursor: col-resize;
-		touch-action: none;
-	}
-	.splitter::after {
-		content: '';
-		position: absolute;
-		top: 0;
-		bottom: 0;
-		left: -6px;
-		width: 12px;
-		border-radius: 999px;
-	}
-	.splitter:hover::after,
-	.splitter:focus-visible::after {
-		background: color-mix(in srgb, var(--pp-ink) 12%, transparent);
 	}
 	.floating {
 		position: fixed;
@@ -1776,27 +1819,12 @@
 		align-items: center;
 		gap: 8px 12px;
 	}
-	.color-more {
-		position: relative;
-	}
-	.color-pop {
-		position: absolute;
-		z-index: 40;
-		bottom: calc(100% + 10px);
-		right: 0;
-	}
-	@media (max-width: 640px) {
-		.color-pop {
-			position: fixed;
-			left: 16px;
-			right: 16px;
-			bottom: 16px;
-		}
-	}
 	.sketch-note {
+		flex: none;
 		margin: 0;
-		padding: 12px 16px;
-		border-radius: 16px;
+		padding: 6px 12px;
+		border-radius: 12px;
+		font-size: 13px !important;
 		background: var(--pp-lilac);
 		color: var(--pp-lilac-ink);
 		font-size: 14px;
@@ -1865,63 +1893,14 @@
 		text-align: center;
 		pointer-events: none;
 	}
-	.canvas-col {
-		grid-area: canvas;
-	}
-	.brush-toggle {
-		display: none;
-	}
-	/* Tablets and phones: reference, then the canvas, then a folded-away brush panel. */
-	@media (max-width: 960px) {
-		.layout {
-			grid-template-columns: minmax(0, 1fr);
-			grid-template-rows: none;
-			grid-template-areas: 'ref' 'canvas' 'layers' 'brushes';
-		}
-		.splitter,
-		.float-btn {
-			display: none;
-		}
-		.layout {
-			--ref-max-h: 34vh !important;
-		}
-		.brush-toggle {
-			display: block;
-			margin-left: auto;
-			padding: 8px 14px;
-			border: 0;
-			border-radius: 999px;
-			background: var(--pp-ink);
-			color: #fff;
-			font: 600 14px var(--pp-font-body);
-			cursor: pointer;
-		}
-		.brush-body.closed {
-			display: none;
-		}
-	}
 	.tile-head {
 		display: flex;
 		justify-content: space-between;
 		align-items: baseline;
 		gap: 8px;
 	}
-	.current {
-		font-size: 14px;
-		font-weight: 600;
-		color: var(--pp-accent-ink);
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
 	.muted {
 		color: var(--pp-muted);
-	}
-	.canvas-col {
-		display: flex;
-		flex-direction: column;
-		gap: var(--pp-gap);
-		min-width: 0;
 	}
 
 	.credit {
@@ -1999,23 +1978,6 @@
 		color: var(--pp-accent-ink);
 	}
 
-	.canvas-tile {
-		position: relative;
-		background: #fff;
-		border-radius: var(--pp-radius-tile);
-		overflow: hidden;
-		box-shadow: 0 1px 0 rgba(22, 22, 26, 0.04);
-	}
-	.toolbar {
-		display: flex;
-		flex-wrap: wrap;
-		align-items: center;
-		gap: 12px 20px;
-		padding: 14px 16px;
-		background: var(--pp-ink);
-		color: var(--pp-on-ink);
-		border-radius: var(--pp-radius-card);
-	}
 	.group {
 		display: flex;
 		flex-wrap: wrap;
@@ -2081,16 +2043,505 @@
 		background: conic-gradient(red, yellow, lime, cyan, blue, magenta, red);
 	}
 
-	.hint {
-		margin: 16px 0 0;
-		font-size: 13px;
-		color: var(--pp-muted);
-	}
 	kbd {
 		font: 600 12px var(--pp-font-body);
 		padding: 1px 6px;
 		border-radius: 6px;
 		background: var(--pp-surface);
 		border: 1px solid var(--pp-track);
+	}
+
+	/* ---- Studio layout: top bar · tool rail | options + canvas | dock ---- */
+	.studio {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+		height: var(--studio-h);
+		min-height: 540px;
+		box-sizing: border-box;
+		padding-block: 8px 12px;
+		padding-left: max(12px, env(safe-area-inset-left, 0px));
+		padding-right: max(12px, env(safe-area-inset-right, 0px));
+		overflow: hidden;
+	}
+	.sbar {
+		flex: none;
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 8px 12px;
+		padding: 8px 10px;
+		background: var(--pp-surface);
+		border-radius: 18px;
+	}
+	.title {
+		flex: 1 1 220px;
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+	}
+	.title :global(.pp-eyebrow) {
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	h1 {
+		margin: 0;
+		font-size: 21px;
+		letter-spacing: -0.5px;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	h2 {
+		font-size: 18px;
+		font-weight: 700;
+		letter-spacing: -0.3px;
+	}
+	.sbar-actions :global(.btn) {
+		min-height: 40px;
+		padding: 8px 18px;
+		white-space: nowrap;
+	}
+	.sbar-actions {
+		flex: 0 1 auto;
+		display: flex;
+		align-items: center;
+		justify-content: flex-end;
+		gap: 8px;
+		margin-left: auto;
+	}
+	.undo-group {
+		display: flex;
+		gap: 4px;
+	}
+	.undo-group .tool {
+		min-width: 40px;
+		height: 40px;
+		padding: 0 8px;
+		border-radius: 12px;
+	}
+	.icon-btn {
+		flex: none;
+		width: 40px;
+		height: 40px;
+		display: grid;
+		place-items: center;
+		border: 0;
+		border-radius: 12px;
+		background: var(--pp-surface-sunk);
+		color: var(--pp-ink);
+		cursor: pointer;
+	}
+	.icon-btn[aria-pressed='true'] {
+		background: var(--pp-ink);
+		color: #fff;
+	}
+	.timer {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		min-height: 40px;
+		padding: 6px 12px;
+		background: var(--pp-yellow);
+		border: 0;
+		border-radius: 12px;
+		font: 700 17px var(--pp-font-display);
+		color: var(--pp-ink);
+		cursor: pointer;
+	}
+	.timer[aria-pressed='false'] {
+		background: var(--pp-surface-sunk);
+	}
+
+	.work {
+		flex: 1 1 0;
+		min-height: 0;
+		display: flex;
+		gap: 8px;
+		position: relative;
+	}
+	.rail {
+		flex: none;
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+		padding: 8px;
+		background: var(--pp-ink);
+		color: var(--pp-on-ink);
+		border-radius: 18px;
+		overflow-y: auto;
+		scrollbar-width: none;
+	}
+	.rail-tools {
+		display: grid;
+		grid-template-columns: repeat(2, 44px);
+		gap: 6px;
+	}
+	.rail .tool {
+		min-width: 44px;
+		width: 44px;
+		height: 44px;
+		padding: 0;
+		border-radius: 12px;
+	}
+	.rail-sliders {
+		display: flex;
+		justify-content: space-around;
+		padding-top: 8px;
+		border-top: 1px solid #34343c;
+	}
+	.slider.rail-slider {
+		flex: none;
+		min-width: 0;
+		width: 44px;
+		align-items: center;
+		text-align: center;
+		font-size: 11px;
+	}
+	.rail-slider input {
+		writing-mode: vertical-lr;
+		direction: rtl;
+		width: 22px;
+		height: 120px;
+	}
+
+	.center {
+		flex: 1 1 0;
+		min-width: 0;
+		min-height: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+	.opts,
+	.ctx {
+		flex: none;
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 8px 14px;
+		padding: 8px 12px;
+		background: var(--pp-ink);
+		color: var(--pp-on-ink);
+		border-radius: 18px;
+	}
+	.opts {
+		flex-wrap: nowrap;
+		overflow-x: auto;
+		scrollbar-width: thin;
+	}
+	.opts > :global(*) {
+		flex: none;
+	}
+	.ctx {
+		flex-direction: column;
+		align-items: stretch;
+	}
+	.ctx:not(:has(*)) {
+		display: none;
+	}
+	.opts .tool,
+	.ctx .tool {
+		height: 38px;
+		min-width: 38px;
+		border-radius: 12px;
+	}
+	.opts .slider {
+		flex: 0 1 150px;
+		min-width: 110px;
+	}
+	.brush-name {
+		font: 700 15px var(--pp-font-display);
+		white-space: nowrap;
+	}
+	.stage {
+		flex: 1 1 0;
+		min-height: 0;
+		position: relative;
+		background: var(--pp-surface-sunk);
+		border-radius: 18px;
+		overflow: hidden;
+	}
+	.pip {
+		display: none;
+	}
+
+	.dock {
+		--ref-max-h: min(28vh, 260px);
+		flex: none;
+		width: 330px;
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+		min-height: 0;
+		overflow-y: auto;
+		scrollbar-width: thin;
+	}
+	.dock-close,
+	.dock-btn,
+	.scrim {
+		display: none;
+	}
+	.ref-card {
+		flex: none;
+	}
+	.ref-card :global(.pp-tile) {
+		padding: 14px;
+		gap: 8px;
+	}
+	.ref-card :global(.credit) {
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.tabs {
+		flex: none;
+		display: flex;
+		gap: 4px;
+		padding: 4px;
+		background: var(--pp-surface-sunk);
+		border-radius: 14px;
+	}
+	.tab {
+		flex: 1 1 0;
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		padding: 7px 6px;
+		border: 0;
+		border-radius: 10px;
+		background: transparent;
+		font: 700 13px var(--pp-font-body);
+		color: var(--pp-ink-2);
+		cursor: pointer;
+	}
+	.tab[aria-selected='true'] {
+		background: var(--pp-surface);
+		color: var(--pp-ink);
+		box-shadow: 0 1px 4px rgba(22, 22, 26, 0.08);
+	}
+	.tab-meta {
+		max-width: 100%;
+		font-size: 11px;
+		font-weight: 600;
+		color: var(--pp-ink-2);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.tab[aria-selected='true'] .tab-meta {
+		color: var(--pp-accent-ink);
+	}
+	.tab-panel {
+		padding: 14px;
+		background: var(--pp-surface);
+		border-radius: 20px;
+	}
+	.tab-panel :global(.panel) {
+		width: auto;
+		max-height: none;
+		padding: 0;
+		box-shadow: none;
+	}
+	.hint {
+		margin: 0;
+		padding: 0 6px 6px;
+		font-size: 12px;
+		color: var(--pp-muted);
+	}
+
+	/* Tablets: the dock slides in over the canvas; the reference floats on the canvas. */
+	@media (max-width: 1100px) {
+		.dock {
+			position: absolute;
+			top: 0;
+			right: 0;
+			bottom: 0;
+			z-index: 20;
+			width: min(340px, 86vw);
+			padding: 10px;
+			background: var(--pp-ground);
+			border-radius: 18px;
+			box-shadow: -14px 0 40px rgba(22, 22, 26, 0.18);
+			transform: translateX(calc(100% + 24px));
+			visibility: hidden;
+			transition:
+				transform 0.2s ease,
+				visibility 0.2s;
+		}
+		.dock.open {
+			transform: none;
+			visibility: visible;
+		}
+		.dock-close {
+			display: grid;
+			place-items: center;
+			align-self: flex-end;
+			width: 36px;
+			height: 36px;
+			border: 0;
+			border-radius: 10px;
+			background: var(--pp-surface-sunk);
+			font-size: 22px;
+			cursor: pointer;
+		}
+		.dock-btn {
+			display: grid;
+		}
+		.scrim {
+			display: block;
+			position: absolute;
+			inset: 0;
+			z-index: 19;
+			border: 0;
+			background: rgba(22, 22, 26, 0.12);
+			cursor: pointer;
+		}
+		.pip {
+			display: flex;
+			flex-direction: column;
+			position: absolute;
+			left: 12px;
+			top: 12px;
+			z-index: 5;
+			width: clamp(120px, 24%, 220px);
+			background: var(--pp-surface);
+			border-radius: 14px;
+			overflow: hidden;
+			box-shadow: 0 10px 30px rgba(22, 22, 26, 0.22);
+		}
+		.pip-bar {
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+			padding: 4px 4px 4px 10px;
+			font-size: 12px;
+			font-weight: 700;
+		}
+		.pip-bar button {
+			width: 28px;
+			height: 28px;
+			border: 0;
+			border-radius: 8px;
+			background: var(--pp-surface-sunk);
+			cursor: pointer;
+		}
+		.pip img {
+			display: block;
+			width: 100%;
+			max-height: 200px;
+			object-fit: contain;
+			background: #fff;
+		}
+	}
+
+	/* Phones: tools along the bottom, the dock is a bottom sheet. */
+	@media (max-width: 700px) {
+		.studio {
+			padding-left: max(6px, env(safe-area-inset-left, 0px));
+			padding-right: max(6px, env(safe-area-inset-right, 0px));
+			gap: 6px;
+		}
+		.sbar {
+			gap: 6px;
+			padding: 6px;
+		}
+		.title {
+			flex-basis: 180px;
+		}
+		.title :global(.pp-eyebrow) {
+			font-size: 10px;
+		}
+		.sbar-actions {
+			flex: 1 1 100%;
+			gap: 6px;
+		}
+		.sbar-actions :global(button:last-child) {
+			margin-left: auto;
+		}
+		.dock {
+			--ref-max-h: 26vh;
+		}
+		.wide-only {
+			display: none;
+		}
+		.sbar-actions :global(.btn) {
+			min-height: 40px;
+			padding: 8px 14px;
+			font-size: 15px;
+		}
+		.pip {
+			top: auto;
+			bottom: 8px;
+		}
+		h1 {
+			font-size: 16px;
+		}
+		.undo-group .tool:last-child,
+		.sbar-actions :global(.picker) {
+			display: none;
+		}
+		.work {
+			flex-direction: column-reverse;
+			gap: 6px;
+		}
+		.rail {
+			flex-direction: column;
+			gap: 8px;
+			overflow: visible;
+			padding: 6px;
+		}
+		.rail-tools {
+			display: flex;
+			gap: 6px;
+			overflow-x: auto;
+			scrollbar-width: none;
+		}
+		.rail .tool {
+			flex: none;
+		}
+		.rail-sliders {
+			order: -1;
+			gap: 12px;
+			padding: 0 4px;
+			border: 0;
+		}
+		.slider.rail-slider {
+			flex: 1 1 0;
+			width: auto;
+			align-items: stretch;
+			text-align: left;
+		}
+		.rail-slider input {
+			writing-mode: horizontal-tb;
+			direction: ltr;
+			width: auto;
+			height: auto;
+		}
+		.opts {
+			flex-wrap: nowrap;
+			overflow-x: auto;
+			scrollbar-width: none;
+			padding: 6px 8px;
+		}
+		.opts > :global(*) {
+			flex: none;
+		}
+		.dock {
+			top: auto;
+			left: 0;
+			width: auto;
+			max-height: 72%;
+			border-radius: 22px 22px 0 0;
+			box-shadow: 0 -12px 34px rgba(22, 22, 26, 0.2);
+			transform: translateY(calc(100% + 24px));
+		}
+		.pip {
+			left: auto;
+			right: 8px;
+			width: 110px;
+		}
 	}
 </style>

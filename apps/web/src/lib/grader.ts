@@ -183,14 +183,14 @@ export async function gradeImages(
 	if (g.scale === 1) return grade(width, height, drawing, reference, options) as Grade;
 	// Big canvases are graded at the usual size, so scores stay comparable and fast.
 	const k = g.scale;
-	const scaled: GradeOptions = {
-		...options,
-		strokes: options.strokes?.map((s) => ({
+	// Only set what was given: the grader can't read a key whose value is undefined.
+	const scaled: GradeOptions = { ...options };
+	if (options.strokes)
+		scaled.strokes = options.strokes.map((s) => ({
 			...s,
 			points: s.points.map((p) => ({ ...p, x: p.x * k, y: p.y * k }))
-		})),
-		keypoints: options.keypoints?.map((kp) => scaleKeypoint(kp, k))
-	};
+		}));
+	if (options.keypoints) scaled.keypoints = options.keypoints.map((kp) => scaleKeypoint(kp, k));
 	return grade(
 		g.width,
 		g.height,
