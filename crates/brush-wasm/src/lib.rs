@@ -576,7 +576,8 @@ impl Painter {
     /// `grow` px so it tucks under soft line edges. Paint goes *behind* what
     /// the layer already has, so lines stay on top. One undo step; false if
     /// nothing changed (or the layer is locked/hidden).
-    #[allow(clippy::too_many_arguments)]
+    // pixel loops index tiles by (row, col) and map them to canvas coordinates
+    #[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
     pub fn fill(
         &mut self,
         x: u32,
