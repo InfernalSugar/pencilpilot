@@ -190,6 +190,9 @@
 	let seconds = $state(0);
 	let timerOn = $state(true);
 
+	/** daily challenge day (?daily=YYYY-MM-DD): the picture is fixed */
+	const daily = page.url.searchParams.get('daily');
+
 	// Sketch mode (?mode=sketch, ADR-0007): a Construction layer under a Sketch layer.
 	const drawMode: 'finished' | 'sketch' =
 		page.url.searchParams.get('mode') === 'sketch' ? 'sketch' : 'finished';
@@ -353,7 +356,8 @@
 					}
 				: undefined,
 			...(timeLimit ? { timeLimit } : {}),
-			...(drawMode === 'sketch' ? { mode: 'sketch' as const } : {})
+			...(drawMode === 'sketch' ? { mode: 'sketch' as const } : {}),
+			...(daily ? { daily } : {})
 		};
 	}
 
@@ -372,7 +376,9 @@
 	<div class="top">
 		<div>
 			<span class="pp-eyebrow">
-				{drawMode === 'sketch' ? 'Sketch · ' : ''}{category ? `${category.name} · ` : ''}{reference
+				{daily ? 'Today’s challenge · ' : ''}{drawMode === 'sketch' ? 'Sketch · ' : ''}{category
+					? `${category.name} · `
+					: ''}{reference
 					? [topicName(reference.category, reference.topic), tierName(tierOf(reference))]
 							.filter(Boolean)
 							.join(' · ')
@@ -445,7 +451,7 @@
 				<Tile as="section" label="Reference">
 					<div class="tile-head">
 						<h2>Reference</h2>
-						{#if category}
+						{#if category && !daily}
 							<button
 								type="button"
 								class="link-btn"

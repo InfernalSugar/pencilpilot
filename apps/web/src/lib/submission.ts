@@ -26,6 +26,8 @@ export interface Submission {
 	layers?: { id: number; opacity: number; blend: string }[];
 	/** a rough sketch (graded on the big picture, ADR-0007) */
 	mode?: 'finished' | 'sketch';
+	/** the daily challenge day (YYYY-MM-DD) this drawing was for */
+	daily?: string;
 	/** seconds, for timed drawings */
 	timeLimit?: number;
 	/** drawn with a tracing picture showing: tips only, never scored or counted */
