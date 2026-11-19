@@ -28,7 +28,12 @@
 	import TracePanel, { TRACE_DEFAULTS, type TraceState } from '#lib/paint/TracePanel.svelte';
 	import { savedSize, saveSize, type CanvasSize } from '#lib/paint/canvas-size.js';
 	import BrushPicker from '#lib/paint/BrushPicker.svelte';
-	import { DEFAULT_BRUSH, loadManifest, type BrushManifest } from '#lib/paint/brushes.js';
+	import {
+		DEFAULT_BRUSH,
+		brushLabel,
+		loadManifest,
+		type BrushManifest
+	} from '#lib/paint/brushes.js';
 	import { categories } from '#lib/categories.js';
 	import { loadSubmission, saveSubmission, type Submission } from '#lib/submission.js';
 	import { ownReference } from '#lib/own-picture.js';
@@ -507,7 +512,7 @@
 	}
 	let confirmClear = $state(false);
 
-	const brushName = $derived(manifest?.brushes.find((b) => b.id === brushId)?.name ?? '…');
+	const brushName = $derived(brushLabel(manifest, brushId));
 	const clock = $derived(
 		`${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`
 	);

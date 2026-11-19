@@ -10,7 +10,7 @@
 	import BrushPicker from '../paint/BrushPicker.svelte';
 	import ColorPanel from '../paint/ColorPanel.svelte';
 	import LayersPanel from '../paint/LayersPanel.svelte';
-	import { DEFAULT_BRUSH, loadManifest, type BrushManifest } from '../paint/brushes';
+	import { DEFAULT_BRUSH, brushLabel, loadManifest, type BrushManifest } from '../paint/brushes';
 	import { gradeImages, toGray, type GradeCategory } from '../grader';
 	import { referencePixels } from '../references';
 	import { clockOf } from '../timed';
@@ -45,7 +45,7 @@
 	let tab = $state('layers');
 	let dockOpen = $state(false);
 	let manifest = $state<BrushManifest | null>(null);
-	const brushName = $derived(manifest?.brushes.find((b) => b.id === brushId)?.name ?? '…');
+	const brushName = $derived(brushLabel(manifest, brushId));
 	const activeLayerName = $derived(status.layers.find((l) => l.id === status.active)?.name ?? '');
 	let handedIn = $state(false);
 	let grading = $state(false);
