@@ -1,5 +1,5 @@
 <script lang="ts" module>
-	import type { LayerSettings } from './PaintCanvas.svelte';
+	import type { GroupSettings, LayerSettings } from './PaintCanvas.svelte';
 
 	/** What the panel needs from the canvas (PaintCanvas's exported functions). */
 	export interface LayerControls {
@@ -18,11 +18,20 @@
 		applyMask(id: number): void;
 		editMask(id: number, on: boolean): void;
 		maskThumbnail(id: number, w: number, h: number): ImageData | null;
+		moveLayerTo(id: number, to: number, group: number): void;
+		addGroup(layer: number): number;
+		setGroup(id: number, patch: Partial<GroupSettings>): void;
+		previewGroup(id: number, patch: Partial<GroupSettings>): void;
+		commitGroup(): void;
+		ungroup(id: number): void;
+		deleteGroup(id: number): void;
+		mergeGroup(id: number): void;
+		moveGroup(id: number, up: boolean): void;
 	}
 </script>
 
 <script lang="ts">
-	import type { BlendMode, CanvasStatus, LayerInfo } from './PaintCanvas.svelte';
+	import type { BlendMode, CanvasStatus, GroupInfo, LayerInfo } from './PaintCanvas.svelte';
 
 	let {
 		status,
@@ -49,6 +58,39 @@
 	const activeIndex = $derived(status.layers.findIndex((l) => l.id === status.active));
 
 	let renaming = $state<number | null>(null);
+	/** a group picked in the list (its settings show instead of the layer's) */
+	let selectedGroup = $state<number | null>(null);
+	let renamingGroup = $state<number | null>(null);
+	let collapsed = $state<number[]>([]);
+	const groupById = $derived(new Map(status.groups.map((g) => [g.id, g])));
+	const group = $derived(selectedGroup !== null ? (groupById.get(selectedGroup) ?? null) : null);
+	const isCollapsed = (gid: number) => collapsed.includes(gid);
+	function toggleCollapsed(gid: number) {
+		collapsed = isCollapsed(gid) ? collapsed.filter((x) => x !== gid) : [...collapsed, gid];
+	}
+	function finishGroupRename(g: GroupInfo, value: string) {
+		renamingGroup = null;
+		const name = value.trim();
+		if (name && name !== g.name) controls?.setGroup(g.id, { name });
+	}
+	/** move the active layer one step; it takes the group of the layer it passes */
+	function step(up: boolean) {
+		if (!active) return;
+		const to = activeIndex + (up ? 1 : -1);
+		const passed = status.layers[to];
+		if (passed) controls?.moveLayerTo(active.id, to, passed.group);
+	}
+	/** take the active layer out of its group (it lands just above the group) */
+	function leaveGroup() {
+		if (!active?.group) return;
+		let top = activeIndex;
+		while (status.layers[top + 1]?.group === active.group) top++;
+		controls?.moveLayerTo(active.id, top, 0);
+	}
+	function pickLayer(id: number) {
+		selectedGroup = null;
+		controls?.selectLayer(id);
+	}
 	let dragging = $state<number | null>(null);
 	let dropAt = $state<number | null>(null);
 	/** preview canvases by layer id (not reactive state: written by the action below) */
@@ -93,7 +135,9 @@
 	const engineIndex = (rowIndex: number) => status.layers.length - 1 - rowIndex;
 
 	function drop(rowIndex: number) {
-		if (dragging !== null) controls?.moveLayer(dragging, engineIndex(rowIndex));
+		// dropped next to a layer: it joins that layer's group
+		if (dragging !== null)
+			controls?.moveLayerTo(dragging, engineIndex(rowIndex), rows[rowIndex]?.group ?? 0);
 		dragging = null;
 		dropAt = null;
 	}
@@ -135,7 +179,7 @@
 			aria-label="Move layer up"
 			title="Move up"
 			disabled={!active || activeIndex >= status.layers.length - 1}
-			onclick={() => active && controls?.moveLayer(active.id, activeIndex + 1)}
+			onclick={() => step(true)}
 		>
 			<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6" /></svg>
 		</button>
@@ -144,7 +188,7 @@
 			aria-label="Move layer down"
 			title="Move down"
 			disabled={!active || activeIndex <= 0}
-			onclick={() => active && controls?.moveLayer(active.id, activeIndex - 1)}
+			onclick={() => step(false)}
 		>
 			<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M6 13l6 6 6-6" /></svg>
 		</button>
@@ -162,7 +206,66 @@
 		</button>
 	</div>
 
-	{#if active}
+	{#if group}
+		<div class="settings" role="group" aria-label="Group {group.name}">
+			<p class="group-title">Group: <b>{group.name}</b></p>
+			<label class="field">
+				<span>Group opacity <b>{Math.round(group.opacity * 100)}%</b></span>
+				<input
+					type="range"
+					min="0"
+					max="100"
+					value={Math.round(group.opacity * 100)}
+					aria-label="Group opacity"
+					oninput={(e) =>
+						controls?.previewGroup(group.id, { opacity: +e.currentTarget.value / 100 })}
+					onchange={() => controls?.commitGroup()}
+				/>
+			</label>
+			<div class="toggles">
+				<button type="button" class="chip" onclick={() => controls?.moveGroup(group.id, true)}>
+					Move up
+				</button>
+				<button type="button" class="chip" onclick={() => controls?.moveGroup(group.id, false)}>
+					Move down
+				</button>
+				<button
+					type="button"
+					class="chip"
+					title="Keep the layers, remove the group"
+					onclick={() => {
+						controls?.ungroup(group.id);
+						selectedGroup = null;
+					}}
+				>
+					Ungroup
+				</button>
+				<button
+					type="button"
+					class="chip"
+					title="Flatten the group into one layer"
+					onclick={() => {
+						controls?.mergeGroup(group.id);
+						selectedGroup = null;
+					}}
+				>
+					Merge group
+				</button>
+				<button
+					type="button"
+					class="chip"
+					title="Delete the group and its layers"
+					disabled={status.layers.every((l) => l.group === group.id)}
+					onclick={() => {
+						controls?.deleteGroup(group.id);
+						selectedGroup = null;
+					}}
+				>
+					Delete group
+				</button>
+			</div>
+		</div>
+	{:else if active}
 		<div class="settings">
 			<label class="field">
 				<span>Blend</span>
@@ -215,6 +318,28 @@
 				>
 					Clip to below
 				</button>
+				{#if active.group}
+					<button
+						type="button"
+						class="chip"
+						title="Take this layer out of its group"
+						onclick={leaveGroup}
+					>
+						Leave group
+					</button>
+				{:else}
+					<button
+						type="button"
+						class="chip"
+						title="Put this layer in a new group"
+						onclick={() => {
+							const gid = controls?.addGroup(active.id);
+							if (gid) selectedGroup = null;
+						}}
+					>
+						New group
+					</button>
+				{/if}
 				{#if active.mask}
 					<button
 						type="button"
@@ -263,149 +388,224 @@
 
 	<ul class="list" aria-label="Layers, top to bottom">
 		{#each rows as l, i (l.id)}
-			<li
-				class:active={l.id === status.active}
-				class:clipped={l.clip}
-				class:drop={dropAt === i && dragging !== l.id}
-				draggable={renaming === null}
-				ondragstart={(e) => {
-					dragging = l.id;
-					e.dataTransfer?.setData('text/plain', String(l.id));
-				}}
-				ondragover={(e) => {
-					e.preventDefault();
-					dropAt = i;
-				}}
-				ondragleave={() => (dropAt = null)}
-				ondrop={(e) => {
-					e.preventDefault();
-					drop(i);
-				}}
-				ondragend={() => {
-					dragging = null;
-					dropAt = null;
-				}}
-			>
-				<button
-					type="button"
-					class="eye"
-					aria-pressed={l.visible}
-					aria-label="{l.visible ? 'Hide' : 'Show'} {l.name}"
-					title={l.visible ? 'Hide' : 'Show'}
-					onclick={() => controls?.setLayer(l.id, { visible: !l.visible })}
-				>
-					{#if l.visible}
+			{@const g = l.group ? groupById.get(l.group) : undefined}
+			{#if g && rows[i - 1]?.group !== g.id}
+				<li class="group-row" class:active={selectedGroup === g.id}>
+					<button
+						type="button"
+						class="eye"
+						aria-pressed={g.visible}
+						aria-label="{g.visible ? 'Hide' : 'Show'} group {g.name}"
+						title={g.visible ? 'Hide group' : 'Show group'}
+						onclick={() => controls?.setGroup(g.id, { visible: !g.visible })}
+					>
 						<svg viewBox="0 0 24 24" aria-hidden="true">
-							<path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z" /><circle
-								cx="12"
-								cy="12"
-								r="3"
-							/>
+							{#if g.visible}
+								<path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z" /><circle
+									cx="12"
+									cy="12"
+									r="3"
+								/>
+							{:else}
+								<path d="M3 3l18 18M6.6 6.6A17 17 0 0 0 2 12s3.6 7 10 7a9.6 9.6 0 0 0 5.4-1.6" />
+							{/if}
 						</svg>
+					</button>
+					<button
+						type="button"
+						class="fold"
+						aria-expanded={!isCollapsed(g.id)}
+						aria-label="{isCollapsed(g.id) ? 'Expand' : 'Collapse'} group {g.name}"
+						onclick={() => toggleCollapsed(g.id)}
+					>
+						<svg viewBox="0 0 24 24" aria-hidden="true">
+							<path d={isCollapsed(g.id) ? 'M9 6l6 6-6 6' : 'M6 9l6 6 6-6'} />
+						</svg>
+					</button>
+					{#if renamingGroup === g.id}
+						<!-- svelte-ignore a11y_autofocus -->
+						<input
+							class="rename"
+							value={g.name}
+							maxlength="60"
+							aria-label="Group name"
+							autofocus
+							onblur={(e) => finishGroupRename(g, e.currentTarget.value)}
+							onkeydown={(e) => {
+								if (e.key === 'Enter') finishGroupRename(g, e.currentTarget.value);
+								if (e.key === 'Escape') renamingGroup = null;
+								e.stopPropagation();
+							}}
+						/>
 					{:else}
-						<svg viewBox="0 0 24 24" aria-hidden="true">
-							<path
-								d="M3 3l18 18M10.6 5.1A9.7 9.7 0 0 1 12 5c6.4 0 10 7 10 7a17 17 0 0 1-3.2 4M6.6 6.6A17 17 0 0 0 2 12s3.6 7 10 7a9.6 9.6 0 0 0 5.4-1.6"
-							/>
-						</svg>
+						<button
+							type="button"
+							class="name"
+							aria-current={selectedGroup === g.id ? 'true' : undefined}
+							title="Select group · double-click to rename"
+							onclick={() => (selectedGroup = selectedGroup === g.id ? null : g.id)}
+							ondblclick={() => (renamingGroup = g.id)}
+						>
+							<span class="label">
+								<svg class="folder" viewBox="0 0 24 24" aria-hidden="true">
+									<path
+										d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"
+									/>
+								</svg>
+								{g.name}
+							</span>
+							<span class="meta">
+								{#if g.opacity < 1}{Math.round(g.opacity * 100)}%{/if}
+							</span>
+						</button>
 					{/if}
-				</button>
-				{#if l.clip}
-					<span
-						class="clip-mark"
-						title="Clipped to the layer below"
-						aria-label="Clipped to the layer below"
-						role="img"
-					>
-						↳
-					</span>
-				{/if}
-				<canvas
-					class="thumb"
-					width={TW}
-					height={TH}
-					style="width:{TW}px;height:{TH}px"
-					use:thumb={l.id}
-					aria-hidden="true"
-				></canvas>
-				{#if l.mask}
+				</li>
+			{/if}
+			{#if !(g && isCollapsed(g.id))}
+				<li
+					class:active={l.id === status.active && selectedGroup === null}
+					class:member={!!g}
+					class:clipped={l.clip}
+					class:drop={dropAt === i && dragging !== l.id}
+					draggable={renaming === null}
+					ondragstart={(e) => {
+						dragging = l.id;
+						e.dataTransfer?.setData('text/plain', String(l.id));
+					}}
+					ondragover={(e) => {
+						e.preventDefault();
+						dropAt = i;
+					}}
+					ondragleave={() => (dropAt = null)}
+					ondrop={(e) => {
+						e.preventDefault();
+						drop(i);
+					}}
+					ondragend={() => {
+						dragging = null;
+						dropAt = null;
+					}}
+				>
 					<button
 						type="button"
-						class="mask-btn"
-						class:on={l.editingMask}
-						aria-pressed={l.editingMask}
-						aria-label="Edit the mask of {l.name}"
-						title="Mask: click to paint on it"
-						onclick={() => controls?.editMask(l.id, !l.editingMask)}
+						class="eye"
+						aria-pressed={l.visible}
+						aria-label="{l.visible ? 'Hide' : 'Show'} {l.name}"
+						title={l.visible ? 'Hide' : 'Show'}
+						onclick={() => controls?.setLayer(l.id, { visible: !l.visible })}
 					>
-						<canvas
-							class="thumb mask-thumb"
-							width={TW}
-							height={TH}
-							style="width:{TW}px;height:{TH}px"
-							use:maskThumb={l.id}
-							aria-hidden="true"
-						></canvas>
+						{#if l.visible}
+							<svg viewBox="0 0 24 24" aria-hidden="true">
+								<path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z" /><circle
+									cx="12"
+									cy="12"
+									r="3"
+								/>
+							</svg>
+						{:else}
+							<svg viewBox="0 0 24 24" aria-hidden="true">
+								<path
+									d="M3 3l18 18M10.6 5.1A9.7 9.7 0 0 1 12 5c6.4 0 10 7 10 7a17 17 0 0 1-3.2 4M6.6 6.6A17 17 0 0 0 2 12s3.6 7 10 7a9.6 9.6 0 0 0 5.4-1.6"
+								/>
+							</svg>
+						{/if}
 					</button>
-				{/if}
-				{#if renaming === l.id}
-					<!-- svelte-ignore a11y_autofocus -->
-					<input
-						class="rename"
-						value={l.name}
-						maxlength="60"
-						aria-label="Layer name"
-						autofocus
-						onblur={(e) => finishRename(l, e.currentTarget.value)}
-						onkeydown={(e) => {
-							if (e.key === 'Enter') finishRename(l, e.currentTarget.value);
-							if (e.key === 'Escape') renaming = null;
-							e.stopPropagation();
-						}}
-					/>
-				{:else}
-					<button
-						type="button"
-						class="name"
-						aria-current={l.id === status.active ? 'true' : undefined}
-						title="Select · double-click to rename"
-						onclick={() =>
-							l.editingMask ? controls?.editMask(l.id, false) : controls?.selectLayer(l.id)}
-						ondblclick={() => (renaming = l.id)}
-						onkeydown={(e) => {
-							if (e.key === 'F2') renaming = l.id;
-						}}
-					>
-						<span class="label">{l.name}</span>
-						<span class="meta">
-							{#if l.blend !== 'normal'}{BLENDS.find((b) => b.id === l.blend)?.label}{/if}
-							{#if l.opacity < 1}{Math.round(l.opacity * 100)}%{/if}
+					{#if l.clip}
+						<span
+							class="clip-mark"
+							title="Clipped to the layer below"
+							aria-label="Clipped to the layer below"
+							role="img"
+						>
+							↳
 						</span>
-					</button>
-				{/if}
-				{#if l.locked || l.alphaLock}
-					<span class="badge" title={l.locked ? 'Locked' : 'Alpha locked'}>
-						<svg viewBox="0 0 24 24" aria-label={l.locked ? 'Locked' : 'Alpha locked'} role="img">
-							<rect x="5" y="11" width="14" height="9" rx="2" /><path
-								d="M8 11V8a4 4 0 0 1 8 0v3"
-							/>{#if l.alphaLock && !l.locked}<circle cx="12" cy="15.5" r="1.5" />{/if}
-						</svg>
-					</span>
-				{/if}
-				{#if l.id === status.active && renaming !== l.id}
-					<button
-						type="button"
-						class="mini"
-						aria-label="Rename {l.name}"
-						title="Rename (F2)"
-						onclick={() => (renaming = l.id)}
-					>
-						<svg viewBox="0 0 24 24" aria-hidden="true">
-							<path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
-						</svg>
-					</button>
-				{/if}
-			</li>
+					{/if}
+					<canvas
+						class="thumb"
+						width={TW}
+						height={TH}
+						style="width:{TW}px;height:{TH}px"
+						use:thumb={l.id}
+						aria-hidden="true"
+					></canvas>
+					{#if l.mask}
+						<button
+							type="button"
+							class="mask-btn"
+							class:on={l.editingMask}
+							aria-pressed={l.editingMask}
+							aria-label="Edit the mask of {l.name}"
+							title="Mask: click to paint on it"
+							onclick={() => controls?.editMask(l.id, !l.editingMask)}
+						>
+							<canvas
+								class="thumb mask-thumb"
+								width={TW}
+								height={TH}
+								style="width:{TW}px;height:{TH}px"
+								use:maskThumb={l.id}
+								aria-hidden="true"
+							></canvas>
+						</button>
+					{/if}
+					{#if renaming === l.id}
+						<!-- svelte-ignore a11y_autofocus -->
+						<input
+							class="rename"
+							value={l.name}
+							maxlength="60"
+							aria-label="Layer name"
+							autofocus
+							onblur={(e) => finishRename(l, e.currentTarget.value)}
+							onkeydown={(e) => {
+								if (e.key === 'Enter') finishRename(l, e.currentTarget.value);
+								if (e.key === 'Escape') renaming = null;
+								e.stopPropagation();
+							}}
+						/>
+					{:else}
+						<button
+							type="button"
+							class="name"
+							aria-current={l.id === status.active ? 'true' : undefined}
+							title="Select · double-click to rename"
+							onclick={() => (l.editingMask ? controls?.editMask(l.id, false) : pickLayer(l.id))}
+							ondblclick={() => (renaming = l.id)}
+							onkeydown={(e) => {
+								if (e.key === 'F2') renaming = l.id;
+							}}
+						>
+							<span class="label">{l.name}</span>
+							<span class="meta">
+								{#if l.blend !== 'normal'}{BLENDS.find((b) => b.id === l.blend)?.label}{/if}
+								{#if l.opacity < 1}{Math.round(l.opacity * 100)}%{/if}
+							</span>
+						</button>
+					{/if}
+					{#if l.locked || l.alphaLock}
+						<span class="badge" title={l.locked ? 'Locked' : 'Alpha locked'}>
+							<svg viewBox="0 0 24 24" aria-label={l.locked ? 'Locked' : 'Alpha locked'} role="img">
+								<rect x="5" y="11" width="14" height="9" rx="2" /><path
+									d="M8 11V8a4 4 0 0 1 8 0v3"
+								/>{#if l.alphaLock && !l.locked}<circle cx="12" cy="15.5" r="1.5" />{/if}
+							</svg>
+						</span>
+					{/if}
+					{#if l.id === status.active && renaming !== l.id}
+						<button
+							type="button"
+							class="mini"
+							aria-label="Rename {l.name}"
+							title="Rename (F2)"
+							onclick={() => (renaming = l.id)}
+						>
+							<svg viewBox="0 0 24 24" aria-hidden="true">
+								<path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
+							</svg>
+						</button>
+					{/if}
+				</li>
+			{/if}
 		{/each}
 		<li class="paper" aria-label="Paper (white background)">
 			<span class="eye-space"></span>
@@ -490,6 +690,7 @@
 	}
 	.toggles {
 		display: flex;
+		flex-wrap: wrap;
 		gap: 6px;
 	}
 	.chip {
@@ -609,6 +810,32 @@
 		font: 600 14px var(--pp-font-body);
 		background: var(--pp-surface);
 		color: var(--pp-ink);
+	}
+	li.member {
+		margin-left: 14px;
+		border-left: 2px solid var(--pp-track);
+		border-radius: 0 14px 14px 0;
+	}
+	li.member.active {
+		border-left-color: var(--pp-ink);
+	}
+	.group-row {
+		background: var(--pp-surface-sunk);
+	}
+	.fold {
+		flex: none;
+		width: 28px;
+		background: transparent;
+	}
+	.folder {
+		width: 16px;
+		height: 16px;
+		vertical-align: -3px;
+		margin-right: 4px;
+	}
+	.group-title {
+		margin: 0 0 6px;
+		font-size: 14px;
 	}
 	li.clipped {
 		padding-left: 18px;
