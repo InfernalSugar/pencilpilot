@@ -146,6 +146,52 @@ struct TransformSession {
     m: [f32; 6],
 }
 
+/// Mirror / rotation copies of every stroke, about (cx, cy).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SymmetryMode {
+    Vertical,
+    Horizontal,
+    Quadrant,
+    /// `n` copies rotated evenly around the centre (2–24)
+    Radial(u32),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Symmetry {
+    pub mode: SymmetryMode,
+    pub cx: f32,
+    pub cy: f32,
+}
+
+impl Symmetry {
+    /// Where the copies of point (x, y) go (not including (x, y) itself).
+    pub fn copies(&self, x: f32, y: f32) -> Vec<(f32, f32)> {
+        let (cx, cy) = (self.cx, self.cy);
+        match self.mode {
+            SymmetryMode::Vertical => vec![(2.0 * cx - x, y)],
+            SymmetryMode::Horizontal => vec![(x, 2.0 * cy - y)],
+            SymmetryMode::Quadrant => vec![
+                (2.0 * cx - x, y),
+                (x, 2.0 * cy - y),
+                (2.0 * cx - x, 2.0 * cy - y),
+            ],
+            SymmetryMode::Radial(n) => {
+                let n = n.clamp(2, 24);
+                (1..n)
+                    .map(|k| {
+                        let a = k as f32 * std::f32::consts::TAU / n as f32;
+                        let (dx, dy) = (x - cx, y - cy);
+                        (
+                            cx + dx * a.cos() - dy * a.sin(),
+                            cy + dx * a.sin() + dy * a.cos(),
+                        )
+                    })
+                    .collect()
+            }
+        }
+    }
+}
+
 /// One undoable change. Applying an edit returns its inverse.
 enum Edit {
     /// Swap tiles of one layer (strokes, clearing, merging).
@@ -199,6 +245,10 @@ pub struct Painter {
     transform: Option<Box<TransformSession>>,
     /// a liquify stroke in progress: (layer, its tiles before the stroke)
     liquify: Option<(u32, TileMap)>,
+    /// symmetry: every stroke is also drawn mirrored / rotated (see `set_symmetry`)
+    symmetry: Option<Symmetry>,
+    /// brush states for the mirrored copies of the current stroke
+    sym_states: Vec<BrushState>,
 }
 
 impl Painter {
@@ -221,6 +271,8 @@ impl Painter {
             selection: None,
             transform: None,
             liquify: None,
+            symmetry: None,
+            sym_states: Vec::new(),
         }
     }
 
@@ -491,6 +543,8 @@ impl Painter {
         l.surface.recording = Some(Snapshot::new());
         let (id, alpha_lock) = (l.id, l.props.alpha_lock);
         self.state.reset();
+        let copies = self.symmetry.map_or(0, |sym| sym.copies(0.0, 0.0).len());
+        self.sym_states = (0..copies).map(|_| BrushState::default()).collect();
         self.stroking = Some(id);
         self.stroke_brush = None;
         self.alpha_lock_stroke = alpha_lock;
@@ -536,6 +590,11 @@ impl Painter {
                 ytilt,
                 dtime,
             );
+            if let Some(sym) = self.symmetry {
+                for (st, (mx, my)) in self.sym_states.iter_mut().zip(sym.copies(x, y)) {
+                    b.stroke_to(st, &mut l.surface, mx, my, pressure, 0.0, 0.0, dtime);
+                }
+            }
         }
         self.clip_to_selection(id);
     }
@@ -595,7 +654,11 @@ impl Painter {
         if let Some(l) = self.layers.iter_mut().find(|l| l.id == id) {
             l.surface.touched.clear();
             b.finish_stroke(&mut self.state, &mut l.surface);
+            for st in self.sym_states.iter_mut() {
+                b.finish_stroke(st, &mut l.surface);
+            }
         }
+        self.sym_states.clear();
         self.clip_to_selection(id);
         let snap = self
             .layers
@@ -1156,6 +1219,15 @@ impl Painter {
             self.dirty.extend(tiles.keys().copied());
             *tiles = t.original;
             self.dirty.extend(tiles.keys().copied());
+        }
+    }
+
+    // ---- symmetry ----
+
+    /// Draw every stroke mirrored / rotated about (cx, cy) (`None` = off).
+    pub fn set_symmetry(&mut self, sym: Option<Symmetry>) {
+        if self.stroking.is_none() {
+            self.symmetry = sym;
         }
     }
 
@@ -2345,6 +2417,58 @@ mod tests {
         assert!(p.liquify_begin());
         p.liquify_push(200.0, 10.0, 3.0, 0.0, 10.0, 1.0);
         assert!(!p.liquify_end());
+    }
+
+    #[test]
+    fn symmetry_mirrors_strokes_in_one_undo_step() {
+        let mut p = Painter::new(256, 128);
+        let b = pen();
+        p.set_symmetry(Some(Symmetry {
+            mode: SymmetryMode::Vertical,
+            cx: 128.0,
+            cy: 64.0,
+        }));
+        p.begin_stroke();
+        for i in 0..=20 {
+            p.stroke_to(&b, 20.0 + i as f32 * 2.0, 30.0, 1.0, 0.0, 0.0, 0.01); // x 20..60
+        }
+        p.end_stroke(&b);
+        p.flush();
+        assert!(px(&p, 40, 30)[0] < 100, "original");
+        assert!(px(&p, 216, 30)[0] < 100, "mirror at 256 - 40");
+        assert!(px(&p, 128, 30)[0] > 240);
+        assert!(p.undo());
+        p.flush();
+        assert_eq!(dark_pixels(&p), 0, "one step removes both");
+        // radial: 4 copies of a short line right of centre land around it
+        p.set_symmetry(Some(Symmetry {
+            mode: SymmetryMode::Radial(4),
+            cx: 128.0,
+            cy: 64.0,
+        }));
+        p.begin_stroke();
+        for i in 0..=8 {
+            p.stroke_to(&b, 160.0 + i as f32 * 2.0, 64.0, 1.0, 0.0, 0.0, 0.01);
+        }
+        p.end_stroke(&b);
+        p.flush();
+        for (x, y) in [(168, 64), (128, 104), (88, 64), (128, 24)] {
+            assert!(
+                px(&p, x, y)[0] < 160,
+                "copy at ({x},{y}): {:?}",
+                px(&p, x, y)
+            );
+        }
+        p.set_symmetry(None);
+        assert_eq!(
+            Symmetry {
+                mode: SymmetryMode::Quadrant,
+                cx: 10.0,
+                cy: 10.0
+            }
+            .copies(0.0, 0.0),
+            vec![(20.0, 0.0), (0.0, 20.0), (20.0, 20.0)]
+        );
     }
 
     #[test]

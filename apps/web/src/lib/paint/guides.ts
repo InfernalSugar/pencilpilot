@@ -16,7 +16,11 @@ export interface GuideSettings {
 		assist: boolean;
 	};
 	ruler: { on: boolean; a: Pt; b: Pt };
+	/** strokes mirrored / rotated live about `c` */
+	symmetry: { mode: 'off' | 'vertical' | 'horizontal' | 'quadrant' | 'radial'; n: number; c: Pt };
 }
+
+export const SYMMETRY_MODES = ['off', 'vertical', 'horizontal', 'quadrant', 'radial'] as const;
 
 export function defaultGuides(w: number, h: number): GuideSettings {
 	return {
@@ -30,12 +34,49 @@ export function defaultGuides(w: number, h: number): GuideSettings {
 			],
 			assist: true
 		},
-		ruler: { on: false, a: [w * 0.2, h * 0.5], b: [w * 0.8, h * 0.5] }
+		ruler: { on: false, a: [w * 0.2, h * 0.5], b: [w * 0.8, h * 0.5] },
+		symmetry: { mode: 'off', n: 6, c: [w / 2, h / 2] }
 	};
 }
 
 export const anyGuide = (g: GuideSettings | null | undefined) =>
-	!!g && (g.grid.on || g.perspective.points > 0 || g.ruler.on);
+	!!g && (g.grid.on || g.perspective.points > 0 || g.ruler.on || symmetryOn(g));
+
+export const symmetryOn = (g: GuideSettings | null | undefined) =>
+	!!g?.symmetry && g.symmetry.mode !== 'off';
+
+/** The symmetry axes to draw, as [x1, y1, x2, y2] (long lines through the centre). */
+export function symmetryAxes(
+	g: GuideSettings,
+	w: number,
+	h: number
+): [number, number, number, number][] {
+	if (!symmetryOn(g)) return [];
+	const [cx, cy] = g.symmetry.c;
+	const far = 2 * Math.hypot(w, h);
+	const at = (a: number): [number, number, number, number] => [
+		cx - Math.cos(a) * far,
+		cy - Math.sin(a) * far,
+		cx + Math.cos(a) * far,
+		cy + Math.sin(a) * far
+	];
+	switch (g.symmetry.mode) {
+		case 'vertical':
+			return [at(Math.PI / 2)];
+		case 'horizontal':
+			return [at(0)];
+		case 'quadrant':
+			return [at(0), at(Math.PI / 2)];
+		default: {
+			// spokes from the centre
+			const n = Math.max(2, Math.min(24, g.symmetry.n));
+			return Array.from({ length: n }, (_, k) => {
+				const a = (k / n) * Math.PI * 2 - Math.PI / 2;
+				return [cx, cy, cx + Math.cos(a) * far, cy + Math.sin(a) * far];
+			});
+		}
+	}
+}
 
 /** Unit directions a stroke starting at `p` may snap to (perspective assist). */
 export function snapDirections(g: GuideSettings, p: Pt): Pt[] {

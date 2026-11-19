@@ -78,6 +78,8 @@
 		project,
 		rulerLine,
 		snapDirections,
+		symmetryAxes,
+		SYMMETRY_MODES,
 		type GuideSettings,
 		type Pt
 	} from './guides';
@@ -1007,7 +1009,7 @@
 	/** perspective: directions on offer until the stroke has shown which way it goes */
 	let snapPending: { start: Pt; dirs: Pt[] } | null = null;
 	let guideDrag: {
-		what: 'vp' | 'a' | 'b' | 'ruler';
+		what: 'vp' | 'a' | 'b' | 'ruler' | 'sym';
 		i: number;
 		start: Pt;
 		from: GuideSettings;
@@ -1045,6 +1047,8 @@
 		if (!guides) return null;
 		const r = 16 / Math.max(0.01, fit * zoom);
 		const near = (q: Pt) => Math.hypot(p[0] - q[0], p[1] - q[1]) <= r;
+		if (guides.symmetry?.mode !== 'off' && guides.symmetry && near(guides.symmetry.c))
+			return { what: 'sym', i: 0, start: p, from: $state.snapshot(guides) as GuideSettings };
 		const n = guides.perspective.points;
 		for (let i = 0; i < n; i++)
 			if (near(guides.perspective.vps[i]))
@@ -1069,9 +1073,20 @@
 			g.perspective.vps[guideDrag.i] = shift(g.perspective.vps[guideDrag.i]);
 		else if (guideDrag.what === 'a') g.ruler.a = shift(g.ruler.a);
 		else if (guideDrag.what === 'b') g.ruler.b = shift(g.ruler.b);
+		else if (guideDrag.what === 'sym') g.symmetry.c = shift(g.symmetry.c);
 		else g.ruler = { ...g.ruler, a: shift(g.ruler.a), b: shift(g.ruler.b) };
 		onguides?.(g);
 	}
+
+	const guideAxes = $derived(guides ? symmetryAxes(guides, width, height) : []);
+
+	// tell the engine about symmetry whenever it changes
+	$effect(() => {
+		if (!ready || !paint) return;
+		const sym = guides?.symmetry;
+		const mode = sym ? SYMMETRY_MODES.indexOf(sym.mode) : 0;
+		paint.setSymmetry(Math.max(0, mode), sym?.n ?? 6, sym?.c[0] ?? 0, sym?.c[1] ?? 0);
+	});
 
 	const guideGrid = $derived(guides?.grid.on ? gridLines(guides, width, height) : []);
 	const guideRays = $derived(
@@ -1686,7 +1701,7 @@
 			data-ready={ready}
 		></canvas>
 		<canvas class="ants" bind:this={antsEl} {width} {height} aria-hidden="true"></canvas>
-		{#if guides && (guideGrid.length || guideRays.length || guides.ruler.on)}
+		{#if guides && (guideGrid.length || guideRays.length || guides.ruler.on || guideAxes.length)}
 			{@const hr = 8 / Math.max(0.01, fit * zoom)}
 			<svg
 				class="guides"
@@ -1713,6 +1728,9 @@
 						y2={ay + k * (2 * width - ax)}
 					/>
 				{/if}
+				{#each guideAxes as [x1, y1, x2, y2], i (i)}
+					<line class="axis" {x1} {y1} {x2} {y2} />
+				{/each}
 				{#if guides.ruler.on}
 					<line
 						class="ruler"
@@ -1723,6 +1741,9 @@
 					/>
 				{/if}
 				{#if tool === 'guides'}
+					{#if guideAxes.length}
+						<circle class="handle sym" cx={guides.symmetry.c[0]} cy={guides.symmetry.c[1]} r={hr} />
+					{/if}
 					{#each guides.perspective.vps.slice(0, guides.perspective.points) as [x, y], i (i)}
 						<circle class="handle" cx={x} cy={y} r={hr} />
 					{/each}
@@ -1920,6 +1941,11 @@
 	.guides .ray {
 		stroke: rgba(232, 73, 47, 0.22);
 		stroke-width: 1;
+	}
+	.guides .axis {
+		stroke: rgba(139, 92, 246, 0.7);
+		stroke-width: 1.5;
+		stroke-dasharray: 8 6;
 	}
 	.guides .horizon {
 		stroke: rgba(232, 73, 47, 0.6);

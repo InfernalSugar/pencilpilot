@@ -590,3 +590,48 @@ test('guides: grid, ruler and perspective assist straighten strokes; vanishing p
 		.poll(() => page.locator('svg.guides line.horizon').getAttribute('y1'))
 		.not.toBe(before);
 });
+
+test('symmetry: strokes are mirrored live, one undo removes all copies, the centre moves', async ({
+	page
+}) => {
+	await ready(page);
+	for (let i = 0; i < 3; i++) await page.keyboard.press(']');
+	await page.getByRole('button', { name: 'Guides' }).click();
+	const g = page.getByRole('group', { name: 'Guides' });
+	await g.getByRole('radio', { name: 'Vertical' }).click();
+	await expect(page.locator('svg.guides line.axis')).toHaveCount(1);
+	await drag(page, [0.1, 0.3], [0.3, 0.3], 12);
+	const inkAt = (x0: number, x1: number) =>
+		canvas(page).evaluate(
+			(c: HTMLCanvasElement, [x0, x1]) => {
+				const d = c
+					.getContext('2d')!
+					.getImageData(
+						Math.round(c.width * x0),
+						0,
+						Math.round(c.width * (x1 - x0)),
+						c.height
+					).data;
+				let n = 0;
+				for (let i = 0; i < d.length; i += 4) if (d[i] < 225) n++;
+				return n;
+			},
+			[x0, x1]
+		);
+	await expect.poll(() => inkAt(0.7, 0.92)).toBeGreaterThan(30);
+	expect(Math.abs((await inkAt(0.08, 0.32)) - (await inkAt(0.68, 0.92)))).toBeLessThan(40);
+	await page.getByRole('button', { name: /Undo/ }).click();
+	await expect.poll(() => inkAt(0, 1)).toBe(0);
+
+	// quadrant: four copies
+	await g.getByRole('radio', { name: 'Quadrant' }).click();
+	await drag(page, [0.1, 0.2], [0.3, 0.2], 12);
+	await expect.poll(async () => (await inkFrac(page)).h).toBeGreaterThan(0.55);
+
+	// move the centre: the axis follows
+	await g.getByRole('radio', { name: 'Vertical' }).click();
+	const x = await page.locator('svg.guides line.axis').getAttribute('x1');
+	await g.getByRole('button', { name: 'Move guides' }).click();
+	await drag(page, [0.5, 0.5], [0.3, 0.5], 6);
+	await expect.poll(() => page.locator('svg.guides line.axis').getAttribute('x1')).not.toBe(x);
+});
