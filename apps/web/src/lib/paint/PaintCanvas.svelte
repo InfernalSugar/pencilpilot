@@ -2207,6 +2207,10 @@
 		height: 100%;
 		pointer-events: none;
 	}
+	/* an overlay: it must never hide the drawing (the plain canvas rule paints paper white) */
+	canvas.ants {
+		background: transparent;
+	}
 	.marquee {
 		fill: rgba(61, 107, 255, 0.12);
 		stroke: #16161a;
