@@ -2,6 +2,7 @@ import { defineConfig } from 'vitest/config';
 import { searchForWorkspaceRoot } from 'vite';
 import adapter from '@sveltejs/adapter-node';
 import { sveltekit } from '@sveltejs/kit/vite';
+import { attachLobbySockets } from './src/lib/server/lobby/socket';
 
 export default defineConfig({
 	// one .env at the repo root (git-ignored) for every app and tool
@@ -18,6 +19,16 @@ export default defineConfig({
 		)
 	},
 	plugins: [
+		// Private lobbies: live connections on /lobby-ws (production: server.js does the same).
+		{
+			name: 'pencilpilot-lobby-sockets',
+			configureServer(s) {
+				if (s.httpServer) attachLobbySockets(s.httpServer as import('node:http').Server);
+			},
+			configurePreviewServer(s) {
+				attachLobbySockets(s.httpServer as import('node:http').Server);
+			}
+		},
 		sveltekit({
 			compilerOptions: {
 				// Force runes mode for the project, except for libraries. Can be removed in svelte 6.

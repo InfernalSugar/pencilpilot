@@ -155,6 +155,9 @@ pub struct Painter {
     active: u32,
     next_id: u32,
     state: BrushState,
+    /// strokes from other people (shared canvases), drawn alongside the local
+    /// one: key → (layer id, brush state). Never in the undo history.
+    remote: HashMap<u32, (u32, BrushState)>,
     width: u32,
     height: u32,
     rgba: Vec<u8>,
@@ -176,6 +179,7 @@ impl Painter {
             active: 1,
             next_id: 2,
             state: BrushState::default(),
+            remote: HashMap::new(),
             width,
             height,
             rgba: vec![255; (width * height * 4) as usize],
@@ -561,6 +565,73 @@ impl Painter {
             snap,
         });
         true
+    }
+
+    // ---- shared canvases: other people's strokes ----
+
+    /// Add a layer without an undo step (e.g. a layer for another person). Returns its id.
+    pub fn add_layer_silent(&mut self, name: &str) -> u32 {
+        if self.layers.len() >= MAX_LAYERS {
+            return 0;
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        self.layers.push(Layer::new(
+            id,
+            LayerProps::named(name.chars().take(60).collect::<String>()),
+        ));
+        id
+    }
+
+    /// Erase a layer without an undo step (before redrawing someone's strokes).
+    pub fn clear_layer_silent(&mut self, id: u32) {
+        if let Some(idx) = self.index_of(id) {
+            self.mark_layer(idx);
+            self.layers[idx].surface.tiles.clear();
+        }
+    }
+
+    /// Start another person's stroke `key` on `layer` (any number at once,
+    /// alongside the local stroke; never undoable here).
+    pub fn remote_begin(&mut self, key: u32, layer: u32) -> bool {
+        if self.index_of(layer).is_none() {
+            return false;
+        }
+        self.remote.insert(key, (layer, BrushState::default()));
+        true
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn remote_to(
+        &mut self,
+        key: u32,
+        brush: &Brush,
+        x: f32,
+        y: f32,
+        pressure: f32,
+        dtime: f64,
+    ) {
+        let Some((layer, state)) = self.remote.get_mut(&key) else {
+            return;
+        };
+        let layer = *layer;
+        if let Some(l) = self.layers.iter_mut().find(|l| l.id == layer) {
+            // a remote stroke must not land in the local stroke's undo snapshot
+            let rec = l.surface.recording.take();
+            brush.stroke_to(state, &mut l.surface, x, y, pressure, 0.0, 0.0, dtime);
+            l.surface.recording = rec;
+        }
+    }
+
+    pub fn remote_end(&mut self, key: u32, brush: &Brush) {
+        let Some((layer, mut state)) = self.remote.remove(&key) else {
+            return;
+        };
+        if let Some(l) = self.layers.iter_mut().find(|l| l.id == layer) {
+            let rec = l.surface.recording.take();
+            brush.finish_stroke(&mut state, &mut l.surface);
+            l.surface.recording = rec;
+        }
     }
 
     /// Forget the undo/redo history (e.g. after setting up starter layers,
@@ -1142,6 +1213,36 @@ mod tests {
             p.undo() && !p.can_undo(),
             "only the first stroke is in the history"
         );
+    }
+
+    #[test]
+    fn remote_strokes_paint_alongside_the_local_one() {
+        let mut p = Painter::new(256, 128);
+        let b = pen();
+        let theirs = p.add_layer_silent("Sam");
+        assert!(!p.can_undo(), "a layer for someone else isn't an undo step");
+        // local stroke on layer 1 and a remote stroke on Sam's layer, interleaved
+        p.begin_stroke();
+        assert!(p.remote_begin(7, theirs));
+        for i in 0..=30 {
+            p.stroke_to(&b, 20.0 + i as f32 * 6.0, 30.0, 1.0, 0.0, 0.0, 0.01);
+            p.remote_to(7, &b, 20.0 + i as f32 * 6.0, 90.0, 1.0, 0.01);
+        }
+        p.remote_end(7, &b);
+        p.end_stroke(&b);
+        p.flush();
+        assert!(
+            px(&p, 100, 30)[0] < 100 && px(&p, 100, 90)[0] < 100,
+            "both lines show"
+        );
+        // undo removes only the local line
+        p.undo();
+        p.flush();
+        assert!(px(&p, 100, 30)[0] > 240 && px(&p, 100, 90)[0] < 100);
+        p.clear_layer_silent(theirs);
+        p.flush();
+        assert!(px(&p, 100, 90)[0] > 240);
+        assert!(!p.can_undo());
     }
 
     #[test]

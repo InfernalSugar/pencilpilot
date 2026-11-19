@@ -16,7 +16,9 @@ const PAGES = [
 	'/privacy',
 	'/community',
 	'/community/rate',
-	'/community/mine'
+	'/community/mine',
+	'/lobby',
+	'/daily'
 ];
 const VIEWPORTS = [
 	{ name: 'phone', width: 375, height: 740 },
