@@ -459,3 +459,63 @@ test('liquify: push part of a line into place, one undo step', async ({ page }) 
 	for (let i = 0; i < 3; i++) await page.getByRole('button', { name: /Undo/ }).click();
 	await expect.poll(async () => Math.abs((await column(0.5)) - startY)).toBeLessThan(0.005);
 });
+
+test('pen pressure can be switched off', async ({ page }) => {
+	await ready(page);
+	/** a pen stroke at a fixed pressure across row y; returns the ink it added */
+	const penLine = async (y: number, pressure: number) => {
+		await canvas(page).scrollIntoViewIfNeeded();
+		return canvas(page).evaluate(
+			async (c: HTMLCanvasElement, [y, pressure]) => {
+				const r = c.getBoundingClientRect();
+				const [bx, by, bw, bh] = [r.x, r.y, r.width, r.height];
+				const vp = c.closest('.viewport')!;
+				const ev = (type: string, x: number) =>
+					new PointerEvent(type, {
+						pointerId: 7,
+						pointerType: 'pen',
+						pressure,
+						clientX: bx + bw * x,
+						clientY: by + bh * y,
+						bubbles: true,
+						isPrimary: true,
+						button: 0,
+						buttons: type === 'pointerup' ? 0 : 1
+					});
+				const ink = () => {
+					const d = c
+						.getContext('2d')!
+						.getImageData(0, Math.round(c.height * y) - 20, c.width, 40).data;
+					let n = 0;
+					for (let i = 0; i < d.length; i += 4) if (d[i] < 235) n++;
+					return n;
+				};
+				const before = ink();
+				vp.dispatchEvent(ev('pointerdown', 0.2));
+				for (let i = 1; i <= 30; i++) vp.dispatchEvent(ev('pointermove', 0.2 + i * 0.02));
+				vp.dispatchEvent(ev('pointerup', 0.8));
+				await new Promise((r) => setTimeout(r, 300));
+				return ink() - before;
+			},
+			[y, pressure]
+		);
+	};
+	const hard = await penLine(0.2, 1);
+	const soft = await penLine(0.4, 0.05);
+	expect(hard).toBeGreaterThan(soft * 1.3);
+
+	await page.getByRole('button', { name: 'Pen pressure' }).click();
+	await expect(page.getByRole('button', { name: 'Pen pressure' })).toHaveAttribute(
+		'aria-pressed',
+		'false'
+	);
+	const hardOff = await penLine(0.6, 1);
+	const softOff = await penLine(0.8, 0.05);
+	expect(Math.abs(hardOff - softOff)).toBeLessThan(Math.max(hardOff, softOff) * 0.15);
+	// remembered
+	await page.reload();
+	await expect(page.getByRole('button', { name: 'Pen pressure' })).toHaveAttribute(
+		'aria-pressed',
+		'false'
+	);
+});
