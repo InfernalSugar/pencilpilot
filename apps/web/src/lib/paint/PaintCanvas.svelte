@@ -67,6 +67,9 @@
 		onblocked,
 		overlaySrc = null,
 		overlayOpacity = 0.3,
+		overlayTransform = { x: 0, y: 0, scale: 1, rotate: 0 },
+		adjustOverlay = false,
+		onoverlaymove,
 		maxHeight = '78vh',
 		viewControls = true
 	}: {
@@ -84,6 +87,12 @@
 		/** a picture shown over the canvas (fitted like the grader fits references); never part of the drawing */
 		overlaySrc?: string | null;
 		overlayOpacity?: number;
+		/** where the overlay sits: offset (fraction of the canvas), scale and rotation (degrees) */
+		overlayTransform?: { x: number; y: number; scale: number; rotate: number };
+		/** dragging moves the overlay instead of drawing */
+		adjustOverlay?: boolean;
+		/** overlay dragged by (dx, dy), as fractions of the canvas width / height */
+		onoverlaymove?: (dx: number, dy: number) => void;
 		/** tallest the canvas area may get */
 		maxHeight?: string;
 		/** show the zoom / rotate / mirror bar */
@@ -326,6 +335,7 @@
 	/** after a pinch, remaining fingers do nothing until all are lifted */
 	let gestureLatch = false;
 	let panning: { id: number; x: number; y: number; panX: number; panY: number } | null = null;
+	let moving: { id: number; cx: number; cy: number } | null = null;
 	let spaceHeld = $state(false);
 	let hovering = false;
 	/** once a pen has been used, fingers only move the view (palm rejection) */
@@ -387,6 +397,12 @@
 		if (e.pointerType === 'mouse' && e.button === 1) return startPan(e);
 		if (spaceHeld) return startPan(e);
 		if (e.pointerType === 'mouse' && e.button !== 0) return;
+		if (adjustOverlay && overlaySrc) {
+			vp.setPointerCapture(e.pointerId);
+			const [cx, cy] = toCanvas(e.clientX, e.clientY);
+			moving = { id: e.pointerId, cx, cy };
+			return;
+		}
 		if (!paint.beginStroke()) {
 			const l = layerList().find((x) => x.id === paint!.activeLayer);
 			onblocked?.(l && !l.visible ? 'hidden' : 'locked');
@@ -417,6 +433,12 @@
 				return;
 			}
 		}
+		if (moving && e.pointerId === moving.id) {
+			const [cx, cy] = toCanvas(e.clientX, e.clientY);
+			onoverlaymove?.((cx - moving.cx) / width, (cy - moving.cy) / height);
+			moving = { ...moving, cx, cy };
+			return;
+		}
 		if (panning && e.pointerId === panning.id) {
 			panX = panning.panX + e.clientX - panning.x;
 			panY = panning.panY + e.clientY - panning.y;
@@ -436,6 +458,7 @@
 			if (touches.size === 0) gestureLatch = false;
 		}
 		if (panning && e.pointerId === panning.id) panning = null;
+		if (moving && e.pointerId === moving.id) moving = null;
 		if (!current || !paint || !brush) return;
 		paint.endStroke(brush);
 		log.add(current);
@@ -596,6 +619,7 @@
 <div
 	class="viewport"
 	class:grab={spaceHeld}
+	class:moving-overlay={adjustOverlay && !!overlaySrc}
 	bind:this={vp}
 	style="aspect-ratio: {width} / {height}; max-height: {maxHeight}"
 	onpointerdown={down}
@@ -616,7 +640,14 @@
 			data-ready={ready}
 		></canvas>
 		{#if overlaySrc}
-			<img class="overlay" src={overlaySrc} alt="" style="opacity: {overlayOpacity}" />
+			<img
+				class="overlay"
+				src={overlaySrc}
+				alt=""
+				style="opacity: {overlayOpacity}; transform: translate({overlayTransform.x *
+					100}%, {overlayTransform.y *
+					100}%) rotate({overlayTransform.rotate}deg) scale({overlayTransform.scale})"
+			/>
 		{/if}
 	</div>
 	{#if viewControls && ready}
@@ -690,6 +721,12 @@
 	}
 	.viewport.grab {
 		cursor: grab;
+	}
+	.viewport.moving-overlay {
+		cursor: move;
+	}
+	.sheet {
+		overflow: hidden;
 	}
 	.sheet {
 		position: absolute;

@@ -218,3 +218,57 @@ test('canvas size: pick a shape, and confirm before clearing a drawing', async (
 	await expect(page).toHaveURL(/\/results$/);
 	await expect(page.getByRole('img', { name: 'Your submitted drawing' })).toBeVisible();
 });
+
+test('tracing your own picture: line it up, draw, get tips but no score', async ({ page }) => {
+	await page.goto('/draw');
+	await expect(page.getByLabel(/Drawing canvas/)).toHaveAttribute('data-ready', 'true', {
+		timeout: 15_000
+	});
+	await page.getByRole('button', { name: 'Trace' }).click();
+	const tracing = page.getByRole('region', { name: 'Tracing' });
+	await expect(tracing).toContainText('no score');
+
+	// a picture from "the device": a black ring on white, made in the page
+	const png = await page.evaluate(() => {
+		const c = document.createElement('canvas');
+		c.width = 400;
+		c.height = 300;
+		const x = c.getContext('2d')!;
+		x.fillStyle = '#fff';
+		x.fillRect(0, 0, 400, 300);
+		x.lineWidth = 12;
+		x.beginPath();
+		x.arc(200, 150, 90, 0, Math.PI * 2);
+		x.stroke();
+		return c.toDataURL('image/png').split(',')[1];
+	});
+	await tracing.getByLabel('Picture from your device').setInputFiles({
+		name: 'ring.png',
+		mimeType: 'image/png',
+		buffer: Buffer.from(png, 'base64')
+	});
+	const overlay = page.locator('img.overlay');
+	await expect(overlay).toBeVisible();
+
+	// move it: in move mode a drag shifts the picture, and paints nothing
+	await tracing.getByRole('button', { name: 'Move picture' }).click();
+	const box = (await page.getByLabel(/Drawing canvas/).boundingBox())!;
+	await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+	await page.mouse.down();
+	await page.mouse.move(box.x + box.width / 2 + 40, box.y + box.height / 2, { steps: 5 });
+	await page.mouse.up();
+	await expect(overlay).toHaveAttribute('style', /translate\([1-9]/);
+	expect(await inkPixels(page)).toBe(0);
+	await tracing.getByRole('button', { name: 'Done moving' }).click();
+
+	await scribble(page);
+	await expect(page.getByRole('button', { name: 'Get tips →' })).toBeEnabled();
+	await page.getByRole('button', { name: 'Get tips →' }).click();
+	await expect(page).toHaveURL(/\/results$/);
+	await expect(page.getByText('Traced', { exact: true })).toBeVisible();
+	await expect(page.getByTestId('score')).toHaveCount(0);
+	await expect(page.getByTestId('overlay')).toBeVisible({ timeout: 15_000 });
+	// not counted
+	const history = await page.evaluate(() => localStorage.getItem('pp.attempts'));
+	expect(history ?? '[]').toBe('[]');
+});
