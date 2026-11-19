@@ -160,6 +160,11 @@ pub mod tests {
         }
         // the subject check is on: wide-view topics are scenes, the rest
         // (characters above all) want one clear subject
+        // the franchise / fan-art check is on for the drawn categories (ADR-0003)
+        let fr = spec.franchise.as_ref().expect("_sorting.franchise");
+        assert!(fr.prompts.iter().any(|p| p.contains("Naruto")));
+        assert!(!fr.decoys.is_empty());
+        assert_eq!(fr.categories, ["anime", "cartoon"]);
         let sub = spec.subject.as_ref().expect("_sorting.subject");
         assert!(sub.reject.contains_key("sheet"));
         let scenes = [

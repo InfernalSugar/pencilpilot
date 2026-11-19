@@ -226,3 +226,26 @@ own prompts plus its kind's prompts. Calibrated on 988 live pool pictures
 * A plain-maths "count similar blobs on a plain background" heuristic was
   tried and dropped: line drawings and faces split into many blobs, so it
   flagged good pictures as often as it found missed sheets.
+
+Franchise check (2026-11-19, `_sorting.franchise`, ADR-0003): for anime and
+cartoon, ~40 franchise characters (Naruto, Gaara, Doraemon, Goku, Pikachu,
+Mickey, Spider-Man, Harry Potter, …) compete with the topic's keep class and
+~25 look-alike originals ("decoys": "an anime girl with long blue hair", "a
+cute cartoon cat", "a ninja", …). Reject if a franchise class beats the keep
+class and every decoy by 0.5. Calibrated on 1,229 live pool pictures:
+
+* Without decoys the check was useless: every blue-haired anime girl scored
+  as Hatsune Miku, every white cartoon cat as Hello Kitty, and photos of
+  women as Disney princesses (248 hits at margin 0, mostly wrong).
+* With decoys, on the 698 anime/cartoon pictures: the 19 hits above 0.75
+  were all real franchise art (Naruto ×6, Sasuke, Sakura ×2, Hinata, Gaara,
+  Goku, Krillin, Doraemon, Iron Man, Harry Potter ×3, a lightsaber
+  samurai). Between 0.5 and 0.75: Vegeta, a Krillin-like head, L's wig, a
+  Free Fire character, lightsaber art, and one false hit (a red-haired
+  woman). Below 0.5 the hits are mostly originals; the few franchise ones
+  there (Inosuke, Anya, Deku, Serena) carry tags the word list catches or
+  were added to it.
+* Photo categories are not checked: there the model mostly confused ordinary
+  photos with characters. The word list (cosplay, brands) covers them.
+* On the pool, words and model together remove 50 pictures (45 by words, 5
+  more by the model); Doraemon was already removed as off-topic.

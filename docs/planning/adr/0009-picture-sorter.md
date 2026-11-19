@@ -67,6 +67,11 @@ student's drawing (ADR-0002). The sorter never sees drawings.
     `avoid` list (for example "a drawing of a single eye" for Characters).
   - Reject if the strongest of those beats the keep class by the kind's
     margin: 0.35 for `single`, 0.45 for `scene`.
+- No franchise characters (added 2026-11-19, ADR-0003): for anime and
+  cartoon, the topic's keep class and ~25 look-alike originals ("decoys")
+  compete with ~40 well-known franchise characters (`_sorting.franchise`).
+  Reject if a franchise character beats the topic and every decoy by 0.5.
+  This is still only sorting reference pictures; drawings are never checked.
 - Tag rules and search queries stay as the cheap first guess. The model has
   the final say.
 
