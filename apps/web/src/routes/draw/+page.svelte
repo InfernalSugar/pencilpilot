@@ -31,6 +31,7 @@
 	import { DEFAULT_BRUSH, loadManifest, type BrushManifest } from '#lib/paint/brushes.js';
 	import { categories } from '#lib/categories.js';
 	import { loadSubmission, saveSubmission, type Submission } from '#lib/submission.js';
+	import { ownReference } from '#lib/own-picture.js';
 	import {
 		byId,
 		filtered,
@@ -78,13 +79,21 @@
 		} catch {
 			/* storage blocked */
 		}
-		if (daily || personal || sessionMode) return;
+		if (daily || personal || sessionMode || r.own) return;
 		const url = new URL(page.url.href);
 		if (url.searchParams.get('ref') === r.id) return;
 		url.searchParams.set('ref', r.id);
 		replaceState(url, page.state);
 	}
-	let reference = $state<Reference | undefined>(referenceFromUrl());
+	/** "Practise with your own picture": it lives in this tab only (see own-picture.ts) */
+	const ownMode = page.url.searchParams.has('own');
+	let reference = $state<Reference | undefined>(
+		ownMode
+			? typeof sessionStorage === 'undefined'
+				? undefined
+				: (ownReference() ?? undefined)
+			: referenceFromUrl()
+	);
 	let refLoading = $state(false);
 	/** brush (draw / erase) or the eyedropper */
 	type Tool =
@@ -382,7 +391,9 @@
 	/** personal challenge day (?personal=YYYY-MM-DD): the picture is fixed too */
 	const personal = page.url.searchParams.get('personal');
 	/** where the back button goes */
-	const backHref = $derived(daily ? '/daily' : category ? `/practice/${category.id}` : '/');
+	const backHref = $derived(
+		ownMode ? '/practice/own' : daily ? '/daily' : category ? `/practice/${category.id}` : '/'
+	);
 
 	// Sketch mode (?mode=sketch, ADR-0007): a Construction layer under a Sketch layer.
 	const drawMode: 'finished' | 'sketch' =
@@ -658,14 +669,17 @@
 >
 	{#snippet title()}
 		<span class="pp-eyebrow">
-			{daily ? 'Today’s challenge · ' : ''}{personal ? 'Your challenge · ' : ''}{drawMode ===
-			'sketch'
-				? 'Sketch · '
-				: ''}{category ? `${category.name} · ` : ''}{reference
-				? [topicName(reference.category, reference.topic), tierName(tierOf(reference))]
-						.filter(Boolean)
-						.join(' · ')
-				: 'Free draw'}
+			{ownMode ? 'Your own picture · ' : ''}{daily ? 'Today’s challenge · ' : ''}{personal
+				? 'Your challenge · '
+				: ''}{drawMode === 'sketch' ? 'Sketch · ' : ''}{category
+				? `${category.name} · `
+				: ''}{reference?.own
+				? 'Practice'
+				: reference
+					? [topicName(reference.category, reference.topic), tierName(tierOf(reference))]
+							.filter(Boolean)
+							.join(' · ')
+					: 'Free draw'}
 		</span>
 		<h1>{reference ? titleOf(reference) : 'Draw anything'}</h1>
 	{/snippet}
@@ -1299,7 +1313,9 @@
 			<Tile as="section" label="Reference">
 				<div class="tile-head">
 					<h2>Reference</h2>
-					{#if category && !daily && !personal}
+					{#if reference.own}
+						<a class="link-btn" href="/practice/own">Choose another</a>
+					{:else if category && !daily && !personal}
 						<button
 							type="button"
 							class="link-btn"
@@ -1324,18 +1340,24 @@
 						Float this picture ⧉
 					</button>
 				{/if}
-				<p class="credit one-line">
-					By <a href={reference.authorUrl} target="_blank" rel="noreferrer">
-						{reference.author}
-					</a>
-					via
-					<a href={reference.pageUrl} target="_blank" rel="noreferrer">Pixabay</a> ·
-					<a href={reference.licenseUrl} target="_blank" rel="noreferrer">
-						{reference.license}
-					</a>
-					{#if reference.live}· <span class="badge-live">Endless</span>{/if}
-				</p>
-				{#if reported}
+				{#if reference.own}
+					<p class="credit">Your own picture. It stays on this device and isn’t uploaded.</p>
+				{:else}
+					<p class="credit one-line">
+						By <a href={reference.authorUrl} target="_blank" rel="noreferrer">
+							{reference.author}
+						</a>
+						via
+						<a href={reference.pageUrl} target="_blank" rel="noreferrer">Pixabay</a> ·
+						<a href={reference.licenseUrl} target="_blank" rel="noreferrer">
+							{reference.license}
+						</a>
+						{#if reference.live}· <span class="badge-live">Endless</span>{/if}
+					</p>
+				{/if}
+				{#if reference.own}
+					<!-- nothing to report: it's the student's own picture -->
+				{:else if reported}
 					<p class="credit" role="status">Thanks! That picture is blocked for everyone.</p>
 				{:else if reportOpen}
 					<div class="report" role="group" aria-label="Report this picture">
@@ -1357,6 +1379,14 @@
 			<Tile as="section" label="Reference">
 				<div class="tile-head"><h2>Reference</h2></div>
 				<div class="ref-skeleton" aria-busy="true">Finding a picture…</div>
+			</Tile>
+		{:else if ownMode}
+			<Tile tone="lilac" as="section" label="Reference">
+				<h2>No picture chosen</h2>
+				<p class="muted-dark">
+					Your picture is kept only while this tab is open. <a href="/practice/own">Choose one</a>
+					to draw from.
+				</p>
 			</Tile>
 		{:else if category}
 			<Tile tone="lilac" as="section" label="Reference">

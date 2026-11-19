@@ -138,6 +138,13 @@
 				</span>
 			</a>
 		{/each}
+		<a class="cat own" href="/practice/own">
+			<span class="dot own-dot" aria-hidden="true"></span>
+			<span class="cat-text">
+				<span class="cat-name">Your own picture</span>
+				<span class="cat-blurb">Draw from any picture you have</span>
+			</span>
+		</a>
 	</div>
 
 	<h2 class="section-title" id="how">How it works</h2>
@@ -325,6 +332,18 @@
 	.cat[aria-disabled='true'] {
 		opacity: 0.6;
 		pointer-events: none;
+	}
+	.cat.own {
+		background: transparent;
+		border: 2px dashed var(--pp-track);
+	}
+	.own-dot {
+		background: conic-gradient(
+			var(--pp-cat-anime),
+			var(--pp-cat-real),
+			var(--pp-cat-env),
+			var(--pp-cat-anime)
+		);
 	}
 	.cat.dark {
 		background: var(--pp-ink);

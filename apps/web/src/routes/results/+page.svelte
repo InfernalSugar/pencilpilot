@@ -181,7 +181,8 @@
 			fb = g.fb;
 			compareSrc = g.compareSrc;
 			// Tracing is practice: tips, but no score, progress, streak or level-up.
-			if (sub.traced || !g.ref) return;
+			// own pictures too: scored, but not part of category progress
+			if (sub.traced || !g.ref || g.ref.own) return;
 			const before = recommendedTier(g.ref.category);
 			recordGraded(sub, g);
 			if (sub.personal) {
@@ -211,9 +212,11 @@
 	}
 
 	const nextUrl = $derived(
-		reference
-			? `/draw?category=${reference.category}${sub?.topic ? `&topic=${sub.topic}` : ''}&tier=${sub?.tier ?? tierOf(reference)}`
-			: '/draw'
+		reference?.own
+			? '/practice/own'
+			: reference
+				? `/draw?category=${reference.category}${sub?.topic ? `&topic=${sub.topic}` : ''}&tier=${sub?.tier ?? tierOf(reference)}`
+				: '/draw'
 	);
 	const pct = (v: number) => `${Math.round(v * 100)}%`;
 </script>
@@ -233,9 +236,11 @@
 		<div class="top">
 			<div>
 				<span class="pp-eyebrow">
-					Results{reference
-						? ` · ${reference.category} · ${tierName(tierOf(reference))}`
-						: ''}{sub.mode === 'sketch' ? ' · sketch' : ''}{sub.timeLimit
+					Results{reference?.own
+						? ' · your own picture'
+						: reference
+							? ` · ${reference.category} · ${tierName(tierOf(reference))}`
+							: ''}{sub.mode === 'sketch' ? ' · sketch' : ''}{sub.timeLimit
 						? ` · ${timeLabel(sub.timeLimit)} ${sub.mode === 'sketch' ? 'sketch' : 'drawing'}`
 						: ''}
 				</span>
@@ -243,10 +248,17 @@
 			</div>
 			<div class="actions">
 				{#if reference}
-					<Button href="/draw?category={reference.category}&ref={reference.id}" variant="outline">
+					<Button
+						href={reference.own
+							? '/draw?own=1'
+							: `/draw?category=${reference.category}&ref=${reference.id}`}
+						variant="outline"
+					>
 						Try again
 					</Button>
-					<Button href={nextUrl} variant="dark">Next reference →</Button>
+					<Button href={nextUrl} variant="dark">
+						{reference.own ? 'Another picture →' : 'Next reference →'}
+					</Button>
 				{:else}
 					<Button href="/draw" variant="outline">Draw another</Button>
 				{/if}
@@ -522,7 +534,7 @@
 				{/each}
 			</div>
 		{/if}
-		{#if page.data.community && grade && reference && !traced && !grade.flags.includes('blank')}
+		{#if page.data.community && grade && reference && !reference.own && !traced && !grade.flags.includes('blank')}
 			<div class="share">
 				<Tile tone="lilac" as="section" label="Get a human opinion">
 					<span class="pp-eyebrow">Community · beta</span>
@@ -549,7 +561,11 @@
 				</Tile>
 			</div>
 		{/if}
-		{#if reference}
+		{#if reference?.own}
+			<p class="credit">
+				Your own picture (kept on this device only) · {time}, {sub.strokes} strokes
+			</p>
+		{:else if reference}
 			<p class="credit">
 				Reference by <a href={reference.authorUrl} target="_blank" rel="noreferrer">
 					{reference.author}

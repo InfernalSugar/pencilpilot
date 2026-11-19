@@ -86,7 +86,8 @@ export async function gradeSubmission(sub: Submission): Promise<Graded> {
 		decodeGray(sub.png, sub.width, sub.height),
 		placed ? placed.then((p) => p.data) : referencePixels(ref!, sub.width, sub.height)
 	]);
-	const cat = ref?.category ?? 'fundamentals';
+	// own pictures are graded like the kind of picture the student picked
+	const cat = ref?.gradeAs ?? ref?.category ?? 'fundamentals';
 	const mode = sub.mode ?? 'finished';
 	const refGray = toGray(refData.data);
 	const grade = await gradeImages(sub.width, sub.height, drawing, refGray, {
@@ -106,7 +107,7 @@ export async function tipsFor(
 	gray: Uint8Array,
 	strokes: Stroke[]
 ): Promise<string[]> {
-	const cat = g.ref?.category ?? 'fundamentals';
+	const cat = g.ref?.gradeAs ?? g.ref?.category ?? 'fundamentals';
 	const mode = sub.mode ?? 'finished';
 	const grade = await gradeImages(sub.width, sub.height, gray, g.refGray, {
 		category: (cat === 'cartoon' ? 'anime' : cat) as GradeCategory,
@@ -136,7 +137,8 @@ export function alreadyRecorded(at: number | undefined) {
  */
 export function recordGraded(sub: Submission, g: Graded): boolean {
 	const { ref, grade, fb } = g;
-	if (sub.traced || !ref || alreadyRecorded(sub.at)) return false;
+	// own pictures are scored but don't feed category progress (it's built from our references)
+	if (sub.traced || !ref || ref.own || alreadyRecorded(sub.at)) return false;
 	recordAttempt({
 		category: ref.category,
 		topic: sub.topic ?? ref.topic ?? null,
