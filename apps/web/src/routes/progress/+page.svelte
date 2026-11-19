@@ -49,13 +49,22 @@
 		return () => window.removeEventListener(SYNCED, load);
 	});
 
-	/** timed drawings are compared with others of the same time limit ('all' = everything) */
+	/**
+	 * Like is compared with like: timed drawings with others of the same time
+	 * limit, sketches with sketches ('all' = everything).
+	 */
 	let timeFilter = $state<'all' | number>('all');
+	let styleFilter = $state<'all' | 'finished' | 'sketch'>('all');
 	const limitsUsed = $derived(
 		[...new Set(history.map((a) => a.timeLimit ?? 0))].sort((a, b) => a - b)
 	);
+	const hasSketches = $derived(history.some((a) => a.mode === 'sketch'));
 	const shown = $derived(
-		timeFilter === 'all' ? history : history.filter((a) => (a.timeLimit ?? 0) === timeFilter)
+		history.filter(
+			(a) =>
+				(timeFilter === 'all' || (a.timeLimit ?? 0) === timeFilter) &&
+				(styleFilter === 'all' || (a.mode ?? 'finished') === styleFilter)
+		)
 	);
 	const avg30 = $derived(averageScore(shown, 30));
 	const best = $derived(bestScore(shown));
@@ -109,6 +118,20 @@
 		<span class="pp-eyebrow">Your practice</span>
 		<h1>Progress</h1>
 	</div>
+	{#if hasSketches}
+		<div class="time-filter" role="radiogroup" aria-label="Style">
+			{#each [['all', 'Drawings and sketches'], ['finished', 'Finished drawings'], ['sketch', 'Sketches']] as [id, label] (id)}
+				<button
+					type="button"
+					role="radio"
+					aria-checked={styleFilter === id}
+					onclick={() => (styleFilter = id as typeof styleFilter)}
+				>
+					{label}
+				</button>
+			{/each}
+		</div>
+	{/if}
 	{#if limitsUsed.length > 1}
 		<div class="time-filter" role="radiogroup" aria-label="Time limit">
 			<button

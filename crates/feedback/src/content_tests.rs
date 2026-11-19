@@ -50,6 +50,8 @@ const OLD_DRILLS: &[&str] = &[
 
 /// Measurement names the grader emits (crates/grader `MEASUREMENT_DOCS`).
 const MEASUREMENTS: &[&str] = &[
+    "angles",
+    "passes",
     "placement",
     "scale_ratio",
     "aspect_error",

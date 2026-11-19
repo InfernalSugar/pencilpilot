@@ -40,12 +40,13 @@ mod img;
 pub mod keypoints;
 mod metrics;
 pub mod score;
+pub mod sketch;
 pub mod strokes;
 
 use serde::{Deserialize, Serialize};
 
 pub use keypoints::{KeypointPair, KeypointResult, Point, fit_keypoints};
-pub use score::{Category, DEFAULT_WEIGHTS, ScoreCurve, Weights};
+pub use score::{Category, DEFAULT_WEIGHTS, SKETCH_WEIGHTS, ScoreCurve, Weights};
 pub use strokes::{Stroke, StrokeMetrics, StrokePoint, stroke_metrics};
 
 use img::{distance_transform, downsample_mean, downsample_min, factor_for};
@@ -100,12 +101,28 @@ pub enum GradeError {
 #[serde(rename_all = "camelCase", default)]
 pub struct GradeOptions {
     pub category: Category,
+    /// Finished drawing (default) or a rough sketch (ADR-0007).
+    pub mode: Mode,
     /// Overrides the category's default weights.
     pub weights: Option<Weights>,
     pub curve: Option<ScoreCurve>,
     pub strokes: Vec<Stroke>,
     pub keypoints: Vec<KeypointPair>,
 }
+
+/// What kind of drawing is being graded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    #[default]
+    Finished,
+    /// Rough multi-pass lines are merged first, then graded on proportions,
+    /// big shapes and angles at a coarse scale.
+    Sketch,
+}
+
+/// Outline tolerance in sketch mode, as a multiple of the usual σ.
+const SKETCH_TOLERANCE: f32 = 3.0;
 
 /// One named number. Similarities are 0–1 (1 = matches); raw values are
 /// documented in [`MEASUREMENT_DOCS`].
@@ -175,6 +192,14 @@ pub const MEASUREMENT_DOCS: &[(&str, &str)] = &[
     (
         "shading",
         "raw 0–1: share of the ink in filled/shaded areas (0 = pure line art); tone and ssim count in proportion",
+    ),
+    (
+        "angles",
+        "0–1: main line directions of the drawing vs the reference (orientation histograms); sketch mode leans on it",
+    ),
+    (
+        "passes",
+        "raw ≥1, sketch mode only: average number of separate strokes per line (1 = single clean passes)",
     ),
     (
         "line_confidence",
@@ -335,9 +360,14 @@ pub fn grade_with(
         return Err(GradeError::Empty);
     }
     let (cw, ch) = (drawing.width as f32, drawing.height as f32);
-    let weights = opts
-        .weights
-        .unwrap_or_else(|| Weights::for_category(opts.category));
+    let sketch_mode = opts.mode == Mode::Sketch;
+    let weights = opts.weights.unwrap_or_else(|| {
+        if sketch_mode {
+            score::SKETCH_WEIGHTS
+        } else {
+            Weights::for_category(opts.category)
+        }
+    });
     let curve = opts.curve.unwrap_or_default();
     let mut flags = Vec::new();
     let mut out = Out { m: Vec::new() };
@@ -351,7 +381,27 @@ pub fn grade_with(
         strength: ref_strength,
         frame,
     } = edges::reference_edge_maps(&ref_tone);
-    let drawing = &without_frame(drawing, &frame, f);
+    let unframed = without_frame(drawing, &frame, f);
+    let mut drawing: &Gray = &unframed;
+    // Sketch mode: merge multi-pass lines into the lines meant, then grade those.
+    let mut passes = None;
+    let consolidated;
+    if sketch_mode && !opts.strokes.is_empty() {
+        let near_ink = img::dilate(&edges::ink_mask(&downsample_min(drawing, f)), 2.0);
+        let (iw, ih) = (near_ink.w, near_ink.h);
+        let keep = |x: f32, y: f32| {
+            if x < 0.0 || y < 0.0 {
+                return false;
+            }
+            let (cx, cy) = (x as usize / f, y as usize / f);
+            cx < iw && cy < ih && near_ink.d[cy * iw + cx]
+        };
+        if let Some(c) = sketch::consolidate(&opts.strokes, drawing.width, drawing.height, keep) {
+            passes = Some(c.passes);
+            consolidated = c.image;
+            drawing = &consolidated;
+        }
+    }
     let ink = edges::ink_mask(&downsample_min(drawing, f));
     let (w, h) = (ink.w, ink.h);
     let line = edges::ink_outline(&ink);
@@ -405,7 +455,7 @@ pub fn grade_with(
     let a_line = edges::ink_outline(&a_ink);
     let a_tone = downsample_mean(&aligned, f);
     let dt_a_line = distance_transform(&a_line);
-    let sigma = metrics::sigma_px(w, h);
+    let sigma = metrics::sigma_px(w, h) * if sketch_mode { SKETCH_TOLERANCE } else { 1.0 };
 
     // 3. Placement & proportion: the drawing's box as drawn (before
     // alignment) vs the box of the part of the reference it depicts, i.e.
@@ -517,6 +567,12 @@ pub fn grade_with(
     out.push("ssim", ssim);
     out.push("ink_coverage", ink_count as f32 / (w * h) as f32);
     out.push("shading", shading);
+    // Main line directions: drawing outline vs the depicted reference edges.
+    let angles = metrics::orientation_similarity(&a_tone, &ref_tone, &a_line, &depicted);
+    out.push("angles", angles);
+    if let Some(p) = passes {
+        out.push("passes", p);
+    }
 
     // 9. Strokes.
     let mut parts: Vec<(f32, f32)> = vec![
@@ -526,6 +582,7 @@ pub fn grade_with(
         (weights.grid, grid_mean),
         (weights.tone * shading_weight, tone.similarity),
         (weights.ssim * shading_weight, ssim),
+        (weights.angles, angles),
     ];
     if let Some(s) = stroke_metrics(&opts.strokes, drawing.width, drawing.height) {
         out.push("line_confidence", s.line_confidence);
@@ -650,6 +707,193 @@ fn blank_grade(category: Category, out: &mut Out, flags: &mut Vec<String>) -> Gr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod sketch_mode {
+        use super::*;
+        use crate::sketch::tests::pass;
+
+        const W: u32 = 800;
+        const H: u32 = 600;
+
+        /// A simple subject: a box with a circle on top (body and head).
+        fn subject(scale: f32, dx: f32) -> Vec<Vec<(f32, f32)>> {
+            subject_head(scale, dx, 1.0)
+        }
+
+        /// …with the head `head` times its real size (a proportion mistake).
+        fn subject_head(scale: f32, dx: f32, head: f32) -> Vec<Vec<(f32, f32)>> {
+            let t = |x: f32, y: f32| {
+                (
+                    400.0 + (x - 400.0) * scale + dx,
+                    330.0 + (y - 330.0) * scale,
+                )
+            };
+            let rect = vec![
+                t(300.0, 300.0),
+                t(500.0, 300.0),
+                t(500.0, 480.0),
+                t(300.0, 480.0),
+                t(300.0, 300.0),
+            ];
+            let circle = (0..=48)
+                .map(|i| {
+                    let a = i as f32 / 48.0 * std::f32::consts::TAU;
+                    let r = 70.0 * head;
+                    t(400.0 + r * a.cos(), 300.0 - r + r * a.sin())
+                })
+                .collect();
+            vec![rect, circle]
+        }
+
+        /// Raster of strokes, as the canvas would show them.
+        fn render(strokes: &[Stroke], width: f32) -> Gray {
+            let mut px = vec![255u8; (W * H) as usize];
+            for s in strokes {
+                for seg in s.points.windows(2) {
+                    let (a, b) = ((seg[0].x, seg[0].y), (seg[1].x, seg[1].y));
+                    let n = ((b.0 - a.0).hypot(b.1 - a.1) / 0.7).ceil().max(1.0) as usize;
+                    for k in 0..=n {
+                        let t = k as f32 / n as f32;
+                        let (x, y) = (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t);
+                        let r = width / 2.0;
+                        for yy in (y - r).floor() as i32..=(y + r).ceil() as i32 {
+                            for xx in (x - r).floor() as i32..=(x + r).ceil() as i32 {
+                                if xx >= 0
+                                    && yy >= 0
+                                    && (xx as u32) < W
+                                    && (yy as u32) < H
+                                    && ((xx as f32 + 0.5 - x).powi(2)
+                                        + (yy as f32 + 0.5 - y).powi(2))
+                                        <= r * r
+                                {
+                                    px[(yy as u32 * W + xx as u32) as usize] = 40;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Gray::new(W, H, px).unwrap()
+        }
+
+        fn clean(scale: f32, dx: f32) -> Vec<Stroke> {
+            subject(scale, dx)
+                .iter()
+                .enumerate()
+                .map(|(i, p)| pass(p, 0.0, 0.6, i as u32))
+                .collect()
+        }
+
+        /// Every line drawn as four or five scratchy passes ~4 px apart that
+        /// overshoot the ends, like a real rough sketch.
+        fn hairy(scale: f32, dx: f32) -> Vec<Stroke> {
+            hairy_of(subject(scale, dx))
+        }
+
+        fn hairy_of(shapes: Vec<Vec<(f32, f32)>>) -> Vec<Stroke> {
+            let mut out = Vec::new();
+            for (i, p) in shapes.iter().enumerate() {
+                for k in 0..(4 + i % 2) {
+                    let mut path = p.clone();
+                    // overshoot: extend both ends along their direction
+                    let ext = |a: (f32, f32), b: (f32, f32), by: f32| {
+                        let (dx, dy) = (a.0 - b.0, a.1 - b.1);
+                        let l = dx.hypot(dy).max(1e-6);
+                        (a.0 + dx / l * by, a.1 + dy / l * by)
+                    };
+                    let n = path.len();
+                    path.insert(0, ext(p[0], p[1], 6.0 + 4.0 * k as f32));
+                    path.push(ext(p[n - 1], p[n - 2], 6.0 + 3.0 * k as f32));
+                    out.push(pass(
+                        &path,
+                        (k as f32 - 2.0) * 4.0,
+                        3.0,
+                        (i * 10 + k) as u32,
+                    ));
+                }
+            }
+            out
+        }
+
+        /// Guide lines a sketcher puts on the Construction layer (a centre line and a box).
+        fn construction() -> Vec<Stroke> {
+            vec![
+                pass(&[(400.0, 100.0), (400.0, 520.0)], 0.0, 1.0, 900),
+                pass(
+                    &[
+                        (250.0, 140.0),
+                        (550.0, 140.0),
+                        (550.0, 520.0),
+                        (250.0, 520.0),
+                        (250.0, 140.0),
+                    ],
+                    0.0,
+                    1.0,
+                    901,
+                ),
+            ]
+        }
+
+        fn score(strokes: Vec<Stroke>, mode: Mode) -> (f32, Grade) {
+            let reference = render(&clean(1.0, 0.0), 3.0);
+            let drawing = render(&strokes, 2.0);
+            let g = grade_with(
+                &drawing,
+                &reference,
+                &GradeOptions {
+                    mode,
+                    strokes,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            (g.score, g)
+        }
+
+        #[test]
+        fn hairy_sketches_score_like_clean_ones_in_sketch_mode() {
+            let (clean_s, _) = score(clean(1.0, 0.0), Mode::Sketch);
+            let (hairy_s, g) = score(hairy(1.0, 0.0), Mode::Sketch);
+            // without sketch mode the guide lines are part of the drawing too
+            let (hairy_f, _) = score([hairy(1.0, 0.0), construction()].concat(), Mode::Finished);
+            let (wrong_s, _) = score(hairy(1.35, 60.0), Mode::Sketch);
+            eprintln!(
+                "sketch: clean {clean_s:.2} hairy {hairy_s:.2} wrong {wrong_s:.2}; finished hairy {hairy_f:.2}"
+            );
+            let m = |n: &str| g.measurements.iter().find(|x| x.name == n).map(|x| x.value);
+            assert!(m("passes").unwrap() > 3.0, "passes {:?}", m("passes"));
+            assert!(hairy_s >= 8.0, "a good rough sketch scores well: {hairy_s}");
+            assert!(
+                (clean_s - hairy_s).abs() <= 1.0,
+                "clean {clean_s} vs hairy {hairy_s}"
+            );
+            assert!(hairy_s > hairy_f, "sketch mode is kinder to rough lines");
+            assert!(
+                wrong_s <= hairy_s - 2.0,
+                "wrong size/place still costs: {wrong_s}"
+            );
+        }
+
+        #[test]
+        fn mistakes_cost_more_the_bigger_they_are() {
+            // size and place on the page
+            let s: Vec<f32> = [1.0f32, 1.15, 1.3, 1.5]
+                .iter()
+                .map(|&k| score(hairy(k, (k - 1.0) * 120.0), Mode::Sketch).0)
+                .collect();
+            eprintln!("by size/place mistake: {s:?}");
+            assert!(s.windows(2).all(|w| w[1] < w[0] + 0.05), "{s:?}");
+            assert!(s[0] - s[3] >= 3.0, "{s:?}");
+            // proportions inside the drawing: the head too big for the body
+            let p: Vec<f32> = [1.0f32, 1.25, 1.5, 1.8]
+                .iter()
+                .map(|&k| score(hairy_of(subject_head(1.0, 0.0, k)), Mode::Sketch).0)
+                .collect();
+            eprintln!("by head-size mistake: {p:?}");
+            assert!(p.windows(2).all(|w| w[1] < w[0] + 0.05), "{p:?}");
+            assert!(p[0] - p[3] >= 2.0, "{p:?}");
+        }
+    }
 
     fn img(fill: u8) -> Gray {
         Gray::new(40, 30, vec![fill; 1200]).unwrap()

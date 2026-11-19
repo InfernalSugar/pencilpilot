@@ -14,7 +14,12 @@ export interface GradeWeights {
 	ssim: number;
 	lineConfidence: number;
 	keypoints: number;
+	/** main line directions (sketch mode leans on it) */
+	angles?: number;
 }
+
+/** Finished drawing, or a rough sketch (ADR-0007). */
+export type DrawingMode = 'finished' | 'sketch';
 
 /** `t = clamp((m - floor) / (pass - floor), 0, 1)`, `score = 1 + 9 * t^gamma`. */
 export interface ScoreCurve {
@@ -36,6 +41,7 @@ export interface KeypointPair {
 
 export interface GradeOptions {
 	category?: GradeCategory;
+	mode?: DrawingMode;
 	/** Overrides the category's default weights (missing fields use the fundamentals defaults). */
 	weights?: Partial<GradeWeights>;
 	curve?: Partial<ScoreCurve>;
@@ -76,7 +82,9 @@ export type MeasurementName =
 	| 'keypoints'
 	| 'keypoint_error'
 	| 'keypoint_max_error'
-	| 'angle_error';
+	| 'angle_error'
+	| 'angles'
+	| 'passes';
 
 export interface Measurement {
 	name: MeasurementName;
@@ -278,9 +286,14 @@ export interface Feedback {
  * grader category used for weights (cartoon is graded like anime); feedback
  * rules are written per site category.
  */
-export async function getFeedback(g: Grade, seed: number, category?: string): Promise<Feedback> {
+export async function getFeedback(
+	g: Grade,
+	seed: number,
+	category?: string,
+	mode: DrawingMode = 'finished'
+): Promise<Feedback> {
 	await load();
-	return wasmFeedback(g.measurements, category ?? g.category, seed >>> 0) as Feedback;
+	return wasmFeedback(g.measurements, category ?? g.category, seed >>> 0, mode) as Feedback;
 }
 
 /** "measuring-with-units" → "Measuring with units" */

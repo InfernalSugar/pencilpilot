@@ -21,6 +21,8 @@
 # `gate` / `gate_min` / `gate_max` (optional): a second measurement that must be in range,
 #   e.g. tone rules use gate = "shading", gate_min = 0.1 so line art isn't judged on shading.
 # `categories` (optional) limits a rule to some categories.
+# `modes` (optional): "finished" and/or "sketch". Without it a rule applies to both, except
+#   rules on line/shading measurements (feedback::FINISHED_ONLY), which skip sketches.
 #
 # Conventions (checked by the tests in crates/feedback):
 # - Graded bands: a mild band uses `above = a` + `max = b`, the strong band
@@ -1353,3 +1355,31 @@ number = "deg"
 lesson = "finding-angles"
 drill = "angle-matching"
 categories = ["cartoon"]
+
+# ════════════════════════════════════════════════════════════════════
+# SKETCH MODE (ADR-0007): line and shading rules don't apply to sketches
+# ════════════════════════════════════════════════════════════════════
+
+[[rule]]
+id = "sketch-many-passes"
+measurement = "passes"
+above = 3.5
+span = 3.0
+severity = 1
+skill = "line_confidence"
+number = "count"
+lesson = "one-confident-stroke"
+drill = "ghosted-lines"
+modes = ["sketch"]
+
+[[rule]]
+id = "sketch-angles-off"
+measurement = "angles"
+below = 0.85
+span = 0.35
+severity = 3
+skill = "outline"
+number = "pct"
+lesson = "finding-angles"
+drill = "angle-matching"
+modes = ["sketch"]

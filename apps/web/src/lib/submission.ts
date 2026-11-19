@@ -22,6 +22,8 @@ export interface Submission {
 	brushes: string[];
 	/** raw pen input, for the grader's line-confidence metrics */
 	strokeData: Stroke[];
+	/** a rough sketch (graded on the big picture, ADR-0007) */
+	mode?: 'finished' | 'sketch';
 	/** seconds, for timed drawings */
 	timeLimit?: number;
 	/** drawn with a tracing picture showing: tips only, never scored or counted */

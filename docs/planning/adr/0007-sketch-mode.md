@@ -1,6 +1,6 @@
 # ADR-0007: Sketch mode
 
-- Status: proposed (2026-11-19), M10-T05
+- Status: accepted and built (2026-11-19), M10-T05
 - Builds on: ADR-0002 (no AI grading), M10-T01 (layers), M10-T04 (timed modes)
 
 ## Problem
@@ -112,3 +112,35 @@ silhouette. This is less precise, but it can't be thrown off by hairy lines.
   version without them, using the faint-stroke fallback.
 - Scores in sketch mode are kept apart from finished-drawing scores on the
   progress page, as with timed modes.
+
+## Results (synthetic benchmark, `cargo test -p pencilpilot-grader sketch_mode`)
+
+A box-and-circle subject drawn as a rough sketch: every line is made of 4–5
+scratchy passes about 4 px apart that overshoot the ends, plus guide lines.
+
+| Drawing | Sketch mode | Finished mode |
+|---|---|---|
+| clean single-pass copy | 10.0 | |
+| rough multi-pass copy (guides on the Construction layer) | **10.0** | 4.4 (guides included) |
+| rough, too big and shifted | 6.8 | |
+| size/place mistake ×1.0 / 1.15 / 1.3 / 1.5 | 10 / 10 / 7.9 / 5.5 | |
+| head too big ×1.0 / 1.25 / 1.5 / 1.8 | 10 / 10 / 7.8 / 5.2 | |
+
+Small mistakes (15–25%) are still forgiven, which suits a sketch. Human
+ratings (#37) can tighten the curve.
+
+## As built
+
+- `GradeOptions.mode = "sketch"`: strokes are merged by a mean shift
+  across the line (`crates/grader/src/sketch.rs`). Points within ~1.2% of the
+  diagonal and within ~20° of each other's direction are pulled together.
+  The merged lines are redrawn clean, masked by the real ink so erased parts
+  stay erased, then graded with σ × 3 and `SKETCH_WEIGHTS`.
+- New measurements: `angles` (orientation histograms, cosine) and `passes`.
+- The web app opens sketch mode with a Construction layer (blue, 50%) under a
+  Sketch layer. Construction is left out of the graded image and strokes.
+- Feedback rules have `modes`. Rules on line and shading measurements skip
+  sketches by default; `sketch-many-passes` (gentle) and `sketch-angles-off`
+  are sketch-only.
+- Attempts store `mode = "sketch"`. Progress can show sketches on their own,
+  and sketches don't feed the skill radar.

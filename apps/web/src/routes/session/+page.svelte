@@ -42,7 +42,8 @@
 		session
 			? `/draw?category=${session.plan.category}&session=gesture&count=${session.plan.count}&time=${session.plan.time}` +
 					(session.plan.topic ? `&topic=${session.plan.topic}` : '') +
-					(session.plan.tier ? `&tier=${session.plan.tier}` : '')
+					(session.plan.tier ? `&tier=${session.plan.tier}` : '') +
+					(session.plan.mode === 'sketch' ? '&mode=sketch' : '')
 			: '/'
 	);
 </script>

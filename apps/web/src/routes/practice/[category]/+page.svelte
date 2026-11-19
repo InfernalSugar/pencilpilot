@@ -52,8 +52,9 @@
 				? `&time=${time}`
 				: ''
 	);
+	let style = $state<'finished' | 'sketch'>('finished');
 	const drawUrl = (topic?: string) =>
-		`/draw?category=${category.id}${topic ? `&topic=${topic}` : ''}&tier=${tier}${timing}`;
+		`/draw?category=${category.id}${topic ? `&topic=${topic}` : ''}&tier=${tier}${timing}${style === 'sketch' ? '&mode=sketch' : ''}`;
 </script>
 
 <svelte:head><title>{category.name} · PencilPilot</title></svelte:head>
@@ -97,7 +98,31 @@
 			{/each}
 		</div>
 
-		<h2 class="section">2. Time</h2>
+		<h2 class="section">2. Style and time</h2>
+		<div class="chips style" role="radiogroup" aria-label="Style">
+			<button
+				type="button"
+				role="radio"
+				aria-checked={style === 'finished'}
+				onclick={() => (style = 'finished')}
+			>
+				Finished drawing
+			</button>
+			<button
+				type="button"
+				role="radio"
+				aria-checked={style === 'sketch'}
+				onclick={() => (style = 'sketch')}
+			>
+				Sketch
+			</button>
+		</div>
+		{#if style === 'sketch'}
+			<p class="time-note">
+				Rough and loose. Scratchy lines and guide lines are fine; you’re scored on proportions, big
+				shapes and angles, not neatness or shading. Pairs well with a 1–5 minute limit.
+			</p>
+		{/if}
 		<div class="time">
 			<div class="chips" role="radiogroup" aria-label="Time limit">
 				{#each TIME_LIMITS as t (t.seconds)}
@@ -189,6 +214,9 @@
 		font-weight: 700;
 		letter-spacing: -0.4px;
 		margin: 32px 0 12px;
+	}
+	.chips.style {
+		margin-bottom: 12px;
 	}
 	.chips {
 		display: flex;

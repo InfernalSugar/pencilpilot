@@ -74,6 +74,12 @@ export class StrokeLog {
 		this.#push({ kind: 'layer' });
 	}
 
+	/** Forget undo/redo (the engine's history was cleared too); strokes stay. */
+	forgetHistory() {
+		this.#undo = [];
+		this.#redo = [];
+	}
+
 	undo(): boolean {
 		const a = this.#undo.pop();
 		if (!a) return false;
