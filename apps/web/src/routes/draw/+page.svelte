@@ -49,6 +49,8 @@
 		| 'transform'
 		| 'liquify';
 	let tool = $state<Tool>('brush');
+	/** pen pressure and tilt on/off (remembered) */
+	let penPressure = $state(true);
 	let liquifySize = $state(60);
 	let liquifyStrength = $state(0.6);
 	let selectMode = $state<'replace' | 'add' | 'subtract'>('replace');
@@ -351,6 +353,7 @@
 		floatBox = recall('pp.refFloat', floatBox);
 		smoothing = recall('pp.smoothing', 0);
 		quickShape = recall('pp.quickShape', true);
+		penPressure = recall('pp.penPressure', true);
 		loadManifest().then((m) => (manifest = m));
 		if (!reference) loadReference();
 		if (sessionMode && category)
@@ -712,6 +715,7 @@
 						ontransformend={onTransformEnd}
 						{liquifySize}
 						{liquifyStrength}
+						{penPressure}
 						overlaySrc={traceSrc}
 						overlayOpacity={trace.opacity}
 						overlayTransform={trace}
@@ -1070,6 +1074,18 @@
 				<button
 					type="button"
 					class="tool"
+					aria-pressed={penPressure}
+					title="Pen pressure and tilt: off draws every stroke at a steady medium pressure"
+					onclick={() => {
+						penPressure = !penPressure;
+						remember('pp.penPressure', penPressure);
+					}}
+				>
+					Pen pressure
+				</button>
+				<button
+					type="button"
+					class="tool"
 					aria-pressed={quickShape}
 					title="QuickShape: hold at the end of a stroke to snap it to a line, circle or rectangle"
 					onclick={() => {
@@ -1215,7 +1231,7 @@
 	<p class="hint">
 		Shortcuts: <kbd>B</kbd> brush · <kbd>E</kbd> eraser · <kbd>[</kbd> <kbd>]</kbd> size ·
 		<kbd>Ctrl</kbd>+<kbd>Z</kbd> undo · <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> redo. Pen pressure
-		and tilt work with tablets.
+		and tilt work with tablets (switch them off with Pen pressure).
 	</p>
 </div>
 
