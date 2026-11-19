@@ -1,5 +1,5 @@
 {
-	"_comment": "Topics inside each category. A reference gets the first topic whose tags match its Pixabay tags (or the --topic given to `pnpm refs fetch`, or a reviewer's choice). Order matters: more specific topics first.",
+	"_comment": "Topics inside each category. A reference gets the first topic whose tags match its Pixabay tags (or the --topic given to `pnpm refs fetch`, or a reviewer's choice). Order matters: more specific topics first. `queries` are Pixabay searches; `sourceQueries` holds searches for the other picture sources (openverse, artic, met, pexels). A source is used for a topic only if the topic has queries for it.",
 	"anime": [
 		{
 			"id": "action",
@@ -188,7 +188,14 @@
 				"a photo of food",
 				"a photo of fruit or vegetables",
 				"a photo of a meal, bread, cake or a drink"
-			]
+			],
+			"sourceQueries": {
+				"openverse": [
+					"fruit",
+					"bread",
+					"vegetables"
+				]
+			}
 		},
 		{
 			"id": "vehicles",
@@ -215,7 +222,15 @@
 				"a photo of a bicycle or a motorcycle",
 				"a photo of a boat or a ship",
 				"a photo of a vehicle"
-			]
+			],
+			"sourceQueries": {
+				"openverse": [
+					"bicycle",
+					"vintage car",
+					"sailboat",
+					"steam locomotive"
+				]
+			}
 		},
 		{
 			"id": "still-life",
@@ -250,7 +265,14 @@
 				"a photo of a vase, a teapot or a bottle",
 				"a photo of an everyday object",
 				"a photo of old books or a pair of shoes"
-			]
+			],
+			"sourceQueries": {
+				"openverse": [
+					"teapot",
+					"vase",
+					"old books"
+				]
+			}
 		},
 		{
 			"id": "people",
@@ -311,7 +333,15 @@
 				"a photo of a bird",
 				"a photo of an owl or an eagle",
 				"a photo of a parrot or a sparrow"
-			]
+			],
+			"sourceQueries": {
+				"openverse": [
+					"owl",
+					"parrot",
+					"eagle",
+					"heron"
+				]
+			}
 		},
 		{
 			"id": "sea-life",
@@ -339,7 +369,14 @@
 				"a photo of a sea turtle",
 				"a photo of a whale, a dolphin or a shark",
 				"a photo of a jellyfish or an octopus"
-			]
+			],
+			"sourceQueries": {
+				"openverse": [
+					"sea turtle",
+					"whale",
+					"jellyfish"
+				]
+			}
 		},
 		{
 			"id": "insects",
@@ -366,7 +403,14 @@
 				"a photo of a butterfly",
 				"a photo of a bee, a beetle or a ladybug",
 				"a photo of a dragonfly"
-			]
+			],
+			"sourceQueries": {
+				"openverse": [
+					"butterfly",
+					"dragonfly",
+					"beetle"
+				]
+			}
 		},
 		{
 			"id": "pets",
@@ -395,7 +439,14 @@
 				"a photo of a dog",
 				"a photo of a rabbit",
 				"a photo of a pet"
-			]
+			],
+			"sourceQueries": {
+				"openverse": [
+					"cat",
+					"dog",
+					"rabbit"
+				]
+			}
 		},
 		{
 			"id": "wildlife",
@@ -429,7 +480,15 @@
 				"a photo of a fox, a deer or a squirrel",
 				"a photo of a lion, a tiger or a bear",
 				"a photo of an elephant"
-			]
+			],
+			"sourceQueries": {
+				"openverse": [
+					"fox",
+					"deer",
+					"brown bear",
+					"elephant"
+				]
+			}
 		}
 	],
 	"environment": [
@@ -458,7 +517,14 @@
 				"a photo of a staircase",
 				"a photo of a library inside"
 			],
-			"subject": "scene"
+			"subject": "scene",
+			"sourceQueries": {
+				"openverse": [
+					"library interior",
+					"staircase",
+					"church interior"
+				]
+			}
 		},
 		{
 			"id": "city",
@@ -486,7 +552,14 @@
 				"a photo of a bridge",
 				"a photo of an old town"
 			],
-			"subject": "scene"
+			"subject": "scene",
+			"sourceQueries": {
+				"openverse": [
+					"street",
+					"bridge",
+					"old town"
+				]
+			}
 		},
 		{
 			"id": "plants",
@@ -513,7 +586,14 @@
 				"a close-up photo of leaves",
 				"a photo of a plant"
 			],
-			"subject": "scene"
+			"subject": "scene",
+			"sourceQueries": {
+				"openverse": [
+					"tree",
+					"flower",
+					"succulent"
+				]
+			}
 		},
 		{
 			"id": "skies-water",
@@ -542,7 +622,14 @@
 				"a photo of a lake or a river",
 				"a photo of a waterfall"
 			],
-			"subject": "scene"
+			"subject": "scene",
+			"sourceQueries": {
+				"openverse": [
+					"waterfall",
+					"lake",
+					"clouds"
+				]
+			}
 		},
 		{
 			"id": "landscapes",
@@ -569,7 +656,14 @@
 				"a photo of a field",
 				"a photo of a valley"
 			],
-			"subject": "scene"
+			"subject": "scene",
+			"sourceQueries": {
+				"openverse": [
+					"mountains",
+					"valley",
+					"hills"
+				]
+			}
 		}
 	],
 	"cartoon": [
@@ -706,6 +800,229 @@
 			]
 		}
 	],
+	"masters": [
+		{
+			"id": "portraits",
+			"name": "Portraits",
+			"blurb": "Faces by the old masters",
+			"tags": [
+				"portrait",
+				"face",
+				"head",
+				"self-portrait",
+				"bust"
+			],
+			"sourceQueries": {
+				"artic": [
+					"portrait",
+					"self-portrait",
+					"portrait of a woman",
+					"portrait of a man"
+				],
+				"met": [
+					"portrait painting",
+					"self-portrait",
+					"portrait of a lady",
+					"portrait drawing"
+				],
+				"openverse": [
+					"portrait painting",
+					"portrait drawing"
+				]
+			},
+			"prompts": [
+				"a classical oil painting portrait of one person",
+				"an old master portrait of a face",
+				"a historical painted portrait of a man or a woman"
+			],
+			"avoid": [
+				"a group of many small people far away"
+			]
+		},
+		{
+			"id": "figures",
+			"name": "Figures",
+			"blurb": "Whole people, standing or at work",
+			"tags": [
+				"figure",
+				"dancer",
+				"peasant",
+				"standing",
+				"seated",
+				"people"
+			],
+			"sourceQueries": {
+				"artic": [
+					"dancer",
+					"figure study",
+					"peasant woman",
+					"seated woman"
+				],
+				"met": [
+					"dancer painting",
+					"figure study",
+					"peasant",
+					"seated figure"
+				],
+				"openverse": [
+					"figure study",
+					"dancers painting"
+				]
+			},
+			"prompts": [
+				"a classical painting of a whole human figure",
+				"an old master painting of a person standing or sitting",
+				"a historical drawing of a dancer or a worker, full body"
+			],
+			"avoid": [
+				"a tiny figure far away in a big landscape"
+			]
+		},
+		{
+			"id": "still-life",
+			"name": "Still life",
+			"blurb": "Fruit, flowers and objects",
+			"tags": [
+				"still life",
+				"fruit",
+				"flowers",
+				"vase",
+				"table"
+			],
+			"sourceQueries": {
+				"artic": [
+					"still life",
+					"flowers in a vase",
+					"still life fruit"
+				],
+				"met": [
+					"still life",
+					"flower still life",
+					"still life with fruit"
+				],
+				"openverse": [
+					"still life painting",
+					"flower still life"
+				]
+			},
+			"prompts": [
+				"a classical still life painting of fruit and objects on a table",
+				"an old master painting of flowers in a vase",
+				"a historical still life of bottles, bowls and food"
+			]
+		},
+		{
+			"id": "landscapes",
+			"name": "Landscapes",
+			"blurb": "Fields, rivers, skies in paint",
+			"tags": [
+				"landscape",
+				"river",
+				"trees",
+				"village",
+				"sea",
+				"mountains"
+			],
+			"sourceQueries": {
+				"artic": [
+					"landscape",
+					"river landscape",
+					"haystacks",
+					"seascape"
+				],
+				"met": [
+					"landscape painting",
+					"river landscape",
+					"seascape",
+					"landscape drawing"
+				],
+				"openverse": [
+					"landscape painting",
+					"landscape etching"
+				]
+			},
+			"prompts": [
+				"a classical landscape painting with trees, hills and sky",
+				"an old master painting of a river, a field or the sea",
+				"a historical etching of a countryside view"
+			],
+			"subject": "scene"
+		},
+		{
+			"id": "animals",
+			"name": "Animals in art",
+			"blurb": "Horses, dogs and birds by the masters",
+			"tags": [
+				"animal",
+				"horse",
+				"dog",
+				"cat",
+				"bird",
+				"cow",
+				"lion"
+			],
+			"sourceQueries": {
+				"artic": [
+					"horse",
+					"dog",
+					"bird",
+					"cat"
+				],
+				"met": [
+					"horse painting",
+					"dog painting",
+					"bird print",
+					"animal study"
+				],
+				"openverse": [
+					"animal drawing",
+					"bird engraving",
+					"horse painting"
+				]
+			},
+			"prompts": [
+				"a classical painting of an animal",
+				"an old master drawing of a horse, a dog or a cat",
+				"an antique print of a bird or a wild animal"
+			]
+		},
+		{
+			"id": "drawings",
+			"name": "Drawings & sketches",
+			"blurb": "Chalk, ink and pencil studies",
+			"tags": [
+				"drawing",
+				"sketch",
+				"study",
+				"chalk",
+				"ink",
+				"pencil"
+			],
+			"sourceQueries": {
+				"artic": [
+					"study drawing",
+					"sketch",
+					"chalk drawing",
+					"pen and ink"
+				],
+				"met": [
+					"drawing study",
+					"sketch",
+					"chalk drawing",
+					"pen and ink drawing"
+				],
+				"openverse": [
+					"sketch study",
+					"chalk drawing"
+				]
+			},
+			"prompts": [
+				"an old master pencil or chalk drawing",
+				"a classical sketch study on paper",
+				"a pen and ink drawing by an old master"
+			]
+		}
+	],
 	"_sorting": {
 		"_comment": "Picture sorter (ADR-0009): a local CLIP model matches each reference picture against these prompts and the topics' `prompts`. Used only to sort reference pictures, never to grade or critique drawings. A topic is the mean of its prompts. Style: reject if the category's allowed styles get less than minStyle. Topic: compared with every topic of every category in the same group; re-file if the best beats the own topic by margin and has at least minBest, reject if the own topic has less than rejectBelow, otherwise keep. Subject: see `subject`. Categories not listed here (fundamentals) are not checked. Changing anything here makes ref-service re-check its whole pool once on the next start.",
 		"margin": 0.25,
@@ -766,6 +1083,12 @@
 				"styles": [
 					"anime",
 					"cartoon",
+					"drawing"
+				]
+			},
+			"masters": {
+				"group": "art",
+				"styles": [
 					"drawing"
 				]
 			}

@@ -11,8 +11,14 @@
 //! GET  /api/health
 //! ```
 //!
-//! Config (env, or the repo's git-ignored `.env`): `PIXABAY_API_KEY`;
-//! optional `REF_DATA_DIR` (default `data/ref-service`), `REF_PORT` (8787),
+//! Pictures come from several sources (see `sources`): Pixabay, Openverse
+//! (CC0 / PDM / CC BY from museums and Wikimedia), and the public-domain
+//! collections of the Art Institute of Chicago and The Met.
+//!
+//! Config (env, or the repo's git-ignored `.env`): `PIXABAY_API_KEY`
+//! (without it Pixabay is skipped); optional `OPENVERSE_TOKEN` (OAuth access
+//! token, raises Openverse's daily limit), `REF_SOURCES` (comma-separated
+//! source names to use, default all), `REF_DATA_DIR` (default `data/ref-service`), `REF_PORT` (8787),
 //! `REF_TOPICS` (content/topics.json), `REF_TARGET` (fresh pictures kept
 //! ready per requested slot, default 6), `REF_NSFW_MODEL`, `REF_CLIP_DIR`
 //! (the picture sorter, default crates/ref-filters/models/clip-vit-b32).
@@ -21,11 +27,12 @@
 //! `ref-service recheck [--dry-run]` runs the topic check over the existing
 //! pool (stop the server first) and prints counts per category/topic.
 
+mod budget;
 mod model;
-mod pixabay;
 mod pool;
 mod recheck;
 mod sorting;
+mod sources;
 mod vet;
 
 use std::collections::HashMap;
@@ -43,30 +50,30 @@ use serde_json::{Value, json};
 use tokio::sync::{Mutex, Notify};
 use tracing::{info, warn};
 
-use model::{CATEGORIES, LiveRef, Slot, Topic, image_type, kind_allowed};
-use pixabay::Pixabay;
+use model::{CATEGORIES, LiveRef, PHOTO_ONLY, Slot, Topic, image_type, kind_allowed};
 use pool::PoolState;
 use ref_filters::sort::Decision;
 use sorting::{ClipTopicCheck, NoTopicCheck, TopicCheck, destination};
-use vet::{FiltersVetter, Vetter, pixabay_flags_ok};
+use sources::{Candidate, SourceId, Sources};
+use vet::{FiltersVetter, Vetter};
 
-const LICENSE: &str = "Pixabay Content License";
-const LICENSE_URL: &str = "https://pixabay.com/service/license-summary/";
 /// How many search hits to examine per refill step before yielding.
 const HITS_PER_STEP: usize = 12;
 
 struct App {
     pool: Mutex<PoolState>,
     wake: Notify,
-    pixabay: Pixabay,
+    sources: Sources,
     vetter: Box<dyn Vetter>,
     /// picture sorter: is it really this category/topic? (ADR-0009)
     sorter: Box<dyn TopicCheck>,
     topics: HashMap<String, Vec<Topic>>,
     data: PathBuf,
     target: usize,
-    /// (query, image_type) → next search page to try
-    cursors: Mutex<HashMap<(String, String), u32>>,
+    /// (source, query, mode) → next search page to try
+    cursors: Mutex<HashMap<(SourceId, String, String), u32>>,
+    /// slot key → refill steps so far (picks the source and the query)
+    turns: Mutex<HashMap<String, usize>>,
 }
 
 impl App {
@@ -169,7 +176,7 @@ fn recheck_main(args: &[String]) {
     let purged = if apply {
         purge_wrong_kind(&mut pool, &data.join("images"))
     } else {
-        pool.remove_where(|r| !kind_allowed(&r.category, &r.page_url))
+        pool.remove_where(|r| !kind_allowed(&r.category, r.kind()))
             .len()
     };
     let sorter = load_sorter(&topics);
@@ -219,7 +226,6 @@ async fn main() {
         return tokio::task::block_in_place(|| recheck_main(&args[1..]));
     }
 
-    let key = env_or_dotenv("PIXABAY_API_KEY").expect("PIXABAY_API_KEY not set");
     let data = data_dir();
     std::fs::create_dir_all(data.join("images")).expect("data dir");
     let topics_path = topics_path();
@@ -289,16 +295,18 @@ async fn main() {
         std::fs::rename(data.join("pool.json.tmp"), data.join("pool.json")).expect("save pool");
     }
 
+    let sources = load_sources(&data);
     let app = Arc::new(App {
         pool: Mutex::new(pool),
         wake: Notify::new(),
-        pixabay: Pixabay::new(key, data.join("search-cache")),
+        sources,
         vetter: Box::new(FiltersVetter(filters)),
         sorter,
         topics: load_topics(&topics_path),
         data,
         target,
         cursors: Mutex::new(HashMap::new()),
+        turns: Mutex::new(HashMap::new()),
     });
 
     tokio::spawn(refill_worker(app.clone()));
@@ -316,10 +324,55 @@ async fn main() {
         .expect("server");
 }
 
+/// The picture sources to use: all of them unless `REF_SOURCES` names some.
+/// Pixabay needs `PIXABAY_API_KEY`; without it, it is skipped.
+fn load_sources(data: &Path) -> Sources {
+    let wanted = env_or_dotenv("REF_SOURCES");
+    let on = |s: SourceId| {
+        wanted
+            .as_deref()
+            .is_none_or(|w| w.split(',').any(|x| x.trim() == s.name()))
+    };
+    let cache = data.join("search-cache");
+    let budget = |s: SourceId| Some(data.join(format!("budget-{}.json", s.name())));
+    let pixabay = match env_or_dotenv("PIXABAY_API_KEY") {
+        Some(key) if on(SourceId::Pixabay) => Some(sources::pixabay::Pixabay::new(
+            key,
+            cache.clone(),
+            budget(SourceId::Pixabay),
+        )),
+        None if on(SourceId::Pixabay) => {
+            warn!("PIXABAY_API_KEY not set: Pixabay is skipped");
+            None
+        }
+        _ => None,
+    };
+    let openverse = on(SourceId::Openverse).then(|| {
+        let token = env_or_dotenv("OPENVERSE_TOKEN").filter(|t| !t.is_empty());
+        info!(
+            signed_in = token.is_some(),
+            "Openverse on (CC0 / PDM / CC BY, allowed providers only)"
+        );
+        sources::openverse::Openverse::new(token, cache.clone(), budget(SourceId::Openverse))
+    });
+    let artic = on(SourceId::Artic)
+        .then(|| sources::artic::Artic::new(cache.clone(), budget(SourceId::Artic)));
+    let met =
+        on(SourceId::Met).then(|| sources::met::Met::new(cache.clone(), budget(SourceId::Met)));
+    let s = Sources::new(pixabay, openverse, artic, met);
+    let names: Vec<&str> = SourceId::ALL
+        .iter()
+        .filter(|x| s.enabled(**x))
+        .map(|x| x.name())
+        .collect();
+    info!(sources = ?names, "picture sources");
+    s
+}
+
 /// Drop references whose image kind isn't allowed in their category (drawings
 /// in real-life/animals/environment) and delete their files. Returns how many.
 fn purge_wrong_kind(pool: &mut PoolState, images: &Path) -> usize {
-    let gone = pool.remove_where(|r| !kind_allowed(&r.category, &r.page_url));
+    let gone = pool.remove_where(|r| !kind_allowed(&r.category, r.kind()));
     for r in &gone {
         std::fs::remove_file(images.join(format!("{}.jpg", r.id))).ok();
     }
@@ -494,6 +547,9 @@ async fn refill_worker(app: Arc<App>) {
             Some(slot) => {
                 if let Err(e) = refill_step(&app, &slot).await {
                     warn!(slot = %slot.key(), "refill: {e}");
+                    // counts as a fruitless step, so a slot whose sources keep
+                    // failing is paused instead of holding up the others
+                    app.pool.lock().await.record_step(&slot, false);
                     tokio::time::sleep(Duration::from_secs(5)).await;
                 }
             }
@@ -505,91 +561,148 @@ async fn refill_worker(app: Arc<App>) {
     }
 }
 
-/// Look at up to HITS_PER_STEP new search hits for `slot`, vet them and add
-/// the good ones to the pool (under the tier they actually measure as).
+/// The sources that can fill `slot` right now: enabled, allowed in the
+/// category, with queries for the topic, and not paused or out of budget.
+async fn ready_sources(app: &App, slot: &Slot, topic: &Topic) -> Vec<SourceId> {
+    let mut out = Vec::new();
+    for s in SourceId::ALL {
+        if app.sources.enabled(s)
+            && s.allows(&slot.category)
+            && !topic.queries_for(s.name()).is_empty()
+            && app.sources.ready(s).await
+        {
+            out.push(s);
+        }
+    }
+    out
+}
+
+/// Count a rejected picture under its reason code ("off_topic:anime/scenery"
+/// counts as "off_topic").
+async fn count_reject(app: &App, why: &str) {
+    let mut p = app.pool.lock().await;
+    for r in why.split(',') {
+        let code = r.split([':', ' ']).next().unwrap_or(r);
+        *p.rejected.entry(code.to_string()).or_insert(0) += 1;
+    }
+}
+
+/// Look at up to HITS_PER_STEP new search hits for `slot` from one source,
+/// vet them and add the good ones to the pool (under the tier they actually
+/// measure as). Sources take turns per slot, so pictures come from all of
+/// them and no single API's limits are hit; a source that is down, paused or
+/// out of budget is skipped.
 async fn refill_step(app: &App, slot: &Slot) -> Result<(), String> {
-    let queries = app
+    let topic = app
         .topics
         .get(&slot.category)
         .and_then(|l| l.iter().find(|t| t.id == slot.topic))
-        .map(|t| t.queries.clone())
-        .filter(|q| !q.is_empty())
-        .ok_or("topic has no queries")?;
-    let kind = image_type(&slot.category, slot.tier).to_string();
-    let before = app.pool.lock().await.fresh_len(slot);
-    // rotate through the topic's queries
-    let qi = app.pool.lock().await.seen.len() % queries.len();
-    let query = queries[qi].clone();
-    let page = {
-        let mut c = app.cursors.lock().await;
-        let p = c.entry((query.clone(), kind.clone())).or_insert(1);
-        *p
+        .cloned()
+        .ok_or("unknown topic")?;
+    let ready = ready_sources(app, slot, &topic).await;
+    if ready.is_empty() {
+        app.pool.lock().await.record_step(slot, false);
+        info!(slot = %slot.key(), "refill: no source ready");
+        return Ok(());
+    }
+    let turn = {
+        let mut t = app.turns.lock().await;
+        let n = t.entry(slot.key()).or_insert(0);
+        *n += 1;
+        *n - 1
     };
-    let hits = app.pixabay.search(&query, &kind, page).await?;
-    let fresh_hits: Vec<Value> = {
+    let source = ready[turn % ready.len()];
+    let queries = topic.queries_for(source.name());
+    let query = queries[(turn / ready.len()) % queries.len()].clone();
+    let mode = match source {
+        SourceId::Pixabay => image_type(&slot.category, slot.tier).to_string(),
+        SourceId::Openverse if PHOTO_ONLY.contains(&slot.category.as_str()) => "photo".into(),
+        SourceId::Openverse => "art".into(),
+        _ => String::new(),
+    };
+    let before = app.pool.lock().await.fresh_len(slot);
+    let cursor = (source, query.clone(), mode);
+    let page = *app.cursors.lock().await.entry(cursor.clone()).or_insert(1);
+    let found = app
+        .sources
+        .search(source, &query, &slot.category, slot.tier, page)
+        .await
+        .map_err(|e| format!("{}: {e}", source.name()))?;
+    let fresh_hits: Vec<_> = {
         let p = app.pool.lock().await;
-        hits.into_iter()
-            .filter(|h| h["id"].as_u64().is_some_and(|id| !p.seen.contains(&id)))
+        found
+            .hits
+            .into_iter()
+            .filter(|h| !p.is_seen(&h.key))
             .take(HITS_PER_STEP)
             .collect()
     };
     if fresh_hits.is_empty() {
-        // page exhausted: next time try the next page (stop after 10 pages)
+        // page used up: next time try the next page (back to 1 after the last)
         let mut c = app.cursors.lock().await;
-        let p = c.entry((query, kind)).or_insert(1);
-        *p = if *p >= 10 { 1 } else { *p + 1 };
+        let p = c.entry(cursor).or_insert(1);
+        *p = if found.last || *p >= 10 { 1 } else { *p + 1 };
         drop(c);
         app.pool.lock().await.record_step(slot, false);
         return Ok(());
     }
 
-    // Flag checks first (cheap), then download the survivors in parallel.
-    let mut todo = Vec::new();
-    {
-        let mut p = app.pool.lock().await;
-        for hit in fresh_hits {
-            let sid = hit["id"].as_u64().unwrap_or(0);
-            p.seen.insert(sid);
-            if let Err(why) = pixabay_flags_ok(&hit) {
-                tracing::debug!(sid, why, "skip");
+    // Source rules (licence, provider, flags, public domain) and banned words
+    // first (cheap), then download the survivors in parallel.
+    let mut todo: Vec<Candidate> = Vec::new();
+    for hit in fresh_hits {
+        let cand = match app.sources.resolve(source, &hit, &slot.category).await {
+            Ok(c) => c,
+            Err(e) => {
+                // couldn't check it now (network, budget): look again later
+                warn!(source = source.name(), key = %hit.key, "resolve: {e}");
+                break;
+            }
+        };
+        app.pool.lock().await.mark_seen(&hit.key);
+        let cand = match cand {
+            Ok(c) => c,
+            Err(why) => {
+                tracing::debug!(key = %hit.key, why, "skip");
+                count_reject(app, &why).await;
                 continue;
             }
-            if !kind_allowed(&slot.category, hit["pageURL"].as_str().unwrap_or("")) {
-                tracing::debug!(sid, "skip: not a photo");
-                continue;
-            }
-            // The 640 px rendition is plenty for a reference and ~5x smaller.
-            if let Some(url) = hit["webformatURL"]
-                .as_str()
-                .or(hit["largeImageURL"].as_str())
-                .map(String::from)
-            {
-                todo.push((sid, hit, url));
-            }
+        };
+        let text = format!("{} {}", cand.title, cand.tags.join(", "));
+        if let Some(why) = ref_filters::words::banned(&text) {
+            tracing::debug!(key = %hit.key, why, "skip");
+            count_reject(app, &why).await;
+            continue;
         }
+        if !kind_allowed(&slot.category, &cand.kind) {
+            tracing::debug!(key = %hit.key, kind = cand.kind, "skip: wrong kind");
+            count_reject(app, "wrong_kind").await;
+            continue;
+        }
+        todo.push(cand);
     }
     let mut downloads = tokio::task::JoinSet::new();
-    for (sid, hit, url) in todo {
-        let http = app.pixabay.client();
+    for c in todo {
+        let http = app.sources.client();
         downloads.spawn(async move {
-            let bytes = pixabay::fetch_bytes(&http, &url).await;
-            (sid, hit, bytes)
+            let bytes = sources::fetch_bytes(&http, &c.image_url).await;
+            (c, bytes)
         });
     }
 
     let mut added = 0;
     while let Some(joined) = downloads.join_next().await {
-        let Ok((sid, hit, bytes)) = joined else {
+        let Ok((c, bytes)) = joined else {
             continue;
         };
         let bytes = match bytes {
             Ok(b) => b,
             Err(e) => {
-                warn!(sid, "download: {e}");
+                warn!(id = %c.id, "download: {e}");
                 continue;
             }
         };
-        let id = format!("px-{sid}");
+        let id = c.id.clone();
         let images = app.images();
         let vetted = tokio::task::block_in_place(|| {
             let img = vet::on_white(image::load_from_memory(&bytes).map_err(|e| e.to_string())?);
@@ -601,7 +714,17 @@ async fn refill_step(app: &App, slot: &Slot) -> Result<(), String> {
                 .map_err(|e| format!("sorter_error ({e})"))?;
             let checked = decision != Decision::Unchecked;
             let dest = destination(decision, &slot.category, &slot.topic)?;
-            if !kind_allowed(&dest.0, hit["pageURL"].as_str().unwrap_or("")) {
+            // A source only fills the topics that list queries for it (e.g. no
+            // Openverse photos of people: no model releases), re-filed or not.
+            let for_source = app
+                .topics
+                .get(&dest.0)
+                .and_then(|l| l.iter().find(|t| t.id == dest.1))
+                .is_some_and(|t| !t.queries_for(c.source.name()).is_empty());
+            if !for_source {
+                return Err(format!("not_for_source:{}/{}", dest.0, dest.1));
+            }
+            if !kind_allowed(&dest.0, &c.kind) {
                 return Err(format!("wrong_kind_for:{}/{}", dest.0, dest.1));
             }
             // re-encode as JPEG ≤ 1280 px (consistent format, strips metadata)
@@ -618,44 +741,32 @@ async fn refill_step(app: &App, slot: &Slot) -> Result<(), String> {
         let (v, (category, topic), checked, w, h) = match vetted {
             Ok(x) => x,
             Err(why) => {
-                tracing::debug!(sid, why, "rejected");
-                let mut p = app.pool.lock().await;
-                for r in why.split(',') {
-                    // "off_topic:anime/scenery" counts as "off_topic"
-                    let code = r.split([':', ' ']).next().unwrap_or(r);
-                    *p.rejected.entry(code.to_string()).or_insert(0) += 1;
-                }
+                tracing::debug!(id, why, "rejected");
+                count_reject(app, &why).await;
                 continue;
             }
         };
         if (category.as_str(), topic.as_str()) != (slot.category.as_str(), slot.topic.as_str()) {
-            info!(sid, from = %slot.key(), to = %format!("{category}/{topic}"), "re-filed");
+            info!(id, from = %slot.key(), to = %format!("{category}/{topic}"), "re-filed");
         }
-        let user = hit["user"].as_str().unwrap_or("").to_string();
         let r = LiveRef {
             id: id.clone(),
-            source: "pixabay".into(),
-            source_id: sid,
+            source: c.source.name().into(),
+            source_id: c.source_id,
             category,
             topic,
-            page_url: hit["pageURL"].as_str().unwrap_or("").into(),
-            author_url: format!(
-                "https://pixabay.com/users/{}-{}/",
-                user.to_lowercase().replace(' ', "_"),
-                hit["user_id"].as_u64().unwrap_or(0)
-            ),
-            author: user,
-            license: LICENSE.into(),
-            license_url: LICENSE_URL.into(),
-            tags: hit["tags"]
-                .as_str()
-                .unwrap_or("")
-                .split(", ")
-                .map(String::from)
-                .collect(),
+            page_url: c.page_url,
+            author: c.author,
+            author_url: c.author_url,
+            license: c.license,
+            license_url: c.license_url,
+            tags: c.tags,
             width: w,
             height: h,
-            title: String::new(),
+            title: c.title,
+            attribution: c.attribution,
+            provider: c.provider,
+            kind: c.kind,
             keypoints: vec![],
             difficulty: (v.difficulty.score * 10.0).round() / 10.0,
             tier: v.difficulty.tier,
@@ -666,6 +777,9 @@ async fn refill_step(app: &App, slot: &Slot) -> Result<(), String> {
         let ok = p.add(r, v.phash);
         if ok && checked {
             p.sorted.insert(id.clone());
+        }
+        if !ok {
+            *p.rejected.entry("duplicate".into()).or_insert(0) += 1;
         }
         drop(p);
         if ok {
@@ -678,7 +792,7 @@ async fn refill_step(app: &App, slot: &Slot) -> Result<(), String> {
     }
     let gained = app.pool.lock().await.fresh_len(slot) > before;
     app.pool.lock().await.record_step(slot, gained);
-    info!(slot = %slot.key(), query, page, added, gained, "refill step");
+    info!(slot = %slot.key(), source = source.name(), query, page, added, gained, "refill step");
     app.save().await;
     Ok(())
 }
@@ -697,14 +811,127 @@ mod tests {
         Arc::new(App {
             pool: Mutex::new(PoolState::default()),
             wake: Notify::new(),
-            pixabay: Pixabay::new("test".into(), dir.join("cache")),
+            sources: Sources::new(
+                Some(sources::pixabay::Pixabay::new(
+                    "test".into(),
+                    dir.join("cache"),
+                    None,
+                )),
+                None,
+                None,
+                None,
+            ),
             vetter: Box::new(FiltersVetter(ref_filters::Filters::without_nsfw())),
             sorter: Box::new(NoTopicCheck),
             topics: load_topics(&repo_root().join("content/topics.json")),
             data: dir,
             target: 3,
             cursors: Mutex::new(HashMap::new()),
+            turns: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// A drawable test picture: a dark disc with a lighter ring.
+    fn disc_png(shift: u32) -> Vec<u8> {
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(800, 600, |x, y| {
+            let d = ((x as f32 - 300.0 - shift as f32).powi(2) + (y as f32 - 300.0).powi(2)).sqrt();
+            let g = if d < 150.0 {
+                40
+            } else if d < 200.0 {
+                160
+            } else {
+                255
+            };
+            image::Rgb([g, g, g])
+        }));
+        let mut png = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        png
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn refill_adds_vetted_pictures_with_their_credit_and_drops_duplicates() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let hit = |id: u64, ai: bool| {
+            json!({"id": id, "pageURL": format!("https://pixabay.com/photos/cat-{id}/"),
+                "webformatURL": format!("{base}/img.png"), "user": "Ann", "user_id": 5,
+                "tags": "cat, pet", "isAiGenerated": ai, "isGRated": true, "isLowQuality": false})
+        };
+        let body = json!({"hits": [hit(1, false), hit(2, false), hit(3, true)]}).to_string();
+        let png = disc_png(0);
+        let router = Router::new()
+            .route(
+                "/api/",
+                get(move || {
+                    let b = body.clone();
+                    async move { ([(header::CONTENT_TYPE, "application/json")], b) }
+                }),
+            )
+            .route(
+                "/img.png",
+                get(move || {
+                    let b = png.clone();
+                    async move { ([(header::CONTENT_TYPE, "image/png")], b) }
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, router).await.ok() });
+
+        let dir = std::env::temp_dir().join(format!("pp-refill-test-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(dir.join("images")).unwrap();
+        let app = App {
+            pool: Mutex::new(PoolState::default()),
+            wake: Notify::new(),
+            sources: Sources::new(
+                Some(
+                    sources::pixabay::Pixabay::new("k".into(), dir.join("cache"), None)
+                        .with_base(&format!("{base}/api/")),
+                ),
+                None,
+                None,
+                None,
+            ),
+            vetter: Box::new(FiltersVetter(ref_filters::Filters::without_nsfw())),
+            sorter: Box::new(NoTopicCheck),
+            topics: load_topics(&repo_root().join("content/topics.json")),
+            data: dir,
+            target: 3,
+            cursors: Mutex::new(HashMap::new()),
+            turns: Mutex::new(HashMap::new()),
+        };
+        let slot = Slot {
+            category: "animals".into(),
+            topic: "pets".into(),
+            tier: 2,
+        };
+        refill_step(&app, &slot).await.unwrap();
+        let p = app.pool.lock().await;
+        assert_eq!(p.refs.len(), 1, "same picture twice: one kept");
+        let r = p.refs.values().next().unwrap();
+        assert_eq!(r.source, "pixabay");
+        assert_eq!(r.provider, "Pixabay");
+        assert_eq!(r.kind, "photo");
+        assert_eq!(r.author, "Ann");
+        assert_eq!(p.rejected.get("duplicate"), Some(&1));
+        assert_eq!(p.rejected.get("ai_generated"), Some(&1));
+        assert!(p.is_seen("pixabay:3"));
+        assert!(app.images().join(format!("{}.jpg", r.id)).exists());
+    }
+
+    #[tokio::test]
+    async fn masters_has_no_source_without_museums() {
+        // test_app has Pixabay only, which never fills Master studies
+        let app = test_app();
+        let slot = Slot {
+            category: "masters".into(),
+            topic: "portraits".into(),
+            tier: 2,
+        };
+        refill_step(&app, &slot).await.unwrap();
+        assert!(app.pool.lock().await.refs.is_empty());
+        assert_eq!(app.pool.lock().await.misses[&slot.key()].0, 1);
     }
 
     async fn call(app: Arc<App>, req: Request<Body>) -> (StatusCode, String) {
@@ -788,8 +1015,22 @@ mod tests {
             let topics = app.topics.get(*c).expect("category in topics.json");
             assert!(!topics.is_empty());
             for t in topics {
-                assert!(!t.queries.is_empty(), "{c}/{} has no queries", t.id);
+                let usable = SourceId::ALL
+                    .iter()
+                    .any(|s| s.allows(c) && !t.queries_for(s.name()).is_empty());
+                assert!(usable, "{c}/{} has no queries for any source", t.id);
+                for (name, qs) in &t.source_queries {
+                    let s = SourceId::ALL.iter().find(|s| s.name() == name);
+                    let s = s.unwrap_or_else(|| panic!("{c}/{}: unknown source {name}", t.id));
+                    assert!(s.allows(c), "{c}/{}: {name} can't fill {c}", t.id);
+                    assert!(!qs.is_empty(), "{c}/{}: empty {name} queries", t.id);
+                }
             }
+        }
+        // Master studies comes from the museums only
+        for t in &app.topics["masters"] {
+            assert!(t.queries.is_empty(), "masters/{}: no Pixabay", t.id);
+            assert!(!t.queries_for("artic").is_empty() && !t.queries_for("met").is_empty());
         }
     }
 }

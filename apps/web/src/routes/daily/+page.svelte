@@ -8,6 +8,7 @@
 	import { categories } from '#lib/categories.js';
 	import { attempts } from '#lib/progress.js';
 	import { SYNCED } from '#lib/sync.js';
+	import RefCredit from '#lib/RefCredit.svelte';
 	import {
 		personalDone,
 		personalKey,
@@ -84,9 +85,8 @@
 				<img class="ref" src={imageUrl(ref)} alt="Today’s picture: {titleOf(ref)}" />
 				<h2>{titleOf(ref)}</h2>
 				<p class="credit">
-					{category?.name ?? ref.category} · {tierName(tierOf(ref))} · by
-					<a href={ref.authorUrl} target="_blank" rel="noreferrer">{ref.author}</a> via
-					<a href={ref.pageUrl} target="_blank" rel="noreferrer">Pixabay</a>
+					{category?.name ?? ref.category} · {tierName(tierOf(ref))} ·
+					<RefCredit reference={ref} license={false} lead="by" />
 				</p>
 			</Tile>
 			<Tile tone="ink">
@@ -149,10 +149,8 @@
 				<p class="credit">
 					{categories.find((c) => c.id === mine!.category)?.name ?? mine.category} · {tierName(
 						mine.tier
-					)} · by
-					<a href={mine.ref.authorUrl} target="_blank" rel="noreferrer">{mine.ref.author}</a>
-					via
-					<a href={mine.ref.pageUrl} target="_blank" rel="noreferrer">Pixabay</a>
+					)} ·
+					<RefCredit reference={mine.ref} license={false} lead="by" />
 				</p>
 			</Tile>
 			<Tile span={2} tone="lilac">

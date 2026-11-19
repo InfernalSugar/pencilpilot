@@ -143,7 +143,14 @@ pub mod tests {
         )
         .unwrap();
         let spec = SortSpec::from_topics_json(&topics).expect("valid _sorting block");
-        for c in ["anime", "real-life", "animals", "environment", "cartoon"] {
+        for c in [
+            "anime",
+            "real-life",
+            "animals",
+            "environment",
+            "cartoon",
+            "masters",
+        ] {
             let n = topics[c].as_array().unwrap().len();
             assert_eq!(
                 spec.topics.iter().filter(|t| t.category == c).count(),
@@ -162,6 +169,7 @@ pub mod tests {
             "environment/plants",
             "environment/skies-water",
             "environment/landscapes",
+            "masters/landscapes",
         ];
         for t in &spec.topics {
             let key = format!("{}/{}", t.category, t.id);

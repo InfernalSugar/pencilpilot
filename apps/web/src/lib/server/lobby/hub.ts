@@ -4,6 +4,7 @@
  * preview and production servers. Rooms live in memory and vanish when empty.
  */
 import { randomBytes, randomInt } from 'node:crypto';
+import { SOURCES, defaultLicense, safeLink } from '../../credit';
 import {
 	cleanSettings,
 	DEFAULT_SETTINGS,
@@ -524,20 +525,22 @@ export function cleanRef(x: LobbyRef): LobbyRef | null {
 	const str = (v: unknown, max: number) => (typeof v === 'string' && v.length <= max ? v : '');
 	const img = str(x?.imageUrl, 120);
 	if (!/^\/(references|refimg)\/[A-Za-z0-9_.-]{1,60}\.jpg$/.test(img)) return null;
-	const page = (v: unknown) => {
-		const u = str(v, 300);
-		return /^https:\/\/pixabay\.com\//.test(u) ? u : 'https://pixabay.com/';
-	};
+	const source = SOURCES.find((s) => s === x?.source) ?? 'pixabay';
+	const fallback = defaultLicense(source);
+	const page = (v: unknown) => safeLink(v) || 'https://pixabay.com/';
 	return {
 		id: str(x.id, 60) || 'ref',
 		category: str(x.category, 30),
 		title: str(x.title, 80) || 'Reference',
 		imageUrl: img,
 		author: str(x.author, 80),
-		authorUrl: page(x.authorUrl),
+		authorUrl: safeLink(x.authorUrl),
 		pageUrl: page(x.pageUrl),
-		license: str(x.license, 60) || 'Pixabay Content License',
-		licenseUrl: 'https://pixabay.com/service/license-summary/',
+		license: str(x.license, 60) || fallback.license,
+		licenseUrl: safeLink(x.licenseUrl) || fallback.licenseUrl,
+		source,
+		provider: str(x.provider, 80) || undefined,
+		attribution: str(x.attribution, 400) || undefined,
 		tier: Number.isInteger(x.tier) ? x.tier : undefined,
 		live: x.live === true,
 		tags: Array.isArray(x.tags) ? x.tags.filter((t) => typeof t === 'string').slice(0, 12) : []

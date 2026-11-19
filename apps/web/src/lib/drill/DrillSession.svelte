@@ -19,6 +19,7 @@
 	import { gradeRound, type RoundResult } from '#lib/drill-grade.js';
 	import { imageUrl, pickReference, type Reference } from '#lib/references.js';
 	import { fetchLiveReference, recentRefs, rememberRef } from '#lib/live.js';
+	import RefCredit from '#lib/RefCredit.svelte';
 
 	let { drill }: { drill: Drill } = $props();
 
@@ -351,13 +352,7 @@
 						alt="Subject: {reference.tags.join(', ')}"
 					/>
 					<p class="credit">
-						By <a href={reference.authorUrl} target="_blank" rel="noreferrer">
-							{reference.author}
-						</a>
-						via <a href={reference.pageUrl} target="_blank" rel="noreferrer">Pixabay</a> ·
-						<a href={reference.licenseUrl} target="_blank" rel="noreferrer">
-							{reference.license}
-						</a>
+						<RefCredit {reference} />
 					</p>
 				{:else}
 					<div class="target svg" data-testid="drill-target">

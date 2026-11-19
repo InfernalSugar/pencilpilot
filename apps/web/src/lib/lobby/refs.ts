@@ -15,7 +15,10 @@ export function toLobbyRef(r: Reference): LobbyRef {
 		licenseUrl: r.licenseUrl,
 		tier: r.tier,
 		live: r.live,
-		tags: r.tags
+		tags: r.tags,
+		source: r.source,
+		provider: r.provider,
+		attribution: r.attribution
 	};
 }
 
