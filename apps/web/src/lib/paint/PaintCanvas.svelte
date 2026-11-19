@@ -70,6 +70,7 @@
 		overlayTransform = { x: 0, y: 0, scale: 1, rotate: 0 },
 		adjustOverlay = false,
 		onoverlaymove,
+		locked = false,
 		maxHeight = '78vh',
 		viewControls = true
 	}: {
@@ -89,6 +90,8 @@
 		overlayOpacity?: number;
 		/** where the overlay sits: offset (fraction of the canvas), scale and rotation (degrees) */
 		overlayTransform?: { x: number; y: number; scale: number; rotate: number };
+		/** no more strokes (e.g. time is up); a stroke in progress is finished */
+		locked?: boolean;
 		/** dragging moves the overlay instead of drawing */
 		adjustOverlay?: boolean;
 		/** overlay dragged by (dx, dy), as fractions of the canvas width / height */
@@ -397,6 +400,7 @@
 		if (e.pointerType === 'mouse' && e.button === 1) return startPan(e);
 		if (spaceHeld) return startPan(e);
 		if (e.pointerType === 'mouse' && e.button !== 0) return;
+		if (locked) return;
 		if (adjustOverlay && overlaySrc) {
 			vp.setPointerCapture(e.pointerId);
 			const [cx, cy] = toCanvas(e.clientX, e.clientY);
@@ -466,6 +470,17 @@
 		schedule();
 		notify();
 	}
+
+	// Time's up mid-stroke: keep what was drawn so far.
+	$effect(() => {
+		if (locked && current && paint && brush) {
+			paint.endStroke(brush);
+			log.add(current);
+			current = null;
+			schedule();
+			notify();
+		}
+	});
 
 	// Ctrl/⌘ + wheel (and trackpad pinch) zooms at the pointer; the plain wheel pans once zoomed in.
 	$effect(() => {

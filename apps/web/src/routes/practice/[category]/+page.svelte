@@ -6,6 +6,7 @@
 	import { topicsFor } from '#lib/topics.js';
 	import { recommendedTier } from '#lib/progress.js';
 	import { liveAvailable } from '#lib/live.js';
+	import { GESTURE_COUNTS, GESTURE_TIMES, TIME_LIMITS, timeLabel } from '#lib/timed.js';
 	import type { PageProps } from './$types';
 
 	let { data }: PageProps = $props();
@@ -39,8 +40,20 @@
 			: n
 				? `${n} at this level`
 				: 'None at this level yet';
+	/** 'single' = one drawing (time 0 = no limit); 'gesture' = a timed queue of pictures */
+	let timeMode = $state<'single' | 'gesture'>('single');
+	let time = $state(0);
+	let gestureCount = $state(10);
+	let gestureTime = $state(60);
+	const timing = $derived(
+		timeMode === 'gesture'
+			? `&session=gesture&count=${gestureCount}&time=${gestureTime}`
+			: time
+				? `&time=${time}`
+				: ''
+	);
 	const drawUrl = (topic?: string) =>
-		`/draw?category=${category.id}${topic ? `&topic=${topic}` : ''}&tier=${tier}`;
+		`/draw?category=${category.id}${topic ? `&topic=${topic}` : ''}&tier=${tier}${timing}`;
 </script>
 
 <svelte:head><title>{category.name} · PencilPilot</title></svelte:head>
@@ -84,7 +97,61 @@
 			{/each}
 		</div>
 
-		<h2 class="section">2. What to draw</h2>
+		<h2 class="section">2. Time</h2>
+		<div class="time">
+			<div class="chips" role="radiogroup" aria-label="Time limit">
+				{#each TIME_LIMITS as t (t.seconds)}
+					<button
+						type="button"
+						role="radio"
+						aria-checked={timeMode === 'single' && time === t.seconds}
+						onclick={() => {
+							timeMode = 'single';
+							time = t.seconds;
+						}}
+					>
+						{t.label}
+					</button>
+				{/each}
+				<button
+					type="button"
+					role="radio"
+					aria-checked={timeMode === 'gesture'}
+					onclick={() => (timeMode = 'gesture')}
+				>
+					Gesture session
+				</button>
+			</div>
+			{#if timeMode === 'gesture'}
+				<div class="gesture">
+					<p>
+						A run of pictures, a fixed time each, like a life-drawing class. Quick, loose, no
+						stopping. You’ll see all your drawings and scores at the end.
+					</p>
+					<label>
+						Pictures
+						<select bind:value={gestureCount}>
+							{#each GESTURE_COUNTS as n (n)}<option value={n}>{n}</option>{/each}
+						</select>
+					</label>
+					<label>
+						Each
+						<select bind:value={gestureTime}>
+							{#each GESTURE_TIMES as s (s)}<option value={s}>
+									{TIME_LIMITS.find((t) => t.seconds === s)?.label}
+								</option>{/each}
+						</select>
+					</label>
+				</div>
+			{:else if time}
+				<p class="time-note">
+					The canvas locks when time runs out and your drawing is scored straight away. Scores are
+					compared with your other {timeLabel(time)} drawings.
+				</p>
+			{/if}
+		</div>
+
+		<h2 class="section">3. What to draw</h2>
 		<div class="topics">
 			<a class="topic dark" href={drawUrl()} aria-disabled={!live && !anyCount}>
 				<span class="topic-name">Surprise me</span>
@@ -122,6 +189,61 @@
 		font-weight: 700;
 		letter-spacing: -0.4px;
 		margin: 32px 0 12px;
+	}
+	.chips {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 8px;
+	}
+	.chips button {
+		min-height: 44px;
+		padding: 8px 18px;
+		border: 0;
+		border-radius: 999px;
+		background: var(--pp-surface);
+		color: var(--pp-ink);
+		font: 600 15px var(--pp-font-body);
+		cursor: pointer;
+	}
+	.chips button[aria-checked='true'] {
+		background: var(--pp-ink);
+		color: #fff;
+	}
+	.gesture {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: end;
+		gap: 12px 20px;
+		margin-top: 12px;
+		padding: 18px 20px;
+		border-radius: var(--pp-radius-card);
+		background: var(--pp-lilac);
+		color: var(--pp-lilac-ink);
+	}
+	.gesture p {
+		flex: 1 1 100%;
+		margin: 0;
+	}
+	.gesture label {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		font-weight: 600;
+		font-size: 14px;
+		color: var(--pp-ink);
+	}
+	.gesture select {
+		min-height: 40px;
+		padding: 4px 10px;
+		border: 0;
+		border-radius: 10px;
+		background: var(--pp-surface);
+		color: var(--pp-ink);
+		font: 500 15px var(--pp-font-body);
+	}
+	.time-note {
+		margin: 10px 0 0;
+		color: var(--pp-ink-2);
 	}
 	.tiers {
 		display: grid;

@@ -7,36 +7,17 @@
 	import OverlayViewer, { type OverlayMode } from '#lib/results/OverlayViewer.svelte';
 	import ScoreReveal from '#lib/results/ScoreReveal.svelte';
 	import { loadSubmission, type Submission } from '#lib/submission.js';
+	import { byId, imageUrl, tierName, tierOf, titleOf } from '#lib/references.js';
+	import { attempts, recommendedTier, recurringMistakes, type Pattern } from '#lib/progress.js';
 	import {
-		byId,
-		imageUrl,
-		NO_TRANSFORM,
-		placedPixels,
-		referencePixels,
-		tierName,
-		tierOf,
-		titleOf
-	} from '#lib/references.js';
-	import {
-		attempts,
-		recommendedTier,
-		recordAttempt,
-		recurringMistakes,
-		saveThumb,
-		type Pattern
-	} from '#lib/progress.js';
-	import {
-		getFeedback,
-		gradeImages,
 		humanize,
 		measurement,
-		toGray,
 		type Feedback,
 		type FeedbackItem,
-		type Grade,
-		type GradeCategory,
-		type MeasurementName
+		type Grade
 	} from '#lib/grader.js';
+	import { gradable, gradeSubmission, recordGraded, SKILLS } from '#lib/grade-submission.js';
+	import { sessionDrawing, timeLabel } from '#lib/timed.js';
 
 	let sub = $state<Submission | null>(null);
 	let loaded = $state(false);
@@ -118,14 +99,6 @@
 		sub ? `${Math.floor(sub.seconds / 60)}m ${String(sub.seconds % 60).padStart(2, '0')}s` : ''
 	);
 
-	/** The skills shown in the breakdown, in plain words. */
-	const SKILLS: { name: MeasurementName; label: string; skill: string }[] = [
-		{ name: 'placement', label: 'Size & placement', skill: 'placement' },
-		{ name: 'outline', label: 'Outlines', skill: 'outline' },
-		{ name: 'silhouette', label: 'Big shapes', skill: 'silhouette' },
-		{ name: 'tone', label: 'Light & dark', skill: 'tone' },
-		{ name: 'line_confidence', label: 'Line confidence', skill: 'line_confidence' }
-	];
 	const skills = $derived(
 		grade
 			? SKILLS.map((s) => ({ ...s, value: measurement(grade!, s.name) ?? -1 })).filter(
@@ -135,88 +108,30 @@
 	);
 	const fixSkills = $derived(new Set(fb?.fixes.map((f) => f.skill) ?? []));
 
-	async function decodeGray(png: string, w: number, h: number) {
-		const img = new Image();
-		img.src = png;
-		await img.decode();
-		const c = new OffscreenCanvas(w, h);
-		const ctx = c.getContext('2d')!;
-		ctx.drawImage(img, 0, 0, w, h);
-		return toGray(ctx.getImageData(0, 0, w, h).data);
-	}
-
 	onMount(async () => {
-		sub = loadSubmission();
+		const at = Number(page.url.searchParams.get('at'));
+		sub = (at && sessionDrawing(at)) || loadSubmission();
 		loaded = true;
-		const ref = sub?.reference ?? byId(sub?.referenceId);
-		const own = sub?.trace?.source === 'own' ? sub.trace.ownUrl : undefined;
-		if (!sub || (!ref && !own)) return;
+		if (!sub || !gradable(sub)) return;
 		try {
-			const placed = sub.trace
-				? placedPixels(
-						own ?? imageUrl(ref!),
-						sub.width,
-						sub.height,
-						sub.trace.transform ?? NO_TRANSFORM
-					)
-				: null;
-			const [drawing, refData] = await Promise.all([
-				decodeGray(sub.png, sub.width, sub.height),
-				placed ? placed.then((p) => p.data) : referencePixels(ref!, sub.width, sub.height)
-			]);
-			if (placed) compareSrc = (await placed).url;
-			const cat = ref?.category ?? 'fundamentals';
-			grade = await gradeImages(sub.width, sub.height, drawing, toGray(refData.data), {
-				// Cartoons are graded like anime: clean outlines matter most.
-				category: (cat === 'cartoon' ? 'anime' : cat) as GradeCategory,
-				strokes: sub.strokeData ?? []
-			});
-			fb = await getFeedback(grade, sub.at ?? 0, ref?.category);
+			const g = await gradeSubmission(sub);
+			grade = g.grade;
+			fb = g.fb;
+			compareSrc = g.compareSrc;
 			// Tracing is practice: tips, but no score, progress, streak or level-up.
-			if (sub.traced || !ref) return;
-			const tier = sub.tier ?? tierOf(ref);
-			const before = recommendedTier(ref.category);
-			if (!alreadyRecorded(sub.at)) {
-				recordAttempt({
-					category: ref.category,
-					topic: sub.topic ?? ref.topic ?? null,
-					tier,
-					score: grade.score,
-					at: sub.at ?? Date.now(),
-					refId: ref.id,
-					title: titleOf(ref),
-					fixes: fb.fixes.map((f) => f.id),
-					skills: Object.fromEntries(
-						SKILLS.map((s) => [s.skill, measurement(grade!, s.name)]).filter(
-							([, v]) => v !== undefined
-						)
-					)
-				});
-				if (sub.at) saveThumb(sub.at, sub.png);
-			}
+			if (sub.traced || !g.ref) return;
+			const before = recommendedTier(g.ref.category);
+			recordGraded(sub, g);
 			// a mistake that keeps coming back (and is in this drawing too)
 			patterns = recurringMistakes(attempts()).filter((p) =>
 				fb!.fixes.some((f) => f.id === p.ruleId)
 			);
-			const after = recommendedTier(ref.category);
+			const after = recommendedTier(g.ref.category);
 			if (after > before) levelUp = after;
 		} catch (e) {
 			gradeError = `Could not grade this drawing: ${e}`;
 		}
 	});
-
-	/** Reloading the results page must not count the same drawing twice. */
-	function alreadyRecorded(at: number | undefined) {
-		if (!at) return false;
-		try {
-			const seen: number[] = JSON.parse(sessionStorage.getItem('pp.recorded') ?? '[]');
-			if (seen.includes(at)) return true;
-			sessionStorage.setItem('pp.recorded', JSON.stringify([...seen, at].slice(-50)));
-		} catch {
-			/* storage blocked: may double count on reload, harmless */
-		}
-		return false;
-	}
 
 	/** "Show me": switch the viewer to the view that explains a fix. */
 	function showMe(f: FeedbackItem) {
@@ -248,7 +163,9 @@
 		<div class="top">
 			<div>
 				<span class="pp-eyebrow">
-					Results{reference ? ` · ${reference.category} · ${tierName(tierOf(reference))}` : ''}
+					Results{reference
+						? ` · ${reference.category} · ${tierName(tierOf(reference))}`
+						: ''}{sub.timeLimit ? ` · ${timeLabel(sub.timeLimit)} drawing` : ''}
 				</span>
 				<h1>{reference ? titleOf(reference) : 'Your drawing'}</h1>
 			</div>
