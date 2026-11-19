@@ -14,6 +14,10 @@ export interface Stroke {
 	eraser: boolean;
 	/** the layer it was painted on (paint engine layer id) */
 	layer?: number;
+	/** brush colour (#rrggbb), size multiplier and opacity, for replays */
+	color?: string;
+	size?: number;
+	opacity?: number;
 	points: StrokePoint[];
 }
 

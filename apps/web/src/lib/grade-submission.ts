@@ -24,6 +24,7 @@ import {
 	type Reference
 } from './references';
 import type { Submission } from './submission';
+import type { Stroke } from './paint/strokes';
 
 /** The skills shown in breakdowns (and stored per attempt), in plain words. */
 export const SKILLS: { name: MeasurementName; label: string; skill: string }[] = [
@@ -49,6 +50,8 @@ export interface Graded {
 	ref: Reference | undefined;
 	/** for traced drawings: the picture as it was placed (data URL) */
 	compareSrc: string | null;
+	/** the reference as graded (grayscale, canvas size), for re-grading partial drawings */
+	refGray: Uint8Array;
 }
 
 export const referenceOf = (sub: Submission) => sub.reference ?? byId(sub.referenceId);
@@ -85,14 +88,32 @@ export async function gradeSubmission(sub: Submission): Promise<Graded> {
 	]);
 	const cat = ref?.category ?? 'fundamentals';
 	const mode = sub.mode ?? 'finished';
-	const grade = await gradeImages(sub.width, sub.height, drawing, toGray(refData.data), {
+	const refGray = toGray(refData.data);
+	const grade = await gradeImages(sub.width, sub.height, drawing, refGray, {
 		// Cartoons are graded like anime: clean outlines matter most.
 		category: (cat === 'cartoon' ? 'anime' : cat) as GradeCategory,
 		mode,
 		strokes: sub.strokeData ?? []
 	});
 	const fb = await getFeedback(grade, sub.at ?? 0, ref?.category, mode);
-	return { grade, fb, ref, compareSrc: placed ? (await placed).url : null };
+	return { grade, fb, ref, compareSrc: placed ? (await placed).url : null, refGray };
+}
+
+/** Tip ids the grader gives a (partial) version of the drawing: for replay moments. */
+export async function tipsFor(
+	sub: Submission,
+	g: Graded,
+	gray: Uint8Array,
+	strokes: Stroke[]
+): Promise<string[]> {
+	const cat = g.ref?.category ?? 'fundamentals';
+	const mode = sub.mode ?? 'finished';
+	const grade = await gradeImages(sub.width, sub.height, gray, g.refGray, {
+		category: (cat === 'cartoon' ? 'anime' : cat) as GradeCategory,
+		mode,
+		strokes
+	});
+	return (await getFeedback(grade, sub.at ?? 0, g.ref?.category, mode)).fixes.map((f) => f.id);
 }
 
 /** Reloading a results page must not count the same drawing twice. Marks `at` as recorded. */
