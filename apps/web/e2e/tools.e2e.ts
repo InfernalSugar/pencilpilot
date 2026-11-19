@@ -919,3 +919,35 @@ test('import picture: a new layer, undoable; handing it in visible means not sco
 	await expect(page.getByText('Not scored')).toBeVisible();
 	await expect(page.getByText(/includes an imported picture/)).toBeVisible();
 });
+
+test('save: a PNG picture and a layered Photoshop file', async ({ page }) => {
+	await ready(page);
+	for (let i = 0; i < 3; i++) await page.keyboard.press(']');
+	await drag(page, [0.2, 0.3], [0.8, 0.3], 10);
+	await page.getByRole('button', { name: 'New layer' }).click();
+	await page.getByRole('button', { name: 'New group' }).click();
+	await drag(page, [0.2, 0.6], [0.8, 0.6], 10);
+
+	await page.getByRole('button', { name: 'Save', exact: true }).click();
+	const [png] = await Promise.all([
+		page.waitForEvent('download'),
+		page.getByRole('button', { name: /PNG picture/ }).click()
+	]);
+	expect(png.suggestedFilename()).toMatch(/^pencilpilot-.*\.png$/);
+	const pngBytes = Buffer.concat(await (await png.createReadStream()).toArray());
+	expect(pngBytes.subarray(1, 4).toString()).toBe('PNG');
+
+	await page.getByRole('button', { name: 'Save', exact: true }).click();
+	const [psd] = await Promise.all([
+		page.waitForEvent('download'),
+		page.getByRole('button', { name: /Photoshop file/ }).click()
+	]);
+	expect(psd.suggestedFilename()).toMatch(/\.psd$/);
+	const buf = Buffer.concat(await (await psd.createReadStream()).toArray());
+	expect(buf.subarray(0, 4).toString()).toBe('8BPS');
+	expect(buf.readUInt32BE(14)).toBe(600); // height
+	expect(buf.readUInt32BE(18)).toBe(800); // width
+	// layer and group names are stored as UTF-16 (big-endian)
+	for (const n of ['Layer 1', 'Layer 2', 'Group 1'])
+		expect(buf.includes(Buffer.from(n, 'utf16le').swap16())).toBe(true);
+});

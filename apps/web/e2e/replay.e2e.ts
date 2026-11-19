@@ -68,3 +68,26 @@ test('replay redraws the drawing with its colours and layers', async ({ page }) 
 	await page.getByLabel('Replay position').fill('0');
 	expect((await replay.evaluate(counts)).ink).toBe(0);
 });
+
+test('the replay can be saved as a video', async ({ page }) => {
+	await page.goto('/draw');
+	await expect(page.getByLabel(/Drawing canvas/)).toHaveAttribute('data-ready', 'true', {
+		timeout: 15_000
+	});
+	await line(page, 0.4);
+	await line(page, 0.6);
+	await page.getByRole('button', { name: /Submit drawing/ }).click();
+	await expect(page).toHaveURL(/\/results$/);
+	await page.getByRole('button', { name: /Watch the replay/ }).click();
+	await expect(page.getByLabel('Replay of your drawing')).toHaveAttribute('data-ready', 'true', {
+		timeout: 15_000
+	});
+	const [video] = await Promise.all([
+		page.waitForEvent('download', { timeout: 30_000 }),
+		page.getByRole('button', { name: 'Save video' }).click()
+	]);
+	expect(video.suggestedFilename()).toMatch(/^pencilpilot-replay-.*\.(mp4|webm)$/);
+	const bytes = Buffer.concat(await (await video.createReadStream()).toArray());
+	expect(bytes.length).toBeGreaterThan(1000);
+	await expect(page.getByRole('button', { name: 'Save video' })).toBeEnabled();
+});

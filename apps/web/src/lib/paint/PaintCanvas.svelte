@@ -101,6 +101,7 @@
 	import { loadBrush, loadEngine, PaintCanvas, type PaintBrush } from './brushes';
 	import { StrokeLog, type Stroke } from './strokes';
 	import { recognise, resample } from './quickshape';
+	import type { PsdDoc, PsdGroup, PsdLayer } from './psd';
 	import {
 		closestDirection,
 		gridLines,
@@ -574,12 +575,34 @@
 		clampPan();
 	}
 
+	// Smooth zoom: steps add up to a target the view glides to, anchored at the pointer.
+	let zoomGoal: { log: number; x?: number; y?: number } | null = null;
+	let zoomRaf = 0;
+	function smoothZoom(logStep: number, clientX?: number, clientY?: number) {
+		const from = zoomGoal?.log ?? Math.log(zoom);
+		const log = Math.max(Math.log(ZOOM_MIN), Math.min(Math.log(ZOOM_MAX), from + logStep));
+		zoomGoal = { log, x: clientX, y: clientY };
+		if (!zoomRaf) zoomRaf = requestAnimationFrame(zoomFrame);
+	}
+	function zoomFrame() {
+		zoomRaf = 0;
+		if (!zoomGoal) return;
+		const now = Math.log(zoom);
+		const left = zoomGoal.log - now;
+		const done = Math.abs(left) < 0.004;
+		zoomAt(Math.exp(done ? left : left * 0.35), zoomGoal.x, zoomGoal.y);
+		if (done) zoomGoal = null;
+		else zoomRaf = requestAnimationFrame(zoomFrame);
+	}
 	export function zoomIn() {
-		zoomAt(1.25);
+		smoothZoom(Math.log(1.25));
 	}
 	export function zoomOut() {
-		zoomAt(1 / 1.25);
+		smoothZoom(-Math.log(1.25));
 	}
+
+	/** Ctrl + drag with the wheel (middle button) held: zoom, up = in, around where it started */
+	let zoomDrag: { id: number; y: number; z: number; cx: number; cy: number } | null = null;
 	/** back to the whole canvas, upright */
 	export function resetView() {
 		zoom = 1;
@@ -1469,6 +1492,13 @@
 				return startPan(e);
 			}
 		}
+		if (e.pointerType === 'mouse' && e.button === 1 && (e.ctrlKey || e.metaKey)) {
+			e.preventDefault();
+			capture(e);
+			zoomGoal = null;
+			zoomDrag = { id: e.pointerId, y: e.clientY, z: zoom, cx: e.clientX, cy: e.clientY };
+			return;
+		}
 		if (e.pointerType === 'mouse' && e.button === 1) return startPan(e);
 		if (spaceHeld) return startPan(e);
 		if (e.pointerType === 'mouse' && e.button !== 0) return;
@@ -1558,6 +1588,11 @@
 	let picking: number | null = null;
 
 	function move(e: PointerEvent) {
+		if (zoomDrag && e.pointerId === zoomDrag.id) {
+			const want = zoomDrag.z * Math.exp((zoomDrag.y - e.clientY) * 0.006);
+			zoomAt(want / zoom, zoomDrag.cx, zoomDrag.cy);
+			return;
+		}
 		if (guideDrag) return guideMove(toCanvas(e.clientX, e.clientY));
 		if (tool === 'liquify') hoverAt = toCanvas(e.clientX, e.clientY);
 		if (grad && e.pointerId === grad.id) {
@@ -1628,6 +1663,10 @@
 	}
 
 	function up(e: PointerEvent) {
+		if (zoomDrag && e.pointerId === zoomDrag.id) {
+			zoomDrag = null;
+			return;
+		}
 		if (guideDrag) {
 			guideDrag = null;
 			return;
@@ -1708,7 +1747,11 @@
 		const onWheel = (e: WheelEvent) => {
 			if (e.ctrlKey || e.metaKey) {
 				e.preventDefault();
-				zoomAt(Math.exp(-e.deltaY * 0.01), e.clientX, e.clientY);
+				// lines / pages → pixels; a mouse wheel notch is ~100 px, a trackpad pinch a few px
+				const px = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1);
+				const notch = Math.abs(px) >= 40 && Number.isInteger(px);
+				const step = notch ? -Math.sign(px) * Math.log(1.12) : -px * 0.008;
+				smoothZoom(step, e.clientX, e.clientY);
 			} else if (zoom > 1.01) {
 				e.preventDefault();
 				panX -= e.deltaX;
@@ -1941,6 +1984,60 @@
 	 * The drawing as shown, minus the `exclude` layers (e.g. sketch-mode
 	 * construction lines), with the strokes on the layers that remain.
 	 */
+	/**
+	 * Everything needed for a layered file (Photoshop .psd): each layer's own
+	 * pixels, masks, groups and settings, plus the flattened picture.
+	 */
+	export function exportLayered(): PsdDoc | null {
+		if (!paint || !ctx) return null;
+		render();
+		const groups = new Map(groupList().map((g) => [g.id, g]));
+		const toLayer = (l: LayerInfo): PsdLayer => {
+			const maskRgba = l.mask ? paint!.maskThumbnail(l.id, width, height) : null;
+			let mask: Uint8Array | undefined;
+			if (maskRgba && maskRgba.length) {
+				mask = new Uint8Array(width * height);
+				for (let i = 0; i < mask.length; i++) mask[i] = maskRgba[i * 4];
+			}
+			return {
+				kind: 'layer',
+				name: l.name,
+				rgba: paint!.layerRgba(l.id),
+				opacity: l.opacity,
+				blend: l.blend,
+				visible: l.visible,
+				clip: l.clip,
+				mask
+			};
+		};
+		// a group's layers sit next to each other, so consecutive layers of one group form a folder
+		const items: PsdDoc['items'] = [];
+		let open = null as { id: number; folder: PsdGroup } | null;
+		for (const l of layerList()) {
+			const g = l.group ? groups.get(l.group) : undefined;
+			if (!g) {
+				open = null;
+				items.push(toLayer(l));
+			} else if (open?.id === g.id) open.folder.children.push(toLayer(l));
+			else {
+				const folder: PsdGroup = {
+					kind: 'group',
+					name: g.name,
+					opacity: g.opacity,
+					visible: g.visible,
+					children: [toLayer(l)]
+				};
+				open = { id: g.id, folder };
+				items.push(folder);
+			}
+		}
+		return {
+			width,
+			height,
+			composite: ctx.getImageData(0, 0, width, height).data,
+			items
+		};
+	}
 	export function exportDrawing(opts: { exclude?: number[] } = {}): DrawingExport | null {
 		if (!ctx || !paint) return null;
 		const hide = (opts.exclude ?? []).filter((id) => layerList().some((l) => l.id === id));
