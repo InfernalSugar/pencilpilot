@@ -47,7 +47,7 @@ apps/studio            Tauri 2 shell + SvelteKit (static SPA): the app
 apps/web               the website (unchanged in purpose)
 packages/ui            design tokens + Fun components (moved from apps/web)
 packages/paint         PaintCanvas, panels, tool UIs (moved from apps/web)
-crates/brush-wasm      → split: crates/brush (engine, native + wasm) + thin wasm bindings
+crates/brush           the engine (pure Rust, native); crates/brush-wasm = its browser bindings
 crates/anim            frame store, timeline, onion skin, playback cache, export
 crates/studio-ai       provider interfaces, job queue, cost meter, local ONNX models
 crates/grader          reused: stroke checks in Coach mode, style / on-model checks
@@ -90,6 +90,7 @@ colour flats and lip-sync are free (local).
 ## S0 — Foundations (≈2 weeks)
 - **S0-T01** ADR-0010 / ADR-0011 accepted; the name, platforms order and BYOK-vs-credits decided `infra` `legal`
 - **S0-T02** Split the engine: `crates/brush` (pure Rust) + `crates/brush-wasm` (bindings); native build and tests `brush` `infra`
+  ✅ `crates/brush` (`pencilpilot-brush`, lib `brush`) holds the engine and its tests; `crates/brush-wasm` is only the wasm-bindgen bindings. The web package is unchanged.
 - **S0-T03** Move the design system and studio components into `packages/ui` and `packages/paint`; the website keeps passing every test `design` `infra`
 - **S0-T04** Tauri 2 spike: the studio running natively on Windows, macOS and Linux, plus an iPad and Android build `app` `infra`
 - **S0-T05** Native pen input spike: pressure, tilt and barrel button, latency budget (<16 ms), palm rejection on tablets `app`
