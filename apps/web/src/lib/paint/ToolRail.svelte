@@ -12,6 +12,8 @@
 		| 'transform'
 		| 'liquify'
 		| 'gradient'
+		| 'smudge'
+		| 'pen'
 		| 'adjust';
 	export const ALL_TOOLS: ToolId[] = [
 		'brush',
@@ -25,6 +27,8 @@
 		'transform',
 		'liquify',
 		'gradient',
+		'smudge',
+		'pen',
 		'measure',
 		'adjust'
 	];
@@ -205,6 +209,56 @@
 						fill="currentColor"
 						fill-opacity="0.35"
 					/><path d="M8 19c0 1.5-1 2.5-2.5 2.5" />
+				</svg>
+			</button>
+		{/if}
+		{#if has('smudge')}
+			<button
+				type="button"
+				class="tool"
+				aria-pressed={tool === 'smudge'}
+				aria-label="Smudge (S)"
+				title="Smudge (S): push and blend the paint with the current brush"
+				onclick={() => (tool = tool === 'smudge' ? 'brush' : 'smudge')}
+			>
+				<svg
+					width="22"
+					height="22"
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="2.3"
+					stroke-linecap="round"
+					stroke-linejoin="round"
+					aria-hidden="true"
+				>
+					<path d="M9 11V5a2 2 0 0 1 4 0v5" /><path
+						d="M13 10V8a2 2 0 0 1 4 0v4c0 5-3 9-7 9-3 0-5-2-6-5l-1-3a1.6 1.6 0 0 1 3-1l2 3"
+					/>
+				</svg>
+			</button>
+		{/if}
+		{#if has('pen')}
+			<button
+				type="button"
+				class="tool"
+				aria-pressed={tool === 'pen'}
+				aria-label="Pen path (P)"
+				title="Pen path (P): click for corners, drag for curves, then draw along it or fill it"
+				onclick={() => (tool = tool === 'pen' ? 'brush' : 'pen')}
+			>
+				<svg
+					width="22"
+					height="22"
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="2.2"
+					stroke-linecap="round"
+					stroke-linejoin="round"
+					aria-hidden="true"
+				>
+					<path d="M12 3 6 13l6 8 6-8Z" /><circle cx="12" cy="12" r="1.6" /><path d="M12 3v7" />
 				</svg>
 			</button>
 		{/if}

@@ -245,7 +245,10 @@ impl PaintCanvas {
     }
 
     /// Preview colour adjustments: hue (degrees), saturation / brightness /
-    /// contrast (−1…1), blur radius (px), and an optional recolour (sRGB 0–1).
+    /// contrast (−1…1), blur radius (px), an optional recolour (sRGB 0–1), curves
+    /// / levels (`tone`: 768 bytes, a 256-entry table for R, G then B) and a
+    /// gradient map (`map`: 768 bytes, 256 RGB colours from dark to light); an
+    /// empty `tone` / `map` = none.
     #[allow(clippy::too_many_arguments)]
     #[wasm_bindgen(js_name = adjustPreview)]
     pub fn adjust_preview(
@@ -259,15 +262,91 @@ impl PaintCanvas {
         r: f32,
         g: f32,
         b: f32,
+        tone: &[u8],
+        map: &[u8],
     ) {
         self.inner.adjust_preview(crate::adjust::ColourAdjust {
-            hue,
-            saturation,
-            brightness,
-            contrast,
             blur,
             recolour: recolour.then_some([r, g, b]),
+            ..colour_adjust(hue, saturation, brightness, contrast, tone, map)
         });
+    }
+
+    /// Add an adjustment layer above the active one: hue (degrees), saturation /
+    /// brightness / contrast (−1…1), curves (`tone`) and gradient map (`map`) as
+    /// for `adjustPreview`. `spec` is kept as given (`layersJson` returns it).
+    #[allow(clippy::too_many_arguments)]
+    #[wasm_bindgen(js_name = addAdjustmentLayer)]
+    pub fn add_adjustment_layer(
+        &mut self,
+        name: &str,
+        spec: &str,
+        hue: f32,
+        saturation: f32,
+        brightness: f32,
+        contrast: f32,
+        tone: &[u8],
+        map: &[u8],
+    ) -> u32 {
+        let a = colour_adjust(hue, saturation, brightness, contrast, tone, map);
+        self.inner.add_adjustment_layer(name, a, spec)
+    }
+
+    /// Change an adjustment layer live; `adjustmentCommit` makes it one undo step.
+    #[allow(clippy::too_many_arguments)]
+    #[wasm_bindgen(js_name = adjustmentPreview)]
+    pub fn adjustment_preview(
+        &mut self,
+        id: u32,
+        spec: &str,
+        hue: f32,
+        saturation: f32,
+        brightness: f32,
+        contrast: f32,
+        tone: &[u8],
+        map: &[u8],
+    ) -> bool {
+        let a = colour_adjust(hue, saturation, brightness, contrast, tone, map);
+        self.inner.adjustment_preview(id, a, spec)
+    }
+
+    #[wasm_bindgen(js_name = adjustmentCommit)]
+    pub fn adjustment_commit(&mut self) -> bool {
+        self.inner.adjustment_commit()
+    }
+
+    /// Store a grey picture (`w`×`h` bytes, 255 = paint) as brush texture `id`.
+    #[wasm_bindgen(js_name = setTexture)]
+    pub fn set_texture(&mut self, id: u32, w: u32, h: u32, px: &[u8]) -> bool {
+        self.inner.set_texture(id, w, h, px.to_vec())
+    }
+
+    /// Texture the next strokes (texture ids from `setTexture`; 0 = none): grain
+    /// (canvas px per texel, strength 0–1), a tip picture, and a dual brush
+    /// (its size and scatter as fractions of the brush radius, stamps per dab).
+    #[allow(clippy::too_many_arguments)]
+    #[wasm_bindgen(js_name = setDabStyle)]
+    pub fn set_dab_style(
+        &mut self,
+        grain: u32,
+        grain_scale: f32,
+        grain_strength: f32,
+        tip: u32,
+        dual: u32,
+        dual_size: f32,
+        dual_scatter: f32,
+        dual_count: u32,
+    ) {
+        self.inner.set_dab_style(
+            grain,
+            grain_scale,
+            grain_strength,
+            tip,
+            dual,
+            dual_size,
+            dual_scatter,
+            dual_count,
+        );
     }
 
     /// Preview a gradient from (x0, y0) to (x1, y1), colours sRGB 0–1 with alpha.
@@ -564,6 +643,33 @@ impl PaintCanvas {
         self.inner.select_wand(x, y, tolerance, all_layers, op)
     }
 
+    /// Select every pixel of a similar colour (joined up or not); see `selectWand`.
+    #[wasm_bindgen(js_name = selectColourRange)]
+    pub fn select_colour_range(
+        &mut self,
+        x: u32,
+        y: u32,
+        tolerance: f32,
+        all_layers: bool,
+        op: u8,
+    ) -> bool {
+        self.inner
+            .select_colour_range(x, y, tolerance, all_layers, op)
+    }
+
+    /// New canvas size (one undo step): moved by (dx, dy), or with `scale` resized to fit.
+    #[wasm_bindgen(js_name = resizeCanvas)]
+    pub fn resize_canvas(
+        &mut self,
+        width: u32,
+        height: u32,
+        dx: i32,
+        dy: i32,
+        scale: bool,
+    ) -> bool {
+        self.inner.resize_canvas(width, height, dx, dy, scale)
+    }
+
     #[wasm_bindgen(js_name = selectAll)]
     pub fn select_all(&mut self) {
         self.inner.select_all();
@@ -682,5 +788,49 @@ fn layer_props(
         clip,
         // kept from the layer by the engine
         imported: false,
+        adjust: None,
+        adjust_spec: String::new(),
     }
+}
+
+/// An adjustment from its parts (see `adjustPreview`).
+fn colour_adjust(
+    hue: f32,
+    saturation: f32,
+    brightness: f32,
+    contrast: f32,
+    tone: &[u8],
+    map: &[u8],
+) -> crate::adjust::ColourAdjust {
+    crate::adjust::ColourAdjust {
+        hue,
+        saturation,
+        brightness,
+        contrast,
+        tone: tables(tone),
+        map: colour_table(map),
+        ..Default::default()
+    }
+}
+
+/// 768 bytes → three 256-entry tables (R, G, B); anything else → none.
+pub(crate) fn tables(b: &[u8]) -> Option<[[u8; 256]; 3]> {
+    (b.len() == 768).then(|| {
+        let mut t = [[0u8; 256]; 3];
+        for (i, row) in t.iter_mut().enumerate() {
+            row.copy_from_slice(&b[i * 256..(i + 1) * 256]);
+        }
+        t
+    })
+}
+
+/// 768 bytes → 256 RGB colours; anything else → none.
+pub(crate) fn colour_table(b: &[u8]) -> Option<[[u8; 3]; 256]> {
+    (b.len() == 768).then(|| {
+        let mut t = [[0u8; 3]; 256];
+        for (i, c) in t.iter_mut().enumerate() {
+            c.copy_from_slice(&b[i * 3..i * 3 + 3]);
+        }
+        t
+    })
 }

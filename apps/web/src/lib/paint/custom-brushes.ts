@@ -23,6 +23,8 @@ export interface CustomBrush {
 	/** the built-in brush it starts from */
 	base: string;
 	tweaks: BrushTweaks;
+	/** an imported MyPaint brush's own settings (used instead of `base`'s) */
+	source?: string;
 }
 
 export const isCustom = (id: string) => id.startsWith('my-');
@@ -60,7 +62,8 @@ export function saveCustomBrush(b: Omit<CustomBrush, 'id'> & { id?: string }): C
 		id: b.id && isCustom(b.id) ? b.id : `my-${Date.now().toString(36)}`,
 		name: b.name.trim().slice(0, 40) || 'My brush',
 		base: b.base,
-		tweaks: b.tweaks
+		tweaks: b.tweaks,
+		...(b.source ? { source: b.source } : {})
 	};
 	const list = customBrushes().filter((x) => x.id !== brush.id);
 	store([...list, brush]);
