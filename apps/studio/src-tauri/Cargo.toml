@@ -1,0 +1,26 @@
+[package]
+name = "pencilpilot-studio"
+description = "PencilPilot: the drawing and frame-by-frame animation app"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/InfernalSugar/pencilpilot"
+
+[lib]
+# staticlib / cdylib for the iPad and Android builds, rlib for the desktop binary
+name = "pencilpilot_studio_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+strip = true
