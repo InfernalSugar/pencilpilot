@@ -8,7 +8,7 @@
     "build": "pnpm wasm && pnpm --filter @pencilpilot/web build",
     "lint": "pnpm --filter './packages/*' --filter @pencilpilot/web --filter @pencilpilot/studio lint",
     "check": "pnpm --filter './packages/*' --filter @pencilpilot/web --filter @pencilpilot/studio check",
-    "test": "pnpm --filter './packages/*' test && pnpm --filter @pencilpilot/web test:unit -- --run",
+    "test": "pnpm --filter './packages/*' --filter @pencilpilot/studio test && pnpm --filter @pencilpilot/web test:unit -- --run",
     "wasm:grader": "wasm-pack build crates/grader-wasm --target web --out-dir pkg --out-name grader",
     "wasm:brush": "wasm-pack build crates/brush-wasm --target web --out-dir pkg --out-name brush",
     "refs": "cargo run -q -p ref-importer --",

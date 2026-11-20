@@ -1,4 +1,5 @@
-import { defineConfig, searchForWorkspaceRoot, type Plugin } from 'vite';
+import { defineConfig } from 'vitest/config';
+import { searchForWorkspaceRoot, type Plugin } from 'vite';
 import { sveltekit } from '@sveltejs/kit/vite';
 import adapter from '@sveltejs/adapter-static';
 import { cpSync } from 'node:fs';
@@ -41,6 +42,11 @@ export default defineConfig({
 		watch: { ignored: ['**/src-tauri/**'] }
 	},
 	envPrefix: ['VITE_', 'TAURI_ENV_*'],
+	test: {
+		expect: { requireAssertions: true },
+		environment: 'node',
+		include: ['src/**/*.test.ts']
+	},
 	build: {
 		target: 'safari16',
 		sourcemap: !!process.env.TAURI_ENV_DEBUG
