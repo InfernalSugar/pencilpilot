@@ -1,5 +1,5 @@
 <script lang="ts">
-	import Tile from '#lib/ui/Tile.svelte';
+	import Tile from '@pencilpilot/ui/Tile.svelte';
 
 	const pages = [
 		{

@@ -1,5 +1,5 @@
 <script lang="ts">
-	import Button from '../ui/Button.svelte';
+	import Button from '@pencilpilot/ui/Button.svelte';
 	import { MIN_KEYPOINTS, refKeypoints, type Taps } from '../keypoints';
 	import type { Reference } from '../references';
 

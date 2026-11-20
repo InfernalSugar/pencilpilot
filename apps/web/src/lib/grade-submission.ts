@@ -25,7 +25,7 @@ import {
 } from './references';
 import { keypointPairs } from './keypoints';
 import type { Submission } from './submission';
-import type { Stroke } from './paint/strokes';
+import type { Stroke } from '@pencilpilot/paint/strokes';
 
 /** The skills shown in breakdowns (and stored per attempt), in plain words. */
 export const SKILLS: { name: MeasurementName; label: string; skill: string }[] = [

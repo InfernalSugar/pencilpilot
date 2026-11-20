@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { page } from '$app/state';
-	import Tile from '#lib/ui/Tile.svelte';
+	import Tile from '@pencilpilot/ui/Tile.svelte';
 	import { TIERS, filtered, inCategory, tierOf } from '#lib/references.js';
 	import { topicsFor } from '#lib/topics.js';
 	import { recommendedTier } from '#lib/progress.js';

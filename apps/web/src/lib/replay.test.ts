@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { timeline } from './replay';
-import type { Stroke } from './paint/strokes';
+import type { Stroke } from '@pencilpilot/paint/strokes';
 
 const s = (ts: number[]): Stroke => ({
 	brushId: 'b',

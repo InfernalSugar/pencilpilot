@@ -2,11 +2,14 @@
 	import { onMount } from 'svelte';
 	import { warmGrader } from '../grader';
 	import { page } from '$app/state';
-	import Tile from '#lib/ui/Tile.svelte';
-	import Button from '#lib/ui/Button.svelte';
-	import PaintCanvas, { type CanvasStatus, BLANK_STATUS } from '#lib/paint/PaintCanvas.svelte';
-	import Studio from '#lib/paint/Studio.svelte';
-	import ToolRail from '#lib/paint/ToolRail.svelte';
+	import Tile from '@pencilpilot/ui/Tile.svelte';
+	import Button from '@pencilpilot/ui/Button.svelte';
+	import PaintCanvas, {
+		type CanvasStatus,
+		BLANK_STATUS
+	} from '@pencilpilot/paint/PaintCanvas.svelte';
+	import Studio from '@pencilpilot/paint/Studio.svelte';
+	import ToolRail from '@pencilpilot/paint/ToolRail.svelte';
 	import {
 		DRILL_BRUSHES,
 		SKILL_NAMES,

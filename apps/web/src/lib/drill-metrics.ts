@@ -14,7 +14,7 @@
  * Each is turned into a 0–1 score with a fixed, documented tolerance, then blended
  * with the grader's 1–10 score in `roundScore`.
  */
-import type { Stroke, StrokePoint } from './paint/strokes';
+import type { Stroke, StrokePoint } from '@pencilpilot/paint/strokes';
 import type { Pt } from './drills';
 
 const clamp01 = (v: number) => Math.min(1, Math.max(0, v));

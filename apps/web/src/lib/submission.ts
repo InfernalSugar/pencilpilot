@@ -1,4 +1,4 @@
-import type { Stroke } from './paint/strokes';
+import type { Stroke } from '@pencilpilot/paint/strokes';
 import type { Reference, TraceTransform } from './references';
 
 /** The last submitted drawing, handed from /draw to /results for this browser tab. */

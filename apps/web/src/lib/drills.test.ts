@@ -18,7 +18,7 @@ import {
 	strokeAngle,
 	taperMetrics
 } from './drill-metrics';
-import type { Stroke } from './paint/strokes';
+import type { Stroke } from '@pencilpilot/paint/strokes';
 
 const rulesToml = readFileSync(
 	new URL('../../../../content/feedback/rules.toml', import.meta.url),

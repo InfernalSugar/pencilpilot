@@ -91,6 +91,7 @@ colour flats and lip-sync are free (local).
 - **S0-T01** ADR-0010 / ADR-0011 accepted; the name, platforms order and BYOK-vs-credits decided `infra` `legal`
 - **S0-T02** Split the engine: `crates/brush` (pure Rust) + `crates/brush-wasm` (bindings); native build and tests `brush` `infra`
 - **S0-T03** Move the design system and studio components into `packages/ui` and `packages/paint`; the website keeps passing every test `design` `infra`
+  ✅ `@pencilpilot/ui` (theme, Button, Logo, Tile) and `@pencilpilot/paint` (the whole studio, plus the tracing and grayscale helpers it used from the site). The site imports them; root lint / check / test cover both packages.
 - **S0-T04** Tauri 2 spike: the studio running natively on Windows, macOS and Linux, plus an iPad and Android build `app` `infra`
 - **S0-T05** Native pen input spike: pressure, tilt and barrel button, latency budget (<16 ms), palm rejection on tablets `app`
 - **S0-T06** CI for the app: build matrix, Rust + UI tests, nightly artifacts `infra`

@@ -3,8 +3,8 @@
 	import { dev } from '$app/env';
 	import { setScore } from '#lib/history.js';
 	import { page } from '$app/state';
-	import Tile from '#lib/ui/Tile.svelte';
-	import Button from '#lib/ui/Button.svelte';
+	import Tile from '@pencilpilot/ui/Tile.svelte';
+	import Button from '@pencilpilot/ui/Button.svelte';
 	import OverlayViewer, { type OverlayMode } from '#lib/results/OverlayViewer.svelte';
 	import ScoreReveal from '#lib/results/ScoreReveal.svelte';
 	import { loadSubmission, saveSubmission, type Submission } from '#lib/submission.js';

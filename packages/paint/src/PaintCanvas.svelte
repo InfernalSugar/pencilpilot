@@ -123,7 +123,7 @@
 		type GuideSettings,
 		type Pt
 	} from './guides';
-	import { toGray } from '../grader';
+	import { toGray } from './pixels';
 	import { boxToQuad, usableQuad, type Quad } from './homography';
 	import { meshLines, meshNodes, WARP_N } from './warp';
 	import { editable, moveHandle, shapeHandles, shapePath, type EditShape } from './shape-edit';

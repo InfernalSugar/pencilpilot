@@ -3,7 +3,7 @@ import { gradeImages, measurement, toGray } from './grader';
 import { referencePixels, type Reference } from './references';
 import { lineMetrics, roundScore, type LineMetrics } from './drill-metrics';
 import type { Drill, DrillTarget } from './drills';
-import type { DrawingExport } from './paint/PaintCanvas.svelte';
+import type { DrawingExport } from '@pencilpilot/paint/PaintCanvas.svelte';
 
 /** Render an SVG string onto a white w×h canvas and return grayscale bytes for the grader. */
 export async function svgGray(svg: string, w: number, h: number): Promise<Uint8Array> {

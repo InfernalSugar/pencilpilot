@@ -1,31 +1,37 @@
 <script lang="ts">
-	import Studio from '#lib/paint/Studio.svelte';
-	import ToolRail, { SELECT_TOOLS } from '#lib/paint/ToolRail.svelte';
-	import Swatches from '#lib/paint/Swatches.svelte';
+	import Studio from '@pencilpilot/paint/Studio.svelte';
+	import ToolRail, { SELECT_TOOLS } from '@pencilpilot/paint/ToolRail.svelte';
+	import Swatches from '@pencilpilot/paint/Swatches.svelte';
 	import { onMount } from 'svelte';
 	import { warmGrader } from '#lib/grader.js';
 	import { beforeNavigate, goto, replaceState } from '$app/navigation';
 	import { page } from '$app/state';
-	import Tile from '#lib/ui/Tile.svelte';
-	import Button from '#lib/ui/Button.svelte';
+	import Tile from '@pencilpilot/ui/Tile.svelte';
+	import Button from '@pencilpilot/ui/Button.svelte';
 	import PaintCanvas, {
 		BLANK_STATUS,
 		type CanvasStatus,
 		type ImportResult
-	} from '#lib/paint/PaintCanvas.svelte';
-	import LayersPanel from '#lib/paint/LayersPanel.svelte';
-	import ToneEditor from '#lib/paint/ToneEditor.svelte';
-	import BrushTexturePanel from '#lib/paint/BrushTexturePanel.svelte';
-	import QuickMenu, { type QuickAction } from '#lib/paint/QuickMenu.svelte';
-	import TimelapsePlayer from '#lib/paint/TimelapsePlayer.svelte';
-	import { brushTexture, onTextures, textureOn } from '#lib/paint/brush-textures.js';
-	import { MAP_PRESETS, NO_SPEC, parseSpec, specName, type AdjustSpec } from '#lib/paint/tone.js';
-	import CanvasSizePicker from '#lib/paint/CanvasSizePicker.svelte';
-	import RefViewer from '#lib/paint/RefViewer.svelte';
-	import HistoryPanel from '#lib/paint/HistoryPanel.svelte';
+	} from '@pencilpilot/paint/PaintCanvas.svelte';
+	import LayersPanel from '@pencilpilot/paint/LayersPanel.svelte';
+	import ToneEditor from '@pencilpilot/paint/ToneEditor.svelte';
+	import BrushTexturePanel from '@pencilpilot/paint/BrushTexturePanel.svelte';
+	import QuickMenu, { type QuickAction } from '@pencilpilot/paint/QuickMenu.svelte';
+	import TimelapsePlayer from '@pencilpilot/paint/TimelapsePlayer.svelte';
+	import { brushTexture, onTextures, textureOn } from '@pencilpilot/paint/brush-textures';
+	import {
+		MAP_PRESETS,
+		NO_SPEC,
+		parseSpec,
+		specName,
+		type AdjustSpec
+	} from '@pencilpilot/paint/tone';
+	import CanvasSizePicker from '@pencilpilot/paint/CanvasSizePicker.svelte';
+	import RefViewer from '@pencilpilot/paint/RefViewer.svelte';
+	import HistoryPanel from '@pencilpilot/paint/HistoryPanel.svelte';
 	import { gradable, gradeSubmission } from '#lib/grade-submission.js';
 	import { addToSession, clockOf, startSession, timeLabel } from '#lib/timed.js';
-	import ColorPanel, { rememberColor } from '#lib/paint/ColorPanel.svelte';
+	import ColorPanel, { rememberColor } from '@pencilpilot/paint/ColorPanel.svelte';
 	import {
 		anyGuide,
 		defaultGuides,
@@ -33,16 +39,19 @@
 		SYMMETRY_MODES,
 		symmetryOn,
 		type GuideSettings
-	} from '#lib/paint/guides.js';
-	import TracePanel, { TRACE_DEFAULTS, type TraceState } from '#lib/paint/TracePanel.svelte';
-	import { savedSize, saveSize, type CanvasSize } from '#lib/paint/canvas-size.js';
-	import BrushPicker from '#lib/paint/BrushPicker.svelte';
+	} from '@pencilpilot/paint/guides';
+	import TracePanel, {
+		TRACE_DEFAULTS,
+		type TraceState
+	} from '@pencilpilot/paint/TracePanel.svelte';
+	import { savedSize, saveSize, type CanvasSize } from '@pencilpilot/paint/canvas-size';
+	import BrushPicker from '@pencilpilot/paint/BrushPicker.svelte';
 	import {
 		DEFAULT_BRUSH,
 		brushLabel,
 		loadManifest,
 		type BrushManifest
-	} from '#lib/paint/brushes.js';
+	} from '@pencilpilot/paint/brushes';
 	import { categories } from '#lib/categories.js';
 	import { loadSubmission, saveSubmission, type Submission } from '#lib/submission.js';
 	import { ownReference } from '#lib/own-picture.js';
@@ -1040,7 +1049,7 @@
 		try {
 			const doc = canvas?.exportLayered();
 			if (!doc) return;
-			const { writePsd } = await import('#lib/paint/psd.js');
+			const { writePsd } = await import('@pencilpilot/paint/psd');
 			const bytes = writePsd(doc);
 			download(
 				new Blob([bytes as BlobPart], { type: 'image/vnd.adobe.photoshop' }),

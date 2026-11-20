@@ -1,16 +1,24 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import Tile from '../ui/Tile.svelte';
-	import Button from '../ui/Button.svelte';
-	import PaintCanvas, { BLANK_STATUS, type CanvasStatus } from '../paint/PaintCanvas.svelte';
-	import RefViewer from '../paint/RefViewer.svelte';
-	import Studio from '../paint/Studio.svelte';
-	import ToolRail from '../paint/ToolRail.svelte';
-	import Swatches from '../paint/Swatches.svelte';
-	import BrushPicker from '../paint/BrushPicker.svelte';
-	import ColorPanel from '../paint/ColorPanel.svelte';
-	import LayersPanel from '../paint/LayersPanel.svelte';
-	import { DEFAULT_BRUSH, brushLabel, loadManifest, type BrushManifest } from '../paint/brushes';
+	import Tile from '@pencilpilot/ui/Tile.svelte';
+	import Button from '@pencilpilot/ui/Button.svelte';
+	import PaintCanvas, {
+		BLANK_STATUS,
+		type CanvasStatus
+	} from '@pencilpilot/paint/PaintCanvas.svelte';
+	import RefViewer from '@pencilpilot/paint/RefViewer.svelte';
+	import Studio from '@pencilpilot/paint/Studio.svelte';
+	import ToolRail from '@pencilpilot/paint/ToolRail.svelte';
+	import Swatches from '@pencilpilot/paint/Swatches.svelte';
+	import BrushPicker from '@pencilpilot/paint/BrushPicker.svelte';
+	import ColorPanel from '@pencilpilot/paint/ColorPanel.svelte';
+	import LayersPanel from '@pencilpilot/paint/LayersPanel.svelte';
+	import {
+		DEFAULT_BRUSH,
+		brushLabel,
+		loadManifest,
+		type BrushManifest
+	} from '@pencilpilot/paint/brushes';
 	import { gradeImages, toGray, type GradeCategory } from '../grader';
 	import { referencePixels } from '../references';
 	import { clockOf } from '../timed';

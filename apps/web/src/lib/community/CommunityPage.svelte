@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
-	import Tile from '#lib/ui/Tile.svelte';
-	import Button from '#lib/ui/Button.svelte';
+	import Tile from '@pencilpilot/ui/Tile.svelte';
+	import Button from '@pencilpilot/ui/Button.svelte';
 	import CommunityNav from './CommunityNav.svelte';
 	import { imageUrl, titleOf } from '#lib/references.js';
 	import RefCredit from '#lib/RefCredit.svelte';

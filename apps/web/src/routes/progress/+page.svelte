@@ -2,8 +2,8 @@
 	import { timeLabel } from '#lib/timed.js';
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
-	import Tile from '#lib/ui/Tile.svelte';
-	import Button from '#lib/ui/Button.svelte';
+	import Tile from '@pencilpilot/ui/Tile.svelte';
+	import Button from '@pencilpilot/ui/Button.svelte';
 	import {
 		attempts,
 		averageScore,

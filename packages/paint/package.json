@@ -1,0 +1,40 @@
+{
+	"name": "@pencilpilot/paint",
+	"version": "0.0.1",
+	"private": true,
+	"type": "module",
+	"description": "PencilPilot studio: the canvas, tools, panels and their logic, shared by the website and the app",
+	"exports": {
+		"./*.svelte": "./src/*.svelte",
+		"./*": "./src/*.ts"
+	},
+	"scripts": {
+		"check": "svelte-check --tsconfig ./tsconfig.json",
+		"lint": "prettier --check . && eslint .",
+		"format": "prettier --write .",
+		"test": "vitest --run"
+	},
+	"peerDependencies": {
+		"svelte": "^5"
+	},
+	"dependencies": {
+		"pencilpilot-brush-wasm": "workspace:*"
+	},
+	"devDependencies": {
+		"@eslint/js": "^10.0.1",
+		"@sveltejs/vite-plugin-svelte": "^7.3.1",
+		"@types/node": "^26",
+		"eslint": "^10.15.0",
+		"eslint-config-prettier": "^10.1.8",
+		"eslint-plugin-svelte": "^3.24.1",
+		"globals": "^17.14.0",
+		"prettier": "^3.10.1",
+		"prettier-plugin-svelte": "^4.1.1",
+		"svelte": "^5.57.3",
+		"svelte-check": "^4.7.8",
+		"typescript": "^6.0.3",
+		"typescript-eslint": "^8.72.2",
+		"vite": "^8.3.8",
+		"vitest": "^5.1.0"
+	}
+}

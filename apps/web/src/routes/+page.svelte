@@ -2,8 +2,8 @@
 	import { dailyReference, dayOf } from '#lib/daily.js';
 	import { imageUrl, titleOf } from '#lib/references.js';
 	const todayRef = dailyReference(dayOf());
-	import Tile from '#lib/ui/Tile.svelte';
-	import Button from '#lib/ui/Button.svelte';
+	import Tile from '@pencilpilot/ui/Tile.svelte';
+	import Button from '@pencilpilot/ui/Button.svelte';
 	import { onMount } from 'svelte';
 	import { categories } from '#lib/categories.js';
 	import { liveAvailable } from '#lib/live.js';

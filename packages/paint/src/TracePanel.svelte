@@ -1,5 +1,5 @@
 <script lang="ts" module>
-	import type { TraceTransform } from '../references';
+	import type { TraceTransform } from './trace';
 
 	export interface TraceState extends TraceTransform {
 		source: 'reference' | 'own';
@@ -23,7 +23,7 @@
 </script>
 
 <script lang="ts">
-	import { loadOwnPicture } from '../references';
+	import { loadOwnPicture } from './trace';
 
 	let {
 		trace = $bindable(),
