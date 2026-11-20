@@ -3,7 +3,7 @@
 	import { Replayer, findMoments, timeline, type Timeline } from '../replay';
 	import { toGray } from '../grader';
 	import type { Submission } from '../submission';
-	import type { Stroke } from '../paint/strokes';
+	import type { Stroke } from '@pencilpilot/paint/strokes';
 
 	let {
 		sub,

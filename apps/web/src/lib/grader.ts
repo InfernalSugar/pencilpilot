@@ -1,5 +1,5 @@
 import init, { feedback as wasmFeedback, grade, defaultWeights } from 'pencilpilot-grader-wasm';
-import type { Stroke } from './paint/strokes';
+import type { Stroke } from '@pencilpilot/paint/strokes';
 
 /** Category ids, same as `categories.ts`. */
 export type GradeCategory = 'anime' | 'real-life' | 'animals' | 'environment' | 'fundamentals';
@@ -255,16 +255,7 @@ export function measurement(g: Grade, name: MeasurementName): number | undefined
 	return g.measurements.find((m) => m.name === name)?.value;
 }
 
-/** Convert RGBA canvas pixels to grayscale bytes (luma, transparent = white). */
-export function toGray(rgba: Uint8ClampedArray): Uint8Array {
-	const out = new Uint8Array(rgba.length / 4);
-	for (let i = 0; i < out.length; i++) {
-		const [r, g, b, a] = [rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2], rgba[i * 4 + 3] / 255];
-		const luma = 0.299 * r + 0.587 * g + 0.114 * b;
-		out[i] = Math.round(luma * a + 255 * (1 - a));
-	}
-	return out;
-}
+export { toGray } from '@pencilpilot/paint/pixels';
 
 /** One tip from the feedback engine (crates/feedback, content/feedback/*.toml). */
 export interface FeedbackItem {

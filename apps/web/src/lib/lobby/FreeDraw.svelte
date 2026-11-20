@@ -1,18 +1,23 @@
 <script lang="ts">
-	import Tile from '../ui/Tile.svelte';
-	import Button from '../ui/Button.svelte';
+	import Tile from '@pencilpilot/ui/Tile.svelte';
+	import Button from '@pencilpilot/ui/Button.svelte';
 	import PaintCanvas, {
 		BLANK_STATUS,
 		type CanvasStatus,
 		type LiveEvent
-	} from '../paint/PaintCanvas.svelte';
-	import RefViewer from '../paint/RefViewer.svelte';
-	import Studio from '../paint/Studio.svelte';
-	import ToolRail from '../paint/ToolRail.svelte';
-	import Swatches from '../paint/Swatches.svelte';
-	import BrushPicker from '../paint/BrushPicker.svelte';
-	import ColorPanel from '../paint/ColorPanel.svelte';
-	import { DEFAULT_BRUSH, brushLabel, loadManifest, type BrushManifest } from '../paint/brushes';
+	} from '@pencilpilot/paint/PaintCanvas.svelte';
+	import RefViewer from '@pencilpilot/paint/RefViewer.svelte';
+	import Studio from '@pencilpilot/paint/Studio.svelte';
+	import ToolRail from '@pencilpilot/paint/ToolRail.svelte';
+	import Swatches from '@pencilpilot/paint/Swatches.svelte';
+	import BrushPicker from '@pencilpilot/paint/BrushPicker.svelte';
+	import ColorPanel from '@pencilpilot/paint/ColorPanel.svelte';
+	import {
+		DEFAULT_BRUSH,
+		brushLabel,
+		loadManifest,
+		type BrushManifest
+	} from '@pencilpilot/paint/brushes';
 	import { onMount } from 'svelte';
 	import { pickRefs } from './refs';
 	import RefCredit from '../RefCredit.svelte';

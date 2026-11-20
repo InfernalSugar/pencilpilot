@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import Tile from '#lib/ui/Tile.svelte';
+	import Tile from '@pencilpilot/ui/Tile.svelte';
 	import { drillsBySkill, loadDrillResults, seeded } from '#lib/drills.js';
 
 	const groups = drillsBySkill();

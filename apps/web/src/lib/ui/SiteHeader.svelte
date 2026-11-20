@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { page } from '$app/state';
-	import Logo from './Logo.svelte';
+	import Logo from '@pencilpilot/ui/Logo.svelte';
 
 	let {
 		user,

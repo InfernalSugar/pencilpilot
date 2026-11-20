@@ -4,7 +4,7 @@
  * layers (pixels as PNG, masks, groups, settings), strokes and reference.
  */
 import type { Reference } from './references';
-import type { Stroke } from './paint/strokes';
+import type { Stroke } from '@pencilpilot/paint/strokes';
 
 export const HISTORY_SIZE = 10;
 

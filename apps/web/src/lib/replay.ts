@@ -8,8 +8,8 @@ import {
 	loadEngine,
 	PaintCanvas,
 	type PaintBrush
-} from './paint/brushes';
-import type { Stroke } from './paint/strokes';
+} from '@pencilpilot/paint/brushes';
+import type { Stroke } from '@pencilpilot/paint/strokes';
 
 export interface ReplayLayer {
 	id: number;

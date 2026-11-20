@@ -2,7 +2,7 @@
 	import { enhance } from '$app/forms';
 	import { page } from '$app/state';
 	import AuthCard from '#lib/ui/AuthCard.svelte';
-	import Button from '#lib/ui/Button.svelte';
+	import Button from '@pencilpilot/ui/Button.svelte';
 	import GoogleButton from '#lib/ui/GoogleButton.svelte';
 	import type { PageProps } from './$types';
 

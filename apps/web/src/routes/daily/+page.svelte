@@ -1,8 +1,8 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { page } from '$app/state';
-	import Tile from '#lib/ui/Tile.svelte';
-	import Button from '#lib/ui/Button.svelte';
+	import Tile from '@pencilpilot/ui/Tile.svelte';
+	import Button from '@pencilpilot/ui/Button.svelte';
 	import { dailyReference, dailyUrl, dayOf, msToNextDay, percentile } from '#lib/daily.js';
 	import { imageUrl, tierName, tierOf, titleOf } from '#lib/references.js';
 	import { categories } from '#lib/categories.js';

@@ -1,9 +1,9 @@
 <script lang="ts">
-	import Tile from '../ui/Tile.svelte';
-	import Button from '../ui/Button.svelte';
+	import Tile from '@pencilpilot/ui/Tile.svelte';
+	import Button from '@pencilpilot/ui/Button.svelte';
 	import { categories } from '../categories';
 	import { TIERS } from '../references';
-	import { CANVAS_PRESETS } from '../paint/canvas-size';
+	import { CANVAS_PRESETS } from '@pencilpilot/paint/canvas-size';
 	import { pickRefs } from './refs';
 	import type { ClientMsg, LobbySettings, LobbyView } from './protocol';
 

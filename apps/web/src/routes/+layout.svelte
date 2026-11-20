@@ -1,5 +1,5 @@
 <script lang="ts">
-	import '#lib/ui/theme.css';
+	import '@pencilpilot/ui/theme.css';
 	import favicon from '#lib/assets/favicon.svg';
 	import SiteHeader from '#lib/ui/SiteHeader.svelte';
 	import { setSignedIn, syncNow } from '#lib/sync.js';

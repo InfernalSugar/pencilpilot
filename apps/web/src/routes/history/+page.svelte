@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import Button from '#lib/ui/Button.svelte';
+	import Button from '@pencilpilot/ui/Button.svelte';
 	import {
 		HISTORY_SIZE,
 		deleteDrawing,
@@ -9,7 +9,7 @@
 		pngToRgba,
 		type SavedDrawing
 	} from '#lib/history.js';
-	import type { PsdGroup, PsdLayer } from '#lib/paint/psd.js';
+	import type { PsdGroup, PsdLayer } from '@pencilpilot/paint/psd';
 
 	let drawings = $state<SavedDrawing[]>([]);
 	let loaded = $state(false);
@@ -59,7 +59,7 @@
 		busy = d.id;
 		try {
 			const { width: w, height: h } = d;
-			const { writePsd } = await import('#lib/paint/psd.js');
+			const { writePsd } = await import('@pencilpilot/paint/psd');
 			const items: (PsdLayer | PsdGroup)[] = [];
 			let open = null as { id: number; folder: PsdGroup } | null;
 			for (const l of d.layers) {
