@@ -94,7 +94,9 @@ colour flats and lip-sync are free (local).
 - **S0-T03** Move the design system and studio components into `packages/ui` and `packages/paint`; the website keeps passing every test `design` `infra`
   ✅ `@pencilpilot/ui` (theme, Button, Logo, Tile) and `@pencilpilot/paint` (the whole studio, plus the tracing and grayscale helpers it used from the site). The site imports them; root lint / check / test cover both packages.
 - **S0-T04** Tauri 2 spike: the studio running natively on Windows, macOS and Linux, plus an iPad and Android build `app` `infra`
+  🟡 `apps/studio`: Tauri 2 + SvelteKit (single-page) with the shared studio; runs and packages on Linux (`.deb`, 4.2 MB). Windows / macOS builds come with CI (S0-T06); iPad / Android builds need Xcode and the Android SDK.
 - **S0-T05** Native pen input spike: pressure, tilt and barrel button, latency budget (<16 ms), palm rejection on tablets `app`
+  🟡 The app's **Pen test** page measures pressure levels, tilt, twist, buttons, sample rate (with coalesced events) and event delay; results per system to be recorded here.
 - **S0-T06** CI for the app: build matrix, Rust + UI tests, nightly artifacts `infra`
 
 ## S1 — The app shell, same UI (≈3 weeks)
