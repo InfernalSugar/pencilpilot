@@ -70,9 +70,12 @@
 </script>
 
 <script lang="ts">
+	import { harmony, HARMONIES, type Harmony } from './harmony';
+
 	let { color = $bindable(), onclose }: { color: string; onclose: () => void } = $props();
 
 	let hsv = $state(hexToHsv(color));
+	let harmonyKind = $state<Harmony>('complementary');
 	let hex = $state(color);
 	let recents = $state(load(RECENTS));
 	let mine = $state(load(MINE));
@@ -167,6 +170,19 @@
 			oninput={(e) => set(+e.currentTarget.value, hsv[1] || 0.8, hsv[2] || 0.8)}
 		/>
 	</label>
+
+	<div class="label row">
+		<span>Harmony</span>
+		<select
+			class="mini harmony-kind"
+			bind:value={harmonyKind}
+			aria-label="Colour harmony"
+			title={HARMONIES.find((h) => h.id === harmonyKind)?.hint}
+		>
+			{#each HARMONIES as h (h.id)}<option value={h.id}>{h.name}</option>{/each}
+		</select>
+	</div>
+	<div data-testid="harmony">{@render swatches(harmony(color, harmonyKind))}</div>
 
 	{#if recents.length}
 		<p class="label">Recent</p>

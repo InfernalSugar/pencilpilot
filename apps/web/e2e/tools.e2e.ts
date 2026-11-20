@@ -26,25 +26,27 @@ async function zigzag(page: Page, y: number, amp = 0.06) {
 	await page.mouse.up();
 }
 
-/** ink pixels and the ink's height, inside a band of rows */
-const band = (page: Page, y0: number, y1: number) =>
+/** ink pixels and the ink's height, inside a band of rows (and columns x0–x1) */
+const band = (page: Page, y0: number, y1: number, x0 = 0, x1 = 1) =>
 	canvas(page).evaluate(
-		(c: HTMLCanvasElement, [y0, y1]) => {
+		(c: HTMLCanvasElement, [y0, y1, x0, x1]) => {
 			const top = Math.round(c.height * y0);
 			const h = Math.round(c.height * (y1 - y0));
-			const d = c.getContext('2d')!.getImageData(0, top, c.width, h).data;
+			const left = Math.round(c.width * x0);
+			const w = Math.max(1, Math.round(c.width * (x1 - x0)));
+			const d = c.getContext('2d')!.getImageData(left, top, w, h).data;
 			let [n, lo, hi, red] = [0, h, 0, 0];
 			for (let i = 0; i < d.length; i += 4)
 				if (d[i] < 225 || d[i + 1] < 225) {
 					n++;
-					const row = Math.floor(i / 4 / c.width);
+					const row = Math.floor(i / 4 / w);
 					lo = Math.min(lo, row);
 					hi = Math.max(hi, row);
 					if (d[i] > d[i + 1] + 40) red++;
 				}
 			return { n, height: n ? hi - lo : 0, red };
 		},
-		[y0, y1]
+		[y0, y1, x0, x1]
 	);
 
 test('eyedropper: the tool and Alt+click pick colours from the drawing', async ({ page }) => {
@@ -93,10 +95,12 @@ test('eyedropper: the tool and Alt+click pick colours from the drawing', async (
 test('smoothing steadies a wobbly line and still reaches the end', async ({ page }) => {
 	await ready(page);
 	await zigzag(page, 0.3);
-	const raw = await band(page, 0.15, 0.45);
+	// measured away from the ends: the smoothed line's catch-up to where the pointer
+	// stopped is meant to swing out, and how far depends on the brush width
+	const raw = await band(page, 0.15, 0.45, 0.3, 0.65);
 	await page.getByLabel(/^Smoothing/).fill('0.9');
 	await zigzag(page, 0.7);
-	const smooth = await band(page, 0.55, 0.85);
+	const smooth = await band(page, 0.55, 0.85, 0.3, 0.65);
 	expect(smooth.height).toBeLessThan(raw.height * 0.6);
 	// the catch-up carries the line on to where the pointer stopped (x 0.83 of the width)
 	// (the last dabs land a frame later)

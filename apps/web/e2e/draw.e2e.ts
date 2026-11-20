@@ -458,3 +458,49 @@ test('a category with no pictures yet waits for the picture service instead of g
 	});
 	await expect(page.getByText(/references yet/)).toHaveCount(0);
 });
+
+test('Shift+click draws a straight line from where the last stroke ended', async ({ page }) => {
+	await page.goto('/draw');
+	const c = page.getByLabel(/Drawing canvas/);
+	await expect(c).toHaveAttribute('data-ready', 'true', { timeout: 15_000 });
+	await c.scrollIntoViewIfNeeded();
+	const b = (await c.boundingBox())!;
+	const at = (fx: number, fy: number) => [b.x + b.width * fx, b.y + b.height * fy] as const;
+	/** ink in a small square around a point given as fractions of the canvas */
+	const inkNear = (fx: number, fy: number) =>
+		c.evaluate(
+			(el: HTMLCanvasElement, [fx, fy]) => {
+				const x = Math.round(el.width * fx);
+				const y = Math.round(el.height * fy);
+				const d = el.getContext('2d')!.getImageData(x - 4, y - 4, 9, 9).data;
+				let n = 0;
+				for (let i = 0; i < d.length; i += 4) if (d[i] < 200) n++;
+				return n;
+			},
+			[fx, fy]
+		);
+
+	// a short stroke ending at (0.2, 0.3)
+	await page.mouse.move(...at(0.15, 0.3));
+	await page.mouse.down();
+	await page.mouse.move(...at(0.2, 0.3), { steps: 5 });
+	await page.mouse.up();
+	await expect.poll(() => inkNear(0.5, 0.6)).toBe(0);
+
+	// Shift held: a preview line follows the pointer
+	await page.keyboard.down('Shift');
+	await page.mouse.move(...at(0.8, 0.9), { steps: 3 });
+	await expect(page.getByTestId('line-preview')).toBeVisible();
+	await page.mouse.down();
+	await page.mouse.up();
+	await page.keyboard.up('Shift');
+	await expect(page.getByTestId('line-preview')).toHaveCount(0);
+	// the midpoint of (0.2, 0.3) → (0.8, 0.9) is inked: a straight line joined them
+	await expect.poll(() => inkNear(0.5, 0.6)).toBeGreaterThan(0);
+	await expect.poll(() => inkNear(0.35, 0.45)).toBeGreaterThan(0);
+
+	// and it's one undo step
+	await page.getByRole('button', { name: /Undo/ }).click();
+	await expect.poll(() => inkNear(0.5, 0.6)).toBe(0);
+	expect(await inkNear(0.18, 0.3)).toBeGreaterThan(0);
+});

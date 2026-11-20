@@ -44,6 +44,16 @@ impl PaintBrush {
         self.inner.get_mut(BrushSetting::OpaqueMultiply).base_value = opacity.clamp(0.0, 1.0);
     }
 
+    /// The brush's base radius in canvas pixels at its current size (for the
+    /// brush outline cursor). Pressure and other inputs can still vary a dab.
+    pub fn radius(&self) -> f32 {
+        self.inner
+            .get(BrushSetting::Radius)
+            .base_value
+            .exp()
+            .clamp(0.2, 1000.0)
+    }
+
     /// Turn this brush into an eraser (keeps its shape and texture).
     #[wasm_bindgen(js_name = setEraser)]
     pub fn set_eraser(&mut self, on: bool) {
@@ -422,9 +432,27 @@ impl PaintCanvas {
         all_layers: bool,
         grow: u32,
         gap: u32,
+        reference_layer: u32,
     ) -> bool {
-        self.inner
-            .fill(x, y, [r, g, b], opacity, tolerance, all_layers, grow, gap)
+        // 0 = no reference layer (layer ids start at 1)
+        let reference = (reference_layer != 0).then_some(reference_layer);
+        self.inner.fill_from(
+            x,
+            y,
+            [r, g, b],
+            opacity,
+            tolerance,
+            all_layers,
+            grow,
+            gap,
+            reference,
+        )
+    }
+
+    /// Paint a coverage mask (one byte per canvas pixel) in this colour: the lasso fill.
+    #[wasm_bindgen(js_name = fillMask)]
+    pub fn fill_mask(&mut self, coverage: &[u8], r: u8, g: u8, b: u8, opacity: f32) -> bool {
+        self.inner.fill_mask(coverage, [r, g, b], opacity)
     }
 
     // ---- symmetry ----
@@ -477,6 +505,22 @@ impl PaintCanvas {
         self.inner.transform_preview([a, b, c, d, e, f])
     }
 
+    /// Preview with a projective matrix (row-major 3×3): distort and perspective.
+    #[wasm_bindgen(js_name = transformPreviewH)]
+    pub fn transform_preview_h(&mut self, h: &[f32]) -> bool {
+        let Ok(h) = <[f32; 9]>::try_from(h) else {
+            return false;
+        };
+        self.inner.transform_preview_h(h)
+    }
+
+    /// Warp: `nodes` are (x, y) pairs for a (cols+1)×(rows+1) grid over the lifted box.
+    #[wasm_bindgen(js_name = transformPreviewMesh)]
+    pub fn transform_preview_mesh(&mut self, nodes: &[f32], cols: u32, rows: u32) -> bool {
+        self.inner
+            .transform_preview_mesh(nodes, cols as usize, rows as usize)
+    }
+
     #[wasm_bindgen(js_name = transformCommit)]
     pub fn transform_commit(&mut self) -> bool {
         self.inner.transform_commit()
@@ -496,6 +540,12 @@ impl PaintCanvas {
 
     /// Set the selection from a canvas-sized mask (byte > 127 = selected);
     /// `op`: 0 replace, 1 add, 2 subtract, 3 intersect.
+    /// Soften the selection's edge over about `radius` px.
+    #[wasm_bindgen(js_name = featherSelection)]
+    pub fn feather_selection(&mut self, radius: f32) -> bool {
+        self.inner.feather_selection(radius)
+    }
+
     #[wasm_bindgen(js_name = setSelection)]
     pub fn set_selection(&mut self, mask: &[u8], op: u8) -> bool {
         self.inner.set_selection(mask, op)

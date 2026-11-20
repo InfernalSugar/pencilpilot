@@ -94,4 +94,30 @@ describe('StrokeLog batch', () => {
 		expect(log.undo() && log.undo() && log.undo()).toBe(true);
 		expect(log.strokes).toHaveLength(0);
 	});
+
+	it('names each step for the history panel', () => {
+		const log = new StrokeLog();
+		log.add(s('a'));
+		log.add({ ...s('b'), eraser: true });
+		log.layerChange();
+		log.labelLast('Fill');
+		log.clear(1);
+		expect(log.history()).toEqual({
+			undo: ['Brush stroke', 'Eraser', 'Fill', 'Clear layer'],
+			redo: []
+		});
+		log.undo();
+		log.undo();
+		// redo lists the next step first
+		expect(log.history()).toEqual({
+			undo: ['Brush stroke', 'Eraser'],
+			redo: ['Fill', 'Clear layer']
+		});
+		log.batch(() => {
+			log.layerChange();
+			log.labelLast('Gradient');
+		});
+		// a batch takes its first action's name; the step before it keeps its own
+		expect(log.history().undo).toEqual(['Brush stroke', 'Eraser', 'Gradient']);
+	});
 });

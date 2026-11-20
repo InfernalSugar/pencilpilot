@@ -21,14 +21,35 @@ export interface Stroke {
 	points: StrokePoint[];
 }
 
-type Action =
+type Action = (
 	| { kind: 'stroke'; stroke: Stroke }
 	| { kind: 'clear'; layer: number; removed: Stroke[] }
 	| { kind: 'merge'; from: number; to: number; moved: Stroke[] }
 	/** add / delete / move / settings: no strokes change, but it's an undo step */
 	| { kind: 'layer' }
 	/** several of the above as one engine undo step */
-	| { kind: 'batch'; actions: Action[] };
+	| { kind: 'batch'; actions: Action[] }
+) & {
+	/** what the history panel calls this step */
+	label?: string;
+};
+
+/** The history panel's name for an action without its own label. */
+function labelOf(a: Action): string {
+	if (a.label) return a.label;
+	switch (a.kind) {
+		case 'stroke':
+			return a.stroke.eraser ? 'Eraser' : 'Brush stroke';
+		case 'clear':
+			return 'Clear layer';
+		case 'merge':
+			return 'Merge down';
+		case 'batch':
+			return a.actions[0] ? labelOf(a.actions[0]) : 'Change';
+		default:
+			return 'Layer change';
+	}
+}
 
 /**
  * Mirrors the paint engine's undo history one-to-one (every engine step has a
@@ -106,6 +127,20 @@ export class StrokeLog {
 	forgetHistory() {
 		this.#undo = [];
 		this.#redo = [];
+	}
+
+	/** Name the step just recorded (e.g. "Fill", "Transform") for the history panel. */
+	labelLast(label: string) {
+		const a = this.#collect ? this.#collect.at(-1) : this.#undo.at(-1);
+		if (a) a.label = label;
+	}
+
+	/** Step names: `undo` oldest → newest (the last one is the current state), `redo` next → furthest. */
+	history(): { undo: string[]; redo: string[] } {
+		return {
+			undo: this.#undo.map(labelOf),
+			redo: [...this.#redo].reverse().map(labelOf)
+		};
 	}
 
 	undo(): boolean {
