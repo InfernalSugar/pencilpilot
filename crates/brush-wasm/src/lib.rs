@@ -21,6 +21,7 @@ use hokusai::{Brush, BrushSetting, BrushState, TILE_SIZE, TilePixels, TiledSurfa
 
 pub mod adjust;
 pub mod layers;
+pub mod texture;
 pub mod wasm;
 
 pub use layers::{Blend, LayerProps};
@@ -45,6 +46,8 @@ pub struct UndoSurface {
     dirty: HashSet<TileKey>,
     /// tiles painted since the last `touched.clear()` (for clipping to a selection)
     touched: HashSet<TileKey>,
+    /// grain / tip / dual brush for the stroke being painted (see [`texture`])
+    style: Option<std::rc::Rc<texture::DabStyle>>,
 }
 
 impl UndoSurface {
@@ -82,6 +85,54 @@ impl TiledSurface for UndoSurface {
 
     fn tile_lookup(&self, tx: i32, ty: i32) -> Option<&TilePixels> {
         self.tiles.get(&(tx, ty)).map(|b| &**b)
+    }
+
+    /// libmypaint's dab, then (with a texture) each pixel's change scaled by
+    /// how much the grain / tip / dual brush lets through there.
+    fn draw_dab(&mut self, dab: &hokusai::Dab) -> bool {
+        let Some(style) = self.style.clone() else {
+            return hokusai::brushmodes::draw_dab_default(self, dab);
+        };
+        let r = dab.radius + 2.0;
+        let (x0, y0) = ((dab.x - r).floor() as i64, (dab.y - r).floor() as i64);
+        let (x1, y1) = ((dab.x + r).ceil() as i64, (dab.y + r).ceil() as i64);
+        let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
+        let ts = TILE_SIZE as i64;
+        let px_at = |s: &Self, x: i64, y: i64| -> [u16; 4] {
+            s.tiles
+                .get(&(x.div_euclid(ts) as i32, y.div_euclid(ts) as i32))
+                .map_or([0; 4], |t| {
+                    t[y.rem_euclid(ts) as usize][x.rem_euclid(ts) as usize]
+                })
+        };
+        let mut before = Vec::with_capacity(w * h);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                before.push(px_at(self, x, y));
+            }
+        }
+        if !hokusai::brushmodes::draw_dab_default(self, dab) {
+            return false;
+        }
+        let stamps = style.stamps(dab);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let key = (x.div_euclid(ts) as i32, y.div_euclid(ts) as i32);
+                let Some(tile) = self.tiles.get_mut(&key) else {
+                    continue;
+                };
+                let p = &mut tile[y.rem_euclid(ts) as usize][x.rem_euclid(ts) as usize];
+                let b = before[(y - y0) as usize * w + (x - x0) as usize];
+                if *p == b {
+                    continue;
+                }
+                let f = style.factor(dab, &stamps, x as f32 + 0.5, y as f32 + 0.5);
+                if f < 0.999 {
+                    *p = lerp_px(b, *p, f);
+                }
+            }
+        }
+        true
     }
 }
 
@@ -205,6 +256,7 @@ impl Clone for UndoSurface {
             recording: None,
             dirty: HashSet::new(),
             touched: HashSet::new(),
+            style: None,
         }
     }
 }
@@ -326,6 +378,12 @@ enum Edit {
         layer: u32,
         props: LayerProps,
     },
+    /// A new canvas size: every layer's colour and mask tiles, by layer id.
+    Canvas {
+        width: u32,
+        height: u32,
+        tiles: Vec<(u32, TileMap, Option<TileMap>)>,
+    },
     Batch(Vec<Edit>),
 }
 
@@ -365,6 +423,12 @@ pub struct Painter {
     symmetry: Option<Symmetry>,
     /// brush states for the mirrored copies of the current stroke
     sym_states: Vec<BrushState>,
+    /// grain / tip pictures by id (see `set_texture`)
+    textures: HashMap<u32, std::rc::Rc<texture::Gray>>,
+    /// how the next strokes are textured (see `set_dab_style`)
+    style: Option<std::rc::Rc<texture::DabStyle>>,
+    /// an adjustment layer being changed live: (layer, its settings before)
+    adjust_layer_before: Option<(u32, LayerProps)>,
 }
 
 impl Painter {
@@ -392,7 +456,62 @@ impl Painter {
             liquify: None,
             symmetry: None,
             sym_states: Vec::new(),
+            textures: HashMap::new(),
+            style: None,
+            adjust_layer_before: None,
         }
+    }
+
+    // ---- brush textures -------------------------------------------------
+
+    /// Store a grey picture (255 = paint) as texture `id` for grain, tips and
+    /// dual brushes. An empty picture removes it.
+    pub fn set_texture(&mut self, id: u32, w: u32, h: u32, px: Vec<u8>) -> bool {
+        match texture::Gray::new(w, h, px) {
+            Some(g) => {
+                self.textures.insert(id, std::rc::Rc::new(g));
+                true
+            }
+            None => {
+                self.textures.remove(&id);
+                false
+            }
+        }
+    }
+
+    /// Texture the next strokes: grain (texture id, canvas px per texel,
+    /// strength 0–1), tip picture, and dual brush (tip, size and scatter as
+    /// fractions of the brush radius, stamps per dab). Id 0 = none.
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_dab_style(
+        &mut self,
+        grain: u32,
+        grain_scale: f32,
+        grain_strength: f32,
+        tip: u32,
+        dual: u32,
+        dual_size: f32,
+        dual_scatter: f32,
+        dual_count: u32,
+    ) {
+        let tex = |id: u32| self.textures.get(&id).cloned();
+        let style = texture::DabStyle {
+            grain: tex(grain)
+                .filter(|_| grain_strength > 0.0)
+                .map(|t| texture::Grain {
+                    tex: t,
+                    scale: grain_scale,
+                    strength: grain_strength,
+                }),
+            tip: tex(tip),
+            dual: tex(dual).map(|t| texture::Dual {
+                tip: t,
+                size: dual_size.clamp(0.05, 2.0),
+                scatter: dual_scatter.clamp(0.0, 2.0),
+                count: dual_count.clamp(1, 12),
+            }),
+        };
+        self.style = (!style.is_plain()).then(|| std::rc::Rc::new(style));
     }
 
     pub fn width(&self) -> u32 {
@@ -434,12 +553,30 @@ impl Painter {
     }
 
     fn mark_layer(&mut self, idx: usize) {
+        if self.layers[idx].props.adjust.is_some() {
+            self.mark_all();
+            return;
+        }
         let l = &self.layers[idx];
         let mut keys: Vec<TileKey> = l.surface.tiles.keys().copied().collect();
         if let Some(m) = &l.mask {
             keys.extend(m.tiles.keys().copied());
         }
         self.dirty.extend(keys);
+    }
+
+    /// Recomposite every tile of the canvas.
+    fn mark_all(&mut self) {
+        let ts = TILE_SIZE as u32;
+        let (tw, th) = (
+            self.width.div_ceil(ts) as i32,
+            self.height.div_ceil(ts) as i32,
+        );
+        for ty in 0..th {
+            for tx in 0..tw {
+                self.dirty.insert((tx, ty));
+            }
+        }
     }
 
     /// A layer's group's (visible, opacity); (true, 1) outside a group.
@@ -610,6 +747,15 @@ impl Painter {
                 base = Some(baked.clone());
             }
             if !l.props.visible || l.props.opacity <= 0.0 {
+                continue;
+            }
+            if let Some(adj) = l.props.adjust.as_deref() {
+                out = Self::adjusted(
+                    &out,
+                    adj,
+                    l.props.opacity,
+                    l.mask.as_ref().map(|m| &m.tiles),
+                );
                 continue;
             }
             for (key, src) in &baked {
@@ -933,6 +1079,35 @@ impl Painter {
                 self.mark_layer(idx);
                 Edit::Props { layer, props: old }
             }
+            Edit::Canvas {
+                width,
+                height,
+                tiles,
+            } => {
+                let mut old = Vec::with_capacity(tiles.len());
+                for (id, colour, mask) in tiles {
+                    let Some(l) = self.layers.iter_mut().find(|l| l.id == id) else {
+                        continue;
+                    };
+                    let c = std::mem::replace(&mut l.surface.tiles, colour);
+                    let m = match (l.mask.as_mut(), mask) {
+                        (Some(s), Some(t)) => Some(std::mem::replace(&mut s.tiles, t)),
+                        _ => None,
+                    };
+                    old.push((id, c, m));
+                }
+                let (ow, oh) = (self.width, self.height);
+                self.width = width;
+                self.height = height;
+                self.rgba = vec![255; (width * height * 4) as usize];
+                self.selection = None;
+                self.mark_all();
+                Edit::Canvas {
+                    width: ow,
+                    height: oh,
+                    tiles: old,
+                }
+            }
             Edit::Batch(edits) => {
                 let mut inv: Vec<Edit> = edits.into_iter().map(|e| self.apply(e)).collect();
                 inv.reverse();
@@ -1034,6 +1209,8 @@ impl Painter {
         };
         let mut props = props;
         props.imported = self.layers[idx].props.imported; // not the caller's to change
+        props.adjust = self.layers[idx].props.adjust.clone();
+        props.adjust_spec = self.layers[idx].props.adjust_spec.clone();
         props.opacity = props.opacity.clamp(0.0, 1.0);
         props.name = props.name.chars().take(60).collect();
         if props.name.trim().is_empty() {
@@ -1056,6 +1233,8 @@ impl Painter {
         };
         let mut before = before;
         before.imported = self.layers[idx].props.imported;
+        before.adjust = self.layers[idx].props.adjust.clone();
+        before.adjust_spec = self.layers[idx].props.adjust_spec.clone();
         if self.layers[idx].props == before {
             return false;
         }
@@ -1079,6 +1258,29 @@ impl Painter {
         }
         self.stop_mask_editing();
         let (lower, upper) = (&self.layers[upper_idx - 1], &self.layers[upper_idx]);
+        if lower.props.adjust.is_some() {
+            return false;
+        }
+        if let Some(adj) = upper.props.adjust.as_deref() {
+            let lower_id = lower.id;
+            let adjusted = Self::adjusted(
+                &lower.surface.tiles,
+                adj,
+                upper.props.opacity,
+                upper.mask.as_ref().map(|m| &m.tiles),
+            );
+            let snap: Snapshot = adjusted.into_iter().map(|(k, t)| (k, Some(t))).collect();
+            self.perform(Edit::Batch(vec![
+                Edit::Tiles {
+                    layer: lower_id,
+                    mask: false,
+                    snap,
+                },
+                Edit::Remove { index: upper_idx },
+            ]));
+            self.active = lower_id;
+            return true;
+        }
         let (opacity, blend, clipped) = (upper.props.opacity, upper.props.blend, upper.props.clip);
         // masks are baked in: the merged layer looks the same and has none
         let upper_tiles = bake(&upper.surface.tiles, upper.mask.as_ref().map(|m| &m.tiles));
@@ -1148,8 +1350,13 @@ impl Painter {
         if self.layers[idx].props.locked || !self.shown(idx) {
             return false;
         }
+        // an adjustment layer is painted on through its mask only
+        if self.layers[idx].props.adjust.is_some() && !self.layers[idx].editing_mask {
+            return false;
+        }
         let l = &mut self.layers[idx];
         l.surface.recording = Some(Snapshot::new());
+        l.surface.style = self.style.clone();
         let (id, alpha_lock) = (l.id, l.props.alpha_lock);
         self.state.reset();
         let copies = self.symmetry.map_or(0, |sym| sym.copies(0.0, 0.0).len());
@@ -1271,11 +1478,10 @@ impl Painter {
         }
         self.sym_states.clear();
         self.clip_to_selection(id);
-        let snap = self
-            .layers
-            .iter_mut()
-            .find(|l| l.id == id)
-            .and_then(|l| l.surface.recording.take());
+        let snap = self.layers.iter_mut().find(|l| l.id == id).and_then(|l| {
+            l.surface.style = None;
+            l.surface.recording.take()
+        });
         self.state.reset();
         self.alpha_lock_stroke = false;
         // Always record a history step, even if no pixels changed, so the
@@ -1293,10 +1499,11 @@ impl Painter {
         let Some(id) = self.stroking.take() else {
             return;
         };
-        if let Some(l) = self.layers.iter_mut().find(|l| l.id == id)
-            && let Some(snap) = l.surface.recording.take()
-        {
-            l.surface.swap_in(snap);
+        if let Some(l) = self.layers.iter_mut().find(|l| l.id == id) {
+            l.surface.style = None;
+            if let Some(snap) = l.surface.recording.take() {
+                l.surface.swap_in(snap);
+            }
         }
         self.state.reset();
         self.stroke_brush = None;
@@ -1685,6 +1892,81 @@ impl Painter {
         // the same gap closing as fill, so grainy pencil outlines hold the selection in
         let m = flood_closed(&src, w, h, x as usize, y as usize, tol, 3);
         self.combine_selection(m, op)
+    }
+
+    /// Select every pixel of a similar colour to the one at (x, y), joined up
+    /// or not (Photoshop's Color Range, Procreate's non-contiguous wand).
+    pub fn select_colour_range(
+        &mut self,
+        x: u32,
+        y: u32,
+        tolerance: f32,
+        all_layers: bool,
+        op: u8,
+    ) -> bool {
+        let (w, h) = (self.width as usize, self.height as usize);
+        let Some(li) = self.index_of(self.active) else {
+            return false;
+        };
+        if x as usize >= w || y as usize >= h {
+            return false;
+        }
+        let src = self.sample_source(li, all_layers);
+        let tol = (tolerance.clamp(0.0, 1.0) * 255.0) as i32;
+        let seed = src[y as usize * w + x as usize];
+        let m = src
+            .iter()
+            .map(|p| (0..4).all(|i| (p[i] as i32 - seed[i] as i32).abs() <= tol))
+            .collect();
+        self.combine_selection(m, op)
+    }
+
+    // ---- canvas size ----------------------------------------------------
+
+    /// Change the canvas size (one undo step). Without `scale`, the drawing
+    /// keeps its size and moves by (`dx`, `dy`): a crop, or more room; paint
+    /// off the new canvas is dropped. With `scale`, the drawing is resized to
+    /// fill the new canvas (`dx`, `dy` ignored).
+    pub fn resize_canvas(
+        &mut self,
+        width: u32,
+        height: u32,
+        dx: i32,
+        dy: i32,
+        scale: bool,
+    ) -> bool {
+        if !self.idle() || width == 0 || height == 0 || width > 8192 || height > 8192 {
+            return false;
+        }
+        if width == self.width && height == self.height && (scale || (dx == 0 && dy == 0)) {
+            return false;
+        }
+        self.stop_mask_editing();
+        let (ow, oh) = (self.width, self.height);
+        let redo = |t: &TileMap| {
+            if scale {
+                scale_tiles(t, ow, oh, width, height)
+            } else {
+                shift_tiles(t, dx, dy, width, height)
+            }
+        };
+        let tiles = self
+            .layers
+            .iter()
+            .map(|l| {
+                (
+                    l.id,
+                    redo(&l.surface.tiles),
+                    l.mask.as_ref().map(|m| redo(&m.tiles)),
+                )
+            })
+            .collect();
+        self.perform(Edit::Canvas {
+            width,
+            height,
+            tiles,
+        });
+        true
     }
 
     pub fn select_all(&mut self) {
@@ -2399,12 +2681,125 @@ impl Painter {
         let Some(li) = self.index_of(self.active) else {
             return false;
         };
-        if self.layers[li].props.locked || !self.shown(li) {
+        if self.layers[li].props.locked || !self.shown(li) || self.layers[li].props.adjust.is_some()
+        {
             return false;
         }
         let l = &self.layers[li];
         self.adjusting = Some((l.id, l.surface.tiles.clone()));
         true
+    }
+
+    // ---- adjustment layers ----------------------------------------------
+
+    /// Add an adjustment layer above the active one (with a mask, which tools
+    /// then paint on). `spec` is the app's own description, kept as given.
+    /// Returns its id (0 = limit reached).
+    pub fn add_adjustment_layer(
+        &mut self,
+        name: &str,
+        adj: adjust::ColourAdjust,
+        spec: &str,
+    ) -> u32 {
+        if !self.idle() || self.layers.len() >= MAX_LAYERS {
+            return 0;
+        }
+        self.stop_mask_editing();
+        let id = self.next_id;
+        self.next_id += 1;
+        let index = self
+            .index_of(self.active)
+            .map_or(self.layers.len(), |i| i + 1);
+        let mut props = LayerProps::named(name.chars().take(60).collect::<String>());
+        props.adjust = Some(Box::new(adj));
+        props.adjust_spec = spec.into();
+        let mut layer = Layer::new(id, props);
+        layer.group = index
+            .checked_sub(1)
+            .and_then(|i| self.layers.get(i))
+            .map_or(0, |l| l.group);
+        layer.mask = Some(UndoSurface::default());
+        layer.set_editing(true);
+        self.perform(Edit::Insert {
+            index,
+            layer: Box::new(layer),
+        });
+        self.active = id;
+        id
+    }
+
+    /// Change an adjustment layer's settings live (no undo step yet: see
+    /// [`Self::adjustment_commit`]).
+    pub fn adjustment_preview(&mut self, id: u32, adj: adjust::ColourAdjust, spec: &str) -> bool {
+        let Some(idx) = self.index_of(id) else {
+            return false;
+        };
+        if self.layers[idx].props.adjust.is_none() {
+            return false;
+        }
+        if self
+            .adjust_layer_before
+            .as_ref()
+            .is_none_or(|(l, _)| *l != id)
+        {
+            self.adjustment_commit();
+            self.adjust_layer_before = Some((id, self.layers[idx].props.clone()));
+        }
+        let mut props = self.layers[idx].props.clone();
+        props.adjust = Some(Box::new(adj));
+        props.adjust_spec = spec.into();
+        self.apply(Edit::Props { layer: id, props });
+        true
+    }
+
+    /// Record the previewed adjustment-layer change as one undo step.
+    pub fn adjustment_commit(&mut self) -> bool {
+        let Some((id, before)) = self.adjust_layer_before.take() else {
+            return false;
+        };
+        let Some(idx) = self.index_of(id) else {
+            return false;
+        };
+        if self.layers[idx].props == before {
+            return false;
+        }
+        self.push_undo(Edit::Props {
+            layer: id,
+            props: before,
+        });
+        true
+    }
+
+    /// `tiles` with an adjustment applied (through `mask`, at `opacity`).
+    fn adjusted(
+        tiles: &TileMap,
+        adj: &adjust::ColourAdjust,
+        opacity: f32,
+        mask: Option<&TileMap>,
+    ) -> TileMap {
+        tiles
+            .iter()
+            .map(|(k, t)| {
+                let mut t = t.clone();
+                let m = mask.and_then(|m| m.get(k));
+                for (r, row) in t.iter_mut().enumerate() {
+                    for (c, p) in row.iter_mut().enumerate() {
+                        if p[3] == 0 {
+                            continue;
+                        }
+                        let w = opacity * m.map_or(1.0, |m| mask_value(m[r][c]));
+                        if w <= 0.0 {
+                            continue;
+                        }
+                        let (col, a) = unpremul_srgb(*p);
+                        let to = adjust::colour_op(adj, col);
+                        let mix = [0, 1, 2].map(|i| col[i] + (to[i] - col[i]) * w);
+                        *p = premul_fix15(mix, a);
+                    }
+                }
+                (*k, t)
+            })
+            .collect()
     }
 
     pub fn is_adjusting(&self) -> bool {
@@ -2641,23 +3036,34 @@ impl Painter {
                         .map_or((true, 1.0), |g| (g.visible, g.opacity));
                     let opacity = l.props.opacity * go;
                     let visible = l.props.visible && gv && opacity > 0.0;
-                    let tile = l.colour().tiles.get(&(tx, ty));
-                    (clipping || (visible && tile.is_some())).then(|| TileSource {
-                        tile: tile.map(|t| &**t),
-                        opacity,
-                        blend: l.props.blend,
-                        visible,
-                        clip: l.props.clip,
-                        mask: l
-                            .mask_surface()
-                            .map(|m| m.tiles.get(&(tx, ty)).map(|t| &**t)),
+                    let adjust = l.props.adjust.as_deref();
+                    let tile = if adjust.is_some() {
+                        None
+                    } else {
+                        l.colour().tiles.get(&(tx, ty))
+                    };
+                    (clipping || (visible && (tile.is_some() || adjust.is_some()))).then(|| {
+                        TileSource {
+                            adjust,
+                            tile: tile.map(|t| &**t),
+                            opacity,
+                            blend: l.props.blend,
+                            visible,
+                            clip: l.props.clip,
+                            mask: l
+                                .mask_surface()
+                                .map(|m| m.tiles.get(&(tx, ty)).map(|t| &**t)),
+                        }
                     })
                 })
                 .collect();
             for y in cy0..py1 {
                 for x in cx0..px1 {
                     let idx = ((y * w + x) * 4) as usize;
-                    let px = if sources.iter().all(|s| s.tile.is_none()) {
+                    let px = if sources
+                        .iter()
+                        .all(|s| s.tile.is_none() && s.adjust.is_none())
+                    {
                         [255, 255, 255]
                     } else {
                         composite_pixel(&sources, (y - py0) as usize, (x - px0) as usize)
@@ -2814,7 +3220,7 @@ impl Painter {
             .map(|l| {
                 let p = &l.props;
                 format!(
-                    r#"{{"id":{},"name":{},"visible":{},"opacity":{},"blend":"{}","locked":{},"alphaLock":{},"clip":{},"mask":{},"editingMask":{},"group":{},"imported":{},"empty":{}}}"#,
+                    r#"{{"id":{},"name":{},"visible":{},"opacity":{},"blend":"{}","locked":{},"alphaLock":{},"clip":{},"mask":{},"editingMask":{},"group":{},"imported":{},"empty":{},"adjust":{}}}"#,
                     l.id,
                     json_str(&p.name),
                     p.visible,
@@ -2827,12 +3233,132 @@ impl Painter {
                     l.editing_mask,
                     l.group,
                     p.imported,
-                    l.is_empty()
+                    l.is_empty(),
+                    if p.adjust.is_some() {
+                        json_str(&p.adjust_spec)
+                    } else {
+                        "null".into()
+                    }
                 )
             })
             .collect();
         format!("[{}]", items.join(","))
     }
+}
+
+/// `t` moved by (dx, dy) pixels, keeping only what's on a `w`×`h` canvas.
+fn shift_tiles(t: &TileMap, dx: i32, dy: i32, w: u32, h: u32) -> TileMap {
+    let ts = TILE_SIZE as i64;
+    let mut out = TileMap::new();
+    for (&(tx, ty), tile) in t {
+        for (py, row) in tile.iter().enumerate() {
+            for (px, p) in row.iter().enumerate() {
+                if p[3] == 0 {
+                    continue;
+                }
+                let x = tx as i64 * ts + px as i64 + dx as i64;
+                let y = ty as i64 * ts + py as i64 + dy as i64;
+                if x < 0 || y < 0 || x >= w as i64 || y >= h as i64 {
+                    continue;
+                }
+                let o = out
+                    .entry(((x / ts) as i32, (y / ts) as i32))
+                    .or_insert_with(empty_tile);
+                o[(y % ts) as usize][(x % ts) as usize] = *p;
+            }
+        }
+    }
+    out
+}
+
+/// `t` (on an `ow`×`oh` canvas) resized to fill `w`×`h`: each new pixel
+/// averages a few samples over its footprint (premultiplied, so edges stay clean).
+fn scale_tiles(t: &TileMap, ow: u32, oh: u32, w: u32, h: u32) -> TileMap {
+    let ts = TILE_SIZE as i64;
+    let (sx, sy) = (ow as f32 / w as f32, oh as f32 / h as f32);
+    let get = |x: i64, y: i64| -> [f32; 4] {
+        if x < 0 || y < 0 || x >= ow as i64 || y >= oh as i64 {
+            return [0.0; 4];
+        }
+        t.get(&((x / ts) as i32, (y / ts) as i32))
+            .map_or([0.0; 4], |tile| {
+                tile[(y % ts) as usize][(x % ts) as usize].map(|v| v as f32)
+            })
+    };
+    // bilinear at a source point (pixel centres at .5)
+    let bil = |x: f32, y: f32| -> [f32; 4] {
+        let (fx, fy) = (x - 0.5, y - 0.5);
+        let (x0, y0) = (fx.floor(), fy.floor());
+        let (ax, ay) = (fx - x0, fy - y0);
+        let (x0, y0) = (x0 as i64, y0 as i64);
+        let (a, b, c, d) = (
+            get(x0, y0),
+            get(x0 + 1, y0),
+            get(x0, y0 + 1),
+            get(x0 + 1, y0 + 1),
+        );
+        [0, 1, 2, 3].map(|i| {
+            (a[i] * (1.0 - ax) + b[i] * ax) * (1.0 - ay) + (c[i] * (1.0 - ax) + d[i] * ax) * ay
+        })
+    };
+    let (nx, ny) = (
+        (sx.ceil() as usize).clamp(1, 4),
+        (sy.ceil() as usize).clamp(1, 4),
+    );
+    // the new tiles that can have paint: each old tile's area, scaled
+    let mut keys = HashSet::new();
+    for &(tx, ty) in t.keys() {
+        let (x0, y0) = ((tx as i64 * ts) as f32 / sx, (ty as i64 * ts) as f32 / sy);
+        let (x1, y1) = (
+            ((tx as i64 + 1) * ts) as f32 / sx,
+            ((ty as i64 + 1) * ts) as f32 / sy,
+        );
+        let k0 = (
+            ((x0 - 2.0).max(0.0) as i64) / ts,
+            ((y0 - 2.0).max(0.0) as i64) / ts,
+        );
+        let k1 = (
+            ((x1 + 2.0).min(w as f32 - 1.0) as i64) / ts,
+            ((y1 + 2.0).min(h as f32 - 1.0) as i64) / ts,
+        );
+        for ky in k0.1..=k1.1 {
+            for kx in k0.0..=k1.0 {
+                keys.insert((kx as i32, ky as i32));
+            }
+        }
+    }
+    let mut out = TileMap::new();
+    for (kx, ky) in keys {
+        let mut tile = empty_tile();
+        let mut any = false;
+        for (py, row) in tile.iter_mut().enumerate() {
+            for (px, p) in row.iter_mut().enumerate() {
+                let (x, y) = (kx as i64 * ts + px as i64, ky as i64 * ts + py as i64);
+                if x >= w as i64 || y >= h as i64 {
+                    continue;
+                }
+                let mut acc = [0.0f32; 4];
+                for j in 0..ny {
+                    for i in 0..nx {
+                        let s = bil(
+                            (x as f32 + (i as f32 + 0.5) / nx as f32) * sx,
+                            (y as f32 + (j as f32 + 0.5) / ny as f32) * sy,
+                        );
+                        for c in 0..4 {
+                            acc[c] += s[c];
+                        }
+                    }
+                }
+                let n = (nx * ny) as f32;
+                *p = acc.map(|v| (v / n).round().clamp(0.0, 32768.0) as u16);
+                any |= p[3] > 0;
+            }
+        }
+        if any {
+            out.insert((kx, ky), tile);
+        }
+    }
+    out
 }
 
 /// Pixels connected to (x, y) whose colour is within `tol` (per channel, 0–255)
@@ -3118,6 +3644,167 @@ mod tests {
             p.stroke_to(b, 20.0 + i as f32 * 4.0, y, 1.0, 0.0, 0.0, 0.01);
         }
         p.end_stroke(b);
+    }
+
+    /// a fat line for texture tests (radius ≈ 12 px)
+    fn fat_line(p: &mut Painter, y: f32) {
+        let mut b = pen();
+        b.get_mut(BrushSetting::Radius).base_value = 2.5;
+        line(p, &b, y);
+    }
+
+    #[test]
+    fn grain_leaves_gaps_in_the_paint() {
+        let mut plain = Painter::new(256, 128);
+        fat_line(&mut plain, 60.0);
+        plain.flush();
+        let mut grainy = Painter::new(256, 128);
+        // stripes: 2 px painted, 2 px bare
+        let tex: Vec<u8> = (0..16).map(|i| if i % 4 < 2 { 255 } else { 0 }).collect();
+        assert!(grainy.set_texture(7, 4, 4, tex));
+        grainy.set_dab_style(7, 1.0, 1.0, 0, 0, 0.0, 0.0, 1);
+        fat_line(&mut grainy, 60.0);
+        grainy.flush();
+        let (a, b) = (dark_pixels(&plain), dark_pixels(&grainy));
+        assert!(b * 10 < a * 7 && b > 0, "grain thins the line: {a} → {b}");
+        // the bare columns stay paper-white in the middle of the line
+        assert!(px(&grainy, 102, 60)[0] > 200 || px(&grainy, 103, 60)[0] > 200);
+        // the style is per stroke: undo and the plain style again paint solid
+        grainy.set_dab_style(0, 1.0, 0.0, 0, 0, 0.0, 0.0, 1);
+        grainy.undo();
+        fat_line(&mut grainy, 60.0);
+        grainy.flush();
+        assert_eq!(dark_pixels(&grainy), a);
+    }
+
+    #[test]
+    fn a_tip_picture_shapes_each_dab() {
+        let mut p = Painter::new(128, 128);
+        // the top half of the tip is painted, the bottom half bare
+        let n = 16;
+        let tex: Vec<u8> = (0..n * n)
+            .map(|i| if i / n < 8 { 255 } else { 0 })
+            .collect();
+        p.set_texture(1, n as u32, n as u32, tex);
+        p.set_dab_style(0, 1.0, 0.0, 1, 0, 0.0, 0.0, 1);
+        let mut b = pen();
+        b.get_mut(BrushSetting::Radius).base_value = 2.5;
+        p.begin_stroke();
+        for i in 0..=20 {
+            p.stroke_to(&b, 20.0 + i as f32 * 4.0, 64.0, 1.0, 0.0, 0.0, 0.01);
+        }
+        p.end_stroke(&b);
+        p.flush();
+        assert!(px(&p, 60, 58)[0] < 100, "above the line: painted");
+        assert!(px(&p, 60, 70)[0] > 200, "below: bare");
+    }
+
+    #[test]
+    fn adjustment_layers_change_whats_below_and_undo_in_one_step() {
+        let mut p = Painter::new(128, 64);
+        let mut red = pen();
+        set_brush_rgb(&mut red, 220, 0, 0);
+        line(&mut p, &red, 30.0);
+        p.flush();
+        assert!(px(&p, 60, 30)[0] > 150);
+        let id = p.add_adjustment_layer(
+            "Hue",
+            adjust::ColourAdjust {
+                hue: 120.0,
+                ..Default::default()
+            },
+            "{}",
+        );
+        assert!(id > 0);
+        p.flush();
+        let c = px(&p, 60, 30);
+        assert!(c[1] > c[0] + 60, "red looks green: {c:?}");
+        assert!(p.layers_json().contains(r#""adjust":"{}""#));
+        // live changes, then one undo step back to the first setting
+        for h in [60.0, 240.0] {
+            p.adjustment_preview(
+                id,
+                adjust::ColourAdjust {
+                    hue: h,
+                    ..Default::default()
+                },
+                "{\"h\":1}",
+            );
+        }
+        assert!(p.adjustment_commit());
+        p.flush();
+        let c = px(&p, 60, 30);
+        assert!(c[2] > c[0] + 60, "blue now: {c:?}");
+        p.undo();
+        p.flush();
+        let c = px(&p, 60, 30);
+        assert!(c[1] > c[0] + 60, "green again: {c:?}");
+        // no painting on it except on its mask
+        assert!(p.begin_stroke(), "paints on the mask");
+        p.cancel_stroke();
+        // merging it down bakes the change into the layer below
+        assert!(p.merge_down(id));
+        p.flush();
+        let c = px(&p, 60, 30);
+        assert!(c[1] > c[0] + 60, "still green, now in the pixels: {c:?}");
+        assert_eq!(p.layers().len(), 1);
+        p.undo();
+        p.flush();
+        assert_eq!(p.layers().len(), 2);
+    }
+
+    #[test]
+    fn canvas_crop_extend_and_scale_are_undoable() {
+        let mut p = Painter::new(200, 100);
+        line(&mut p, &pen(), 50.0); // x 20 … 180
+        p.flush();
+        let dark = dark_pixels(&p);
+        // crop the left 100 px off
+        assert!(p.resize_canvas(100, 100, -100, 0, false));
+        p.flush();
+        assert_eq!((p.width(), p.height()), (100, 100));
+        assert_eq!(p.rgba().len(), 100 * 100 * 4);
+        assert!(
+            px(&p, 50, 50)[0] < 100,
+            "the line's right part is still there"
+        );
+        assert!(dark_pixels(&p) < dark);
+        p.undo();
+        p.flush();
+        assert_eq!((p.width(), p.height()), (200, 100));
+        assert_eq!(dark_pixels(&p), dark);
+        p.redo();
+        p.undo();
+        // scale to half size: about half the ink
+        assert!(p.resize_canvas(100, 50, 0, 0, true));
+        p.flush();
+        assert!(px(&p, 50, 25)[0] < 160, "{:?}", px(&p, 50, 25));
+        let half = dark_pixels(&p);
+        assert!(half > 0 && half < dark, "{half} vs {dark}");
+        // more room: moves the drawing over
+        p.undo();
+        assert!(p.resize_canvas(300, 100, 50, 0, false));
+        p.flush();
+        assert!(px(&p, 120, 50)[0] < 100 && px(&p, 30, 50)[0] > 200);
+    }
+
+    #[test]
+    fn colour_range_selects_unconnected_areas() {
+        let mut p = Painter::new(200, 100);
+        line(&mut p, &pen(), 20.0);
+        line(&mut p, &pen(), 80.0);
+        p.flush();
+        assert!(p.select_colour_range(60, 20, 0.2, true, 0));
+        let m = p.selection_mask();
+        assert!(m[80 * 200 + 60] > 0, "the other line too");
+        assert_eq!(m[50 * 200 + 60], 0, "not the paper");
+        p.deselect();
+        assert!(p.select_wand(60, 20, 0.2, true, 0));
+        assert_eq!(
+            p.selection_mask()[80 * 200 + 60],
+            0,
+            "the wand only takes what's joined"
+        );
     }
 
     fn dark_pixels(p: &Painter) -> usize {

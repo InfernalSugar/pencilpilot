@@ -208,6 +208,9 @@ test('canvas size: pick a shape, and confirm before clearing a drawing', async (
 	await expect(page.getByText(/Big canvas|Very big canvas/)).toBeVisible();
 	await page.getByLabel('Width').fill('1000');
 	await page.getByLabel('Height').fill('1000');
+	// with a drawing, a new size keeps it unless you choose to start over
+	await expect(page.getByRole('button', { name: 'Resize canvas' })).toBeVisible();
+	await page.getByRole('radio', { name: /Start over/ }).check();
 	await page.getByRole('button', { name: 'Use this size' }).click();
 	await expect(page.getByText('Your drawing will be cleared')).toBeVisible();
 	await page.getByRole('button', { name: 'Clear and resize' }).click();

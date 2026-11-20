@@ -14,6 +14,12 @@
 		type ImportResult
 	} from '#lib/paint/PaintCanvas.svelte';
 	import LayersPanel from '#lib/paint/LayersPanel.svelte';
+	import ToneEditor from '#lib/paint/ToneEditor.svelte';
+	import BrushTexturePanel from '#lib/paint/BrushTexturePanel.svelte';
+	import QuickMenu, { type QuickAction } from '#lib/paint/QuickMenu.svelte';
+	import TimelapsePlayer from '#lib/paint/TimelapsePlayer.svelte';
+	import { brushTexture, onTextures, textureOn } from '#lib/paint/brush-textures.js';
+	import { MAP_PRESETS, NO_SPEC, parseSpec, specName, type AdjustSpec } from '#lib/paint/tone.js';
 	import CanvasSizePicker from '#lib/paint/CanvasSizePicker.svelte';
 	import RefViewer from '#lib/paint/RefViewer.svelte';
 	import HistoryPanel from '#lib/paint/HistoryPanel.svelte';
@@ -134,7 +140,9 @@
 		| 'guides'
 		| 'gradient'
 		| 'lasso-fill'
-		| 'measure';
+		| 'measure'
+		| 'smudge'
+		| 'pen';
 	let tool = $state<Tool>('brush');
 	let gradientKind = $state<'linear' | 'radial'>('linear');
 	let importNote = $state('');
@@ -146,6 +154,11 @@
 			busy: 'Finish what you’re doing first, then import again.',
 			'too-big': 'That picture is too big (30 MB at most).'
 		})[r];
+	/** a picture came in: place it right away (move / resize), as Procreate does */
+	function onImported(r: ImportResult) {
+		importNote = importText(r);
+		if (r === 'ok' && !timeUp) tool = 'transform';
+	}
 	// paste a picture (Ctrl+V) to import it as a layer
 	$effect(() => {
 		const onPaste = (e: ClipboardEvent) => {
@@ -158,7 +171,7 @@
 			}
 			if (!file || !canvas) return;
 			e.preventDefault();
-			void canvas.importImage(file, 'Pasted picture').then((r) => (importNote = importText(r)));
+			void canvas.importImage(file, 'Pasted picture').then(onImported);
 		};
 		window.addEventListener('paste', onPaste);
 		return () => window.removeEventListener('paste', onPaste);
@@ -172,25 +185,173 @@
 	let adjust = $state({ ...NO_ADJUST });
 	let recolour = $state(false);
 	let adjustMsg = $state('');
+	/** the quick menu's actions */
+	function quickActions(): QuickAction[] {
+		return [
+			{
+				id: 'undo',
+				label: 'Undo',
+				icon: 'M9 14 4 9l5-5M4 9h11a5 5 0 0 1 0 10h-3',
+				disabled: !status.canUndo,
+				run: () => canvas?.undo()
+			},
+			{
+				id: 'redo',
+				label: 'Redo',
+				icon: 'm15 14 5-5-5-5M20 9H9a5 5 0 0 0 0 10h3',
+				disabled: !status.canRedo,
+				run: () => canvas?.redo()
+			},
+			{
+				id: 'picker',
+				label: 'Eyedropper',
+				icon: 'm3 21 3-1 10-10-2-2L4 18Zm11-13 3-3a2 2 0 0 1 3 3l-3 3',
+				run: () => (tool = 'picker')
+			},
+			{
+				id: 'eraser',
+				label: eraser ? 'Brush' : 'Eraser',
+				icon: eraser
+					? 'M4 20c3 0 4-2 4-4l9-11 3 3-11 9c-2 0-4 1-4 4Z'
+					: 'M8 20h12M5 16l9-9 5 5-6 6H8Z',
+				run: () => {
+					eraser = !eraser;
+					tool = 'brush';
+				}
+			},
+			{
+				id: 'mirror',
+				label: 'Mirror view',
+				icon: 'M12 3v18M8 7 3 12l5 5ZM16 7l5 5-5 5Z',
+				run: () => canvas?.toggleMirror()
+			},
+			{
+				id: 'deselect',
+				label: 'Deselect',
+				icon: 'M4 4h4M4 4v4M20 4h-4M20 4v4M4 20h4M4 20v-4M20 20h-4M20 20v-4M9 9l6 6M15 9l-6 6',
+				disabled: !status.selection,
+				run: () => canvas?.deselect()
+			}
+		];
+	}
+
+	/** From the Layers panel: change an adjustment layer (its id), or make a new one (0). */
+	function adjustmentLayer(id: number) {
+		if (adjustOpen) closeAdjust(false);
+		if (id) canvas?.selectLayer(id);
+		// the Adjust panel reads the active layer from the status: let it catch up
+		queueMicrotask(() => {
+			openAdjust();
+			if (!id && adjustOpen && !adjustLayer) setKeepEditable(true);
+		});
+	}
+
+	/** which part of the Adjust panel shows */
+	let adjustKind = $state<'colour' | 'curves' | 'levels' | 'map'>('colour');
+	/** curves, levels and gradient map (and, for adjustment layers, everything) */
+	let tone = $state<AdjustSpec>({ ...NO_SPEC });
+	/** an adjustment layer being made or changed (0: adjusting the layer's pixels) */
+	let adjustLayer = $state(0);
+	/** that layer is new (Cancel removes it) */
+	let adjustLayerNew = $state(false);
+	/** the layer's settings when the panel opened (Cancel goes back to them) */
+	let adjustLayerWas: AdjustSpec | null = null;
+	/** everything in the panel as one adjustment */
+	const specNow = (): AdjustSpec => ({
+		...tone,
+		hue: adjust.hue,
+		saturation: adjust.saturation,
+		brightness: adjust.brightness,
+		contrast: adjust.contrast
+	});
 	function openAdjust() {
 		if (adjustOpen) return closeAdjust(false);
 		adjust = { ...NO_ADJUST };
 		recolour = false;
+		tone = { ...NO_SPEC };
+		adjustMsg = '';
+		// an adjustment layer: change its settings
+		const activeLayer = status.layers.find((l) => l.id === status.active);
+		if (activeLayer?.adjust) {
+			const s = parseSpec(activeLayer.adjust);
+			tone = s;
+			adjust = {
+				...NO_ADJUST,
+				hue: s.hue,
+				saturation: s.saturation,
+				brightness: s.brightness,
+				contrast: s.contrast
+			};
+			adjustLayer = activeLayer.id;
+			adjustLayerNew = false;
+			adjustLayerWas = s;
+			adjustKind = s.map ? 'map' : s.curves ? 'curves' : s.levels ? 'levels' : 'colour';
+			tool = 'brush';
+			adjustOpen = true;
+			return;
+		}
+		adjustLayer = 0;
 		if (!canvas?.adjustBegin()) {
 			adjustMsg = 'This layer is locked or hidden, so it can’t be adjusted.';
 			return;
 		}
-		adjustMsg = '';
 		tool = 'brush';
 		adjustOpen = true;
 	}
 	function previewAdjust() {
-		canvas?.adjustPreview({ ...adjust, recolour: recolour ? color : null });
+		if (adjustLayer) canvas?.adjustmentPreview(adjustLayer, specNow());
+		else
+			canvas?.adjustPreview({
+				...adjust,
+				recolour: recolour ? color : null,
+				curves: tone.curves,
+				levels: tone.levels,
+				map: tone.map
+			});
+	}
+	/** Switch between changing the pixels and a separate adjustment layer. */
+	function setKeepEditable(on: boolean) {
+		if (!canvas || on === !!adjustLayer) return;
+		if (on) {
+			canvas.adjustCancel();
+			const id = canvas.addAdjustmentLayer(specNow(), specName(specNow()));
+			if (!id) {
+				adjustMsg = 'There’s no room for another layer.';
+				canvas.adjustBegin();
+				return previewAdjust();
+			}
+			adjustLayer = id;
+			adjustLayerNew = true;
+			adjustLayerWas = null;
+		} else {
+			if (adjustLayerNew) canvas.undo();
+			adjustLayer = 0;
+			if (!canvas.adjustBegin()) {
+				adjustMsg = 'This layer is locked or hidden, so it can’t be adjusted.';
+				adjustOpen = false;
+				return;
+			}
+		}
+		previewAdjust();
 	}
 	function closeAdjust(keep: boolean) {
+		adjustOpen = false;
+		if (adjustLayer) {
+			const id = adjustLayer;
+			adjustLayer = 0;
+			if (adjustLayerNew) {
+				// one undo step for the finished layer: made again with its final settings
+				canvas?.undo();
+				if (keep) canvas?.addAdjustmentLayer(specNow(), specName(specNow()));
+			} else if (keep) canvas?.adjustmentCommit();
+			else if (adjustLayerWas) {
+				canvas?.adjustmentPreview(id, adjustLayerWas);
+				canvas?.adjustmentCommit();
+			}
+			return;
+		}
 		if (keep) canvas?.adjustCommit();
 		else canvas?.adjustCancel();
-		adjustOpen = false;
 	}
 	let guides = $state<GuideSettings>(defaultGuides(800, 600));
 	let guidesOpen = $state(false);
@@ -217,7 +378,26 @@
 	let penPressure = $state(true);
 	let liquifySize = $state(60);
 	let liquifyStrength = $state(0.6);
-	let selectMode = $state<'replace' | 'add' | 'subtract'>('replace');
+	let selectMode = $state<'replace' | 'add' | 'subtract' | 'intersect'>('replace');
+	/** magic wand: joined-up area only, or every similar colour (Color Range) */
+	let wandContiguous = $state(true);
+	let smudgeStrength = $state(0.6);
+	/** the pen tool's path: points and whether it's closed */
+	let penInfo = $state({ points: 0, closed: false });
+	let penTaper = $state(true);
+	/** a new, empty canvas (a new size from the picker, or a saved drawing): remounts it */
+	let canvasEpoch = $state(0);
+	/** the quick menu (right-click / long-press), at screen x, y */
+	let quickMenu = $state<{ x: number; y: number } | null>(null);
+	let timelapseOpen = $state(false);
+	// the current brush's grain / shape / dual brush (changes in the Brushes tab apply at once)
+	let texVersion = $state(0);
+	$effect(() => onTextures(() => texVersion++));
+	const currentTexture = $derived.by(() => {
+		void texVersion;
+		const t = brushTexture(brushId);
+		return textureOn(t) ? t : null;
+	});
 	let wandTolerance = $state(0.15);
 	let fillTolerance = $state(0.12);
 	let fillAllLayers = $state(true);
@@ -478,6 +658,7 @@
 	);
 	let canvasSize = $state<CanvasSize>({ width: 800, height: 600 });
 	function pickSize(next: CanvasSize) {
+		canvasEpoch++;
 		canvasSize = next;
 		saveSize(next);
 		status = BLANK_STATUS;
@@ -743,7 +924,15 @@
 		else if (!mod && k === 'g') tool = tool === 'fill' ? 'brush' : 'fill';
 		else if (!mod && k === 'f') tool = tool === 'lasso-fill' ? 'brush' : 'lasso-fill';
 		else if (!mod && k === 'u') tool = tool === 'measure' ? 'brush' : 'measure';
-		else if (mod && (k === 'c' || k === 'x') && !e.shiftKey) {
+		else if (!mod && k === 's') tool = tool === 'smudge' ? 'brush' : 'smudge';
+		else if (!mod && k === 'p') tool = tool === 'pen' ? 'brush' : 'pen';
+		else if (tool === 'pen' && e.key === 'Enter') {
+			if (canvas?.penStroke(penTaper)) canvas.penClear();
+		} else if (tool === 'pen' && e.key === 'Escape') canvas?.penClear();
+		else if (tool === 'pen' && !mod && e.key === 'Backspace') {
+			e.preventDefault();
+			canvas?.penBack();
+		} else if (mod && (k === 'c' || k === 'x') && !e.shiftKey) {
 			e.preventDefault();
 			copyCut(k === 'x');
 		} else if (mod && k === 'j') {
@@ -974,6 +1163,7 @@
 		const entry = await getDrawing(id);
 		if (!entry) return loadReference();
 		if (entry.width !== canvasSize.width || entry.height !== canvasSize.height) {
+			canvasEpoch++;
 			canvasSize = { width: entry.width, height: entry.height };
 			status = BLANK_STATUS; // wait for the new canvas
 		}
@@ -1173,7 +1363,19 @@
 			{/if}
 		</div>
 		{#if !sessionMode}
-			<CanvasSizePicker size={canvasSize} blank={status.blank} onpick={pickSize} />
+			<CanvasSizePicker
+				size={canvasSize}
+				blank={status.blank}
+				onpick={pickSize}
+				onresize={(next, how) =>
+					canvas?.resizeCanvas(
+						next.width,
+						next.height,
+						(next.width - canvasSize.width) * how.anchor[0],
+						(next.height - canvasSize.height) * how.anchor[1],
+						how.scale
+					)}
+			/>
 			<div class="save">
 				<button
 					type="button"
@@ -1192,6 +1394,15 @@
 						</button>
 						<button type="button" onclick={savePsd}>
 							<b>Photoshop file (.psd)</b><span>Keeps layers, groups and masks</span>
+						</button>
+						<button
+							type="button"
+							onclick={() => {
+								saveOpen = false;
+								timelapseOpen = true;
+							}}
+						>
+							<b>Timelapse</b><span>Watch it being drawn, save it as a video</span>
 						</button>
 						<a class="menu-link" href="/history">Your last 10 drawings →</a>
 					</div>
@@ -1434,36 +1645,74 @@
 		{#if importNote}<p class="adjust-msg" role="alert">{importNote}</p>{/if}
 		{#if adjustOpen}
 			<div class="fill-opts adjust-opts" role="group" aria-label="Adjust layer">
-				{#each [['hue', 'Hue', -180, 180, 1, '°'], ['saturation', 'Saturation', -100, 100, 1, '%'], ['brightness', 'Brightness', -100, 100, 1, '%'], ['contrast', 'Contrast', -100, 100, 1, '%'], ['blur', 'Blur', 0, 40, 1, ' px']] as [key, label, min, max, st, u] (key)}
-					{@const k = key as keyof typeof adjust}
-					{@const scale = k === 'hue' || k === 'blur' ? 1 : 100}
-					<label class="slider">
-						<span>{label} <b>{Math.round(adjust[k] * scale)}{u}</b></span>
-						<input
-							type="range"
-							{min}
-							{max}
-							step={st}
-							value={Math.round(adjust[k] * scale)}
-							oninput={(e) => {
-								adjust = { ...adjust, [k]: +e.currentTarget.value / scale };
+				<div class="seg" role="radiogroup" aria-label="Adjustment">
+					{#each [['colour', 'Colour'], ['curves', 'Curves'], ['levels', 'Levels'], ['map', 'Gradient map']] as [id, label] (id)}
+						<button
+							type="button"
+							class="tool"
+							role="radio"
+							aria-checked={adjustKind === id}
+							onclick={() => {
+								adjustKind = id as typeof adjustKind;
+								if (id === 'map' && !tone.map) {
+									tone = { ...tone, map: MAP_PRESETS[0].stops };
+									previewAdjust();
+								}
+							}}
+						>
+							{label}
+						</button>
+					{/each}
+				</div>
+				{#if adjustKind === 'colour'}
+					{#each [['hue', 'Hue', -180, 180, 1, '°'], ['saturation', 'Saturation', -100, 100, 1, '%'], ['brightness', 'Brightness', -100, 100, 1, '%'], ['contrast', 'Contrast', -100, 100, 1, '%'], ['blur', 'Blur', 0, 40, 1, ' px']] as [key, label, min, max, st, u] (key)}
+						{@const k = key as keyof typeof adjust}
+						{@const scale = k === 'hue' || k === 'blur' ? 1 : 100}
+						{#if !(k === 'blur' && adjustLayer)}
+							<label class="slider">
+								<span>{label} <b>{Math.round(adjust[k] * scale)}{u}</b></span>
+								<input
+									type="range"
+									{min}
+									{max}
+									step={st}
+									value={Math.round(adjust[k] * scale)}
+									oninput={(e) => {
+										adjust = { ...adjust, [k]: +e.currentTarget.value / scale };
+										previewAdjust();
+									}}
+								/>
+							</label>
+						{/if}
+					{/each}
+					{#if !adjustLayer}
+						<button
+							type="button"
+							class="tool"
+							aria-pressed={recolour}
+							title="Paint the whole layer in the current colour (keeps its shading by transparency)"
+							onclick={() => {
+								recolour = !recolour;
 								previewAdjust();
 							}}
-						/>
-					</label>
-				{/each}
-				<button
-					type="button"
-					class="tool"
-					aria-pressed={recolour}
-					title="Paint the whole layer in the current colour (keeps its shading by transparency)"
-					onclick={() => {
-						recolour = !recolour;
-						previewAdjust();
-					}}
-				>
-					Recolour
-				</button>
+						>
+							Recolour
+						</button>
+					{/if}
+				{:else}
+					<ToneEditor kind={adjustKind} bind:spec={tone} onchange={previewAdjust} />
+				{/if}
+				{#if adjustLayerNew || !adjustLayer}
+					<button
+						type="button"
+						class="tool"
+						aria-pressed={!!adjustLayer}
+						title="Keep editable: put the change on its own adjustment layer, which changes everything below it and can be changed or hidden later"
+						onclick={() => setKeepEditable(!adjustLayer)}
+					>
+						Keep editable
+					</button>
+				{/if}
 				<button type="button" class="tool done" onclick={() => closeAdjust(true)}>Apply</button>
 				<button type="button" class="tool" onclick={() => closeAdjust(false)}>Cancel</button>
 			</div>
@@ -1571,7 +1820,7 @@
 			<div class="fill-opts" role="group" aria-label="Selection">
 				{#if tool.startsWith('select')}
 					<div class="seg" role="radiogroup" aria-label="Selection mode">
-						{#each [['replace', 'New'], ['add', 'Add'], ['subtract', 'Subtract']] as [id, label] (id)}
+						{#each [['replace', 'New'], ['add', 'Add'], ['subtract', 'Subtract'], ['intersect', 'Intersect']] as [id, label] (id)}
 							<button
 								type="button"
 								class="tool"
@@ -1589,6 +1838,15 @@
 						<span>Tolerance <b>{Math.round(wandTolerance * 100)}%</b></span>
 						<input type="range" min="0" max="0.6" step="0.02" bind:value={wandTolerance} />
 					</label>
+					<button
+						type="button"
+						class="tool"
+						aria-pressed={!wandContiguous}
+						title="Colour range: every pixel of a similar colour, joined up or not"
+						onclick={() => (wandContiguous = !wandContiguous)}
+					>
+						Colour range
+					</button>
 				{/if}
 				<button type="button" class="tool" onclick={() => canvas?.selectAll()}>All</button>
 				<button type="button" class="tool" title="Copy (Ctrl+C)" onclick={() => copyCut(false)}>
@@ -1656,6 +1914,72 @@
 						{/each}
 					</select>
 				</label>
+			</div>
+		{/if}
+		{#if tool === 'smudge'}
+			<div class="fill-opts" role="group" aria-label="Smudge">
+				<label class="slider">
+					<span>Strength <b>{Math.round(smudgeStrength * 100)}%</b></span>
+					<input type="range" min="0" max="1" step="0.05" bind:value={smudgeStrength} />
+				</label>
+				<span class="adjust-msg plain">Smudges with the shape of the brush you picked.</span>
+			</div>
+		{/if}
+		{#if tool === 'pen'}
+			<div class="fill-opts" role="group" aria-label="Pen path">
+				<span class="adjust-msg plain">
+					{penInfo.points === 0
+						? 'Click for corners, drag for curves. Click the first point to close the shape.'
+						: `${penInfo.points} point${penInfo.points === 1 ? '' : 's'}${penInfo.closed ? ', closed' : ''}. Drag points or handles to change it (Alt breaks a handle).`}
+				</span>
+				<button
+					type="button"
+					class="tool"
+					aria-pressed={penTaper}
+					title="Thinner at the ends, like a hand-drawn line"
+					onclick={() => (penTaper = !penTaper)}
+				>
+					Taper
+				</button>
+				<button
+					type="button"
+					class="tool done"
+					disabled={penInfo.points < 2}
+					title="Draw along the path with the current brush (Enter)"
+					onclick={() => {
+						if (canvas?.penStroke(penTaper)) canvas.penClear();
+					}}
+				>
+					Draw line
+				</button>
+				<button
+					type="button"
+					class="tool"
+					disabled={penInfo.points < 3}
+					title="Fill inside the path with the colour"
+					onclick={() => {
+						if (canvas?.penFill()) canvas.penClear();
+					}}
+				>
+					Fill
+				</button>
+				<button
+					type="button"
+					class="tool"
+					disabled={!penInfo.points}
+					title="Take back the last point (Backspace)"
+					onclick={() => canvas?.penBack()}
+				>
+					Back
+				</button>
+				<button
+					type="button"
+					class="tool"
+					disabled={!penInfo.points}
+					onclick={() => canvas?.penClear()}
+				>
+					Clear
+				</button>
 			</div>
 		{/if}
 		{#if tool === 'measure'}
@@ -1756,7 +2080,7 @@
 				></div>
 			{/if}
 			<div class="canvas-pane">
-				{#key `${canvasSize.width}x${canvasSize.height}-${round}`}
+				{#key `${canvasEpoch}-${round}`}
 					<PaintCanvas
 						bind:this={canvas}
 						fill
@@ -1789,7 +2113,16 @@
 						{liquifySize}
 						{liquifyStrength}
 						allowImport
-						onimport={(r) => (importNote = importText(r))}
+						onimport={onImported}
+						{smudgeStrength}
+						brushTexture={currentTexture}
+						{wandContiguous}
+						oncanvassize={(s) => {
+							canvasSize = s;
+							saveSize(s);
+						}}
+						onquickmenu={(x, y) => (quickMenu = { x, y })}
+						onpenpath={(p) => (penInfo = p)}
 						{gradientKind}
 						gradientEnd={gradientEnd === 'transparent' ? 'transparent' : gradientEndColor}
 						{penPressure}
@@ -1968,12 +2301,13 @@
 	{#snippet panel(t: string)}
 		{#if t === 'layers'}
 			<section aria-label="Layers">
-				<LayersPanel {status} controls={canvas} />
+				<LayersPanel {status} controls={canvas} onadjustment={adjustmentLayer} />
 			</section>
 		{:else if t === 'brushes'}
 			<section aria-label="Brushes">
 				{#if manifest}
 					<BrushPicker {manifest} bind:selected={brushId} />
+					<BrushTexturePanel {brushId} onpick={(id) => (brushId = id)} />
 				{:else}
 					<p class="muted">Loading brushes…</p>
 				{/if}
@@ -1991,6 +2325,17 @@
 		</p>
 	{/snippet}
 	{#snippet after()}
+		{#if quickMenu}
+			<QuickMenu
+				x={quickMenu.x}
+				y={quickMenu.y}
+				actions={quickActions()}
+				onclose={() => (quickMenu = null)}
+			/>
+		{/if}
+		{#if timelapseOpen && canvas}
+			<TimelapsePlayer film={canvas.timelapse()} onclose={() => (timelapseOpen = false)} />
+		{/if}
 		{#if refFloating && reference}
 			<section
 				class="floating"

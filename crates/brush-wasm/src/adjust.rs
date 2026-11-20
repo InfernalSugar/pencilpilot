@@ -23,6 +23,24 @@ pub struct ColourAdjust {
     pub blur: f32,
     /// paint everything in this colour (sRGB 0–1), keeping its transparency
     pub recolour: Option<[f32; 3]>,
+    /// curves / levels: a look-up table per channel (R, G, B), sRGB 0–255 → 0–255,
+    /// applied after the other changes
+    pub tone: Option<[[u8; 256]; 3]>,
+    /// gradient map: each pixel's lightness (0–255) → a colour, applied last
+    pub map: Option<[[u8; 3]; 256]>,
+}
+
+impl ColourAdjust {
+    /// Changes colours (not just blurs).
+    pub fn recolours(&self) -> bool {
+        self.recolour.is_some()
+            || self.hue != 0.0
+            || self.saturation != 0.0
+            || self.brightness != 0.0
+            || self.contrast != 0.0
+            || self.tone.is_some()
+            || self.map.is_some()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -92,7 +110,8 @@ fn rgb_to_hsv(c: [f32; 3]) -> (f32, f32, f32) {
     (h, if max == 0.0 { 0.0 } else { d / max }, max)
 }
 
-fn colour_op(a: &ColourAdjust, mut c: [f32; 3]) -> [f32; 3] {
+/// One colour (sRGB 0–1) with the colour changes of `a` applied.
+pub fn colour_op(a: &ColourAdjust, mut c: [f32; 3]) -> [f32; 3] {
     if let Some(rc) = a.recolour {
         c = rc;
     }
@@ -115,7 +134,26 @@ fn colour_op(a: &ColourAdjust, mut c: [f32; 3]) -> [f32; 3] {
         };
         c = c.map(|v| (v - 0.5) * f + 0.5);
     }
-    c.map(|v| v.clamp(0.0, 1.0))
+    let mut c = c.map(|v| v.clamp(0.0, 1.0));
+    if let Some(t) = &a.tone {
+        c = [0, 1, 2].map(|i| lut_at(&t[i], c[i]));
+    }
+    if let Some(m) = &a.map {
+        let l = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+        let f = l.clamp(0.0, 1.0) * 255.0;
+        let (i, t) = (f.floor() as usize, f.fract());
+        let j = (i + 1).min(255);
+        c = [0, 1, 2].map(|k| (m[i][k] as f32 * (1.0 - t) + m[j][k] as f32 * t) / 255.0);
+    }
+    c
+}
+
+/// A 0–255 table read at v (0–1), between entries.
+fn lut_at(t: &[u8; 256], v: f32) -> f32 {
+    let f = v.clamp(0.0, 1.0) * 255.0;
+    let (i, k) = (f.floor() as usize, f.fract());
+    let j = (i + 1).min(255);
+    (t[i] as f32 * (1.0 - k) + t[j] as f32 * k) / 255.0
 }
 
 /// Three box blurs (≈ Gaussian) of the premultiplied layer, over the area the
@@ -288,11 +326,7 @@ pub fn adjust_tiles(orig: &TileMap, a: &ColourAdjust, area: &Area<'_>) -> TileMa
     } else {
         orig.clone()
     };
-    let colour = a.recolour.is_some()
-        || a.hue != 0.0
-        || a.saturation != 0.0
-        || a.brightness != 0.0
-        || a.contrast != 0.0;
+    let colour = a.recolours();
     let mut keys: Vec<TileKey> = src.keys().chain(orig.keys()).copied().collect();
     keys.sort_unstable();
     keys.dedup();
@@ -368,6 +402,44 @@ mod tests {
     #[test]
     fn colour_adjustments() {
         let red = solid([0.8, 0.1, 0.1], 1.0, &[(0, 0)]);
+        // curves: an inverting table on every channel
+        let mut inv = [0u8; 256];
+        for (i, v) in inv.iter_mut().enumerate() {
+            *v = 255 - i as u8;
+        }
+        let t = adjust_tiles(
+            &red,
+            &ColourAdjust {
+                tone: Some([inv; 3]),
+                ..Default::default()
+            },
+            &AREA,
+        );
+        let (c, _) = at(&t, 5, 5);
+        assert!(
+            (c[0] - 0.2).abs() < 0.02 && (c[1] - 0.9).abs() < 0.02,
+            "{c:?}"
+        );
+        // gradient map: dark → blue, light → yellow
+        let mut map = [[0u8; 3]; 256];
+        for (i, m) in map.iter_mut().enumerate() {
+            let k = i as f32 / 255.0;
+            *m = [
+                (k * 255.0) as u8,
+                (k * 255.0) as u8,
+                ((1.0 - k) * 255.0) as u8,
+            ];
+        }
+        let g = adjust_tiles(
+            &red,
+            &ColourAdjust {
+                map: Some(map),
+                ..Default::default()
+            },
+            &AREA,
+        );
+        let (c, _) = at(&g, 5, 5);
+        assert!(c[2] > c[0], "dark red maps towards blue: {c:?}");
         // hue +120°: red → green
         let g = adjust_tiles(
             &red,
