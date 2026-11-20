@@ -26,17 +26,36 @@
 	let dragging = $state<number | null>(null);
 	/** set once the page is interactive (tests wait for it) */
 	let ready = $state(false);
-	// Saving changes content/references/*.json, which makes Vite reload the page: the
-	// URL keeps the reference and filters, and the last message is carried over.
+	// Saving changes content/references/*.json, which makes Vite update the page.
 	const STATUS = 'pp.keypointStatus';
-	onMount(() => {
+	/** what a save leaves for the page after Vite's reload (kept for a few seconds,
+	 * since the reload can come before the save's answer, or twice) */
+	type Carry = { status: string; next?: string; at: number };
+	function carry(c: Carry | null) {
 		try {
-			status = sessionStorage.getItem(STATUS) ?? '';
-			sessionStorage.removeItem(STATUS);
+			if (c) sessionStorage.setItem(STATUS, JSON.stringify(c));
+			else sessionStorage.removeItem(STATUS);
 		} catch {
 			/* storage blocked */
 		}
+	}
+	onMount(() => {
+		try {
+			const c: Carry | null = JSON.parse(sessionStorage.getItem(STATUS) ?? 'null');
+			if (c && Date.now() - c.at < 10_000) {
+				status = c.status;
+				if (c.next && page.url.searchParams.get('id') !== c.next) setUrl({ id: c.next });
+			}
+		} catch {
+			/* storage blocked or bad data */
+		}
 		ready = true;
+		// The references JSON is part of the client bundle, so a save hot-updates this
+		// page, which remounts it with its state lost: reload instead (the URL keeps the
+		// reference, and the message is carried over).
+		const reload = () => location.reload();
+		import.meta.hot?.on('vite:beforeUpdate', reload);
+		return () => import.meta.hot?.off('vite:beforeUpdate', reload);
 	});
 
 	function setUrl(change: Record<string, string | null>) {
@@ -295,18 +314,17 @@
 					use:enhance={() => {
 						const next = goNext ? nextUnmarked?.id : undefined;
 						const n = points.length;
+						// stored before sending: Vite may reload as soon as the file is written
+						carry({ status: `Saved ${n} points.`, next, at: Date.now() });
 						return async ({ result, update }) => {
 							if (result.type === 'success') {
 								dirty = false;
 								status = `Saved ${n} points.`;
-								try {
-									sessionStorage.setItem(STATUS, status);
-								} catch {
-									/* storage blocked */
-								}
-								// before the reload Vite may do: land on the next one
 								if (next) setUrl({ id: next });
-							} else status = 'Not saved. Check the labels.';
+							} else {
+								carry(null);
+								status = 'Not saved. Check the labels.';
+							}
 							await update({ reset: false });
 							if (result.type === 'success' && next) select(next);
 						};

@@ -148,7 +148,11 @@ test('mark keypoints on a reference and save them', async ({ page }, info) => {
 		const saved = JSON.parse(readFileSync(file, 'utf8')).references.find(
 			(r: { id: string }) => r.id === id
 		).keypoints;
-		await expect(page.getByLabel('Point 2 label')).toHaveValue(saved[1].label);
+		// the save rewrites the JSON file, so Vite may reload the page: wait it out
+		await expect(frame).toHaveAttribute('data-ready', 'true', { timeout: 15_000 });
+		await expect(page.getByLabel('Point 2 label')).toHaveValue(saved[1].label, {
+			timeout: 15_000
+		});
 		expect(saved).toHaveLength(3);
 		expect(saved[0]).toMatchObject({ label: 'nose' });
 		expect(saved[0].x).toBeCloseTo(0.2, 1);

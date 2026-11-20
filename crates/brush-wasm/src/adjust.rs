@@ -54,12 +54,15 @@ pub struct Area<'a> {
 }
 
 impl Area<'_> {
-    fn selected(&self, x: i64, y: i64) -> bool {
+    /// How much a change counts here: 0 outside the selection, 1 inside, in
+    /// between on a feathered edge.
+    fn weight(&self, x: i64, y: i64) -> f32 {
         if x < 0 || y < 0 || x >= self.width as i64 || y >= self.height as i64 {
-            return false;
+            return 0.0;
         }
-        self.selection
-            .is_none_or(|s| s[y as usize * self.width as usize + x as usize] > 0)
+        self.selection.map_or(1.0, |s| {
+            s[y as usize * self.width as usize + x as usize] as f32 / 255.0
+        })
     }
 }
 
@@ -256,8 +259,9 @@ fn finish(
             for px in 0..TILE_SIZE {
                 let (x, y) = (key.0 as i64 * TS + px as i64, key.1 as i64 * TS + py as i64);
                 let op = o.map_or([0; 4], |t| t[py][px]);
-                let mut p = if area.selected(x, y) {
-                    f(x, y, s.map_or([0; 4], |t| t[py][px]))
+                let wt = area.weight(x, y);
+                let mut p = if wt > 0.0 {
+                    crate::lerp_px(op, f(x, y, s.map_or([0; 4], |t| t[py][px])), wt)
                 } else {
                     op
                 };

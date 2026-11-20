@@ -4,6 +4,8 @@
 		| 'eraser'
 		| 'picker'
 		| 'fill'
+		| 'lasso-fill'
+		| 'measure'
 		| 'select-rect'
 		| 'select-lasso'
 		| 'select-wand'
@@ -16,12 +18,14 @@
 		'eraser',
 		'picker',
 		'fill',
+		'lasso-fill',
 		'select-rect',
 		'select-lasso',
 		'select-wand',
 		'transform',
 		'liquify',
 		'gradient',
+		'measure',
 		'adjust'
 	];
 	export const SELECT_TOOLS: { id: ToolId; label: string; key: string; icon: string }[] = [
@@ -173,6 +177,58 @@
 					<path d="m19 11-8-8-8.5 8.5a2.1 2.1 0 0 0 0 3L8 20a2.1 2.1 0 0 0 3 0Z" /><path
 						d="m5 2 5 5"
 					/><path d="M2 13h15" /><path d="M22 20a2 2 0 1 1-4 0c0-1.6 2-3 2-3s2 1.4 2 3Z" />
+				</svg>
+			</button>
+		{/if}
+		{#if has('lasso-fill')}
+			<button
+				type="button"
+				class="tool"
+				aria-pressed={tool === 'lasso-fill'}
+				aria-label="Lasso fill (F)"
+				title="Lasso fill (F): draw a shape and it fills solid with the colour"
+				onclick={() => (tool = tool === 'lasso-fill' ? 'brush' : 'lasso-fill')}
+			>
+				<svg
+					width="22"
+					height="22"
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="2.3"
+					stroke-linecap="round"
+					stroke-linejoin="round"
+					aria-hidden="true"
+				>
+					<path
+						d="M8 19c-3 0-5-1.5-5-4 0-4 5-11 10-11s8 3 8 7c0 5-6 8-13 8Z"
+						fill="currentColor"
+						fill-opacity="0.35"
+					/><path d="M8 19c0 1.5-1 2.5-2.5 2.5" />
+				</svg>
+			</button>
+		{/if}
+		{#if has('measure')}
+			<button
+				type="button"
+				class="tool"
+				aria-pressed={tool === 'measure'}
+				aria-label="Measure (U)"
+				title="Measure (U): drag to measure lengths and angles, in the unit you marked on the reference"
+				onclick={() => (tool = tool === 'measure' ? 'brush' : 'measure')}
+			>
+				<svg
+					width="22"
+					height="22"
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="2.3"
+					stroke-linecap="round"
+					stroke-linejoin="round"
+					aria-hidden="true"
+				>
+					<path d="M3 17 17 3l4 4L7 21Z" /><path d="m7 13 2 2M10 10l2 2M13 7l2 2" />
 				</svg>
 			</button>
 		{/if}

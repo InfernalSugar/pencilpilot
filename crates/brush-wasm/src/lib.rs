@@ -224,8 +224,24 @@ struct TransformSession {
     fh: usize,
     /// destination box drawn by the last preview (to repaint it next time)
     last: Option<(i64, i64, i64, i64)>,
-    /// current matrix: dest = (a x + c y + e, b x + d y + f)
-    m: [f32; 6],
+    /// current projective matrix, row-major: dest = (h0 x + h1 y + h2, h3 x + h4 y + h5) / (h6 x + h7 y + h8)
+    m: [f32; 9],
+    /// after a warp: the box (inclusive) and which of its pixels the lifted paint
+    /// now covers, row by row (the selection follows it)
+    cover: Option<(PixelBox, Vec<bool>)>,
+}
+
+/// A box of canvas pixels: (x0, y0, x1, y1), inclusive.
+type PixelBox = (i64, i64, i64, i64);
+
+/// Part of a transform drawn with one projective map (see `render_float`).
+struct Piece {
+    /// destination → source
+    inv: [f32; 9],
+    /// destination box it may draw in (canvas px, inclusive)
+    bbox: (i64, i64, i64, i64),
+    /// source rectangle it owns (canvas px)
+    src: (f32, f32, f32, f32),
 }
 
 /// Mirror / rotation copies of every stroke, about (cx, cy).
@@ -1220,16 +1236,18 @@ impl Painter {
                         key.0 as i64 * ts as i64 + px as i64,
                         key.1 as i64 * ts as i64 + py as i64,
                     );
-                    let inside = cx >= 0
-                        && cy >= 0
-                        && (cx as usize) < w
-                        && (cy as usize) < h
-                        && sel[cy as usize * w + cx as usize] > 0;
-                    if !inside {
-                        *p = match &orig {
+                    let weight = if cx >= 0 && cy >= 0 && (cx as usize) < w && (cy as usize) < h {
+                        sel[cy as usize * w + cx as usize]
+                    } else {
+                        0
+                    };
+                    if weight < 255 {
+                        // outside: as before; a feathered edge: part of the new paint
+                        let before = match &orig {
                             Some(Some(o)) => o[py][px],
                             _ => [0; 4],
                         };
+                        *p = lerp_px(before, *p, weight as f32 / 255.0);
                     }
                 }
             }
@@ -1324,7 +1342,9 @@ impl Painter {
                             && sel[cy as usize * w + cx as usize] > 0
                             && p[3] > 0
                         {
-                            *p = [0; 4];
+                            // a feathered edge clears only partly
+                            let k = sel[cy as usize * w + cx as usize] as f32 / 255.0;
+                            *p = lerp_px(*p, [0; 4], k);
                             changed = true;
                         }
                     }
@@ -1376,6 +1396,25 @@ impl Painter {
         grow: u32,
         gap: u32,
     ) -> bool {
+        self.fill_from(x, y, rgb, opacity, tolerance, all_layers, grow, gap, None)
+    }
+
+    /// `fill`, but the region comes from `reference`'s own pixels (a line-art
+    /// layer, as in Procreate's reference layer) while the paint still goes on
+    /// the active layer. `None`, or a missing layer, falls back to `fill`.
+    #[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
+    pub fn fill_from(
+        &mut self,
+        x: u32,
+        y: u32,
+        rgb: [u8; 3],
+        opacity: f32,
+        tolerance: f32,
+        all_layers: bool,
+        grow: u32,
+        gap: u32,
+        reference: Option<u32>,
+    ) -> bool {
         let (w, h) = (self.width as usize, self.height as usize);
         if self.stroking.is_some() || x as usize >= w || y as usize >= h {
             return false;
@@ -1387,7 +1426,10 @@ impl Painter {
         if self.layers[li].props.locked || !self.shown(li) {
             return false;
         }
-        let source = self.sample_source(li, all_layers);
+        let source = match reference.and_then(|id| self.index_of(id)) {
+            Some(ri) => self.sample_source(ri, false),
+            None => self.sample_source(li, all_layers),
+        };
         let tol = (tolerance.clamp(0.0, 1.0) * 255.0) as i32;
         let mask = flood_closed(&source, w, h, x as usize, y as usize, tol, gap as usize);
         let mut mask = grow_mask(&mask, w, h, grow as usize);
@@ -1406,6 +1448,7 @@ impl Painter {
             opacity.clamp(0.0, 1.0),
         );
         let alpha_lock = self.layers[li].props.alpha_lock;
+        let soft = self.selection.clone();
         let ts = TILE_SIZE;
         let mut keys: HashSet<TileKey> = HashSet::new();
         for (i, &m) in mask.iter().enumerate() {
@@ -1441,6 +1484,97 @@ impl Painter {
                     } else {
                         merge_pixel(fill, d, 1.0, Blend::Normal)
                     };
+                    // a feathered selection edge gets part of the fill
+                    let out = soft
+                        .as_ref()
+                        .map_or(out, |s| lerp_px(d, out, s[cy * w + cx] as f32 / 255.0));
+                    if out != d {
+                        tile[py][px] = out;
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
+                snap.insert(key, Some(tile));
+            }
+        }
+        if snap.is_empty() {
+            return false;
+        }
+        self.perform(Edit::Tiles {
+            layer: active,
+            mask: self.editing_mask(active),
+            snap,
+        });
+        true
+    }
+
+    /// Paint `rgb` at `opacity` over the active layer wherever `coverage`
+    /// (one byte per canvas pixel, 0–255, anti-aliased edges allowed) says so:
+    /// the lasso fill. Normal blending, on top of what's there; respects the
+    /// selection and alpha lock. One undo step; false if nothing changed.
+    // pixel loops index tiles by (row, col) and map them to canvas coordinates
+    #[allow(clippy::needless_range_loop)]
+    pub fn fill_mask(&mut self, coverage: &[u8], rgb: [u8; 3], opacity: f32) -> bool {
+        let (w, h) = (self.width as usize, self.height as usize);
+        if self.stroking.is_some() || coverage.len() != w * h || !self.idle() {
+            return false;
+        }
+        let active = self.active;
+        let Some(li) = self.index_of(active) else {
+            return false;
+        };
+        if self.layers[li].props.locked || !self.shown(li) {
+            return false;
+        }
+        let color = [
+            rgb[0] as f32 / 255.0,
+            rgb[1] as f32 / 255.0,
+            rgb[2] as f32 / 255.0,
+        ];
+        let opacity = opacity.clamp(0.0, 1.0);
+        let alpha_lock = self.layers[li].props.alpha_lock;
+        let sel = self.selection.clone();
+        let ts = TILE_SIZE;
+        let mut keys: HashSet<TileKey> = HashSet::new();
+        for (i, &c) in coverage.iter().enumerate() {
+            if c > 0 && sel.as_ref().is_none_or(|s| s[i] > 0) {
+                keys.insert(((i % w / ts) as i32, (i / w / ts) as i32));
+            }
+        }
+        let mut snap = Snapshot::new();
+        let l = &mut self.layers[li];
+        for key in keys {
+            let mut tile = l
+                .surface
+                .tiles
+                .get(&key)
+                .cloned()
+                .unwrap_or_else(empty_tile);
+            let mut changed = false;
+            for py in 0..ts {
+                for px in 0..ts {
+                    let (cx, cy) = (key.0 as usize * ts + px, key.1 as usize * ts + py);
+                    if cx >= w || cy >= h {
+                        continue;
+                    }
+                    let i = cy * w + cx;
+                    if coverage[i] == 0 || sel.as_ref().is_some_and(|s| s[i] == 0) {
+                        continue;
+                    }
+                    let d = tile[py][px];
+                    if alpha_lock && d[3] == 0 {
+                        continue;
+                    }
+                    let a = opacity * coverage[i] as f32 / 255.0
+                        * sel.as_ref().map_or(1.0, |s| s[i] as f32 / 255.0);
+                    let src = premul_fix15(color, a);
+                    let mut out = merge_pixel(d, src, 1.0, Blend::Normal);
+                    if alpha_lock {
+                        // keep the layer's own transparency: only the colour changes
+                        let (c, _) = unpremul_srgb(out);
+                        out = premul_fix15(c, unpremul_srgb(d).1);
+                    }
                     if out != d {
                         tile[py][px] = out;
                         changed = true;
@@ -1571,6 +1705,32 @@ impl Painter {
         };
     }
 
+    /// Soften the selection's edge over about `radius` px (a feathered
+    /// selection): paint, fills and adjustments then fade out across it.
+    pub fn feather_selection(&mut self, radius: f32) -> bool {
+        let Some(sel) = self.selection.as_ref() else {
+            return false;
+        };
+        let (w, h) = (self.width as usize, self.height as usize);
+        // three box blurs ≈ a gaussian; each pass has a third of the radius
+        let r = (radius / 3.0).round().max(1.0) as usize;
+        let mut v: Vec<f32> = sel.iter().map(|&b| b as f32).collect();
+        let mut tmp = vec![0f32; w * h];
+        for _ in 0..3 {
+            box_blur_line(&v, &mut tmp, w, h, r, true);
+            box_blur_line(&tmp, &mut v, w, h, r, false);
+        }
+        let out: Vec<u8> = v
+            .iter()
+            .map(|x| x.round().clamp(0.0, 255.0) as u8)
+            .collect();
+        if out.iter().all(|&b| b == 0) {
+            return false;
+        }
+        self.selection = Some(out);
+        true
+    }
+
     pub fn has_selection(&self) -> bool {
         self.selection.is_some()
     }
@@ -1646,9 +1806,10 @@ impl Painter {
             fw,
             fh,
             last: None,
-            m: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            m: H_IDENTITY,
+            cover: None,
         }));
-        self.transform_preview([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        self.transform_preview_h(H_IDENTITY);
         vec![x0 as f32, y0 as f32, (x1 + 1) as f32, (y1 + 1) as f32]
     }
 
@@ -1660,29 +1821,131 @@ impl Painter {
     #[allow(clippy::needless_range_loop)]
     /// Show the lifted pixels under matrix `m` (dest = a·x + c·y + e, b·x + d·y + f).
     pub fn transform_preview(&mut self, m: [f32; 6]) -> bool {
+        let [a, b, c, d, e, f] = m;
+        self.transform_preview_h([a, c, e, b, d, f, 0.0, 0.0, 1.0])
+    }
+
+    /// Show the lifted pixels under a projective matrix `h` (row-major 3×3,
+    /// see `TransformSession::m`): distort and perspective. The lifted box must
+    /// stay in front of the "camera" (no corner may flip through infinity).
+    // pixel loops index tiles by (row, col) and map them to canvas coordinates
+    #[allow(clippy::needless_range_loop)]
+    pub fn transform_preview_h(&mut self, hm: [f32; 9]) -> bool {
         let Some(mut t) = self.transform.take() else {
             return false;
         };
-        let [a, b, c, d, e, f] = m;
-        let det = a * d - b * c;
-        if det.abs() < 1e-6 {
+        let Some(inv) = h_invert(hm) else {
+            self.transform = Some(t);
+            return false;
+        };
+        let (fx0, fy0) = (t.fx0 as f32, t.fy0 as f32);
+        let (fx1, fy1) = (fx0 + t.fw as f32, fy0 + t.fh as f32);
+        let mut quad = [(0.0f32, 0.0f32); 4];
+        for (k, (x, y)) in [(fx0, fy0), (fx1, fy0), (fx1, fy1), (fx0, fy1)]
+            .into_iter()
+            .enumerate()
+        {
+            let Some(q) = h_apply(hm, x, y) else {
+                self.transform = Some(t);
+                return false;
+            };
+            quad[k] = q;
+        }
+        t.m = hm;
+        t.cover = None;
+        // the whole float is one piece (samples outside it are transparent anyway)
+        let piece = Piece {
+            inv,
+            bbox: quad_bbox(&quad),
+            src: (fx0 - 1.0, fy0 - 1.0, fx1 + 1.0, fy1 + 1.0),
+        };
+        self.render_float(t, vec![piece], false)
+    }
+
+    /// Warp: the lifted box is cut into a `cols`×`rows` grid whose
+    /// (cols+1)×(rows+1) corner points land at `nodes` (x, y pairs, row by row,
+    /// in canvas px). Each cell is drawn with its own projective map, so a fine
+    /// grid gives a smooth bend.
+    pub fn transform_preview_mesh(&mut self, nodes: &[f32], cols: usize, rows: usize) -> bool {
+        let Some(t) = self.transform.take() else {
+            return false;
+        };
+        if cols == 0 || rows == 0 || nodes.len() != 2 * (cols + 1) * (rows + 1) {
             self.transform = Some(t);
             return false;
         }
-        t.m = m;
+        let (fx0, fy0) = (t.fx0 as f32, t.fy0 as f32);
+        let (cw, ch) = (t.fw as f32 / cols as f32, t.fh as f32 / rows as f32);
+        let node = |c: usize, r: usize| {
+            let i = 2 * (r * (cols + 1) + c);
+            (nodes[i], nodes[i + 1])
+        };
+        let mut pieces = Vec::with_capacity(cols * rows);
+        for r in 0..rows {
+            for c in 0..cols {
+                let quad = [
+                    node(c, r),
+                    node(c + 1, r),
+                    node(c + 1, r + 1),
+                    node(c, r + 1),
+                ];
+                let src = (
+                    fx0 + c as f32 * cw,
+                    fy0 + r as f32 * ch,
+                    fx0 + (c + 1) as f32 * cw,
+                    fy0 + (r + 1) as f32 * ch,
+                );
+                // a folded cell is skipped rather than drawn inside out
+                let Some(inv) = rect_to_quad(src, quad).and_then(h_invert) else {
+                    continue;
+                };
+                // cells meet edge to edge: let each reach half a pixel over
+                pieces.push(Piece {
+                    inv,
+                    bbox: quad_bbox(&quad),
+                    src: (
+                        src.0 - if c == 0 { 1.0 } else { 0.5 },
+                        src.1 - if r == 0 { 1.0 } else { 0.5 },
+                        src.2 + if c + 1 == cols { 1.0 } else { 0.5 },
+                        src.3 + if r + 1 == rows { 1.0 } else { 0.5 },
+                    ),
+                });
+            }
+        }
+        if pieces.is_empty() {
+            self.transform = Some(t);
+            return false;
+        }
+        self.render_float(t, pieces, true)
+    }
+
+    /// Repaint the transform's old and new areas: the layer without the lifted
+    /// pixels, then the lifted pixels through each piece's map (a pixel is drawn
+    /// by the first piece that covers it). `track` remembers which pixels got
+    /// paint, for the selection to follow a warp.
+    // pixel loops index tiles by (row, col) and map them to canvas coordinates
+    #[allow(clippy::needless_range_loop)]
+    fn render_float(
+        &mut self,
+        mut t: Box<TransformSession>,
+        pieces: Vec<Piece>,
+        track: bool,
+    ) -> bool {
         let (w, h) = (self.width as i64, self.height as i64);
         let ts = TILE_SIZE as i64;
-        // where the floating box lands
-        let (fx0, fy0) = (t.fx0 as f32, t.fy0 as f32);
-        let (fx1, fy1) = (fx0 + t.fw as f32, fy0 + t.fh as f32);
-        let pts = [(fx0, fy0), (fx1, fy0), (fx0, fy1), (fx1, fy1)]
-            .map(|(x, y)| (a * x + c * y + e, b * x + d * y + f));
-        let dx0 = (pts.iter().map(|p| p.0).fold(f32::MAX, f32::min).floor() as i64 - 1).max(0);
-        let dy0 = (pts.iter().map(|p| p.1).fold(f32::MAX, f32::min).floor() as i64 - 1).max(0);
-        let dx1 = (pts.iter().map(|p| p.0).fold(f32::MIN, f32::max).ceil() as i64 + 1).min(w - 1);
-        let dy1 = (pts.iter().map(|p| p.1).fold(f32::MIN, f32::max).ceil() as i64 + 1).min(h - 1);
-        // repaint the old and new boxes from the base
-        let mut region = (dx0, dy0, dx1, dy1);
+        let clip =
+            |b: (i64, i64, i64, i64)| (b.0.max(0), b.1.max(0), b.2.min(w - 1), b.3.min(h - 1));
+        let mut now = clip(pieces[0].bbox);
+        for p in &pieces[1..] {
+            let b = clip(p.bbox);
+            now = (
+                now.0.min(b.0),
+                now.1.min(b.1),
+                now.2.max(b.2),
+                now.3.max(b.3),
+            );
+        }
+        let mut region = now;
         if let Some(o) = t.last {
             region = (
                 region.0.min(o.0),
@@ -1691,18 +1954,20 @@ impl Painter {
                 region.3.max(o.3),
             );
         }
-        t.last = Some((dx0, dy0, dx1, dy1));
-        let (ia, ib, ic, id) = (d / det, -b / det, -c / det, a / det);
+        t.last = Some(now);
+        let (fx0, fy0) = (t.fx0 as f32, t.fy0 as f32);
+        let float = &t.float;
+        let (fw, fh) = (t.fw, t.fh);
         let sample = |sx: f32, sy: f32| -> [u16; 4] {
             // bilinear, premultiplied; outside the float is transparent
             let (x, y) = (sx - fx0 - 0.5, sy - fy0 - 0.5);
             let (x0, y0) = (x.floor(), y.floor());
             let (tx, ty) = (x - x0, y - y0);
             let get = |xi: i64, yi: i64| -> [f32; 4] {
-                if xi < 0 || yi < 0 || xi >= t.fw as i64 || yi >= t.fh as i64 {
+                if xi < 0 || yi < 0 || xi >= fw as i64 || yi >= fh as i64 {
                     return [0.0; 4];
                 }
-                t.float[yi as usize * t.fw + xi as usize].map(|v| v as f32)
+                float[yi as usize * fw + xi as usize].map(|v| v as f32)
             };
             let (x0, y0) = (x0 as i64, y0 as i64);
             let (p00, p10, p01, p11) = (
@@ -1721,6 +1986,33 @@ impl Painter {
             }
             out
         };
+        // what each piece draws, per canvas pixel of the new area (first piece wins)
+        let (nw, nh) = ((now.2 - now.0 + 1) as usize, (now.3 - now.1 + 1) as usize);
+        let mut drawn: Vec<Option<[u16; 4]>> = vec![None; nw * nh];
+        for p in &pieces {
+            let b = clip(p.bbox);
+            for cy in b.1..=b.3 {
+                for cx in b.0..=b.2 {
+                    let i = (cy - now.1) as usize * nw + (cx - now.0) as usize;
+                    if drawn[i].is_some() {
+                        continue;
+                    }
+                    let Some((sx, sy)) = h_apply(p.inv, cx as f32 + 0.5, cy as f32 + 0.5) else {
+                        continue;
+                    };
+                    if sx < p.src.0 || sy < p.src.1 || sx > p.src.2 || sy > p.src.3 {
+                        continue;
+                    }
+                    drawn[i] = Some(sample(sx, sy));
+                }
+            }
+        }
+        t.cover = track.then(|| {
+            (
+                now,
+                drawn.iter().map(|d| d.is_some_and(|s| s[3] > 0)).collect(),
+            )
+        });
         let Some(li) = self.index_of(t.layer) else {
             self.transform = Some(t);
             return false;
@@ -1733,12 +2025,13 @@ impl Painter {
                 for py in 0..TILE_SIZE {
                     for px in 0..TILE_SIZE {
                         let (cx, cy) = (tx * ts + px as i64, ty * ts + py as i64);
-                        if cx < dx0 || cx > dx1 || cy < dy0 || cy > dy1 {
+                        if cx < now.0 || cx > now.2 || cy < now.1 || cy > now.3 {
                             continue;
                         }
-                        let (ux, uy) = (cx as f32 + 0.5 - e, cy as f32 + 0.5 - f);
-                        let s = sample(ia * ux + ic * uy, ib * ux + id * uy);
-                        if s[3] > 0 {
+                        let i = (cy - now.1) as usize * nw + (cx - now.0) as usize;
+                        if let Some(s) = drawn[i]
+                            && s[3] > 0
+                        {
                             tile[py][px] = merge_pixel(tile[py][px], s, 1.0, Blend::Normal);
                         }
                     }
@@ -1777,16 +2070,25 @@ impl Painter {
                 snap.insert(*key, before.cloned());
             }
         }
-        if let Some(sel) = self.selection.take() {
+        if let Some((b, cover)) = t.cover.as_ref().filter(|_| self.selection.is_some()) {
+            let w = self.width as usize;
+            let bw = (b.2 - b.0 + 1) as usize;
+            let mut out = vec![0u8; w * self.height as usize];
+            for (i, _) in cover.iter().enumerate().filter(|(_, c)| **c) {
+                let (x, y) = (b.0 as usize + i % bw, b.1 as usize + i / bw);
+                out[y * w + x] = 255;
+            }
+            self.selection = cover.iter().any(|&c| c).then_some(out);
+        } else if let Some(sel) = self.selection.take() {
             let (w, h) = (self.width as usize, self.height as usize);
-            let [a, b, c, d, e, f] = t.m;
-            let det = a * d - b * c;
-            let (ia, ib, ic, id) = (d / det, -b / det, -c / det, a / det);
+            let inv = h_invert(t.m).unwrap_or(H_IDENTITY);
             let mut out = vec![0u8; w * h];
             for y in 0..h {
                 for x in 0..w {
-                    let (ux, uy) = (x as f32 + 0.5 - e, y as f32 + 0.5 - f);
-                    let (sx, sy) = ((ia * ux + ic * uy).floor(), (ib * ux + id * uy).floor());
+                    let Some((sx, sy)) = h_apply(inv, x as f32 + 0.5, y as f32 + 0.5) else {
+                        continue;
+                    };
+                    let (sx, sy) = (sx.floor(), sy.floor());
                     if sx >= 0.0 && sy >= 0.0 && (sx as usize) < w && (sy as usize) < h {
                         out[y * w + x] = sel[sy as usize * w + sx as usize];
                     }
@@ -1930,6 +2232,14 @@ impl Painter {
                 }
                 let fall = (1.0 - d2).powi(2) * s;
                 let v = sample(px - dx * fall, py - dy * fall);
+                // a feathered selection edge moves only partly
+                let v = sel.map_or(v, |m| {
+                    lerp_px(
+                        old[yy * bw + xx],
+                        v,
+                        m[(cy * w + cx) as usize] as f32 / 255.0,
+                    )
+                });
                 if v == old[yy * bw + xx] {
                     continue;
                 }
@@ -2571,6 +2881,149 @@ fn flood(src: &[[u8; 4]], w: usize, h: usize, x: usize, y: usize, tol: i32) -> V
 /// Flood fill with gap closing: lines count as `gap` px thicker while
 /// flooding, so small gaps in grainy pencil lines don't let it leak; the
 /// region then grows back by `gap` to meet the lines. (`gap` 0 = plain flood.)
+/// The identity projective matrix (row-major 3×3).
+const H_IDENTITY: [f32; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+
+/// `h` applied to (x, y); None behind the camera (w ≤ 0) or at infinity.
+fn h_apply(h: [f32; 9], x: f32, y: f32) -> Option<(f32, f32)> {
+    let w = h[6] * x + h[7] * y + h[8];
+    if w <= 1e-6 {
+        return None;
+    }
+    Some((
+        (h[0] * x + h[1] * y + h[2]) / w,
+        (h[3] * x + h[4] * y + h[5]) / w,
+    ))
+}
+
+/// Bounding box (inclusive, padded by a pixel) of four points.
+fn quad_bbox(q: &[(f32, f32); 4]) -> (i64, i64, i64, i64) {
+    let xs = q.map(|p| p.0);
+    let ys = q.map(|p| p.1);
+    (
+        xs.iter().copied().fold(f32::MAX, f32::min).floor() as i64 - 1,
+        ys.iter().copied().fold(f32::MAX, f32::min).floor() as i64 - 1,
+        xs.iter().copied().fold(f32::MIN, f32::max).ceil() as i64 + 1,
+        ys.iter().copied().fold(f32::MIN, f32::max).ceil() as i64 + 1,
+    )
+}
+
+/// The projective map taking rectangle (x0, y0, x1, y1)'s corners (top-left,
+/// top-right, bottom-right, bottom-left) to `q` (Heckbert's square-to-quad).
+fn rect_to_quad(r: (f32, f32, f32, f32), q: [(f32, f32); 4]) -> Option<[f32; 9]> {
+    let [(x0, y0), (x1, y1), (x2, y2), (x3, y3)] = q.map(|(x, y)| (x as f64, y as f64));
+    let (sx, sy) = (x0 - x1 + x2 - x3, y0 - y1 + y2 - y3);
+    let sq: [f64; 9] = if sx.abs() < 1e-9 && sy.abs() < 1e-9 {
+        [x1 - x0, x3 - x0, x0, y1 - y0, y3 - y0, y0, 0.0, 0.0, 1.0]
+    } else {
+        let (dx1, dx2, dy1, dy2) = (x1 - x2, x3 - x2, y1 - y2, y3 - y2);
+        let den = dx1 * dy2 - dx2 * dy1;
+        if den.abs() < 1e-12 {
+            return None;
+        }
+        let g = (sx * dy2 - dx2 * sy) / den;
+        let h = (dx1 * sy - sx * dy1) / den;
+        [
+            x1 - x0 + g * x1,
+            x3 - x0 + h * x3,
+            x0,
+            y1 - y0 + g * y1,
+            y3 - y0 + h * y3,
+            y0,
+            g,
+            h,
+            1.0,
+        ]
+    };
+    let (rw, rh) = ((r.2 - r.0) as f64, (r.3 - r.1) as f64);
+    if rw <= 0.0 || rh <= 0.0 {
+        return None;
+    }
+    // unit square ← rectangle: u = (x - x0) / w, v = (y - y0) / h
+    let s = [
+        1.0 / rw,
+        0.0,
+        -r.0 as f64 / rw,
+        0.0,
+        1.0 / rh,
+        -r.1 as f64 / rh,
+        0.0,
+        0.0,
+        1.0,
+    ];
+    let mut m = [0.0f32; 9];
+    for i in 0..3 {
+        for j in 0..3 {
+            m[i * 3 + j] = (0..3).map(|k| sq[i * 3 + k] * s[k * 3 + j]).sum::<f64>() as f32;
+        }
+    }
+    Some(m)
+}
+
+/// One box-blur pass along rows (`horizontal`) or columns, radius `r`; edges clamp.
+fn box_blur_line(src: &[f32], dst: &mut [f32], w: usize, h: usize, r: usize, horizontal: bool) {
+    let (n, lines) = if horizontal { (w, h) } else { (h, w) };
+    let at = |line: usize, i: usize| {
+        if horizontal {
+            line * w + i
+        } else {
+            i * w + line
+        }
+    };
+    let k = 1.0 / (2 * r + 1) as f32;
+    for line in 0..lines {
+        let get = |i: isize| src[at(line, i.clamp(0, n as isize - 1) as usize)];
+        let mut acc: f32 = (-(r as isize)..=r as isize).map(get).sum();
+        for i in 0..n {
+            dst[at(line, i)] = acc * k;
+            acc += get(i as isize + r as isize + 1) - get(i as isize - r as isize);
+        }
+    }
+}
+
+/// Premultiplied blend from `a` (t = 0) to `b` (t = 1): soft selections.
+pub(crate) fn lerp_px(a: [u16; 4], b: [u16; 4], t: f32) -> [u16; 4] {
+    if t >= 1.0 {
+        return b;
+    }
+    if t <= 0.0 {
+        return a;
+    }
+    let mut o = [0u16; 4];
+    for k in 0..4 {
+        o[k] = (a[k] as f32 + (b[k] as f32 - a[k] as f32) * t)
+            .round()
+            .clamp(0.0, 32768.0) as u16;
+    }
+    o
+}
+
+/// Inverse of a 3×3 matrix; None if singular.
+fn h_invert(m: [f32; 9]) -> Option<[f32; 9]> {
+    let m = m.map(|v| v as f64);
+    let c0 = m[4] * m[8] - m[5] * m[7];
+    let c1 = m[5] * m[6] - m[3] * m[8];
+    let c2 = m[3] * m[7] - m[4] * m[6];
+    let det = m[0] * c0 + m[1] * c1 + m[2] * c2;
+    if det.abs() < 1e-12 {
+        return None;
+    }
+    let inv = [
+        c0,
+        m[2] * m[7] - m[1] * m[8],
+        m[1] * m[5] - m[2] * m[4],
+        c1,
+        m[0] * m[8] - m[2] * m[6],
+        m[2] * m[3] - m[0] * m[5],
+        c2,
+        m[1] * m[6] - m[0] * m[7],
+        m[0] * m[4] - m[1] * m[3],
+    ]
+    // the exact inverse: a point in front of the camera maps back with w > 0
+    .map(|v| (v / det) as f32);
+    Some(inv)
+}
+
 fn flood_closed(
     src: &[[u8; 4]],
     w: usize,
@@ -3137,6 +3590,179 @@ mod tests {
         lock.locked = true;
         p.set_layer_props(top, lock, true);
         assert!(!p.fill(80, 60, [0, 200, 0], 1.0, 0.1, true, 0, 0));
+    }
+
+    #[test]
+    fn fill_from_a_reference_layer() {
+        let mut p = Painter::new(256, 128);
+        dense_square(&mut p);
+        let lines = p.active_layer();
+        let colour = p.add_layer("Colour");
+        // hide the lines: a normal fill sampling what you see can't find the square
+        let mut hidden = props(&p, lines);
+        hidden.visible = false;
+        p.set_layer_props(lines, hidden, true);
+        assert!(p.fill_from(80, 60, [0, 200, 0], 1.0, 0.1, true, 0, 0, Some(lines)));
+        assert_eq!(p.active_layer(), colour, "painted on the active layer");
+        let mut shown = props(&p, lines);
+        shown.visible = true;
+        p.set_layer_props(lines, shown, true);
+        p.flush();
+        assert!(
+            px(&p, 80, 60)[1] > 150,
+            "inside the reference's square is filled"
+        );
+        assert!(px(&p, 200, 60)[0] > 240, "outside it is not");
+        // a reference that doesn't exist falls back to the usual sampling (what you see)
+        assert!(p.fill_from(200, 60, [200, 0, 0], 1.0, 0.1, true, 0, 0, Some(999)));
+        p.flush();
+        assert!(
+            px(&p, 200, 60)[1] < 60,
+            "the outside is filled: {:?}",
+            px(&p, 200, 60)
+        );
+        assert!(px(&p, 80, 60)[1] > 150, "the inside keeps its green");
+    }
+
+    #[test]
+    fn fill_mask_paints_the_lasso_shape_with_soft_edges() {
+        let mut p = Painter::new(256, 128);
+        let mut cov = rect_mask(&p, 40, 30, 120, 90);
+        cov[(60 * 256 + 120) as usize] = 128; // a half-covered edge pixel
+        assert!(p.fill_mask(&cov, [0, 0, 220], 1.0));
+        p.flush();
+        assert!(
+            px(&p, 80, 60)[2] > 200 && px(&p, 80, 60)[0] < 40,
+            "inside is blue"
+        );
+        assert!(px(&p, 200, 60)[0] > 240, "outside untouched");
+        let edge = px(&p, 120, 60);
+        assert!(edge[0] > 60 && edge[0] < 200, "edge is half way: {edge:?}");
+        assert!(p.undo());
+        p.flush();
+        assert!(px(&p, 80, 60)[0] > 240);
+        // the selection limits it
+        p.set_selection(&rect_mask(&p, 0, 0, 80, 128), 0);
+        assert!(p.fill_mask(&rect_mask(&p, 40, 30, 120, 90), [0, 0, 220], 1.0));
+        p.flush();
+        assert!(px(&p, 60, 60)[0] < 40 && px(&p, 100, 60)[0] > 240);
+        // nothing to paint: no undo step
+        assert!(!p.fill_mask(&vec![0; 256 * 128], [0, 0, 220], 1.0));
+    }
+
+    #[test]
+    fn projective_transform_distorts_and_undoes() {
+        let mut p = Painter::new(256, 128);
+        let b = pen();
+        line(&mut p, &b, 30.0);
+        p.flush();
+        let before = p.rgba().to_vec();
+        assert_eq!(p.transform_begin().len(), 4);
+        // a matrix scaled by 2 is the same move: down 50
+        assert!(p.transform_preview_h([2.0, 0.0, 0.0, 0.0, 2.0, 100.0, 0.0, 0.0, 2.0]));
+        p.flush();
+        assert!(px(&p, 100, 30)[0] > 240 && px(&p, 100, 80)[0] < 100);
+        // real perspective: the right end shrinks towards the middle row
+        assert!(p.transform_preview_h([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.004, 0.0, 1.0]));
+        p.flush();
+        // x' = x / (1 + 0.004 x): the line's right end (x = 180) lands near x = 105
+        assert!(px(&p, 60, 22)[0] < 120, "left part stays");
+        assert!(px(&p, 160, 18)[0] > 240, "right end pulled in");
+        // a corner behind the camera is refused (and the last good preview stays)
+        assert!(!p.transform_preview_h([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, -0.02, 0.0, 1.0]));
+        assert!(p.transform_commit());
+        assert!(p.undo());
+        p.flush();
+        assert_eq!(p.rgba(), &before[..]);
+    }
+
+    #[test]
+    fn warp_mesh_bends_and_the_selection_follows() {
+        let mut p = Painter::new(256, 128);
+        let b = pen();
+        line(&mut p, &b, 60.0);
+        p.flush();
+        let before = p.rgba().to_vec();
+        p.set_selection(&rect_mask(&p, 0, 0, 256, 128), 0);
+        let bbox = p.transform_begin();
+        let (x0, y0, x1, y1) = (bbox[0], bbox[1], bbox[2], bbox[3]);
+        // a 2×1 mesh: lift the middle column of points by 30 px (a tent)
+        let grid = |lift: f32| {
+            let mut n = Vec::new();
+            for r in 0..2 {
+                for c in 0..3 {
+                    let x = x0 + (x1 - x0) * c as f32 / 2.0;
+                    let y = if r == 0 { y0 } else { y1 };
+                    n.extend([x, y - if c == 1 { lift } else { 0.0 }]);
+                }
+            }
+            n
+        };
+        // the identity mesh changes nothing
+        assert!(p.transform_preview_mesh(&grid(0.0), 2, 1));
+        p.flush();
+        assert_eq!(p.rgba(), &before[..]);
+        assert!(p.transform_preview_mesh(&grid(30.0), 2, 1));
+        p.flush();
+        let mid = ((x0 + x1) / 2.0) as u32;
+        assert!(
+            px(&p, mid, 30)[0] < 120,
+            "the middle rose: {:?}",
+            px(&p, mid, 30)
+        );
+        assert!(px(&p, mid, 60)[0] > 240, "and left its old place");
+        assert!(px(&p, 24, 60)[0] < 120, "the ends stay put");
+        // a bad mesh is refused
+        assert!(!p.transform_preview_mesh(&[1.0, 2.0], 2, 1));
+        assert!(p.transform_commit());
+        let sel = p.selection_mask();
+        assert!(
+            sel[30 * 256 + mid as usize] > 0,
+            "the selection followed the paint"
+        );
+        assert!(p.undo());
+        p.flush();
+        assert_eq!(p.rgba(), &before[..]);
+    }
+
+    #[test]
+    fn feathered_selection_paints_partly_at_its_edge() {
+        let mut p = Painter::new(256, 128);
+        assert!(!p.feather_selection(10.0), "nothing to feather");
+        p.set_selection(&rect_mask(&p, 0, 0, 128, 128), 0);
+        assert!(p.feather_selection(12.0));
+        let sel = p.selection_mask();
+        let at = |x: usize| sel[64 * 256 + x];
+        assert_eq!(at(40), 255, "deep inside: fully selected");
+        assert_eq!(at(220), 0, "far outside: not selected");
+        assert!(
+            at(128) > 60 && at(128) < 200,
+            "the edge is soft: {}",
+            at(128)
+        );
+        // a lasso fill across the edge fades out over it
+        assert!(p.fill_mask(&vec![255; 256 * 128], [0, 0, 0], 1.0));
+        p.flush();
+        let (inside, edge, outside) = (px(&p, 40, 64)[0], px(&p, 128, 64)[0], px(&p, 220, 64)[0]);
+        assert!(inside < 20 && outside > 240, "{inside} {outside}");
+        assert!(edge > 40 && edge < 220, "half painted at the edge: {edge}");
+        // strokes too
+        p.undo();
+        let b = pen();
+        line(&mut p, &b, 64.0);
+        p.flush();
+        assert!(px(&p, 40, 64)[0] < 60);
+        assert!(px(&p, 160, 64)[0] > 240);
+    }
+
+    #[test]
+    fn h_invert_round_trips() {
+        let h = [1.2, 0.1, 5.0, -0.2, 0.9, 3.0, 0.001, 0.002, 1.0];
+        let inv = h_invert(h).unwrap();
+        let (x, y) = h_apply(h, 40.0, 70.0).unwrap();
+        let (bx, by) = h_apply(inv, x, y).unwrap();
+        assert!((bx - 40.0).abs() < 1e-2 && (by - 70.0).abs() < 1e-2);
+        assert!(h_invert([0.0; 9]).is_none());
     }
 
     /// a selection mask for the rectangle x0..x1, y0..y1

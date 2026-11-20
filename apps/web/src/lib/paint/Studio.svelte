@@ -137,6 +137,12 @@
 										d="M7 16c-2 0-3 1.5-3 3.5 0 .8-.6 1.5-1.5 1.5H7a4 4 0 0 0 4-4c0-1.3-1-2-2-2Z"
 									/>
 								</svg>
+							{:else if t.id === 'history'}
+								<svg viewBox="0 0 24 24" aria-hidden="true">
+									<path d="M3 12a9 9 0 1 0 3-6.7L3 8" /><path d="M3 3v5h5" /><path
+										d="M12 7v5l3 2"
+									/>
+								</svg>
 							{:else}
 								<svg viewBox="0 0 24 24" aria-hidden="true">
 									<path d="m12 3 9 5-9 5-9-5Z" /><path d="m3 13 9 5 9-5" />

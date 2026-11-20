@@ -198,9 +198,9 @@
 						</defs>
 						<line
 							x1={(d.x + d.w / 2) * 100}
-							y1={(d.y + d.h / 2) * 75}
+							y1={((d.y + d.h / 2) * 100) / aspect}
 							x2={(r.x + r.w / 2) * 100}
-							y2={(r.y + r.h / 2) * 75}
+							y2={((r.y + r.h / 2) * 100) / aspect}
 							stroke="var(--pp-accent)"
 							stroke-width="0.8"
 							marker-end="url(#pp-head)"
