@@ -7,10 +7,13 @@
 	import Button from '#lib/ui/Button.svelte';
 	import OverlayViewer, { type OverlayMode } from '#lib/results/OverlayViewer.svelte';
 	import ScoreReveal from '#lib/results/ScoreReveal.svelte';
-	import { loadSubmission, type Submission } from '#lib/submission.js';
+	import { loadSubmission, saveSubmission, type Submission } from '#lib/submission.js';
+	import TapPoints from '#lib/results/TapPoints.svelte';
+	import { onCanvas, refKeypoints, tappedIndexes, type Taps } from '#lib/keypoints.js';
 	import { byId, imageUrl, tierName, tierOf, titleOf } from '#lib/references.js';
 	import { attempts, recommendedTier, recurringMistakes, type Pattern } from '#lib/progress.js';
 	import {
+		analysisSize,
 		humanize,
 		measurement,
 		type Feedback,
@@ -48,6 +51,10 @@
 	let compareSrc = $state<string | null>(null);
 	const traced = $derived(!!sub?.traced);
 	let graded = $state<Graded | null>(null);
+	/** the proportions check is showing (the reference has keypoints; before grading) */
+	let tapping = $state(false);
+	/** a drawing from a gesture session (already graded on the summary: no check) */
+	let fromSession = false;
 	let showReplay = $state(false);
 	/** daily challenge: how this try compares with everyone's today */
 	let dailyResult = $state<{
@@ -203,11 +210,37 @@
 	);
 	const fixSkills = $derived(new Set(fb?.fixes.map((f) => f.skill) ?? []));
 
-	onMount(async () => {
+	onMount(() => {
 		const at = Number(page.url.searchParams.get('at'));
-		sub = (at && sessionDrawing(at)) || loadSubmission();
+		const fromS = at ? sessionDrawing(at) : null;
+		fromSession = !!fromS;
+		sub = fromS || loadSubmission();
 		loaded = true;
 		if (!sub || !gradable(sub)) return;
+		const ref = sub.reference ?? byId(sub.referenceId);
+		// the proportions check comes first, once per drawing (a reload keeps the answer)
+		if (
+			!fromSession &&
+			!sub.traced &&
+			!sub.trace &&
+			sub.keypointTaps === undefined &&
+			refKeypoints(ref).length
+		)
+			tapping = true;
+		else void run();
+	});
+
+	/** After the proportions check (taps) or skipping it (null): remember the answer, then grade. */
+	function afterCheck(taps: Taps | null) {
+		if (!sub) return;
+		sub.keypointTaps = taps;
+		if (!fromSession) saveSubmission($state.snapshot(sub) as Submission);
+		tapping = false;
+		void run();
+	}
+
+	async function run() {
+		if (!sub) return;
 		try {
 			const g = await gradeSubmission(sub);
 			graded = g;
@@ -239,12 +272,37 @@
 		} catch (e) {
 			gradeError = `Could not grade this drawing: ${e}`;
 		}
+	}
+
+	/** The proportions check on the overlay: each tapped point, lined up with the reference. */
+	const points = $derived.by(() => {
+		const k = grade?.keypoints;
+		if (!k || !sub?.keypointTaps || !reference) return null;
+		const kps = refKeypoints(reference);
+		const a = analysisSize(sub.width, sub.height);
+		const s = sub;
+		return tappedIndexes(sub.keypointTaps).map((i, j) => {
+			const r = onCanvas(kps[i], reference, s.width, s.height);
+			return {
+				label: kps[i].label,
+				ref: { x: r.x / s.width, y: r.y / s.height },
+				mine: { x: k.pairs[j].fitted.x / a.width, y: k.pairs[j].fitted.y / a.height },
+				error: k.pairs[j].error
+			};
+		});
 	});
 
 	/** "Show me": switch the viewer to the view that explains a fix. */
 	function showMe(f: FeedbackItem) {
 		focused = f.id;
-		mode = f.overlay === 'bbox' || f.overlay === 'offset' ? 'size' : f.overlay ? 'heatmap' : 'fade';
+		mode =
+			f.overlay === 'points' && points
+				? 'points'
+				: f.overlay === 'bbox' || f.overlay === 'offset'
+					? 'size'
+					: f.overlay && f.overlay !== 'points'
+						? 'heatmap'
+						: 'fade';
 		document.getElementById('compare')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
 	}
 
@@ -302,301 +360,316 @@
 			</div>
 		</div>
 
-		<div class="pp-bento grid">
-			<Tile tone="ink">
-				<span class="pp-eyebrow on-ink">Your score</span>
-				{#if traced}
-					{#if sub?.imported}
-						<span class="big word">Not scored</span>
-						<span class="note">
-							It includes an imported picture, so it isn’t scored and doesn’t count toward your
-							progress. Hide the picture layer before handing in to get a score.
-						</span>
-					{:else}
-						<span class="big word">Traced</span>
-						<span class="note">
-							Tracing practice isn’t scored and doesn’t count toward your progress.
-						</span>
-					{/if}
-				{:else if grade}
-					<ScoreReveal score={grade.score} />
-					<span class="note">{grade.passed ? 'Passed! Great match.' : 'out of 10'}</span>
-				{:else if reference && !gradeError}
-					<span class="big">…</span>
-					<span class="note">Measuring your drawing…</span>
-				{:else}
-					<span class="big">–</span>
-					<span class="note">
-						{gradeError || 'Free drawings aren’t scored. Pick a category to copy a reference.'}
-					</span>
-				{/if}
-			</Tile>
-
-			<Tile span={2} rows={2} as="section" label="Compare">
-				<div id="compare">
-					{#if compareSrc || reference}
-						<OverlayViewer
-							referenceSrc={compareSrc ?? imageUrl(reference!)}
-							drawingSrc={sub.png}
-							{grade}
-							bind:mode
-							highlight={focused}
-							aspect={sub.width / sub.height}
-						/>
-					{:else}
-						<div
-							class="frame"
-							style="aspect-ratio: {sub.width} / {sub.height}; width: min(100%, calc(75vh * {sub.width /
-								sub.height}))"
-						>
-							<img src={sub.png} alt="Your submitted drawing" />
-						</div>
-					{/if}
-				</div>
-			</Tile>
-
-			{#if fb?.praise}
-				<Tile tone="yellow">
-					<span class="pp-eyebrow ink">You nailed it</span>
-					<span class="mid">{fb.praise.title}</span>
-					<span class="note">{fb.praise.text}</span>
-				</Tile>
-			{:else}
-				<Tile>
-					<span class="pp-eyebrow">Time · strokes</span>
-					<span class="mid">{time}</span>
-					<span class="note">{sub.strokes} strokes, {sub.brushes.length} brush(es)</span>
-				</Tile>
-			{/if}
-
-			{#if grade}
-				<Tile>
-					<h2>Breakdown</h2>
-					{#if grade.flags.includes('unrelated')}
-						<!-- coverage-style measures (big shapes, light & dark) reward any ink in the right area -->
-						<p class="note">
-							Your lines don’t follow the reference’s shapes yet, so there’s nothing to break down.
-							Start with its main outline.
-						</p>
-					{:else}
-						<ul class="bars">
-							{#each skills as s (s.name)}
-								<li>
-									<span class="row"><span>{s.label}</span><b>{pct(s.value)}</b></span>
-									<span class="track">
-										<span
-											class="fill"
-											class:low={fixSkills.has(s.skill)}
-											style="width: {pct(s.value)}"
-										></span>
-									</span>
-								</li>
-							{/each}
-						</ul>
-					{/if}
-				</Tile>
-			{/if}
-			{#if fb?.praise}
-				<Tile>
-					<span class="pp-eyebrow">Time · strokes</span>
-					<span class="mid">{time}</span>
-					<span class="note">{sub.strokes} strokes, {sub.brushes.length} brush(es)</span>
-				</Tile>
-			{/if}
-		</div>
-
-		{#if dailyResult && sub}
-			<section class="daily" aria-label="Today’s challenge">
-				<span class="pp-eyebrow">Today’s challenge</span>
-				<p class="daily-line">
-					{#if dailyResult.counted}
-						{#if dailyResult.players > 1}
-							Counted! Better than <b>{dailyResult.beat}%</b> of today’s
-							{dailyResult.players - 1} other players.
+		{#if tapping && reference}
+			<TapPoints
+				{reference}
+				referenceSrc={imageUrl(reference)}
+				drawingSrc={sub.png}
+				width={sub.width}
+				height={sub.height}
+				ondone={(t) => afterCheck(t)}
+				onskip={() => afterCheck(null)}
+			/>
+		{:else}
+			<div class="pp-bento grid">
+				<Tile tone="ink">
+					<span class="pp-eyebrow on-ink">Your score</span>
+					{#if traced}
+						{#if sub?.imported}
+							<span class="big word">Not scored</span>
+							<span class="note">
+								It includes an imported picture, so it isn’t scored and doesn’t count toward your
+								progress. Hide the picture layer before handing in to get a score.
+							</span>
 						{:else}
-							Counted! You’re the first one in today.
+							<span class="big word">Traced</span>
+							<span class="note">
+								Tracing practice isn’t scored and doesn’t count toward your progress.
+							</span>
 						{/if}
-					{:else if dailyResult.mine !== null}
-						Your first try today ({dailyResult.mine.toFixed(1)}) is the one that counts. This one
-						would beat {dailyResult.beat}% of today’s players.
-					{:else if dailyResult.players}
-						This would beat {dailyResult.beat}% of today’s {dailyResult.players} players.
-						<a href="/login?next=/daily">Sign in</a> to be counted.
+					{:else if grade}
+						<ScoreReveal score={grade.score} />
+						<span class="note">{grade.passed ? 'Passed! Great match.' : 'out of 10'}</span>
+					{:else if reference && !gradeError}
+						<span class="big">…</span>
+						<span class="note">Measuring your drawing…</span>
 					{:else}
-						No one has been counted yet today. <a href="/login?next=/daily">Sign in</a> to be the first.
+						<span class="big">–</span>
+						<span class="note">
+							{gradeError || 'Free drawings aren’t scored. Pick a category to copy a reference.'}
+						</span>
 					{/if}
-				</p>
-				<p class="daily-meta">
-					{#if dailyResult.streak}Daily streak: <b>{dailyResult.streak}</b> ·{/if}
-					<a href="/daily">Today’s challenge page</a>
-				</p>
-			</section>
-		{/if}
+				</Tile>
 
-		{#if personalResult && grade}
-			{@const diff = personalResult.avg === null ? null : grade.score - personalResult.avg}
-			<section class="daily personal" aria-label="Your challenge">
-				<span class="pp-eyebrow">Your challenge · done</span>
-				<p class="daily-line">
-					{#if diff === null}
-						Your first {personalResult.category} drawing: this sets the bar.
-					{:else if diff >= 0.05}
-						<b>+{diff.toFixed(1)}</b> above your {personalResult.category} average ({personalResult.avg!.toFixed(
-							1
-						)}). Nice!
-					{:else if diff > -0.05}
-						Right on your {personalResult.category} average ({personalResult.avg!.toFixed(1)}).
-					{:else}
-						{Math.abs(diff).toFixed(1)} below your {personalResult.category} average ({personalResult.avg!.toFixed(
-							1
-						)}). Tricky one: the tips below show why.
-					{/if}
-				</p>
-				<p class="daily-meta">
-					Personal streak: <b>{personalResult.streak}</b> day{personalResult.streak === 1
-						? ''
-						: 's'} · <a href="/daily">Tomorrow’s is waiting there</a>
-				</p>
-			</section>
-		{/if}
-
-		{#if canReplay}
-			<section class="replay-section" aria-label="Replay">
-				<div class="replay-head">
-					<h2>Replay</h2>
-					{#if !showReplay}
-						<Button variant="dark" onclick={() => (showReplay = true)}>Watch the replay ▶</Button>
-					{/if}
-				</div>
-				{#if showReplay && sub}
-					<ReplayPlayer
-						{sub}
-						tips={fb?.fixes.map((f) => ({ id: f.id, title: f.title })) ?? []}
-						firedAt={graded && sub
-							? (gray, strokes) => tipsFor(sub!, graded!, gray, strokes)
-							: undefined}
-					/>
-				{:else}
-					<p class="muted-line">
-						See your drawing come together stroke by stroke{fb?.fixes.length
-							? ', with a mark where each tip’s mistake started'
-							: ''}.
-					</p>
-				{/if}
-			</section>
-		{/if}
-
-		{#if levelUp && reference}
-			<div class="pp-bento levelup">
-				<Tile tone="accent" span={4}>
-					<span class="pp-eyebrow on-accent">Level up!</span>
-					<p class="big-line light">
-						Three strong drawings in a row. You’re ready for {tierName(levelUp)}.
-					</p>
-					<div>
-						<Button href="/practice/{reference.category}?tier={levelUp}" variant="dark">
-							Try {tierName(levelUp)} →
-						</Button>
+				<Tile span={2} rows={2} as="section" label="Compare">
+					<div id="compare">
+						{#if compareSrc || reference}
+							<OverlayViewer
+								referenceSrc={compareSrc ?? imageUrl(reference!)}
+								drawingSrc={sub.png}
+								{grade}
+								bind:mode
+								highlight={focused}
+								aspect={sub.width / sub.height}
+								{points}
+							/>
+						{:else}
+							<div
+								class="frame"
+								style="aspect-ratio: {sub.width} / {sub.height}; width: min(100%, calc(75vh * {sub.width /
+									sub.height}))"
+							>
+								<img src={sub.png} alt="Your submitted drawing" />
+							</div>
+						{/if}
 					</div>
 				</Tile>
-			</div>
-		{/if}
 
-		{#if patterns.length && fb}
-			{@const p = patterns[0]}
-			{@const fix = fb.fixes.find((f) => f.id === p.ruleId)}
-			{#if fix}
-				<div class="pp-bento levelup">
-					<Tile tone="lilac" span={4}>
-						<span class="pp-eyebrow lilac-ink">Pattern spotted</span>
-						<p class="big-line">
-							“{fix.title}” came up in {p.count} of your last {p.window} drawings.
+				{#if fb?.praise}
+					<Tile tone="yellow">
+						<span class="pp-eyebrow ink">You nailed it</span>
+						<span class="mid">{fb.praise.title}</span>
+						<span class="note">{fb.praise.text}</span>
+					</Tile>
+				{:else}
+					<Tile>
+						<span class="pp-eyebrow">Time · strokes</span>
+						<span class="mid">{time}</span>
+						<span class="note">{sub.strokes} strokes, {sub.brushes.length} brush(es)</span>
+					</Tile>
+				{/if}
+
+				{#if grade}
+					<Tile>
+						<h2>Breakdown</h2>
+						{#if grade.flags.includes('unrelated')}
+							<!-- coverage-style measures (big shapes, light & dark) reward any ink in the right area -->
+							<p class="note">
+								Your lines don’t follow the reference’s shapes yet, so there’s nothing to break
+								down. Start with its main outline.
+							</p>
+						{:else}
+							<ul class="bars">
+								{#each skills as s (s.name)}
+									<li>
+										<span class="row"><span>{s.label}</span><b>{pct(s.value)}</b></span>
+										<span class="track">
+											<span
+												class="fill"
+												class:low={fixSkills.has(s.skill)}
+												style="width: {pct(s.value)}"
+											></span>
+										</span>
+									</li>
+								{/each}
+							</ul>
+						{/if}
+					</Tile>
+				{/if}
+				{#if fb?.praise}
+					<Tile>
+						<span class="pp-eyebrow">Time · strokes</span>
+						<span class="mid">{time}</span>
+						<span class="note">{sub.strokes} strokes, {sub.brushes.length} brush(es)</span>
+					</Tile>
+				{/if}
+			</div>
+
+			{#if dailyResult && sub}
+				<section class="daily" aria-label="Today’s challenge">
+					<span class="pp-eyebrow">Today’s challenge</span>
+					<p class="daily-line">
+						{#if dailyResult.counted}
+							{#if dailyResult.players > 1}
+								Counted! Better than <b>{dailyResult.beat}%</b> of today’s
+								{dailyResult.players - 1} other players.
+							{:else}
+								Counted! You’re the first one in today.
+							{/if}
+						{:else if dailyResult.mine !== null}
+							Your first try today ({dailyResult.mine.toFixed(1)}) is the one that counts. This one
+							would beat {dailyResult.beat}% of today’s players.
+						{:else if dailyResult.players}
+							This would beat {dailyResult.beat}% of today’s {dailyResult.players} players.
+							<a href="/login?next=/daily">Sign in</a> to be counted.
+						{:else}
+							No one has been counted yet today. <a href="/login?next=/daily">Sign in</a> to be the first.
+						{/if}
+					</p>
+					<p class="daily-meta">
+						{#if dailyResult.streak}Daily streak: <b>{dailyResult.streak}</b> ·{/if}
+						<a href="/daily">Today’s challenge page</a>
+					</p>
+				</section>
+			{/if}
+
+			{#if personalResult && grade}
+				{@const diff = personalResult.avg === null ? null : grade.score - personalResult.avg}
+				<section class="daily personal" aria-label="Your challenge">
+					<span class="pp-eyebrow">Your challenge · done</span>
+					<p class="daily-line">
+						{#if diff === null}
+							Your first {personalResult.category} drawing: this sets the bar.
+						{:else if diff >= 0.05}
+							<b>+{diff.toFixed(1)}</b> above your {personalResult.category} average ({personalResult.avg!.toFixed(
+								1
+							)}). Nice!
+						{:else if diff > -0.05}
+							Right on your {personalResult.category} average ({personalResult.avg!.toFixed(1)}).
+						{:else}
+							{Math.abs(diff).toFixed(1)} below your {personalResult.category} average ({personalResult.avg!.toFixed(
+								1
+							)}). Tricky one: the tips below show why.
+						{/if}
+					</p>
+					<p class="daily-meta">
+						Personal streak: <b>{personalResult.streak}</b> day{personalResult.streak === 1
+							? ''
+							: 's'} · <a href="/daily">Tomorrow’s is waiting there</a>
+					</p>
+				</section>
+			{/if}
+
+			{#if canReplay}
+				<section class="replay-section" aria-label="Replay">
+					<div class="replay-head">
+						<h2>Replay</h2>
+						{#if !showReplay}
+							<Button variant="dark" onclick={() => (showReplay = true)}>Watch the replay ▶</Button>
+						{/if}
+					</div>
+					{#if showReplay && sub}
+						<ReplayPlayer
+							{sub}
+							tips={fb?.fixes.map((f) => ({ id: f.id, title: f.title })) ?? []}
+							firedAt={graded && sub
+								? (gray, strokes) => tipsFor(sub!, graded!, gray, strokes)
+								: undefined}
+						/>
+					{:else}
+						<p class="muted-line">
+							See your drawing come together stroke by stroke{fb?.fixes.length
+								? ', with a mark where each tip’s mistake started'
+								: ''}.
 						</p>
-						<div class="fix-actions">
-							{#if fix.lesson}
-								<Button href="/lessons/{fix.lesson}?from={fix.id}" variant="dark">
-									Fix it: {humanize(fix.lesson)} →
-								</Button>
-							{/if}
-							{#if fix.drill}
-								<Button href="/drills/{fix.drill}" variant="outline">Drill it</Button>
-							{/if}
+					{/if}
+				</section>
+			{/if}
+
+			{#if levelUp && reference}
+				<div class="pp-bento levelup">
+					<Tile tone="accent" span={4}>
+						<span class="pp-eyebrow on-accent">Level up!</span>
+						<p class="big-line light">
+							Three strong drawings in a row. You’re ready for {tierName(levelUp)}.
+						</p>
+						<div>
+							<Button href="/practice/{reference.category}?tier={levelUp}" variant="dark">
+								Try {tierName(levelUp)} →
+							</Button>
 						</div>
 					</Tile>
 				</div>
 			{/if}
-		{/if}
 
-		{#if fb}
-			<h2 class="section">{fb.fixes.length ? 'What to work on next' : 'Nothing big to fix'}</h2>
-			<div class="fixes">
-				{#each fb.fixes as f, i (f.id)}
-					<Tile as="article" label="Fix {i + 1}">
-						<div class="fix-head">
-							<span class="num" class:first={i === 0}>{i + 1}</span>
-							<h3>{f.title}</h3>
-						</div>
-						<p class="fix-text">{f.text}</p>
-						<div class="fix-actions">
-							{#if f.overlay}
-								<button type="button" class="chip dark" onclick={() => showMe(f)}>Show me</button>
-							{/if}
-							{#if f.lesson}
-								<a class="chip" href="/lessons/{f.lesson}?from={f.id}">
-									Lesson: {humanize(f.lesson)}
-								</a>
-							{/if}
-							{#if f.drill}
-								<a class="chip" href="/drills/{f.drill}">Drill: {humanize(f.drill)}</a>
-							{/if}
-						</div>
-						<div class="vote" role="group" aria-label="Was this tip helpful?">
-							{#if votes[f.id]}
-								<span class="thanks" role="status">Thanks for the feedback!</span>
-							{:else}
-								<span>Helpful?</span>
-								<button type="button" aria-label="Helpful" onclick={() => vote(f, 1)}>👍</button>
-								<button type="button" aria-label="Not helpful" onclick={() => vote(f, -1)}>
-									👎
-								</button>
-							{/if}
-						</div>
-					</Tile>
-				{:else}
-					{#if !grade?.flags.includes('blank')}
-						<Tile tone="lilac">
-							<p class="big-line">Great match! Try a harder level or a shorter time next.</p>
+			{#if patterns.length && fb}
+				{@const p = patterns[0]}
+				{@const fix = fb.fixes.find((f) => f.id === p.ruleId)}
+				{#if fix}
+					<div class="pp-bento levelup">
+						<Tile tone="lilac" span={4}>
+							<span class="pp-eyebrow lilac-ink">Pattern spotted</span>
+							<p class="big-line">
+								“{fix.title}” came up in {p.count} of your last {p.window} drawings.
+							</p>
+							<div class="fix-actions">
+								{#if fix.lesson}
+									<Button href="/lessons/{fix.lesson}?from={fix.id}" variant="dark">
+										Fix it: {humanize(fix.lesson)} →
+									</Button>
+								{/if}
+								{#if fix.drill}
+									<Button href="/drills/{fix.drill}" variant="outline">Drill it</Button>
+								{/if}
+							</div>
 						</Tile>
-					{/if}
-				{/each}
-			</div>
-		{/if}
-		{#if page.data.community && grade && reference && !reference.own && !traced && !grade.flags.includes('blank')}
-			<div class="share">
-				<Tile tone="lilac" as="section" label="Get a human opinion">
-					<span class="pp-eyebrow">Community · beta</span>
-					<h2>Get a human opinion</h2>
-					{#if !page.data.user}
-						<p>Sign in to share this drawing. Other students compare and rate it.</p>
-						<div><Button href="/login?next=/results" variant="dark">Sign in</Button></div>
-					{:else if share.state === 'done'}
-						<p role="status">
-							Shared! See how it does in <a href="/community/mine">My shared drawings</a>.
-						</p>
+					</div>
+				{/if}
+			{/if}
+
+			{#if fb}
+				<h2 class="section">{fb.fixes.length ? 'What to work on next' : 'Nothing big to fix'}</h2>
+				<div class="fixes">
+					{#each fb.fixes as f, i (f.id)}
+						<Tile as="article" label="Fix {i + 1}">
+							<div class="fix-head">
+								<span class="num" class:first={i === 0}>{i + 1}</span>
+								<h3>{f.title}</h3>
+							</div>
+							<p class="fix-text">{f.text}</p>
+							<div class="fix-actions">
+								{#if f.overlay}
+									<button type="button" class="chip dark" onclick={() => showMe(f)}>Show me</button>
+								{/if}
+								{#if f.lesson}
+									<a class="chip" href="/lessons/{f.lesson}?from={f.id}">
+										Lesson: {humanize(f.lesson)}
+									</a>
+								{/if}
+								{#if f.drill}
+									<a class="chip" href="/drills/{f.drill}">Drill: {humanize(f.drill)}</a>
+								{/if}
+							</div>
+							<div class="vote" role="group" aria-label="Was this tip helpful?">
+								{#if votes[f.id]}
+									<span class="thanks" role="status">Thanks for the feedback!</span>
+								{:else}
+									<span>Helpful?</span>
+									<button type="button" aria-label="Helpful" onclick={() => vote(f, 1)}>👍</button>
+									<button type="button" aria-label="Not helpful" onclick={() => vote(f, -1)}>
+										👎
+									</button>
+								{/if}
+							</div>
+						</Tile>
 					{:else}
-						<p>
-							Other signed-in students will compare it with drawings of the same picture and rate
-							it. They won’t see your name. You can delete it any time.
-						</p>
-						{#if share.state === 'error'}<p class="share-err" role="alert">{share.message}</p>{/if}
-						<div>
-							<Button variant="dark" onclick={shareDrawing} disabled={share.state === 'busy'}>
-								{share.state === 'busy' ? 'Checking…' : 'Share with the community'}
-							</Button>
-						</div>
-					{/if}
-				</Tile>
-			</div>
+						{#if !grade?.flags.includes('blank')}
+							<Tile tone="lilac">
+								<p class="big-line">Great match! Try a harder level or a shorter time next.</p>
+							</Tile>
+						{/if}
+					{/each}
+				</div>
+			{/if}
+			{#if page.data.community && grade && reference && !reference.own && !traced && !grade.flags.includes('blank')}
+				<div class="share">
+					<Tile tone="lilac" as="section" label="Get a human opinion">
+						<span class="pp-eyebrow">Community · beta</span>
+						<h2>Get a human opinion</h2>
+						{#if !page.data.user}
+							<p>Sign in to share this drawing. Other students compare and rate it.</p>
+							<div><Button href="/login?next=/results" variant="dark">Sign in</Button></div>
+						{:else if share.state === 'done'}
+							<p role="status">
+								Shared! See how it does in <a href="/community/mine">My shared drawings</a>.
+							</p>
+						{:else}
+							<p>
+								Other signed-in students will compare it with drawings of the same picture and rate
+								it. They won’t see your name. You can delete it any time.
+							</p>
+							{#if share.state === 'error'}<p class="share-err" role="alert">
+									{share.message}
+								</p>{/if}
+							<div>
+								<Button variant="dark" onclick={shareDrawing} disabled={share.state === 'busy'}>
+									{share.state === 'busy' ? 'Checking…' : 'Share with the community'}
+								</Button>
+							</div>
+						{/if}
+					</Tile>
+				</div>
+			{/if}
 		{/if}
 		<p class="credit">
 			<a href="/history">Your last 10 drawings: open, keep drawing or download →</a>

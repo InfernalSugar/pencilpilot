@@ -26,6 +26,7 @@ Each heading is a GitHub milestone, and each bullet is an issue titled `Mx-Tyy �
 - **M3-T02** Silhouette overlap (IoU), grid comparison, light/dark comparison, SSIM `grader`
 - **M3-T03** Outline matching (edge map + distance transform + chamfer distance) `grader`
 - **M3-T04** Keypoint matching (Procrustes) + the "tap your points" step in the UI `grader` `web`
+  ✅ Before the score, a reference with 3+ keypoints asks the student to tap the same spots on their drawing (or skip, or leave out a point they didn't draw). Adds a Proportions measurement and a Proportions view on the overlay; the proportion tips' "Show me" opens it. Not asked for traced drawings or gesture-session drawings.
 - **M3-T05** Stroke-quality metrics: smoothness, retrace ratio, speed `grader`
 - **M3-T06** Weighted score → 1–10 curve with a passing threshold; per-category weight config `grader`
 - **M3-T07** WASM bindings + web integration; grading in under 500 ms on a mid-range laptop `grader` `web`
@@ -41,6 +42,7 @@ Each heading is a GitHub milestone, and each bullet is an issue titled `Mx-Tyy �
 - **M5-T01** `tools/ref-importer`: Pixabay, Unsplash, Pexels, OpenGameArt (CC0/CC-BY), storing licence and attribution `content` `legal`
 - **M5-T02** Safety: the sources' SafeSearch + a manual approval queue; flag and skip AI-made images `content` `legal`
 - **M5-T03** `tools/ref-annotator` + keypoint marking for the first set `content`
+  ✅ Built as a dev page, `/dev/keypoints` (not a separate tool): click to add labelled points, drag, reorder, save into `content/references/<category>.json`. The first set still needs marking.
 - **M5-T04** Seed 3 categories (Real life, Animals, Anime), about 50 references each `content`
 - **M5-T05** Attribution display on the site + licensing check script in CI `web` `legal`
 - **M5-T06** Deploy a static preview (guest mode, browser storage); ADR-0004 hosting `infra`

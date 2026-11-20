@@ -30,7 +30,7 @@ export default defineConfig({
 		{
 			name: 'dev',
 			use: { baseURL: 'http://localhost:5179' },
-			testMatch: ['**/smoke.e2e.ts', '**/dev-pictures.e2e.ts']
+			testMatch: ['**/smoke.e2e.ts', '**/dev-pictures.e2e.ts', '**/keypoints.e2e.ts']
 		}
 	]
 });
