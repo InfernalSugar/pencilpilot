@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { pack, projectName, unpack, type ProjectDoc } from './project';
+import { ago, pack, projectName, unpack, type ProjectDoc } from './project';
 
 const doc = (): ProjectDoc => ({
 	width: 4,
@@ -70,5 +70,15 @@ describe('project packets', () => {
 		expect(projectName(null)).toBe('Untitled');
 		expect(projectName('/home/me/Walk cycle.ppstudio')).toBe('Walk cycle');
 		expect(projectName('C:\\art\\Fox.PPSTUDIO')).toBe('Fox');
+	});
+});
+
+describe('times', () => {
+	it('read like people talk', () => {
+		const now = Date.parse('2026-11-21T12:00:00Z');
+		expect(ago('2026-11-21T11:59:30Z', now)).toBe('just now');
+		expect(ago('2026-11-21T11:45:00Z', now)).toBe('15 min ago');
+		expect(ago('2026-11-21T09:00:00Z', now)).toBe('3 h ago');
+		expect(ago('junk', now)).toBe('');
 	});
 });

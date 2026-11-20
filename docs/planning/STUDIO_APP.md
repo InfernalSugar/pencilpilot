@@ -107,6 +107,7 @@ colour flats and lip-sync are free (local).
 - **S1-T03** `.ppstudio` format v1 (zip: manifest, tiles, strokes, references, provenance) + a format spec doc `app` `anim`
   ✅ `crates/ppstudio` reads and writes it (spec: `crates/ppstudio/FORMAT.md`): 64×64 tiles, empty ones skipped, repeats stored once (a 1080p line drawing is under 64 KB); timeline-shaped for S2. The app saves (Ctrl+S / Ctrl+Shift+S) and opens (Ctrl+O) with native dialogs. References and provenance join with S4/S6.
 - **S1-T04** Autosave, crash recovery, version history (snapshots), native open / save / export dialogs `app`
+  ✅ Unsaved work is copied to the app's data folder every 20 s and offered back at the next start (Recover / Discard / Decide later); each save keeps the replaced file as a version (last 20, Versions menu); closing or opening over unsaved work asks first; Export → PNG or layered PSD.
 - **S1-T05** The native engine behind PaintCanvas (same API as WASM), with multi-threaded compositing `brush` `app`
 - **S1-T06** Settings: keyboard shortcuts editor, pen curve, tablet gestures, storage location `app`
 

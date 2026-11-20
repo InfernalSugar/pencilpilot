@@ -460,6 +460,33 @@ impl Project {
         Ok(())
     }
 
+    /// Just the manifest and thumbnail, without reading any pixels (for lists of files).
+    pub fn peek(path: &Path) -> Result<(Manifest, Option<Vec<u8>>)> {
+        let mut z = zip::ZipArchive::new(std::io::BufReader::new(fs::File::open(path)?))?;
+        let manifest: Manifest = {
+            let f = z.by_name("manifest.json").map_err(|_| {
+                Error::Invalid("not a PencilPilot project (no manifest.json)".into())
+            })?;
+            serde_json::from_reader(f.take(64 << 20))?
+        };
+        if manifest.format != FORMAT {
+            return Err(Error::Invalid("not a PencilPilot project".into()));
+        }
+        if manifest.version > VERSION {
+            return Err(Error::TooNew(manifest.version));
+        }
+        let thumbnail = match z.by_name("thumbnail.png") {
+            Ok(f) => {
+                let mut v = Vec::new();
+                f.take(16 << 20).read_to_end(&mut v)?;
+                Some(v)
+            }
+            Err(zip::result::ZipError::FileNotFound) => None,
+            Err(e) => return Err(e.into()),
+        };
+        Ok((manifest, thumbnail))
+    }
+
     pub fn open(path: &Path) -> Result<Self> {
         let f = fs::File::open(path)?;
         Project::read(std::io::BufReader::new(f))
@@ -582,6 +609,9 @@ mod tests {
         p.save(&path).unwrap();
         assert!(!path.with_extension("ppstudio.saving").exists());
         assert_eq!(Project::open(&path).unwrap().drawing("d1").unwrap().0, rgba);
+        let (m, thumb) = Project::peek(&path).unwrap();
+        assert_eq!(m, p.manifest);
+        assert_eq!(thumb, None);
         fs::remove_dir_all(&dir).unwrap();
     }
 
