@@ -2,8 +2,8 @@
 	import { enhance } from '$app/forms';
 	import { invalidateAll } from '$app/navigation';
 	import { onMount } from 'svelte';
-	import Tile from '#lib/ui/Tile.svelte';
-	import Button from '#lib/ui/Button.svelte';
+	import Tile from '@pencilpilot/ui/Tile.svelte';
+	import Button from '@pencilpilot/ui/Button.svelte';
 	import { syncNow } from '#lib/sync.js';
 	import type { PageProps } from './$types';
 

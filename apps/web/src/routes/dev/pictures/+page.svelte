@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount, tick } from 'svelte';
-	import Button from '#lib/ui/Button.svelte';
-	import Tile from '#lib/ui/Tile.svelte';
+	import Button from '@pencilpilot/ui/Button.svelte';
+	import Tile from '@pencilpilot/ui/Tile.svelte';
 	import { TIERS, tierName } from '#lib/references.js';
 	import {
 		DEFAULT_FILTERS,

@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { page } from '$app/state';
-	import Tile from '#lib/ui/Tile.svelte';
+	import Tile from '@pencilpilot/ui/Tile.svelte';
 </script>
 
 <svelte:head><title>Privacy · PencilPilot</title></svelte:head>

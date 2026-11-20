@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { page } from '$app/state';
-	import Tile from '#lib/ui/Tile.svelte';
-	import Button from '#lib/ui/Button.svelte';
+	import Tile from '@pencilpilot/ui/Tile.svelte';
+	import Button from '@pencilpilot/ui/Button.svelte';
 	import { lessonForRule, skillLabel } from '#lib/lessons.js';
 	import { ruleById } from '#lib/rules.js';
 	import { attempts, recurringMistakes, type Pattern } from '#lib/progress.js';

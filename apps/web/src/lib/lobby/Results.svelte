@@ -1,6 +1,6 @@
 <script lang="ts">
-	import Tile from '../ui/Tile.svelte';
-	import Button from '../ui/Button.svelte';
+	import Tile from '@pencilpilot/ui/Tile.svelte';
+	import Button from '@pencilpilot/ui/Button.svelte';
 	import type { ClientMsg, LobbyView } from './protocol';
 
 	let { lobby, you, send }: { lobby: LobbyView; you: string; send: (m: ClientMsg) => void } =

@@ -1,8 +1,8 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { page } from '$app/state';
-	import Tile from '#lib/ui/Tile.svelte';
-	import Button from '#lib/ui/Button.svelte';
+	import Tile from '@pencilpilot/ui/Tile.svelte';
+	import Button from '@pencilpilot/ui/Button.svelte';
 	import { getTicket, LobbyClient } from '#lib/lobby/client.js';
 	import WaitingRoom from '#lib/lobby/WaitingRoom.svelte';
 	import FreeDraw from '#lib/lobby/FreeDraw.svelte';

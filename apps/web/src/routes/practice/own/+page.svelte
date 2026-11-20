@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
-	import Tile from '#lib/ui/Tile.svelte';
-	import Button from '#lib/ui/Button.svelte';
+	import Tile from '@pencilpilot/ui/Tile.svelte';
+	import Button from '@pencilpilot/ui/Button.svelte';
 	import { OWN_STYLES, keepOwnPicture, type OwnStyle } from '#lib/own-picture.js';
 
 	let file = $state<File | null>(null);
