@@ -1,0 +1,13 @@
+[package]
+name = "pencilpilot-brush"
+description = "PencilPilot painting engine: hokusai (libmypaint port) + layers, undo/redo, selections, transforms and dirty-rect flattening. Pure Rust: used natively by the app and through brush-wasm by the website"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[lib]
+name = "brush"
+
+[dependencies]
+hokusai = { version = "0.3", default-features = false, features = ["myb-json"] }

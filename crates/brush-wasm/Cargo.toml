@@ -1,6 +1,6 @@
 [package]
 name = "pencilpilot-brush-wasm"
-description = "PencilPilot painting engine: hokusai (libmypaint port) + undo/redo + dirty-rect flattening, for the browser"
+description = "JavaScript bindings for the PencilPilot painting engine (pencilpilot-brush), for the browser"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -8,9 +8,10 @@ version.workspace = true
 
 [lib]
 crate-type = ["cdylib", "rlib"]
-name = "brush"
+name = "brush_wasm"
 
 [dependencies]
+pencilpilot-brush = { path = "../brush" }
 hokusai = { version = "0.3", default-features = false, features = ["myb-json"] }
 wasm-bindgen = "0.2"
 
