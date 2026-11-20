@@ -13,6 +13,7 @@ export interface Reference {
 	width: number;
 	height: number;
 	title: string;
+	/** spots the student taps on their drawing (lib/keypoints.ts; marked in /dev/keypoints) */
 	keypoints: unknown[];
 	/** search query the importer used */
 	query?: string;

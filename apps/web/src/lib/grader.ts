@@ -278,7 +278,7 @@ export interface FeedbackItem {
 	measurement: string;
 	value: number;
 	/** what the results overlay should highlight */
-	overlay: 'bbox' | 'offset' | 'grid' | 'missing' | 'extra' | null;
+	overlay: 'bbox' | 'offset' | 'grid' | 'missing' | 'extra' | 'points' | null;
 	lesson: string | null;
 	drill: string | null;
 }

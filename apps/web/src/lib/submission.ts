@@ -38,6 +38,12 @@ export interface Submission {
 	historyId?: string;
 	/** an imported picture was showing when it was handed in (so it's treated like tracing) */
 	imported?: boolean;
+	/**
+	 * The proportions check (lib/keypoints.ts): per reference keypoint, where the student
+	 * tapped it on the canvas (or null for "I didn't draw this one"). null = skipped;
+	 * missing = not asked yet.
+	 */
+	keypointTaps?: ({ x: number; y: number } | null)[] | null;
 	/** how the tracing picture was placed, so the comparison matches what was traced */
 	trace?: { source: 'reference' | 'own'; transform: TraceTransform; ownUrl?: string };
 }

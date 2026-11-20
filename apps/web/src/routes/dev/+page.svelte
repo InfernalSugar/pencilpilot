@@ -12,6 +12,11 @@
 			name: 'Reference candidates',
 			blurb: 'Approve hand-picked candidates before they go live.'
 		},
+		{
+			href: '/dev/keypoints',
+			name: 'Mark keypoints',
+			blurb: 'Mark the spots students tap to check proportions.'
+		},
 		{ href: '/dev/rate', name: 'Rate drawings', blurb: 'Label samples to calibrate the grader.' },
 		{ href: '/dev/feedback', name: 'Tip feedback', blurb: 'How students voted on tips.' }
 	];

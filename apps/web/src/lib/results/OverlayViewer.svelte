@@ -1,5 +1,9 @@
 <script lang="ts" module>
-	export type OverlayMode = 'fade' | 'heatmap' | 'size' | 'side';
+	export type OverlayMode = 'fade' | 'heatmap' | 'size' | 'points' | 'side';
+
+	type Pt = { x: number; y: number };
+	/** The proportions check: per tapped point, fractions of the canvas. */
+	export type PointsView = { label: string; ref: Pt; mine: Pt; error: number }[];
 </script>
 
 <script lang="ts">
@@ -11,7 +15,8 @@
 		grade,
 		mode = $bindable('fade'),
 		highlight = null,
-		aspect = 4 / 3
+		aspect = 4 / 3,
+		points = null
 	}: {
 		referenceSrc: string;
 		drawingSrc: string;
@@ -21,17 +26,25 @@
 		highlight?: string | null;
 		/** the canvas's width ÷ height, so boxes and the heatmap line up */
 		aspect?: number;
+		/** the proportions check, when the student did it */
+		points?: PointsView | null;
 	} = $props();
 
 	/** 0 = only your drawing, 1 = only the reference */
 	let mix = $state(0.35);
 
-	const MODES: { id: OverlayMode; label: string }[] = [
+	const MODES = $derived<{ id: OverlayMode; label: string }[]>([
 		{ id: 'fade', label: 'Overlay' },
 		{ id: 'heatmap', label: 'Heatmap' },
 		{ id: 'size', label: 'Size & position' },
+		...(points?.length ? [{ id: 'points' as const, label: 'Proportions' }] : []),
 		{ id: 'side', label: 'Side by side' }
-	];
+	]);
+	/** the point that's furthest off (only called out when it's clearly off) */
+	const worstPoint = $derived(
+		points?.length ? points.reduce((w, p, i) => (p.error > points[w].error ? i : w), 0) : -1
+	);
+	const chain = (ps: Pt[]) => ps.map((p) => `${p.x * 100},${(p.y * 100) / aspect}`).join(' ');
 
 	const cells = $derived(
 		grade
@@ -95,14 +108,58 @@
 			<img
 				src={referenceSrc}
 				alt="The reference"
-				style="opacity: {mode === 'fade' ? mix : mode === 'size' ? 0.25 : 0.15}"
+				style="opacity: {mode === 'fade'
+					? mix
+					: mode === 'size'
+						? 0.25
+						: mode === 'points'
+							? 0.45
+							: 0.15}"
 			/>
+			<!-- the proportions view lines your points up with the reference, so your lines would mislead -->
 			<img
 				class="drawing"
 				src={drawingSrc}
 				alt="Your drawing"
-				style="opacity: {mode === 'fade' ? 1 - mix * 0.6 : 1}"
+				style="opacity: {mode === 'fade' ? 1 - mix * 0.6 : mode === 'points' ? 0 : 1}"
 			/>
+
+			{#if points?.length && mode === 'points'}
+				<svg
+					class="arrow"
+					viewBox="0 0 100 {100 / aspect}"
+					preserveAspectRatio="none"
+					aria-hidden="true"
+				>
+					<polyline class="chain ref" points={chain(points.map((p) => p.ref))} />
+					<polyline class="chain mine" points={chain(points.map((p) => p.mine))} />
+					{#each points as p, i (i)}
+						<line
+							class="gap"
+							class:worst={i === worstPoint && p.error > 0.08}
+							x1={p.mine.x * 100}
+							y1={(p.mine.y * 100) / aspect}
+							x2={p.ref.x * 100}
+							y2={(p.ref.y * 100) / aspect}
+						/>
+					{/each}
+				</svg>
+				{#each points as p, i (i)}
+					<span
+						class="kp ref"
+						style="left:{p.ref.x * 100}%;top:{p.ref.y * 100}%"
+						title="{p.label} (reference)"
+					></span>
+					<span
+						class="kp mine"
+						class:worst={i === worstPoint && p.error > 0.08}
+						style="left:{p.mine.x * 100}%;top:{p.mine.y * 100}%"
+						title="{p.label} (yours): {Math.round(p.error * 100)}% off"
+					>
+						{#if i === worstPoint && p.error > 0.08}<em>{p.label}</em>{/if}
+					</span>
+				{/each}
+			{/if}
 
 			{#if grade && mode === 'heatmap'}
 				{#each cells as c (c.col + ',' + c.row)}
@@ -172,6 +229,11 @@
 				<span class="sw" style="background: rgba(255, 216, 77, 0.35)"></span>close
 				<span class="sw" style="background: #fff; border: 1px solid var(--pp-track)"></span>match
 			</p>
+		{:else if mode === 'points'}
+			<p class="legend">
+				<span class="sw ring"></span>reference <span class="sw dot"></span>your points, lined up
+				with the reference (size, position and tilt don’t count here, only proportions)
+			</p>
 		{:else if mode === 'size'}
 			<p class="legend">
 				<span class="sw dash"></span>reference outline <span class="sw solid"></span>your drawing
@@ -234,6 +296,72 @@
 	}
 	.stack .drawing {
 		mix-blend-mode: multiply;
+	}
+	.chain {
+		fill: none;
+		stroke-width: 0.5;
+		vector-effect: non-scaling-stroke;
+	}
+	.chain.ref {
+		stroke: var(--pp-ink);
+		stroke-dasharray: 4 3;
+		stroke-width: 1.5;
+	}
+	.chain.mine {
+		stroke: var(--pp-accent);
+		stroke-width: 2;
+	}
+	.gap {
+		stroke: var(--pp-accent);
+		stroke-width: 1;
+		vector-effect: non-scaling-stroke;
+		opacity: 0.6;
+	}
+	.gap.worst {
+		stroke-width: 2.5;
+		opacity: 1;
+	}
+	.kp {
+		position: absolute;
+		width: 14px;
+		height: 14px;
+		margin: -7px 0 0 -7px;
+		border-radius: 50%;
+	}
+	.kp.ref {
+		border: 2px solid var(--pp-ink);
+		background: #fff;
+	}
+	.kp.mine {
+		background: var(--pp-accent);
+		border: 2px solid #fff;
+	}
+	.kp.mine.worst {
+		width: 20px;
+		height: 20px;
+		margin: -10px 0 0 -10px;
+		box-shadow: 0 0 0 3px var(--pp-accent);
+	}
+	.kp em {
+		position: absolute;
+		left: 22px;
+		top: -4px;
+		white-space: nowrap;
+		font: 600 12px var(--pp-font-body);
+		font-style: normal;
+		background: var(--pp-accent);
+		color: #fff;
+		padding: 2px 6px;
+		border-radius: 999px;
+	}
+	.sw.ring {
+		border: 2px solid var(--pp-ink);
+		border-radius: 50%;
+		background: #fff;
+	}
+	.sw.dot {
+		border-radius: 50%;
+		background: var(--pp-accent);
 	}
 	.side {
 		display: grid;

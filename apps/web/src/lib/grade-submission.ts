@@ -23,6 +23,7 @@ import {
 	titleOf,
 	type Reference
 } from './references';
+import { keypointPairs } from './keypoints';
 import type { Submission } from './submission';
 import type { Stroke } from './paint/strokes';
 
@@ -32,7 +33,9 @@ export const SKILLS: { name: MeasurementName; label: string; skill: string }[] =
 	{ name: 'outline', label: 'Outlines', skill: 'outline' },
 	{ name: 'silhouette', label: 'Big shapes', skill: 'silhouette' },
 	{ name: 'tone', label: 'Light & dark', skill: 'tone' },
-	{ name: 'line_confidence', label: 'Line confidence', skill: 'line_confidence' }
+	{ name: 'line_confidence', label: 'Line confidence', skill: 'line_confidence' },
+	// only measured when the student did the proportions check
+	{ name: 'keypoints', label: 'Proportions', skill: 'proportions' }
 ];
 
 /** What a sketch is judged on (ADR-0007): no shading or line neatness. */
@@ -40,7 +43,8 @@ export const SKETCH_SKILLS: { name: MeasurementName; label: string; skill: strin
 	{ name: 'placement', label: 'Size & placement', skill: 'placement' },
 	{ name: 'silhouette', label: 'Big shapes', skill: 'silhouette' },
 	{ name: 'angles', label: 'Main angles', skill: 'angles' },
-	{ name: 'outline', label: 'Outlines (loose)', skill: 'outline' }
+	{ name: 'outline', label: 'Outlines (loose)', skill: 'outline' },
+	{ name: 'keypoints', label: 'Proportions', skill: 'proportions' }
 ];
 
 export interface Graded {
@@ -94,7 +98,12 @@ export async function gradeSubmission(sub: Submission): Promise<Graded> {
 		// Cartoons are graded like anime, master studies like real life.
 		category: gradeCategory(cat),
 		mode,
-		strokes: sub.strokeData ?? []
+		strokes: sub.strokeData ?? [],
+		// the proportions check: only for the reference as it's placed by default (not traced)
+		keypoints:
+			ref && !sub.trace && sub.keypointTaps
+				? keypointPairs(ref, sub.keypointTaps, sub.width, sub.height)
+				: []
 	});
 	const fb = await getFeedback(grade, sub.at ?? 0, ref?.category, mode);
 	return { grade, fb, ref, compareSrc: placed ? (await placed).url : null, refGray };
