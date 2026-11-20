@@ -264,3 +264,110 @@ export function ago(iso: string, now = Date.now()): string {
 	if (s < 86_400) return `${Math.floor(s / 3600)} h ago`;
 	return new Date(t).toLocaleString();
 }
+
+// ---- the home screen: recent projects, templates, and the way into the studio ----
+
+export interface RecentItem {
+	path: string;
+	/** false when the file has gone */
+	found: boolean;
+	width: number;
+	height: number;
+	fps: number;
+	layers: number;
+	modified: string;
+	thumbnail: string | null;
+}
+
+export const listRecent = () => call<RecentItem[]>('recent_list');
+export const forgetRecent = (path: string) => call<void>('recent_remove', { path });
+
+export interface Template {
+	id: string;
+	name: string;
+	note: string;
+	width: number;
+	height: number;
+	fps: number;
+}
+
+export const TEMPLATES: Template[] = [
+	{ id: 'hd', name: 'HD video', note: '1920 × 1080 · 24 fps', width: 1920, height: 1080, fps: 24 },
+	{ id: '4k', name: '4K video', note: '3840 × 2160 · 24 fps', width: 3840, height: 2160, fps: 24 },
+	{
+		id: 'square',
+		name: 'Square',
+		note: '1080 × 1080 · 12 fps',
+		width: 1080,
+		height: 1080,
+		fps: 12
+	},
+	{
+		id: 'vertical',
+		name: 'Vertical',
+		note: '1080 × 1920 · 24 fps, for phones',
+		width: 1080,
+		height: 1920,
+		fps: 24
+	},
+	{
+		id: 'board',
+		name: 'Storyboard',
+		note: '1280 × 720 · 12 fps',
+		width: 1280,
+		height: 720,
+		fps: 12
+	},
+	{
+		id: 'a4',
+		name: 'Illustration',
+		note: 'A4 at 300 dpi · 2480 × 3508',
+		width: 2480,
+		height: 3508,
+		fps: 24
+	}
+];
+
+/** canvas sides the paint engine accepts */
+export const SIDE_MIN = 64;
+export const SIDE_MAX = 8192;
+
+/** What the studio is asked to start with (in its address). */
+export type StudioStart =
+	| { kind: 'new'; width: number; height: number; fps: number }
+	| { kind: 'open'; path: string }
+	| { kind: 'recover'; id: string; path: string | null };
+
+/** The studio's address for a start. */
+export function studioQuery(s: StudioStart): `?${string}` {
+	const q = new URLSearchParams();
+	if (s.kind === 'new') {
+		q.set('new', `${s.width}x${s.height}`);
+		q.set('fps', String(s.fps));
+	} else if (s.kind === 'open') q.set('open', s.path);
+	else {
+		q.set('recover', s.id);
+		if (s.path) q.set('path', s.path);
+	}
+	return `?${q}`;
+}
+
+/** Read a start from the studio's address; a plain HD canvas when there's none or it's wrong. */
+export function parseStart(q: Pick<URLSearchParams, 'get'>): StudioStart {
+	const open = q.get('open');
+	if (open) return { kind: 'open', path: open };
+	const recover = q.get('recover');
+	if (recover && /^[a-z0-9-]{1,64}$/.test(recover))
+		return { kind: 'recover', id: recover, path: q.get('path') };
+	const m = /^(\d+)x(\d+)$/.exec(q.get('new') ?? '');
+	const fps = Number(q.get('fps'));
+	const side = (v: number) => Math.min(SIDE_MAX, Math.max(SIDE_MIN, Math.round(v)));
+	return m
+		? {
+				kind: 'new',
+				width: side(+m[1]),
+				height: side(+m[2]),
+				fps: fps >= 1 && fps <= 60 ? Math.round(fps) : 24
+			}
+		: { kind: 'new', width: 1920, height: 1080, fps: 24 };
+}

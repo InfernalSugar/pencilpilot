@@ -6,9 +6,10 @@ import { expect, test, type Page } from '@playwright/test';
 // The native dialogs answer with fixed paths. (src-tauri tests the files themselves.)
 
 interface Stub {
-	/** what recovery_list / versions_list answer */
+	/** what recovery_list / versions_list / recent_list answer */
 	recovery?: unknown[];
 	versions?: unknown[];
+	recent?: unknown[];
 	/** the answer to "lose unsaved changes?" */
 	askAnswer?: boolean;
 }
@@ -71,6 +72,8 @@ async function stubTauri(page: Page, stub: Stub = {}) {
 						return stub.recovery ?? [];
 					case 'versions_list':
 						return stub.versions ?? [];
+					case 'recent_list':
+						return stub.recent ?? [];
 					case 'export_write':
 						return path;
 					default:
@@ -102,9 +105,9 @@ async function ink(page: Page, y0 = 0, y1 = 1) {
 	);
 }
 
-async function ready(page: Page) {
+async function ready(page: Page, url = '/studio') {
 	await page.setViewportSize({ width: 1440, height: 960 });
-	await page.goto('/');
+	await page.goto(url);
 	await expect(canvas(page)).toHaveAttribute('data-ready', 'true', { timeout: 15_000 });
 }
 
@@ -126,7 +129,8 @@ async function drawAndSave(page: Page) {
 	const drawn = await ink(page);
 	expect(drawn).toBeGreaterThan(200);
 	await page.keyboard.press('Control+s');
-	await expect(page.getByTestId('project-name')).toHaveText('Walk cycle');
+	// (the stub posts the whole ~16 MB packet through Playwright: allow it time)
+	await expect(page.getByTestId('project-name')).toHaveText('Walk cycle', { timeout: 20_000 });
 	await expect(page.getByLabel('not saved')).toHaveCount(0);
 	return drawn;
 }
@@ -187,7 +191,7 @@ test('unsaved work is autosaved as a recovery copy every 20 seconds', async ({ p
 	expect(await writes()).toHaveLength(1);
 });
 
-test('work left behind is offered back at start-up', async ({ page }) => {
+test('work left behind is offered back on the home screen', async ({ page }) => {
 	await stubTauri(page, {
 		recovery: [
 			{
@@ -200,22 +204,18 @@ test('work left behind is offered back at start-up', async ({ page }) => {
 			}
 		]
 	});
+	// a drawing to "recover": draw it and save it, then go home
 	await ready(page);
-	// the first start shows it too: leave it for later, draw and save the "file"
-	const dialog = page.getByRole('dialog', { name: 'Unsaved work was found' });
-	await expect(dialog).toBeVisible();
-	await dialog.getByRole('button', { name: 'Decide later' }).click();
 	const drawn = await drawAndSave(page);
-	// a new start: the copy is offered again, and recovering it brings the drawing back
-	await page.reload();
-	await expect(canvas(page)).toHaveAttribute('data-ready', 'true', { timeout: 15_000 });
-	await expect(dialog).toBeVisible();
-	await expect(dialog).toContainText('Walk cycle');
-	await dialog.getByRole('button', { name: 'Recover' }).click();
-	await expect(dialog).toBeHidden();
+	await page.goto('/');
+	const box = page.getByRole('region', { name: 'Unsaved work was found' });
+	await expect(box).toContainText('Walk cycle');
+	await box.getByRole('button', { name: 'Recover' }).click();
+	await expect(page).toHaveURL(/\/studio\?recover=doc-1/);
 	await expectSavedDrawing(page, drawn);
 	await expect(page.getByLabel('not saved')).toBeVisible();
 	await expect(page.getByTestId('project-name')).toHaveText('Walk cycle');
+	expect((await calls(page)).map((c) => c.cmd)).toContain('recovery_open');
 });
 
 test('an earlier version can be opened', async ({ page }) => {
@@ -250,4 +250,78 @@ test('export a PNG and a layered PSD', async ({ page }) => {
 		await expect.poll(async () => (await last())?.path).toBe(`/home/me/Walk cycle.${ext}`);
 		expect((await last())!.head).toEqual([...magic]);
 	}
+});
+
+test('home: templates and custom sizes start a new canvas', async ({ page }) => {
+	await stubTauri(page);
+	await page.setViewportSize({ width: 1440, height: 960 });
+	await page.goto('/');
+	await page.getByRole('button', { name: /Square/ }).click();
+	await expect(canvas(page)).toHaveAttribute('data-ready', 'true', { timeout: 15_000 });
+	await expect(canvas(page)).toHaveAttribute('aria-label', /1080 by 1080/);
+	await expect(page.getByTestId('project-name')).toHaveText('Untitled');
+	// back home (nothing drawn: no question), then a custom size
+	await page.getByRole('link', { name: 'Back' }).click();
+	await page.getByRole('button', { name: /Custom/ }).click();
+	await page.getByLabel('Width').fill('10');
+	await expect(page.getByRole('button', { name: 'Create' })).toBeDisabled();
+	await expect(page.getByRole('alert')).toContainText('64–8192');
+	await page.getByLabel('Width').fill('640');
+	await page.getByLabel('Height').fill('480');
+	await page.getByRole('button', { name: 'Create' }).click();
+	await expect(canvas(page)).toHaveAttribute('aria-label', /640 by 480/);
+});
+
+test('home: recent projects open; missing ones are marked and can be removed', async ({ page }) => {
+	await stubTauri(page, {
+		recent: [
+			{
+				path: '/home/me/Walk cycle.ppstudio',
+				found: true,
+				width: 1920,
+				height: 1080,
+				fps: 24,
+				layers: 2,
+				modified: new Date().toISOString(),
+				thumbnail: null
+			},
+			{
+				path: '/home/me/Old.ppstudio',
+				found: false,
+				width: 0,
+				height: 0,
+				fps: 0,
+				layers: 0,
+				modified: '',
+				thumbnail: null
+			}
+		]
+	});
+	// something saved, so opening hands it back
+	await ready(page);
+	const drawn = await drawAndSave(page);
+	await page.goto('/');
+	const recent = page.getByRole('region', { name: 'Recent' });
+	await expect(recent).toContainText('1920 × 1080 · 2 layers · just now');
+	await expect(recent).toContainText('Moved or deleted');
+	await expect(recent.getByRole('button', { name: /^Old/ })).toBeDisabled();
+	await recent.getByRole('button', { name: 'Remove Old from the list' }).click();
+	await expect(recent).not.toContainText('Moved or deleted');
+	await expect.poll(async () => (await calls(page)).map((c) => c.cmd)).toContain('recent_remove');
+	await recent.getByRole('button', { name: /^Walk cycle/ }).click();
+	await expect(page).toHaveURL(/\/studio\?open=/);
+	await expectSavedDrawing(page, drawn);
+	await expect(page.getByLabel('not saved')).toHaveCount(0);
+});
+
+test('leaving the studio with unsaved work asks first', async ({ page }) => {
+	await stubTauri(page, { askAnswer: false });
+	await ready(page);
+	await scribble(page, 0.5);
+	await page.getByRole('link', { name: 'Back' }).click();
+	await expect
+		.poll(async () => (await calls(page)).map((c) => c.cmd))
+		.toContain('plugin:dialog|message');
+	await expect(page).toHaveURL(/\/studio/);
+	await expect(page.getByLabel('not saved')).toBeVisible();
 });
