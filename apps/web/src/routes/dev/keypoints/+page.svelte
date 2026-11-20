@@ -26,8 +26,7 @@
 	let dragging = $state<number | null>(null);
 	/** set once the page is interactive (tests wait for it) */
 	let ready = $state(false);
-	// Saving changes content/references/*.json, which makes Vite reload the page: the
-	// URL keeps the reference and filters, and the last message is carried over.
+	// Saving changes content/references/*.json, which makes Vite update the page.
 	const STATUS = 'pp.keypointStatus';
 	/** what a save leaves for the page after Vite's reload (kept for a few seconds,
 	 * since the reload can come before the save's answer, or twice) */
@@ -51,6 +50,12 @@
 			/* storage blocked or bad data */
 		}
 		ready = true;
+		// The references JSON is part of the client bundle, so a save hot-updates this
+		// page, which remounts it with its state lost: reload instead (the URL keeps the
+		// reference, and the message is carried over).
+		const reload = () => location.reload();
+		import.meta.hot?.on('vite:beforeUpdate', reload);
+		return () => import.meta.hot?.off('vite:beforeUpdate', reload);
 	});
 
 	function setUrl(change: Record<string, string | null>) {
