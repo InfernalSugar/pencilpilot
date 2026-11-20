@@ -1,4 +1,4 @@
-# PencilPilot Studio: plan and milestones
+# The PencilPilot app: plan and milestones
 
 A drawing and frame-by-frame animation app with the website's look and feel, plus AI that
 helps you make frames in **your own** style. Decisions: [ADR-0010](adr/0010-studio-app.md)
@@ -69,12 +69,12 @@ crates/grader          reused: stroke checks in Coach mode, style / on-model che
 
 | Capability | First choice | Alternatives | Notes |
 |---|---|---|---|
-| Keyframe guide from references | Gemini 3 Pro Image ("Nano Banana Pro"), up to 14 reference images, ≈$0.13/image | Gemini 3.1 Flash Image (≈$0.05–0.07), gpt-image-2, FLUX.2 (pro/flex: 8 refs), Seedream 5 | Strong character identity. Line weight is not pixel-exact, which is why we trace or auto-ink |
+| Keyframe guide from references | **Seedream** (ByteDance, BytePlus), the owner's choice; multi-reference, ≈$0.045/image | Gemini 3 Pro Image (14 refs, ≈$0.13), Gemini 3.1 Flash Image, gpt-image-2, FLUX.2 (8 refs) | Strong character identity. Line weight is not pixel-exact, which is why we trace or auto-ink |
 | Style LoRA on your frames | FLUX.2 klein 4B (Apache-2.0) via fal/Replicate trainers, a few $ per run | Qwen-Image-Edit LoRA; SDXL anime + LoRA locally | The best route to your exact line feel. Licence per model (ADR-0011 §7) |
 | Region edit / re-pose | the same edit models with a mask; pose from a DWPose-style 2D skeleton | ControlNet openpose (local) | |
 | Line extraction | AniLines / MangaLineExtraction (MIT), ONNX, local | Anime2Sketch | Runs on CPU; no provider needed |
 | Strokes and their order | centreline vectorising (skeleton → Bézier) + an ordering heuristic | "Draw This First" (NeurIPS 2026) once code is out | No hosted API exists yet; ours is local |
-| In-betweens | line-art in-betweening (thin-plate-spline, local), then cleanup | first/last-frame video: Wan 2.x (≈$0.10/s), Kling O1, Veo 3.1 Lite, Seedance; ToonComposer (needs a 57 GB GPU) | Video models blur lines: sample at your spacing → extract lines → guide |
+| In-betweens | **Seedance 2.5** first/last-frame video (ByteDance, BytePlus), the owner's choice, sampled at your spacing; line-art in-betweening (thin-plate-spline, local) for simple moves | Wan 2.x (≈$0.10/s), Kling O1, Veo 3.1 Lite; ToonComposer (needs a 57 GB GPU) | Video models blur lines: sample → extract lines → guide |
 | Colour | flat fill from the palette (our fill engine), tracking regions across frames | MangaNinja / AniDoc / ColorFlow (self-hosted), image-edit models as a guide | Flats are deterministic and on-model |
 | Upscale line art | APISR (ONNX, local) | — | |
 | Lip-sync | Rhubarb Lip Sync (MIT, WASM / native) → your mouth chart | — | Local |
@@ -89,6 +89,7 @@ colour flats and lip-sync are free (local).
 
 ## S0 — Foundations (≈2 weeks)
 - **S0-T01** ADR-0010 / ADR-0011 accepted; the name, platforms order and BYOK-vs-credits decided `infra` `legal`
+  ✅ Both accepted: the name is PencilPilot, desktop first, ByteDance (Seedance 2.5 + Seedream) as the first AI provider. Bring-your-own-key vs credits stays open until S11-T03.
 - **S0-T02** Split the engine: `crates/brush` (pure Rust) + `crates/brush-wasm` (bindings); native build and tests `brush` `infra`
   ✅ `crates/brush` (`pencilpilot-brush`, lib `brush`) holds the engine and its tests; `crates/brush-wasm` is only the wasm-bindgen bindings. The web package is unchanged.
 - **S0-T03** Move the design system and studio components into `packages/ui` and `packages/paint`; the website keeps passing every test `design` `infra`
@@ -202,8 +203,12 @@ colour flats and lip-sync are free (local).
 | Memory on tablets with long cuts | Tile dedup, disk tier, view-size playback cache |
 | Tauri mobile and pen latency | S0 spikes before committing; fall back to desktop-first if tablets lag |
 
+## Decided (2026-11-21)
+- The app is called **PencilPilot**. Desktop first; tablets after the pen test (S0-T05).
+- First AI provider: ByteDance via BytePlus: **Seedance 2.5** (in-betweens) and
+  **Seedream** (keyframes, references). See ADR-0011.
+
 ## Open questions for the owner
-1. Name, and which platforms come first (desktop only, or iPad from the start)?
-2. BYOK only, or hosted credits as well (S11-T03)?
-3. Free, paid, or free with paid AI credits?
-4. Should finished animations be shareable back to the website (a gallery)?
+1. Bring-your-own-key only, or hosted credits as well (S11-T03)?
+2. Free, paid, or free with paid AI credits?
+3. Should finished animations be shareable back to the website (a gallery)?

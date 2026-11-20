@@ -1,6 +1,6 @@
-# ADR-0011 — AI assistance in PencilPilot Studio
+# ADR-0011 — AI assistance in the PencilPilot app
 
-**Status:** Proposed (2026-11-20). Applies to the Studio app only. The website keeps
+**Status:** Accepted (2026-11-21). Applies to the app only. The website keeps
 ADR-0002 (no AI grading or critique) and ADR-0009 (AI only to vet reference pictures).
 
 ## Decision
@@ -40,3 +40,13 @@ AI drawing "for" the artist would defeat the point of a drawing app built around
 Here AI scaffolds (poses, spacing, construction, colour plans) and the artist's own strokes
 make the frame, and the style stays theirs because it is literally their brush and their
 hand.
+
+## First providers (2026-11-21)
+The owner's choice: **ByteDance's models through BytePlus**, with one key covering both:
+- **Seedance 2.5** for motion: in-between guides between two keys (first / last frame),
+  sampled at the artist's spacing, then cleaned up into line guides (S8).
+- **Seedream** (image model) for keyframe guides, region edits and references (S6).
+
+Both are tested on the owner's own frames before S6 / S8 commit to them (their content
+policies on anime characters, line quality, cost). Other back ends stay behind the same
+interfaces (§6) as fallbacks.

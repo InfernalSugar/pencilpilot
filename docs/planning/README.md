@@ -10,7 +10,7 @@ Start here.
 | [ADR-0003 Reference images](adr/0003-reference-images.md) | Where images come from and how they stay licence-clean and SFW |
 | [ADR-0005 Endless references](adr/0005-endless-references.md) | Live, auto-vetted Pixabay pool; real photos only in real life/animals/environment |
 | [ADR-0009 Picture sorter](adr/0009-picture-sorter.md) | AI only as an NSFW guard and to sort reference pictures (local CLIP); never for grading |
-| [STUDIO_APP.md](STUDIO_APP.md) | PencilPilot Studio: the drawing + frame-by-frame animation app with AI help, milestones S0–S11 |
+| [STUDIO_APP.md](STUDIO_APP.md) | The PencilPilot app: the drawing + frame-by-frame animation app with AI help, milestones S0–S11 |
 | [ADR-0010 Studio app](adr/0010-studio-app.md) | A Tauri 2 app sharing the engine and UI; animation core in Rust; `.ppstudio` files |
 | [ADR-0011 AI assistance](adr/0011-ai-assist.md) | AI in the app only: guides, never the final art; your own style; BYOK; provenance |
 | [LICENSING.md](LICENSING.md) | Licence rules for code, content, and reference images |
