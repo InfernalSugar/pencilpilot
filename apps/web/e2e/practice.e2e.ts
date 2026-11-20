@@ -20,7 +20,7 @@ test('category → difficulty → topic → draw', async ({ page }) => {
 	const topic = page.locator('a.topic:not([aria-disabled=true])').nth(1);
 	await topic.click();
 	await expect(page).toHaveURL(/\/draw\?category=animals&topic=[a-z-]+&tier=\d/);
-	await expect(page.getByRole('region', { name: 'Reference' })).toBeVisible();
+	await expect(page.getByRole('region', { name: 'Reference', exact: true })).toBeVisible();
 });
 
 test('unknown category is a 404', async ({ page }) => {

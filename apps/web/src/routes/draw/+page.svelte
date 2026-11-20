@@ -16,11 +16,13 @@
 	import LayersPanel from '#lib/paint/LayersPanel.svelte';
 	import CanvasSizePicker from '#lib/paint/CanvasSizePicker.svelte';
 	import RefViewer from '#lib/paint/RefViewer.svelte';
+	import HistoryPanel from '#lib/paint/HistoryPanel.svelte';
 	import { addToSession, clockOf, startSession, timeLabel } from '#lib/timed.js';
 	import ColorPanel, { rememberColor } from '#lib/paint/ColorPanel.svelte';
 	import {
 		anyGuide,
 		defaultGuides,
+		gridLines as canvasGridLines,
 		SYMMETRY_MODES,
 		symmetryOn,
 		type GuideSettings
@@ -129,7 +131,8 @@
 		| 'transform'
 		| 'liquify'
 		| 'guides'
-		| 'gradient';
+		| 'gradient'
+		| 'lasso-fill';
 	let tool = $state<Tool>('brush');
 	let gradientKind = $state<'linear' | 'radial'>('linear');
 	let importNote = $state('');
@@ -212,6 +215,30 @@
 	let wandTolerance = $state(0.15);
 	let fillTolerance = $state(0.12);
 	let fillAllLayers = $state(true);
+	/** fill: find shapes on this layer (a line-art "reference" layer); 0 = per fillAllLayers */
+	let fillRefLayer = $state(0);
+	/**
+	 * The canvas grid on the reference (the grid method): the same lines, placed
+	 * where the reference sits when it's fitted inside the canvas (as the grader
+	 * fits it), in fractions of the picture.
+	 */
+	const refGrid = $derived.by((): [number, number, number, number][] | null => {
+		if (!reference || !guides.grid.on || !reference.width || !reference.height) return null;
+		const { width: W, height: H } = canvasSize;
+		const k = Math.min(W / reference.width, H / reference.height);
+		const [w, h] = [reference.width * k, reference.height * k];
+		const [x0, y0] = [(W - w) / 2, (H - h) / 2];
+		return canvasGridLines(guides, W, H).map(([a, b, c, d]) => [
+			(a - x0) / w,
+			(b - y0) / h,
+			(c - x0) / w,
+			(d - y0) / h
+		]);
+	});
+	/** grayscale view of the canvas and the reference (values only) */
+	let grayView = $state(false);
+	/** transform: corners move on their own (distort / perspective) */
+	let distort = $state(false);
 	let quickShape = $state(true);
 	let shapeNote = $state('');
 	let shapeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -360,6 +387,10 @@
 	let opacity = $state(1);
 	let color = $state('#16161a');
 	let status = $state<CanvasStatus>(BLANK_STATUS);
+	/** a fill reference layer that was deleted stops counting */
+	const fillReference = $derived(
+		status.layers.some((l) => l.id === fillRefLayer) ? fillRefLayer : 0
+	);
 	let canvasSize = $state<CanvasSize>({ width: 800, height: 600 });
 	function pickSize(next: CanvasSize) {
 		canvasSize = next;
@@ -370,7 +401,7 @@
 
 	// Side dock (reference + Layers / Brushes / Colour tabs). Always shown on wide
 	// screens; a slide-over (tablet) or bottom sheet (phone) on narrow ones.
-	const DOCK_TABS = ['layers', 'brushes', 'colour'];
+	const DOCK_TABS = ['layers', 'brushes', 'colour', 'history'];
 	let dockTab = $state('layers');
 	let dockOpen = $state(false);
 	// remember the chosen tab
@@ -382,7 +413,18 @@
 		setTab(t);
 		dockOpen = true;
 	}
-	let refFloating = $state(false);
+	/**
+	 * Where the reference shows: in the side panel, beside the canvas (its own pane,
+	 * resized with the divider) or in a floating window.
+	 */
+	type RefPlace = 'dock' | 'beside' | 'float';
+	let refPlace = $state<RefPlace>('dock');
+	const refFloating = $derived(refPlace === 'float');
+	const showBeside = $derived(refPlace === 'beside' && (!!reference || refLoading));
+	/** the reference pane's share of the drawing area in "beside" mode */
+	let refSplit = $state(0.4);
+	const SPLIT_MIN = 0.15;
+	const SPLIT_MAX = 0.75;
 	let floatBox = $state({ x: 24, y: 120, w: 360, h: 420 });
 	function remember(key: string, value: unknown) {
 		try {
@@ -398,9 +440,48 @@
 			return fallback;
 		}
 	}
-	function setFloating(on: boolean) {
-		refFloating = on;
-		remember('pp.refFloating', on);
+	function setPlace(p: RefPlace) {
+		refPlace = p;
+		remember('pp.refPlace', p);
+		if (p === 'beside' && dockOpen && window.innerWidth <= 1100) dockOpen = false;
+	}
+	/** First visit: beside the canvas when there's room; older saved choices still count. */
+	function savedPlace(): RefPlace {
+		const p = recall<string | null>('pp.refPlace', null);
+		if (p === 'dock' || p === 'beside' || p === 'float') return p;
+		if (recall('pp.refFloating', false)) return 'float';
+		return window.innerWidth > 700 ? 'beside' : 'dock';
+	}
+	let splitEl = $state<HTMLDivElement>();
+	let splitDrag = false;
+	function setSplit(v: number) {
+		refSplit = Math.min(SPLIT_MAX, Math.max(SPLIT_MIN, v));
+	}
+	function splitMove(e: PointerEvent) {
+		if (!splitDrag || !splitEl) return;
+		const r = splitEl.getBoundingClientRect();
+		const column = getComputedStyle(splitEl).flexDirection === 'column';
+		setSplit(column ? (e.clientY - r.top) / r.height : (e.clientX - r.left) / r.width);
+	}
+	function splitEnd() {
+		if (!splitDrag) return;
+		splitDrag = false;
+		remember('pp.refSplit', refSplit);
+	}
+	function splitKey(e: KeyboardEvent) {
+		const step = e.shiftKey ? 0.1 : 0.02;
+		const d =
+			e.key === 'ArrowLeft' || e.key === 'ArrowUp'
+				? -step
+				: e.key === 'ArrowRight' || e.key === 'ArrowDown'
+					? step
+					: 0;
+		if (e.key === 'Home') setSplit(SPLIT_MIN);
+		else if (e.key === 'End') setSplit(SPLIT_MAX);
+		else if (d) setSplit(refSplit + d);
+		else return;
+		e.preventDefault();
+		remember('pp.refSplit', refSplit);
 	}
 	let floatDrag: { x: number; y: number; bx: number; by: number } | null = null;
 	function keepFloatOnScreen() {
@@ -522,7 +603,8 @@
 		canvasSize = savedSize();
 		dockTab = recall('pp.dockTab', 'layers');
 		if (!DOCK_TABS.includes(dockTab)) dockTab = 'layers';
-		refFloating = recall('pp.refFloating', false);
+		refPlace = savedPlace();
+		setSplit(Number(recall('pp.refSplit', 0.4)) || 0.4);
 		floatBox = recall('pp.refFloat', floatBox);
 		smoothing = recall('pp.smoothing', 0);
 		quickShape = recall('pp.quickShape', true);
@@ -574,6 +656,7 @@
 			tool = 'brush';
 		} else if (!mod && k === 'i') tool = tool === 'picker' ? 'brush' : 'picker';
 		else if (!mod && k === 'g') tool = tool === 'fill' ? 'brush' : 'fill';
+		else if (!mod && k === 'f') tool = tool === 'lasso-fill' ? 'brush' : 'lasso-fill';
 		else if (!mod && k === 'v') tool = tool === 'transform' ? 'brush' : 'transform';
 		else if (!mod && k === 'k') tool = tool === 'liquify' ? 'brush' : 'liquify';
 		else if (tool === 'transform' && e.key === 'Enter') canvas?.transformCommit();
@@ -840,7 +923,8 @@
 	tabs={[
 		{ id: 'layers', label: 'Layers', meta: activeLayerName },
 		{ id: 'brushes', label: 'Brushes', meta: brushName },
-		{ id: 'colour', label: 'Colour' }
+		{ id: 'colour', label: 'Colour' },
+		{ id: 'history', label: 'History', meta: status.history.undo.at(-1) }
 	]}
 	bind:tab={dockTab}
 	bind:dockOpen
@@ -1329,6 +1413,15 @@
 		{/if}
 		{#if tool === 'transform'}
 			<div class="fill-opts" role="group" aria-label="Transform">
+				<button
+					type="button"
+					class="tool"
+					aria-pressed={distort}
+					title="Distort: drag each corner on its own (perspective, skew). Or hold Ctrl and drag a corner."
+					onclick={() => (distort = !distort)}
+				>
+					Distort
+				</button>
 				<button type="button" class="tool" onclick={() => canvas?.transformFlip('x')}>
 					Flip ↔
 				</button>
@@ -1394,9 +1487,30 @@
 					aria-pressed={fillAllLayers}
 					title="Fill what you see (all layers) or only this layer's own pixels"
 					onclick={() => (fillAllLayers = !fillAllLayers)}
+					disabled={!!fillReference}
 				>
 					{fillAllLayers ? 'Sample: all layers' : 'Sample: this layer'}
 				</button>
+				<label class="ref-layer">
+					<span>Lines from</span>
+					<select
+						bind:value={fillRefLayer}
+						title="Fill inside the lines of a line-art layer while you colour on another layer"
+					>
+						<option value={0}>{fillAllLayers ? 'What you see' : 'This layer'}</option>
+						{#each [...status.layers].reverse() as l (l.id)}
+							<option value={l.id}>Reference: {l.name}</option>
+						{/each}
+					</select>
+				</label>
+			</div>
+		{/if}
+		{#if tool === 'lasso-fill'}
+			<div class="fill-opts" role="group" aria-label="Lasso fill">
+				<span class="adjust-msg plain">
+					Draw a shape: it fills with the colour when you let go. Great for blocking in big shapes
+					and shadows.
+				</span>
 			</div>
 		{/if}
 		{#if tracing && traceBarOpen}
@@ -1418,46 +1532,104 @@
 		{/if}
 	{/snippet}
 	{#snippet stage()}
-		{#key `${canvasSize.width}x${canvasSize.height}-${round}`}
-			<PaintCanvas
-				bind:this={canvas}
-				fill
-				width={canvasSize.width}
-				height={canvasSize.height}
-				{brushId}
-				{eraser}
-				{size}
-				{opacity}
-				{color}
-				{tool}
-				{smoothing}
-				onpick={picked}
-				{fillTolerance}
-				{fillAllLayers}
-				{quickShape}
-				onshape={onShape}
-				{selectMode}
-				{wandTolerance}
-				ontransformend={onTransformEnd}
-				{liquifySize}
-				{liquifyStrength}
-				allowImport
-				onimport={(r) => (importNote = importText(r))}
-				{gradientKind}
-				gradientEnd={gradientEnd === 'transparent' ? 'transparent' : gradientEndColor}
-				{penPressure}
-				{guides}
-				onguides={setGuides}
-				overlaySrc={traceSrc}
-				overlayOpacity={trace.opacity}
-				overlayTransform={trace}
-				adjustOverlay={trace.adjusting}
-				onoverlaymove={(dx, dy) => (trace = { ...trace, x: trace.x + dx, y: trace.y + dy })}
-				onchange={(s) => (status = s)}
-				onblocked={onBlocked}
-				locked={timeUp}
-			/>
-		{/key}
+		<div
+			class="split"
+			class:beside={showBeside}
+			bind:this={splitEl}
+			style="--split: {refSplit * 100}%"
+		>
+			{#if showBeside}
+				<section class="ref-pane" aria-label="Reference beside the canvas">
+					<div class="ref-pane-bar">
+						<span>Reference</span>
+						<button type="button" class="tool" onclick={() => setPlace('float')}>Float</button>
+						<button type="button" class="tool" onclick={() => setPlace('dock')}>
+							To the panel
+						</button>
+					</div>
+					{#if reference}
+						{#key reference.id}
+							<RefViewer
+								src={imageUrl(reference)}
+								alt="Reference: {reference.tags.join(', ')}"
+								fill
+								gray={grayView}
+								grid={refGrid}
+								onpick={picked}
+							/>
+						{/key}
+					{:else}
+						<div class="ref-skeleton" aria-busy="true">Finding a picture…</div>
+					{/if}
+				</section>
+				<!-- a window splitter: drag, or arrow keys when focused -->
+				<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+				<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+				<div
+					class="divider"
+					role="separator"
+					tabindex="0"
+					aria-label="Resize the reference"
+					aria-orientation="vertical"
+					aria-valuemin={SPLIT_MIN * 100}
+					aria-valuemax={SPLIT_MAX * 100}
+					aria-valuenow={Math.round(refSplit * 100)}
+					onpointerdown={(e) => {
+						e.currentTarget.setPointerCapture(e.pointerId);
+						splitDrag = true;
+					}}
+					onpointermove={splitMove}
+					onpointerup={splitEnd}
+					onpointercancel={splitEnd}
+					onkeydown={splitKey}
+				></div>
+			{/if}
+			<div class="canvas-pane">
+				{#key `${canvasSize.width}x${canvasSize.height}-${round}`}
+					<PaintCanvas
+						bind:this={canvas}
+						fill
+						width={canvasSize.width}
+						height={canvasSize.height}
+						{brushId}
+						{eraser}
+						{size}
+						{opacity}
+						{color}
+						{tool}
+						{smoothing}
+						onpick={picked}
+						{fillTolerance}
+						{fillAllLayers}
+						{fillReference}
+						bind:grayView
+						{distort}
+						{quickShape}
+						onshape={onShape}
+						{selectMode}
+						{wandTolerance}
+						ontransformend={onTransformEnd}
+						{liquifySize}
+						{liquifyStrength}
+						allowImport
+						onimport={(r) => (importNote = importText(r))}
+						{gradientKind}
+						gradientEnd={gradientEnd === 'transparent' ? 'transparent' : gradientEndColor}
+						{penPressure}
+						{guides}
+						onguides={setGuides}
+						overlaySrc={traceSrc}
+						overlayOpacity={trace.opacity}
+						overlayTransform={trace}
+						adjustOverlay={trace.adjusting}
+						onoverlaymove={(dx, dy) => (trace = { ...trace, x: trace.x + dx, y: trace.y + dy })}
+						onchange={(s) => (status = s)}
+						onblocked={onBlocked}
+						locked={timeUp}
+					/>
+				{/key}
+			</div>
+		</div>
 		{#if timeUp}
 			<div class="times-up" role="alert">
 				<b>Time’s up!</b>
@@ -1481,14 +1653,15 @@
 					: `“${activeLayerName}” is locked. Unlock it or pick another layer to draw.`}
 			</p>
 		{/if}
-		{#if reference && !refFloating}
+		{#if reference && refPlace === 'dock'}
 			<div class="pip" aria-label="Reference (small)">
 				<div class="pip-bar">
 					<span>Reference</span>
 					<button
 						type="button"
-						aria-label="Show the reference in the panel"
-						onclick={() => openDock('layers')}
+						aria-label="Show the reference bigger, beside the canvas"
+						title="Bigger: beside the canvas"
+						onclick={() => setPlace('beside')}
 					>
 						⤢
 					</button>
@@ -1518,18 +1691,43 @@
 						</button>
 					{/if}
 				</div>
-				{#if refFloating}
-					<p class="muted">The picture is in a floating window.</p>
-					<button type="button" class="link-btn" onclick={() => setFloating(false)}>
+				{#if refPlace !== 'dock'}
+					<p class="muted">
+						{refPlace === 'float'
+							? 'The picture is in a floating window.'
+							: 'The picture is beside the canvas.'}
+					</p>
+					<button type="button" class="link-btn" onclick={() => setPlace('dock')}>
 						Put it back here
 					</button>
 				{:else}
 					{#key reference.id}
-						<RefViewer src={imageUrl(reference)} alt="Reference: {reference.tags.join(', ')}" />
+						<RefViewer
+							src={imageUrl(reference)}
+							alt="Reference: {reference.tags.join(', ')}"
+							gray={grayView}
+							grid={refGrid}
+							onpick={picked}
+						/>
 					{/key}
-					<button type="button" class="link-btn small float-btn" onclick={() => setFloating(true)}>
-						Float this picture ⧉
-					</button>
+					<div class="place-btns">
+						<button
+							type="button"
+							class="tool"
+							title="Show the reference bigger, in its own pane beside the canvas"
+							onclick={() => setPlace('beside')}
+						>
+							Beside the canvas
+						</button>
+						<button
+							type="button"
+							class="tool"
+							title="Show the reference in a window you can move and resize"
+							onclick={() => setPlace('float')}
+						>
+							Float
+						</button>
+					</div>
 				{/if}
 				{#if reference.own}
 					<p class="credit">Your own picture. It stays on this device and isn’t uploaded.</p>
@@ -1594,6 +1792,8 @@
 					<p class="muted">Loading brushes…</p>
 				{/if}
 			</section>
+		{:else if t === 'history'}
+			<HistoryPanel history={status.history} ongo={(n) => canvas?.historyGo(n)} />
 		{:else}
 			<ColorPanel bind:color onclose={() => setTab('layers')} />
 		{/if}
@@ -1638,10 +1838,18 @@
 					}}
 				>
 					<span>Reference · drag to move</span>
-					<button type="button" onclick={() => setFloating(false)}>Dock</button>
+					<button type="button" class="tool" onclick={() => setPlace('beside')}>Beside</button>
+					<button type="button" class="tool" onclick={() => setPlace('dock')}>Dock</button>
 				</div>
 				{#key reference.id}
-					<RefViewer src={imageUrl(reference)} alt="Reference: {reference.tags.join(', ')}" fill />
+					<RefViewer
+						src={imageUrl(reference)}
+						alt="Reference: {reference.tags.join(', ')}"
+						fill
+						gray={grayView}
+						grid={refGrid}
+						onpick={picked}
+					/>
 				{/key}
 			</section>
 		{/if}
@@ -1674,6 +1882,99 @@
 	.timer[aria-pressed='false'] {
 		background: var(--pp-surface-sunk);
 	}
+	.split {
+		position: absolute;
+		inset: 0;
+		display: flex;
+	}
+	.canvas-pane {
+		position: relative;
+		flex: 1 1 0;
+		min-width: 0;
+		min-height: 0;
+		height: 100%;
+	}
+	.ref-pane {
+		flex: 0 0 var(--split);
+		min-width: 0;
+		min-height: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		padding: 8px;
+		box-sizing: border-box;
+		background: var(--pp-surface);
+	}
+	.ref-pane :global(.ref) {
+		flex: 1;
+	}
+	.ref-pane-bar {
+		flex: none;
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		font-size: 13px;
+		font-weight: 700;
+	}
+	.ref-pane-bar span {
+		flex: 1;
+	}
+	.float-bar span {
+		margin-right: auto;
+	}
+	.ref-pane .ref-skeleton {
+		flex: 1;
+	}
+	.divider {
+		flex: none;
+		width: 12px;
+		position: relative;
+		cursor: col-resize;
+		touch-action: none;
+		background: var(--pp-surface-sunk);
+	}
+	.divider::after {
+		content: '';
+		position: absolute;
+		left: 50%;
+		top: 50%;
+		width: 4px;
+		height: 44px;
+		transform: translate(-50%, -50%);
+		border-radius: 4px;
+		background: var(--pp-ink-2);
+		opacity: 0.45;
+		transition: opacity 0.15s;
+	}
+	.divider:hover::after,
+	.divider:focus-visible::after,
+	.divider:active::after {
+		opacity: 1;
+		background: var(--pp-accent);
+	}
+	.divider:focus-visible {
+		outline: 2px solid var(--pp-accent);
+		outline-offset: -2px;
+	}
+	@media (max-width: 700px) {
+		.split.beside {
+			flex-direction: column;
+		}
+		.divider {
+			width: auto;
+			height: 14px;
+			cursor: row-resize;
+		}
+		.divider::after {
+			width: 44px;
+			height: 4px;
+		}
+	}
+	.place-btns {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
+	}
 	.floating {
 		position: fixed;
 		z-index: 30;
@@ -1694,7 +1995,7 @@
 	.float-bar {
 		display: flex;
 		align-items: center;
-		justify-content: space-between;
+		justify-content: flex-end;
 		gap: 8px;
 		padding: 10px 2px 2px;
 		cursor: move;
@@ -1702,16 +2003,6 @@
 		font-size: 13px;
 		font-weight: 600;
 		color: var(--pp-ink-2);
-	}
-	.float-bar button {
-		min-height: 32px;
-		padding: 4px 12px;
-		border: 0;
-		border-radius: 999px;
-		background: var(--pp-ink);
-		color: #fff;
-		font: 600 13px var(--pp-font-body);
-		cursor: pointer;
 	}
 	.tool.done {
 		background: var(--pp-accent-strong);
@@ -1724,6 +2015,28 @@
 	.tool[role='radio'][aria-checked='true'] {
 		background: var(--pp-accent-strong);
 		color: #fff;
+	}
+	.ref-layer {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		font-size: 13px;
+		font-weight: 600;
+		color: var(--pp-on-ink);
+	}
+	.ref-layer select {
+		height: 38px;
+		max-width: 220px;
+		padding: 0 10px;
+		border: 0;
+		border-radius: 12px;
+		background: #2a2a30;
+		color: var(--pp-on-ink);
+		font: 600 14px var(--pp-font-body);
+	}
+	.adjust-msg.plain {
+		color: var(--pp-on-ink);
+		font-weight: 500;
 	}
 	.adjust-msg {
 		margin: 0;

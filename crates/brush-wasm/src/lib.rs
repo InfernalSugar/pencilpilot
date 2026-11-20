@@ -224,8 +224,8 @@ struct TransformSession {
     fh: usize,
     /// destination box drawn by the last preview (to repaint it next time)
     last: Option<(i64, i64, i64, i64)>,
-    /// current matrix: dest = (a x + c y + e, b x + d y + f)
-    m: [f32; 6],
+    /// current projective matrix, row-major: dest = (h0 x + h1 y + h2, h3 x + h4 y + h5) / (h6 x + h7 y + h8)
+    m: [f32; 9],
 }
 
 /// Mirror / rotation copies of every stroke, about (cx, cy).
@@ -1376,6 +1376,25 @@ impl Painter {
         grow: u32,
         gap: u32,
     ) -> bool {
+        self.fill_from(x, y, rgb, opacity, tolerance, all_layers, grow, gap, None)
+    }
+
+    /// `fill`, but the region comes from `reference`'s own pixels (a line-art
+    /// layer, as in Procreate's reference layer) while the paint still goes on
+    /// the active layer. `None`, or a missing layer, falls back to `fill`.
+    #[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
+    pub fn fill_from(
+        &mut self,
+        x: u32,
+        y: u32,
+        rgb: [u8; 3],
+        opacity: f32,
+        tolerance: f32,
+        all_layers: bool,
+        grow: u32,
+        gap: u32,
+        reference: Option<u32>,
+    ) -> bool {
         let (w, h) = (self.width as usize, self.height as usize);
         if self.stroking.is_some() || x as usize >= w || y as usize >= h {
             return false;
@@ -1387,7 +1406,10 @@ impl Painter {
         if self.layers[li].props.locked || !self.shown(li) {
             return false;
         }
-        let source = self.sample_source(li, all_layers);
+        let source = match reference.and_then(|id| self.index_of(id)) {
+            Some(ri) => self.sample_source(ri, false),
+            None => self.sample_source(li, all_layers),
+        };
         let tol = (tolerance.clamp(0.0, 1.0) * 255.0) as i32;
         let mask = flood_closed(&source, w, h, x as usize, y as usize, tol, gap as usize);
         let mut mask = grow_mask(&mask, w, h, grow as usize);
@@ -1441,6 +1463,92 @@ impl Painter {
                     } else {
                         merge_pixel(fill, d, 1.0, Blend::Normal)
                     };
+                    if out != d {
+                        tile[py][px] = out;
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
+                snap.insert(key, Some(tile));
+            }
+        }
+        if snap.is_empty() {
+            return false;
+        }
+        self.perform(Edit::Tiles {
+            layer: active,
+            mask: self.editing_mask(active),
+            snap,
+        });
+        true
+    }
+
+    /// Paint `rgb` at `opacity` over the active layer wherever `coverage`
+    /// (one byte per canvas pixel, 0–255, anti-aliased edges allowed) says so:
+    /// the lasso fill. Normal blending, on top of what's there; respects the
+    /// selection and alpha lock. One undo step; false if nothing changed.
+    // pixel loops index tiles by (row, col) and map them to canvas coordinates
+    #[allow(clippy::needless_range_loop)]
+    pub fn fill_mask(&mut self, coverage: &[u8], rgb: [u8; 3], opacity: f32) -> bool {
+        let (w, h) = (self.width as usize, self.height as usize);
+        if self.stroking.is_some() || coverage.len() != w * h || !self.idle() {
+            return false;
+        }
+        let active = self.active;
+        let Some(li) = self.index_of(active) else {
+            return false;
+        };
+        if self.layers[li].props.locked || !self.shown(li) {
+            return false;
+        }
+        let color = [
+            rgb[0] as f32 / 255.0,
+            rgb[1] as f32 / 255.0,
+            rgb[2] as f32 / 255.0,
+        ];
+        let opacity = opacity.clamp(0.0, 1.0);
+        let alpha_lock = self.layers[li].props.alpha_lock;
+        let sel = self.selection.clone();
+        let ts = TILE_SIZE;
+        let mut keys: HashSet<TileKey> = HashSet::new();
+        for (i, &c) in coverage.iter().enumerate() {
+            if c > 0 && sel.as_ref().is_none_or(|s| s[i] > 0) {
+                keys.insert(((i % w / ts) as i32, (i / w / ts) as i32));
+            }
+        }
+        let mut snap = Snapshot::new();
+        let l = &mut self.layers[li];
+        for key in keys {
+            let mut tile = l
+                .surface
+                .tiles
+                .get(&key)
+                .cloned()
+                .unwrap_or_else(empty_tile);
+            let mut changed = false;
+            for py in 0..ts {
+                for px in 0..ts {
+                    let (cx, cy) = (key.0 as usize * ts + px, key.1 as usize * ts + py);
+                    if cx >= w || cy >= h {
+                        continue;
+                    }
+                    let i = cy * w + cx;
+                    if coverage[i] == 0 || sel.as_ref().is_some_and(|s| s[i] == 0) {
+                        continue;
+                    }
+                    let d = tile[py][px];
+                    if alpha_lock && d[3] == 0 {
+                        continue;
+                    }
+                    let a = opacity * coverage[i] as f32 / 255.0;
+                    let src = premul_fix15(color, a);
+                    let mut out = merge_pixel(d, src, 1.0, Blend::Normal);
+                    if alpha_lock {
+                        // keep the layer's own transparency: only the colour changes
+                        let (c, _) = unpremul_srgb(out);
+                        out = premul_fix15(c, unpremul_srgb(d).1);
+                    }
                     if out != d {
                         tile[py][px] = out;
                         changed = true;
@@ -1646,9 +1754,9 @@ impl Painter {
             fw,
             fh,
             last: None,
-            m: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            m: H_IDENTITY,
         }));
-        self.transform_preview([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        self.transform_preview_h(H_IDENTITY);
         vec![x0 as f32, y0 as f32, (x1 + 1) as f32, (y1 + 1) as f32]
     }
 
@@ -1660,23 +1768,40 @@ impl Painter {
     #[allow(clippy::needless_range_loop)]
     /// Show the lifted pixels under matrix `m` (dest = a·x + c·y + e, b·x + d·y + f).
     pub fn transform_preview(&mut self, m: [f32; 6]) -> bool {
+        let [a, b, c, d, e, f] = m;
+        self.transform_preview_h([a, c, e, b, d, f, 0.0, 0.0, 1.0])
+    }
+
+    /// Show the lifted pixels under a projective matrix `h` (row-major 3×3,
+    /// see `TransformSession::m`): distort and perspective. The lifted box must
+    /// stay in front of the "camera" (no corner may flip through infinity).
+    // pixel loops index tiles by (row, col) and map them to canvas coordinates
+    #[allow(clippy::needless_range_loop)]
+    pub fn transform_preview_h(&mut self, hm: [f32; 9]) -> bool {
         let Some(mut t) = self.transform.take() else {
             return false;
         };
-        let [a, b, c, d, e, f] = m;
-        let det = a * d - b * c;
-        if det.abs() < 1e-6 {
+        let Some(inv) = h_invert(hm) else {
             self.transform = Some(t);
             return false;
-        }
-        t.m = m;
+        };
         let (w, h) = (self.width as i64, self.height as i64);
         let ts = TILE_SIZE as i64;
         // where the floating box lands
         let (fx0, fy0) = (t.fx0 as f32, t.fy0 as f32);
         let (fx1, fy1) = (fx0 + t.fw as f32, fy0 + t.fh as f32);
-        let pts = [(fx0, fy0), (fx1, fy0), (fx0, fy1), (fx1, fy1)]
-            .map(|(x, y)| (a * x + c * y + e, b * x + d * y + f));
+        let mut pts = [(0.0f32, 0.0f32); 4];
+        for (k, (x, y)) in [(fx0, fy0), (fx1, fy0), (fx0, fy1), (fx1, fy1)]
+            .into_iter()
+            .enumerate()
+        {
+            let Some(q) = h_apply(hm, x, y) else {
+                self.transform = Some(t);
+                return false;
+            };
+            pts[k] = q;
+        }
+        t.m = hm;
         let dx0 = (pts.iter().map(|p| p.0).fold(f32::MAX, f32::min).floor() as i64 - 1).max(0);
         let dy0 = (pts.iter().map(|p| p.1).fold(f32::MAX, f32::min).floor() as i64 - 1).max(0);
         let dx1 = (pts.iter().map(|p| p.0).fold(f32::MIN, f32::max).ceil() as i64 + 1).min(w - 1);
@@ -1692,7 +1817,6 @@ impl Painter {
             );
         }
         t.last = Some((dx0, dy0, dx1, dy1));
-        let (ia, ib, ic, id) = (d / det, -b / det, -c / det, a / det);
         let sample = |sx: f32, sy: f32| -> [u16; 4] {
             // bilinear, premultiplied; outside the float is transparent
             let (x, y) = (sx - fx0 - 0.5, sy - fy0 - 0.5);
@@ -1736,8 +1860,10 @@ impl Painter {
                         if cx < dx0 || cx > dx1 || cy < dy0 || cy > dy1 {
                             continue;
                         }
-                        let (ux, uy) = (cx as f32 + 0.5 - e, cy as f32 + 0.5 - f);
-                        let s = sample(ia * ux + ic * uy, ib * ux + id * uy);
+                        let Some((sx, sy)) = h_apply(inv, cx as f32 + 0.5, cy as f32 + 0.5) else {
+                            continue;
+                        };
+                        let s = sample(sx, sy);
                         if s[3] > 0 {
                             tile[py][px] = merge_pixel(tile[py][px], s, 1.0, Blend::Normal);
                         }
@@ -1779,14 +1905,14 @@ impl Painter {
         }
         if let Some(sel) = self.selection.take() {
             let (w, h) = (self.width as usize, self.height as usize);
-            let [a, b, c, d, e, f] = t.m;
-            let det = a * d - b * c;
-            let (ia, ib, ic, id) = (d / det, -b / det, -c / det, a / det);
+            let inv = h_invert(t.m).unwrap_or(H_IDENTITY);
             let mut out = vec![0u8; w * h];
             for y in 0..h {
                 for x in 0..w {
-                    let (ux, uy) = (x as f32 + 0.5 - e, y as f32 + 0.5 - f);
-                    let (sx, sy) = ((ia * ux + ic * uy).floor(), (ib * ux + id * uy).floor());
+                    let Some((sx, sy)) = h_apply(inv, x as f32 + 0.5, y as f32 + 0.5) else {
+                        continue;
+                    };
+                    let (sx, sy) = (sx.floor(), sy.floor());
                     if sx >= 0.0 && sy >= 0.0 && (sx as usize) < w && (sy as usize) < h {
                         out[y * w + x] = sel[sy as usize * w + sx as usize];
                     }
@@ -2571,6 +2697,47 @@ fn flood(src: &[[u8; 4]], w: usize, h: usize, x: usize, y: usize, tol: i32) -> V
 /// Flood fill with gap closing: lines count as `gap` px thicker while
 /// flooding, so small gaps in grainy pencil lines don't let it leak; the
 /// region then grows back by `gap` to meet the lines. (`gap` 0 = plain flood.)
+/// The identity projective matrix (row-major 3×3).
+const H_IDENTITY: [f32; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+
+/// `h` applied to (x, y); None behind the camera (w ≤ 0) or at infinity.
+fn h_apply(h: [f32; 9], x: f32, y: f32) -> Option<(f32, f32)> {
+    let w = h[6] * x + h[7] * y + h[8];
+    if w <= 1e-6 {
+        return None;
+    }
+    Some((
+        (h[0] * x + h[1] * y + h[2]) / w,
+        (h[3] * x + h[4] * y + h[5]) / w,
+    ))
+}
+
+/// Inverse of a 3×3 matrix; None if singular.
+fn h_invert(m: [f32; 9]) -> Option<[f32; 9]> {
+    let m = m.map(|v| v as f64);
+    let c0 = m[4] * m[8] - m[5] * m[7];
+    let c1 = m[5] * m[6] - m[3] * m[8];
+    let c2 = m[3] * m[7] - m[4] * m[6];
+    let det = m[0] * c0 + m[1] * c1 + m[2] * c2;
+    if det.abs() < 1e-12 {
+        return None;
+    }
+    let inv = [
+        c0,
+        m[2] * m[7] - m[1] * m[8],
+        m[1] * m[5] - m[2] * m[4],
+        c1,
+        m[0] * m[8] - m[2] * m[6],
+        m[2] * m[3] - m[0] * m[5],
+        c2,
+        m[1] * m[6] - m[0] * m[7],
+        m[0] * m[4] - m[1] * m[3],
+    ]
+    // the exact inverse: a point in front of the camera maps back with w > 0
+    .map(|v| (v / det) as f32);
+    Some(inv)
+}
+
 fn flood_closed(
     src: &[[u8; 4]],
     w: usize,
@@ -3137,6 +3304,100 @@ mod tests {
         lock.locked = true;
         p.set_layer_props(top, lock, true);
         assert!(!p.fill(80, 60, [0, 200, 0], 1.0, 0.1, true, 0, 0));
+    }
+
+    #[test]
+    fn fill_from_a_reference_layer() {
+        let mut p = Painter::new(256, 128);
+        dense_square(&mut p);
+        let lines = p.active_layer();
+        let colour = p.add_layer("Colour");
+        // hide the lines: a normal fill sampling what you see can't find the square
+        let mut hidden = props(&p, lines);
+        hidden.visible = false;
+        p.set_layer_props(lines, hidden, true);
+        assert!(p.fill_from(80, 60, [0, 200, 0], 1.0, 0.1, true, 0, 0, Some(lines)));
+        assert_eq!(p.active_layer(), colour, "painted on the active layer");
+        let mut shown = props(&p, lines);
+        shown.visible = true;
+        p.set_layer_props(lines, shown, true);
+        p.flush();
+        assert!(
+            px(&p, 80, 60)[1] > 150,
+            "inside the reference's square is filled"
+        );
+        assert!(px(&p, 200, 60)[0] > 240, "outside it is not");
+        // a reference that doesn't exist falls back to the usual sampling (what you see)
+        assert!(p.fill_from(200, 60, [200, 0, 0], 1.0, 0.1, true, 0, 0, Some(999)));
+        p.flush();
+        assert!(
+            px(&p, 200, 60)[1] < 60,
+            "the outside is filled: {:?}",
+            px(&p, 200, 60)
+        );
+        assert!(px(&p, 80, 60)[1] > 150, "the inside keeps its green");
+    }
+
+    #[test]
+    fn fill_mask_paints_the_lasso_shape_with_soft_edges() {
+        let mut p = Painter::new(256, 128);
+        let mut cov = rect_mask(&p, 40, 30, 120, 90);
+        cov[(60 * 256 + 120) as usize] = 128; // a half-covered edge pixel
+        assert!(p.fill_mask(&cov, [0, 0, 220], 1.0));
+        p.flush();
+        assert!(
+            px(&p, 80, 60)[2] > 200 && px(&p, 80, 60)[0] < 40,
+            "inside is blue"
+        );
+        assert!(px(&p, 200, 60)[0] > 240, "outside untouched");
+        let edge = px(&p, 120, 60);
+        assert!(edge[0] > 60 && edge[0] < 200, "edge is half way: {edge:?}");
+        assert!(p.undo());
+        p.flush();
+        assert!(px(&p, 80, 60)[0] > 240);
+        // the selection limits it
+        p.set_selection(&rect_mask(&p, 0, 0, 80, 128), 0);
+        assert!(p.fill_mask(&rect_mask(&p, 40, 30, 120, 90), [0, 0, 220], 1.0));
+        p.flush();
+        assert!(px(&p, 60, 60)[0] < 40 && px(&p, 100, 60)[0] > 240);
+        // nothing to paint: no undo step
+        assert!(!p.fill_mask(&vec![0; 256 * 128], [0, 0, 220], 1.0));
+    }
+
+    #[test]
+    fn projective_transform_distorts_and_undoes() {
+        let mut p = Painter::new(256, 128);
+        let b = pen();
+        line(&mut p, &b, 30.0);
+        p.flush();
+        let before = p.rgba().to_vec();
+        assert_eq!(p.transform_begin().len(), 4);
+        // a matrix scaled by 2 is the same move: down 50
+        assert!(p.transform_preview_h([2.0, 0.0, 0.0, 0.0, 2.0, 100.0, 0.0, 0.0, 2.0]));
+        p.flush();
+        assert!(px(&p, 100, 30)[0] > 240 && px(&p, 100, 80)[0] < 100);
+        // real perspective: the right end shrinks towards the middle row
+        assert!(p.transform_preview_h([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.004, 0.0, 1.0]));
+        p.flush();
+        // x' = x / (1 + 0.004 x): the line's right end (x = 180) lands near x = 105
+        assert!(px(&p, 60, 22)[0] < 120, "left part stays");
+        assert!(px(&p, 160, 18)[0] > 240, "right end pulled in");
+        // a corner behind the camera is refused (and the last good preview stays)
+        assert!(!p.transform_preview_h([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, -0.02, 0.0, 1.0]));
+        assert!(p.transform_commit());
+        assert!(p.undo());
+        p.flush();
+        assert_eq!(p.rgba(), &before[..]);
+    }
+
+    #[test]
+    fn h_invert_round_trips() {
+        let h = [1.2, 0.1, 5.0, -0.2, 0.9, 3.0, 0.001, 0.002, 1.0];
+        let inv = h_invert(h).unwrap();
+        let (x, y) = h_apply(h, 40.0, 70.0).unwrap();
+        let (bx, by) = h_apply(inv, x, y).unwrap();
+        assert!((bx - 40.0).abs() < 1e-2 && (by - 70.0).abs() < 1e-2);
+        assert!(h_invert([0.0; 9]).is_none());
     }
 
     /// a selection mask for the rectangle x0..x1, y0..y1

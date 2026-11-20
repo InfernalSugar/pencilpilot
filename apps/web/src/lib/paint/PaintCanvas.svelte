@@ -56,6 +56,8 @@
 		version: number;
 		/** something is selected */
 		selection: boolean;
+		/** the history panel: step names, oldest → newest, and the redo steps (next first) */
+		history: { undo: string[]; redo: string[] };
 	}
 
 	/** A local stroke as it happens, for shared canvases. Points are [x, y, pressure, dtMs, …]. */
@@ -80,7 +82,8 @@
 		groups: [],
 		active: 0,
 		version: 0,
-		selection: false
+		selection: false,
+		history: { undo: [], redo: [] }
 	};
 
 	export interface DrawingExport {
@@ -119,6 +122,7 @@
 		type Pt
 	} from './guides';
 	import { toGray } from '../grader';
+	import { boxToQuad, usableQuad, type Quad } from './homography';
 
 	let {
 		width = 800,
@@ -143,6 +147,9 @@
 		ongesture,
 		fillTolerance = 0.12,
 		fillAllLayers = true,
+		fillReference = 0,
+		grayView = $bindable(false),
+		distort = false,
 		quickShape = true,
 		onshape,
 		selectMode = 'replace',
@@ -188,7 +195,8 @@
 			| 'transform'
 			| 'liquify'
 			| 'guides'
-			| 'gradient';
+			| 'gradient'
+			| 'lasso-fill';
 		/** pictures can be dropped onto the canvas (as a new layer) */
 		allowImport?: boolean;
 		/** a dropped picture was imported (or why not) */
@@ -216,6 +224,12 @@
 		fillTolerance?: number;
 		/** fill: sample what you see (true) or the current layer only */
 		fillAllLayers?: boolean;
+		/** fill: find the shape on this layer instead (a line-art "reference" layer; 0 = off) */
+		fillReference?: number;
+		/** show the canvas in grey (values only); the drawing itself keeps its colours */
+		grayView?: boolean;
+		/** transform: dragging a corner moves just that corner (distort / perspective) */
+		distort?: boolean;
 		/** hold at the end of a stroke to snap it to a clean shape */
 		quickShape?: boolean;
 		/** a stroke snapped to a shape */
@@ -316,7 +330,13 @@
 		const n = parseInt(c.slice(1), 16);
 		brush.setColor((n >> 16) & 255, (n >> 8) & 255, n & 255);
 		brush.setEraser(er);
+		brushR = brush.radius();
 	}
+
+	/** the brush's radius in canvas px, for the outline cursor */
+	let brushR = $state(0);
+	/** where the pointer hovers (canvas px), for the brush outline cursor */
+	let cursorAt = $state<[number, number] | null>(null);
 
 	let version = 0;
 
@@ -357,7 +377,8 @@
 			groups: groupList(),
 			active: paint.activeLayer,
 			version: ++version,
-			selection: paint.hasSelection()
+			selection: paint.hasSelection(),
+			history: log.history()
 		});
 	}
 
@@ -366,8 +387,11 @@
 	const sendLive = () => !!onlive && !maskStroke;
 
 	/** run an engine change, keep the history in step, then redraw */
-	function changed(recorded: boolean, logIt: () => void = () => log.layerChange()) {
-		if (recorded) logIt();
+	function changed(recorded: boolean, logIt: () => void = () => log.layerChange(), label?: string) {
+		if (recorded) {
+			logIt();
+			if (label) log.labelLast(label);
+		}
 		schedule();
 		notify();
 		return recorded;
@@ -657,6 +681,10 @@
 	let panning: { id: number; x: number; y: number; panX: number; panY: number } | null = null;
 	let moving: { id: number; cx: number; cy: number } | null = null;
 	let spaceHeld = $state(false);
+	/** the outline only belongs to the brush (it would linger after switching tools) */
+	const showOutline = $derived(
+		!!cursorAt && brushR > 0 && tool === 'brush' && !spaceHeld && !adjustOverlay && !locked
+	);
 	let hovering = false;
 	/** once a pen has been used, fingers only move the view (palm rejection) */
 	let penSeen = false;
@@ -724,9 +752,10 @@
 			fillTolerance,
 			fillAllLayers,
 			2,
-			3
+			3,
+			fillReference
 		);
-		changed(done);
+		changed(done, undefined, 'Fill');
 	}
 
 	// ---- imported pictures ----
@@ -760,7 +789,7 @@
 				new Uint8Array(rgba.buffer)
 			);
 			if (!id) return 'busy';
-			changed(true);
+			changed(true, undefined, 'Import picture');
 			return 'ok';
 		} finally {
 			bmp.close();
@@ -919,6 +948,34 @@
 	});
 
 	/** rasterise a rectangle / lasso to a canvas-sized mask and combine it */
+	// ---- lasso fill: draw a shape, it fills solid with the brush colour ----
+
+	let lassoFill = $state<[number, number][] | null>(null);
+
+	function commitLassoFill() {
+		if (!paint || !lassoFill) return;
+		const pts = lassoFill;
+		lassoFill = null;
+		if (pts.length < 3) return;
+		const off = new OffscreenCanvas(width, height);
+		const c = off.getContext('2d')!;
+		c.fillStyle = '#fff';
+		c.beginPath();
+		c.moveTo(...pts[0]);
+		for (const p of pts.slice(1)) c.lineTo(...p);
+		c.closePath();
+		c.fill();
+		const rgba = c.getImageData(0, 0, width, height).data;
+		const coverage = new Uint8Array(width * height);
+		for (let i = 0; i < coverage.length; i++) coverage[i] = rgba[i * 4 + 3];
+		const n = parseInt(color.slice(1), 16) || 0;
+		changed(
+			paint.fillMask(coverage, (n >> 16) & 255, (n >> 8) & 255, n & 255, opacity),
+			undefined,
+			'Lasso fill'
+		);
+	}
+
 	function commitMarquee() {
 		if (!paint || !marquee) return;
 		const { kind, pts, op } = marquee;
@@ -974,12 +1031,16 @@
 		rot: number;
 		fx: 1 | -1;
 		fy: 1 | -1;
+		/** distort: the box's corners (tl, tr, br, bl) pinned here instead; overrides the rest */
+		quad?: Quad | null;
 	}
 	let xf = $state<Xf | null>(null);
 	let xfDrag: {
 		mode: 'move' | 'rotate' | 'corner' | 'edge-x' | 'edge-y';
 		start: [number, number];
 		from: Xf;
+		/** which corner / edge was grabbed (distort moves just that one) */
+		index: number;
 	} | null = null;
 	let xfRaf = 0;
 
@@ -1006,17 +1067,18 @@
 		m[1] * p[0] + m[3] * p[1] + m[5]
 	];
 
+	/** the box's corners (tl, tr, br, bl) after the transform, in canvas px */
+	function xfCorners(x: Xf): Quad {
+		if (x.quad) return x.quad;
+		const m = xfMatrix(x);
+		const [x0, y0, x1, y1] = x.box;
+		return [xfApply(m, [x0, y0]), xfApply(m, [x1, y0]), xfApply(m, [x1, y1]), xfApply(m, [x0, y1])];
+	}
+
 	/** the transformed box corners (tl, tr, br, bl) and handles, in canvas px */
 	const xfShape = $derived.by(() => {
 		if (!xf) return null;
-		const m = xfMatrix(xf);
-		const [x0, y0, x1, y1] = xf.box;
-		const corners = [
-			xfApply(m, [x0, y0]),
-			xfApply(m, [x1, y0]),
-			xfApply(m, [x1, y1]),
-			xfApply(m, [x0, y1])
-		];
+		const corners = xfCorners(xf);
 		const mid = (p: [number, number], q: [number, number]): [number, number] => [
 			(p[0] + q[0]) / 2,
 			(p[1] + q[1]) / 2
@@ -1046,7 +1108,8 @@
 		xfRaf = requestAnimationFrame(() => {
 			xfRaf = 0;
 			if (!paint || !xf) return;
-			paint.transformPreview(...xfMatrix(xf));
+			if (xf.quad) paint.transformPreviewH(new Float32Array(boxToQuad(xf.box, xf.quad)));
+			else paint.transformPreview(...xfMatrix(xf));
 			render();
 		});
 	}
@@ -1066,8 +1129,9 @@
 
 	export function transformCommit() {
 		if (!paint || !xf) return;
+		const label = xf.quad ? 'Distort' : 'Transform';
 		xf = null;
-		changed(paint.transformCommit());
+		changed(paint.transformCommit(), undefined, label);
 		refreshAnts();
 		ontransformend?.('done');
 	}
@@ -1080,31 +1144,59 @@
 		refreshAnts();
 		ontransformend?.('cancelled');
 	}
+	/** the middle of a quad (average of its corners) */
+	const quadMid = (q: Quad): Pt => [
+		(q[0][0] + q[1][0] + q[2][0] + q[3][0]) / 4,
+		(q[0][1] + q[1][1] + q[2][1] + q[3][1]) / 4
+	];
+	const mapQuad = (q: Quad, f: (p: Pt) => Pt): Quad => [f(q[0]), f(q[1]), f(q[2]), f(q[3])];
+	function rotateQuad(q: Quad, deg: number): Quad {
+		const [cx, cy] = quadMid(q);
+		const r = (deg * Math.PI) / 180;
+		const [cs, sn] = [Math.cos(r), Math.sin(r)];
+		return mapQuad(q, ([x, y]) => [
+			cx + (x - cx) * cs - (y - cy) * sn,
+			cy + (x - cx) * sn + (y - cy) * cs
+		]);
+	}
+
 	export function transformFlip(axis: 'x' | 'y') {
 		if (!xf) return;
-		xf = axis === 'x' ? { ...xf, fx: xf.fx === 1 ? -1 : 1 } : { ...xf, fy: xf.fy === 1 ? -1 : 1 };
+		if (xf.quad) {
+			// mirror the pinned corners across the middle: the picture flips with them
+			const [cx, cy] = quadMid(xf.quad);
+			xf = {
+				...xf,
+				quad: mapQuad(xf.quad, ([x, y]) => (axis === 'x' ? [2 * cx - x, y] : [x, 2 * cy - y]))
+			};
+		} else
+			xf = axis === 'x' ? { ...xf, fx: xf.fx === 1 ? -1 : 1 } : { ...xf, fy: xf.fy === 1 ? -1 : 1 };
 		xfShow();
 	}
 	export function transformRotate(deg: number) {
 		if (!xf) return;
-		xf = { ...xf, rot: (((xf.rot + deg) % 360) + 360) % 360 };
+		if (xf.quad) xf = { ...xf, quad: rotateQuad(xf.quad, deg) };
+		else xf = { ...xf, rot: (((xf.rot + deg) % 360) + 360) % 360 };
 		xfShow();
 	}
 	export function transformReset() {
 		if (!xf) return;
-		xf = { ...xf, tx: 0, ty: 0, sx: 1, sy: 1, rot: 0, fx: 1, fy: 1 };
+		xf = { ...xf, tx: 0, ty: 0, sx: 1, sy: 1, rot: 0, fx: 1, fy: 1, quad: null };
 		xfShow();
 	}
 
-	/** what a press at canvas point p grabs */
-	function xfHit(p: [number, number]): NonNullable<typeof xfDrag>['mode'] | null {
+	/** what a press at canvas point p grabs (and which corner / edge) */
+	function xfHit(
+		p: [number, number]
+	): { mode: NonNullable<typeof xfDrag>['mode']; index: number } | null {
 		if (!xfShape) return null;
 		const r = 14 / Math.max(0.01, fit * zoom);
 		const near = (q: [number, number]) => Math.hypot(p[0] - q[0], p[1] - q[1]) <= r;
-		if (near(xfShape.rotH)) return 'rotate';
-		if (xfShape.corners.some(near)) return 'corner';
+		if (near(xfShape.rotH)) return { mode: 'rotate', index: 0 };
+		const ci = xfShape.corners.findIndex(near);
+		if (ci >= 0) return { mode: 'corner', index: ci };
 		const e = xfShape.edges.findIndex(near);
-		if (e >= 0) return e % 2 === 0 ? 'edge-y' : 'edge-x';
+		if (e >= 0) return { mode: e % 2 === 0 ? 'edge-y' : 'edge-x', index: e };
 		// inside the (possibly rotated) box?
 		const c = xfShape.corners;
 		let inside = false;
@@ -1114,13 +1206,45 @@
 				p[0] < ((c[j][0] - c[i][0]) * (p[1] - c[i][1])) / (c[j][1] - c[i][1]) + c[i][0]
 			)
 				inside = !inside;
-		return inside ? 'move' : null;
+		return inside ? { mode: 'move', index: 0 } : null;
+	}
+
+	/** Distort: drag corners / edges freely; move and rotate the pinned quad. */
+	function quadMove(e: PointerEvent, p: Pt, f: Xf & { quad: Quad }) {
+		if (!xfDrag) return;
+		const [dx, dy] = [p[0] - xfDrag.start[0], p[1] - xfDrag.start[1]];
+		const q = f.quad;
+		let next: Quad;
+		if (xfDrag.mode === 'move') next = mapQuad(q, ([x, y]) => [x + dx, y + dy]);
+		else if (xfDrag.mode === 'rotate') {
+			const [cx, cy] = quadMid(q);
+			const a0 = Math.atan2(xfDrag.start[1] - cy, xfDrag.start[0] - cx);
+			const a1 = Math.atan2(p[1] - cy, p[0] - cx);
+			let deg = ((a1 - a0) * 180) / Math.PI;
+			if (e.shiftKey) deg = Math.round(deg / 15) * 15;
+			next = rotateQuad(q, deg);
+		} else if (xfDrag.mode === 'corner') {
+			next = [...q] as Quad;
+			next[xfDrag.index] = [q[xfDrag.index][0] + dx, q[xfDrag.index][1] + dy];
+		} else {
+			// an edge: both of its corners move together
+			const [i, j] = [xfDrag.index, (xfDrag.index + 1) % 4];
+			next = [...q] as Quad;
+			next[i] = [q[i][0] + dx, q[i][1] + dy];
+			next[j] = [q[j][0] + dx, q[j][1] + dy];
+		}
+		// a folded or flat shape can't be shown: keep the last good one
+		if (usableQuad(next)) xf = { ...f, quad: next };
 	}
 
 	function xfMove(e: PointerEvent) {
 		if (!xfDrag) return;
 		const p = toCanvas(e.clientX, e.clientY);
 		const f = xfDrag.from;
+		if (f.quad) {
+			quadMove(e, p, f as Xf & { quad: Quad });
+			return xfShow();
+		}
 		const [cx, cy] = xfCenter(f);
 		const centre: [number, number] = [cx + f.tx, cy + f.ty];
 		if (xfDrag.mode === 'move') {
@@ -1312,7 +1436,7 @@
 
 	/** keep the adjustment (one undo step) */
 	export function adjustCommit() {
-		if (paint?.isAdjusting()) changed(paint.adjustCommit());
+		if (paint?.isAdjusting()) changed(paint.adjustCommit(), undefined, 'Adjustment');
 	}
 
 	export function adjustCancel() {
@@ -1379,6 +1503,61 @@
 	}
 	/** points held back while perspective assist works out which way the stroke goes */
 	let heldBack: RawPoint[] = [];
+
+	// ---- Shift+click: a straight line from where the last stroke ended (as in Photoshop) ----
+
+	const D = Math.SQRT1_2;
+	/** Shift + drag: horizontal, vertical and the two diagonals */
+	const STRAIGHT_DIRS: Pt[] = [
+		[1, 0],
+		[0, 1],
+		[D, D],
+		[D, -D]
+	];
+	/** the stroke in progress began with a Shift+click line */
+	let lineStroke = false;
+
+	/** the end of the last brush stroke, canvas px */
+	let lastEnd = $state<{ x: number; y: number; p: number } | null>(null);
+	let shiftHeld = $state(false);
+	/** where the pointer is (canvas px) while Shift is held, for the line preview */
+	let lineHover = $state<[number, number] | null>(null);
+
+	/** Draw the straight part of a Shift+click stroke: from the last stroke's end to `e`. */
+	function lineFromLast(e: PointerEvent) {
+		if (!paint || !brush || !current || !lastEnd) return;
+		const [bx, by] = toCanvas(e.clientX, e.clientY);
+		// a pen's first contact is often very light: keep the last stroke's pressure then
+		const raw = e.pointerType === 'mouse' || !penPressure ? 0.5 : applyCurve(e.pressure);
+		const pb = raw < 0.05 ? lastEnd.p : raw;
+		const len = Math.hypot(bx - lastEnd.x, by - lastEnd.y);
+		const n = Math.max(1, Math.ceil(len / 2));
+		const t = Math.round(e.timeStamp - t0);
+		for (let k = 0; k <= n; k++) {
+			const f = k / n;
+			const x = lastEnd.x + (bx - lastEnd.x) * f;
+			const y = lastEnd.y + (by - lastEnd.y) * f;
+			const p = lastEnd.p + (pb - lastEnd.p) * f;
+			paint.strokeTo(brush, x, y, p, 0, 0, 0.004);
+			if (sendLive())
+				livePts.push(
+					Math.round(x * 10) / 10,
+					Math.round(y * 10) / 10,
+					Math.round(p * 1000) / 1000,
+					4
+				);
+			current.points.push({
+				x: Math.round(x * 10) / 10,
+				y: Math.round(y * 10) / 10,
+				pressure: Math.round(p * 1000) / 1000,
+				t
+			});
+		}
+		// carry on from the click as a normal stroke (drag on, or Shift+click again)
+		smooth = { x: bx, y: by, p: pb };
+		lastRaw = { x: bx, y: by, p: pb, t: e.timeStamp };
+		lastT = e.timeStamp;
+	}
 
 	function feed(e: PointerEvent) {
 		if (!paint || !brush || !current) return;
@@ -1526,9 +1705,12 @@
 		if (tool === 'transform') {
 			if (!xf) return;
 			const p = toCanvas(e.clientX, e.clientY);
-			const mode = xfHit(p) ?? 'move';
+			const hit = xfHit(p) ?? { mode: 'move' as const, index: 0 };
+			// Distort (or Ctrl/Cmd + a corner, as in Photoshop): corners move on their own
+			if (!xf.quad && (distort || e.ctrlKey || e.metaKey) && hit.mode !== 'rotate')
+				xf = { ...xf, quad: xfCorners(xf) };
 			capture(e);
-			xfDrag = { mode, start: p, from: { ...xf } };
+			xfDrag = { ...hit, start: p, from: { ...xf } };
 			return;
 		}
 		if (tool === 'guides') {
@@ -1562,6 +1744,13 @@
 			if (cx >= 0 && cy >= 0 && cx < width && cy < height)
 				paint.selectWand(Math.floor(cx), Math.floor(cy), wandTolerance, true, opOf(e));
 			return refreshAnts();
+		}
+		if (tool === 'lasso-fill') {
+			const l = shownLayers().find((x) => x.id === paint!.activeLayer);
+			if (l && (l.locked || !l.visible)) return onblocked?.(l.visible ? 'locked' : 'hidden');
+			capture(e);
+			lassoFill = [toCanvas(e.clientX, e.clientY)];
+			return;
 		}
 		if (tool === 'select-rect' || tool === 'select-lasso') {
 			capture(e);
@@ -1598,6 +1787,19 @@
 				style: { brushId: sharedBrushId(brushId), color, size, opacity, eraser }
 			});
 		}
+		lineStroke = false;
+		if (e.shiftKey) {
+			const p = toCanvas(e.clientX, e.clientY);
+			if (lastEnd) {
+				lineFromLast(e);
+				lineHover = null;
+				lineStroke = true;
+			}
+			// Shift + drag: the stroke goes straight, across, down or at 45° (as in Photoshop)
+			snapLine = null;
+			heldBack = [];
+			snapPending = { start: p, dirs: STRAIGHT_DIRS };
+		}
 		feed(e);
 		schedule();
 	}
@@ -1612,6 +1814,14 @@
 		}
 		if (guideDrag) return guideMove(toCanvas(e.clientX, e.clientY));
 		if (tool === 'liquify') hoverAt = toCanvas(e.clientX, e.clientY);
+		lineHover =
+			e.shiftKey && !current && lastEnd && tool === 'brush' && e.pointerType !== 'touch'
+				? toCanvas(e.clientX, e.clientY)
+				: null;
+		cursorAt =
+			tool === 'brush' && e.pointerType !== 'touch' && !adjustOverlay
+				? toCanvas(e.clientX, e.clientY)
+				: null;
 		if (grad && e.pointerId === grad.id) {
 			grad = { ...grad, to: toCanvas(e.clientX, e.clientY) };
 			gradientShow();
@@ -1629,6 +1839,10 @@
 		}
 		if (picking === e.pointerId) return pick(e);
 		if (xfDrag) return xfMove(e);
+		if (lassoFill) {
+			lassoFill = [...lassoFill, toCanvas(e.clientX, e.clientY)];
+			return;
+		}
 		if (marquee) {
 			const p = toCanvas(e.clientX, e.clientY);
 			marquee =
@@ -1690,7 +1904,7 @@
 		}
 		if (liq && e.pointerId === liq.id && paint) {
 			liq = null;
-			changed(paint.liquifyEnd());
+			changed(paint.liquifyEnd(), undefined, 'Liquify');
 			return;
 		}
 		if (grad && e.pointerId === grad.id && paint) {
@@ -1698,7 +1912,7 @@
 			grad = null;
 			// a tap (no drag) paints nothing
 			if (Math.hypot(to[0] - from[0], to[1] - from[1]) * fit * zoom < 4) paint.adjustCancel();
-			else changed(paint.adjustCommit());
+			else changed(paint.adjustCommit(), undefined, 'Gradient');
 			schedule();
 			return;
 		}
@@ -1706,6 +1920,7 @@
 			xfDrag = null;
 			return;
 		}
+		if (lassoFill) return commitLassoFill();
 		if (marquee) return commitMarquee();
 		if (picking === e.pointerId) {
 			picking = null;
@@ -1736,8 +1951,13 @@
 		if (!snapped) catchUp();
 		snapped = false;
 		paint.endStroke(brush);
+		const end = current.points.at(-1);
+		if (end) lastEnd = { x: end.x, y: end.y, p: end.pressure };
 		if (maskStroke) log.layerChange();
-		else log.add(current);
+		else {
+			log.add(current);
+			if (lineStroke) log.labelLast('Straight line');
+		}
 		current = null;
 		if (sendLive()) {
 			flushLive();
@@ -1784,13 +2004,32 @@
 		return t instanceof HTMLElement && !!t.closest('input, textarea, select, [contenteditable]');
 	}
 	function keydown(e: KeyboardEvent) {
+		if (e.key === 'Shift') shiftHeld = true;
 		if (e.code === 'Space' && hovering && !typing(e.target)) {
 			e.preventDefault();
 			spaceHeld = true;
 		}
 	}
 	function keyup(e: KeyboardEvent) {
+		if (e.key === 'Shift') {
+			shiftHeld = false;
+			lineHover = null;
+		}
 		if (e.code === 'Space') spaceHeld = false;
+	}
+
+	/** The history panel: go `steps` back (negative) or forward (positive) in one go. */
+	export function historyGo(steps: number) {
+		if (!paint) return;
+		if (xf) transformCancel();
+		for (let i = 0; i < Math.abs(steps); i++) {
+			const ok = steps < 0 ? paint.undo() : paint.redo();
+			if (!ok) break;
+			if (steps < 0) log.undo();
+			else log.redo();
+		}
+		schedule();
+		notify();
 	}
 
 	export function undo() {
@@ -1821,15 +2060,15 @@
 	}
 
 	export function addLayer(name = '') {
-		if (paint) changed(paint.addLayer(name) !== 0);
+		if (paint) changed(paint.addLayer(name) !== 0, undefined, 'New layer');
 	}
 
 	export function duplicateLayer(id: number) {
-		if (paint) changed(paint.duplicateLayer(id) !== 0);
+		if (paint) changed(paint.duplicateLayer(id) !== 0, undefined, 'Duplicate layer');
 	}
 
 	export function deleteLayer(id: number) {
-		if (paint) changed(paint.deleteLayer(id));
+		if (paint) changed(paint.deleteLayer(id), undefined, 'Delete layer');
 	}
 
 	/** `to`: 0 = bottom */
@@ -2197,7 +2436,15 @@
 	}
 </script>
 
-<svelte:window onkeydown={keydown} onkeyup={keyup} onblur={() => (spaceHeld = false)} />
+<svelte:window
+	onkeydown={keydown}
+	onkeyup={keyup}
+	onblur={() => {
+		spaceHeld = false;
+		shiftHeld = false;
+		lineHover = null;
+	}}
+/>
 
 <div
 	class="viewport"
@@ -2205,6 +2452,7 @@
 	class:moving-overlay={adjustOverlay && !!overlaySrc}
 	class:picker={tool === 'picker'}
 	class:filling={tool === 'fill'}
+	class:outlined={showOutline}
 	class:selecting={tool.startsWith('select')}
 	class:transforming={tool === 'transform'}
 	class:liquifying={tool === 'liquify'}
@@ -2222,6 +2470,8 @@
 	onpointerleave={() => {
 		hovering = false;
 		hoverAt = null;
+		lineHover = null;
+		cursorAt = null;
 	}}
 	role="presentation"
 >
@@ -2232,6 +2482,7 @@
 			{height}
 			aria-label="Drawing canvas, {width} by {height} pixels"
 			data-ready={ready}
+			class:gray={grayView}
 		></canvas>
 		<canvas class="ants" bind:this={antsEl} {width} {height} aria-hidden="true"></canvas>
 		{#if guides && (guideGrid.length || guideRays.length || guides.ruler.on || guideAxes.length)}
@@ -2293,6 +2544,60 @@
 				<line class="grad" x1={grad.from[0]} y1={grad.from[1]} x2={grad.to[0]} y2={grad.to[1]} />
 				<circle class="grad" cx={grad.from[0]} cy={grad.from[1]} r={hr} />
 				<circle class="grad" cx={grad.to[0]} cy={grad.to[1]} r={hr} />
+			</svg>
+		{/if}
+		{#if lassoFill && lassoFill.length > 1}
+			<svg
+				class="xf"
+				viewBox="0 0 {width} {height}"
+				preserveAspectRatio="none"
+				aria-hidden="true"
+				data-testid="lasso-fill-preview"
+			>
+				<polygon
+					class="lasso-fill"
+					points={lassoFill.map((p) => p.join(',')).join(' ')}
+					style="fill: {color}"
+				/>
+			</svg>
+		{/if}
+		{#if showOutline && cursorAt}
+			{@const small = brushR * fit * zoom < 3}
+			<svg
+				class="xf"
+				viewBox="0 0 {width} {height}"
+				preserveAspectRatio="none"
+				aria-hidden="true"
+				data-testid="brush-cursor"
+				data-r={brushR.toFixed(1)}
+			>
+				{#if !small}
+					<circle class="cur-out" cx={cursorAt[0]} cy={cursorAt[1]} r={brushR} />
+					<circle class="cur-in" cx={cursorAt[0]} cy={cursorAt[1]} r={brushR} />
+				{/if}
+				<circle
+					class="cur-dot"
+					cx={cursorAt[0]}
+					cy={cursorAt[1]}
+					r={1.5 / Math.max(0.01, fit * zoom)}
+				/>
+			</svg>
+		{/if}
+		{#if shiftHeld && lineHover && lastEnd}
+			<svg
+				class="xf"
+				viewBox="0 0 {width} {height}"
+				preserveAspectRatio="none"
+				aria-hidden="true"
+				data-testid="line-preview"
+			>
+				<line
+					class="shift-line"
+					x1={lastEnd.x}
+					y1={lastEnd.y}
+					x2={lineHover[0]}
+					y2={lineHover[1]}
+				/>
 			</svg>
 		{/if}
 		{#if tool === 'liquify' && hoverAt}
@@ -2392,6 +2697,17 @@
 					<path d="M12 3v18M8 7 3 12l5 5V7ZM16 7l5 5-5 5V7Z" />
 				</svg>
 			</button>
+			<button
+				type="button"
+				aria-label="Grayscale view"
+				aria-pressed={grayView}
+				title="Grayscale view: check light and dark without the colours"
+				onclick={() => (grayView = !grayView)}
+			>
+				<svg viewBox="0 0 24 24" aria-hidden="true">
+					<circle cx="12" cy="12" r="8" /><path d="M12 4a8 8 0 0 1 0 16Z" class="half" />
+				</svg>
+			</button>
 			{#if rot !== 0}
 				<span class="angle" aria-live="polite">{Math.round(rot)}°</span>
 			{/if}
@@ -2421,6 +2737,10 @@
 			url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="white" stroke="black" stroke-width="1.6"><path d="m2 22 1-4 9-9 3 3-9 9Z"/><path d="m14 7 3-3a2.1 2.1 0 0 1 3 3l-3 3"/></svg>')
 				2 22,
 			crosshair;
+	}
+	/* the brush outline (drawn in the canvas) replaces the pointer */
+	.viewport.outlined {
+		cursor: none;
 	}
 	.viewport.selecting {
 		cursor: crosshair;
@@ -2467,6 +2787,41 @@
 		stroke: #3d6bff;
 		stroke-width: 1.5;
 		vector-effect: non-scaling-stroke;
+	}
+	.xf line.shift-line {
+		stroke-dasharray: 6 4;
+	}
+	canvas.gray {
+		filter: grayscale(1);
+	}
+	.lasso-fill {
+		opacity: 0.45;
+		stroke: #16161a;
+		stroke-width: 1.5;
+		stroke-dasharray: 6 4;
+		vector-effect: non-scaling-stroke;
+	}
+	.xf .cur-out,
+	.xf .cur-in {
+		fill: none;
+		vector-effect: non-scaling-stroke;
+	}
+	.xf .cur-out {
+		stroke: rgba(255, 255, 255, 0.9);
+		stroke-width: 3;
+	}
+	.xf .cur-in {
+		stroke: rgba(22, 22, 26, 0.85);
+		stroke-width: 1.2;
+	}
+	.xf .cur-dot {
+		fill: rgba(22, 22, 26, 0.85);
+		stroke: #fff;
+		stroke-width: 1;
+		vector-effect: non-scaling-stroke;
+	}
+	.view svg .half {
+		fill: currentColor;
 	}
 	.guides {
 		position: absolute;
