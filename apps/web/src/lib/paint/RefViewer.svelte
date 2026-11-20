@@ -10,7 +10,13 @@
 		fill = false,
 		gray = false,
 		grid = null,
-		onpick
+		onpick,
+		notan = 0,
+		squint = false,
+		unit = null,
+		angle = null,
+		onunit,
+		onangle
 	}: {
 		src: string;
 		alt: string;
@@ -21,7 +27,25 @@
 		grid?: [number, number, number, number][] | null;
 		/** a colour was picked from the picture (the eyedropper button, or Alt+click) */
 		onpick?: (hex: string) => void;
+		/** notan view: 2 or 3 flat tones (0 = off) */
+		notan?: 0 | 2 | 3;
+		/** squint view: blurred */
+		squint?: boolean;
+		/** the measuring unit marked on the picture (fractions of it), shown as "1 unit" */
+		unit?: [Seg, Seg] | null;
+		/** an angle marked on the picture (fractions of it) */
+		angle?: [Seg, Seg] | null;
+		/** a unit was marked (or cleared): the canvas's measuring tool counts in it */
+		onunit?: (seg: [Seg, Seg] | null) => void;
+		/** an angle was marked (or cleared): the canvas shows it as a guide */
+		onangle?: (seg: [Seg, Seg] | null) => void;
 	} = $props();
+
+	type Seg = [number, number];
+	/** drawing a unit or an angle line on the picture */
+	let lineMode = $state<'' | 'unit' | 'angle'>('');
+	let drawing = $state<[Seg, Seg] | null>(null);
+	const fid = `pp-ref-notan-${Math.random().toString(36).slice(2, 9)}`;
 
 	let zoom = $state(1);
 	let panX = $state(0);
@@ -96,6 +120,23 @@
 		return x >= 0 && y >= 0 && x < natW && y < natH ? [Math.floor(x), Math.floor(y)] : null;
 	}
 
+	/** The picture point under a screen point, as fractions (0–1) of the picture. */
+	function fracAt(clientX: number, clientY: number): Seg | null {
+		if (!natW || !natH) return null;
+		const r = box.getBoundingClientRect();
+		const [cx, cy] = [r.left + r.width / 2, r.top + r.height / 2];
+		const lx = (clientX - cx - panX) / (zoom * (flipped ? -1 : 1));
+		const ly = (clientY - cy - panY) / zoom;
+		const k = Math.min(r.width / natW, r.height / natH);
+		const c = (v: number) => Math.min(1, Math.max(0, v));
+		return [c((lx / k + natW / 2) / natW), c((ly / k + natH / 2) / natH)];
+	}
+
+	/** an angle in degrees (0 = flat, counter-clockwise, 0–180) of a line in picture fractions */
+	const degOf = ([a, b]: [Seg, Seg]) =>
+		((((Math.atan2(-(b[1] - a[1]) * natH, (b[0] - a[0]) * natW) * 180) / Math.PI) % 180) + 180) %
+		180;
+
 	function pickAt(clientX: number, clientY: number) {
 		const p = pictureAt(clientX, clientY);
 		if (!p) return;
@@ -119,6 +160,16 @@
 		onpick?.(`#${hex(r)}${hex(g)}${hex(b)}`);
 	}
 
+	/** grayscale / notan / squint, as one CSS filter */
+	const imgFilter = $derived(
+		[
+			gray && !notan ? 'grayscale(1)' : '',
+			notan ? `url(#${fid}-${notan})` : '',
+			squint ? 'blur(4px)' : ''
+		]
+			.filter(Boolean)
+			.join(' ') || 'none'
+	);
 	const view = $derived(
 		`transform: translate(${panX}px, ${panY}px) scale(${zoom * (flipped ? -1 : 1)}, ${zoom})`
 	);
@@ -129,6 +180,7 @@
 		class="box"
 		class:zoomed={zoom > 1}
 		class:picking
+		class:lining={!!lineMode}
 		bind:this={box}
 		role="presentation"
 		data-testid="ref-box"
@@ -138,6 +190,13 @@
 			else zoomBy(2);
 		}}
 		onpointerdown={(e) => {
+			if (lineMode) {
+				const p = fracAt(e.clientX, e.clientY);
+				if (!p) return;
+				box.setPointerCapture(e.pointerId);
+				drawing = [p, p];
+				return;
+			}
 			if (onpick && (picking || e.altKey)) {
 				e.preventDefault();
 				pickAt(e.clientX, e.clientY);
@@ -148,21 +207,35 @@
 			drag = { id: e.pointerId, x: e.clientX, y: e.clientY, px: panX, py: panY };
 		}}
 		onpointermove={(e) => {
+			if (drawing) {
+				const p = fracAt(e.clientX, e.clientY);
+				if (p) drawing = [drawing[0], p];
+				return;
+			}
 			if (!drag || e.pointerId !== drag.id) return;
 			panX = drag.px + e.clientX - drag.x;
 			panY = drag.py + e.clientY - drag.y;
 		}}
-		onpointerup={() => (drag = null)}
+		onpointerup={() => {
+			drag = null;
+			if (!drawing) return;
+			const seg = drawing;
+			drawing = null;
+			// a tap isn't a line
+			if (Math.hypot((seg[1][0] - seg[0][0]) * natW, (seg[1][1] - seg[0][1]) * natH) < 4) return;
+			if (lineMode === 'unit') onunit?.(seg);
+			else if (lineMode === 'angle') onangle?.(seg);
+			lineMode = '';
+		}}
 		onpointercancel={() => (drag = null)}
 	>
 		<img
 			class="fade-in"
-			class:gray
 			bind:this={img}
 			{src}
 			{alt}
 			draggable="false"
-			style={view}
+			style="{view}; filter: {imgFilter}"
 			onload={() => {
 				natW = img.naturalWidth;
 				natH = img.naturalHeight;
@@ -189,7 +262,35 @@
 				</g>
 			</svg>
 		{/if}
+		{#if natW && (unit || angle || drawing)}
+			<svg
+				class="grid marks"
+				viewBox="0 0 {natW} {natH}"
+				preserveAspectRatio="xMidYMid meet"
+				style={view}
+				aria-hidden="true"
+				data-testid="ref-marks"
+			>
+				{#each [['unit', unit], ['angle', angle], [lineMode, drawing]] as const as [kind, seg], i (i)}
+					{#if seg}
+						<line
+							class={kind || 'unit'}
+							x1={seg[0][0] * natW}
+							y1={seg[0][1] * natH}
+							x2={seg[1][0] * natW}
+							y2={seg[1][1] * natH}
+						/>
+					{/if}
+				{/each}
+			</svg>
+		{/if}
 	</div>
+	{#if unit || angle}
+		<p class="marks-read" role="status">
+			{#if unit}<span class="u">Unit marked: measure on the canvas with the Measure tool</span>{/if}
+			{#if angle}<span class="a">Angle {Math.round(degOf(angle))}°: shown on the canvas</span>{/if}
+		</p>
+	{/if}
 	<div class="tools" role="toolbar" aria-label="Reference view">
 		<button
 			type="button"
@@ -230,6 +331,44 @@
 				</svg>
 			</button>
 		{/if}
+		{#if onunit}
+			<button
+				type="button"
+				aria-label="Mark a unit on the reference"
+				title="Measure: draw a line over a part (the head, say) to use as your unit"
+				aria-pressed={lineMode === 'unit'}
+				onclick={() => (lineMode = lineMode === 'unit' ? '' : 'unit')}
+			>
+				<svg viewBox="0 0 24 24" aria-hidden="true">
+					<path d="M3 17 17 3l4 4L7 21Z" /><path d="m7 13 2 2M10 10l2 2M13 7l2 2" />
+				</svg>
+			</button>
+		{/if}
+		{#if onangle}
+			<button
+				type="button"
+				aria-label="Find an angle on the reference"
+				title="Angle: draw a line along an edge; the canvas shows it to copy"
+				aria-pressed={lineMode === 'angle'}
+				onclick={() => (lineMode = lineMode === 'angle' ? '' : 'angle')}
+			>
+				<svg viewBox="0 0 24 24" aria-hidden="true">
+					<path d="M4 20h16M4 20 16 6" /><path d="M10 20a6 6 0 0 0-1.5-4" />
+				</svg>
+			</button>
+		{/if}
+		{#if unit || angle}
+			<button
+				type="button"
+				class="text"
+				onclick={() => {
+					onunit?.(null);
+					onangle?.(null);
+				}}
+			>
+				Clear marks
+			</button>
+		{/if}
 		{#if grid?.length}
 			<button
 				type="button"
@@ -248,6 +387,18 @@
 		{/if}
 	</div>
 	{#if pickNote}<p class="note" role="status">{pickNote}</p>{/if}
+	<svg class="filters" aria-hidden="true">
+		{#each [2, 3] as n (n)}
+			<filter id="{fid}-{n}" color-interpolation-filters="sRGB">
+				<feColorMatrix type="saturate" values="0" />
+				<feComponentTransfer>
+					<feFuncR type="discrete" tableValues={n === 2 ? '0 1' : '0 0.55 1'} />
+					<feFuncG type="discrete" tableValues={n === 2 ? '0 1' : '0 0.55 1'} />
+					<feFuncB type="discrete" tableValues={n === 2 ? '0 1' : '0 0.55 1'} />
+				</feComponentTransfer>
+			</filter>
+		{/each}
+	</svg>
 </div>
 
 <style>
@@ -275,8 +426,40 @@
 		cursor: grab;
 		touch-action: none;
 	}
-	.box.picking {
+	.box.picking,
+	.box.lining {
 		cursor: crosshair;
+		touch-action: none;
+	}
+	.marks line {
+		stroke-width: 3;
+		vector-effect: non-scaling-stroke;
+		stroke-linecap: round;
+	}
+	.marks line.unit {
+		stroke: #1f9d55;
+	}
+	.marks line.angle {
+		stroke: #e8492f;
+	}
+	.marks-read {
+		margin: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		font-size: 13px;
+		font-weight: 600;
+	}
+	.marks-read .u {
+		color: #1f9d55;
+	}
+	.marks-read .a {
+		color: #e8492f;
+	}
+	.filters {
+		position: absolute;
+		width: 0;
+		height: 0;
 	}
 	img {
 		display: block;
@@ -285,9 +468,6 @@
 		object-fit: contain;
 		transition: transform 0.12s ease-out;
 		user-select: none;
-	}
-	img.gray {
-		filter: grayscale(1);
 	}
 	.fill img {
 		height: 100%;

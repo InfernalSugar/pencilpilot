@@ -17,6 +17,7 @@
 	import CanvasSizePicker from '#lib/paint/CanvasSizePicker.svelte';
 	import RefViewer from '#lib/paint/RefViewer.svelte';
 	import HistoryPanel from '#lib/paint/HistoryPanel.svelte';
+	import { gradable, gradeSubmission } from '#lib/grade-submission.js';
 	import { addToSession, clockOf, startSession, timeLabel } from '#lib/timed.js';
 	import ColorPanel, { rememberColor } from '#lib/paint/ColorPanel.svelte';
 	import {
@@ -132,7 +133,8 @@
 		| 'liquify'
 		| 'guides'
 		| 'gradient'
-		| 'lasso-fill';
+		| 'lasso-fill'
+		| 'measure';
 	let tool = $state<Tool>('brush');
 	let gradientKind = $state<'linear' | 'radial'>('linear');
 	let importNote = $state('');
@@ -150,6 +152,10 @@
 			const t = e.target as HTMLElement | null;
 			if (t?.closest('input, textarea, [contenteditable]')) return;
 			const file = [...(e.clipboardData?.files ?? [])].find((f) => f.type.startsWith('image/'));
+			if (!file && canvas?.hasClip()) {
+				e.preventDefault();
+				return pasteCopied();
+			}
 			if (!file || !canvas) return;
 			e.preventDefault();
 			void canvas.importImage(file, 'Pasted picture').then((r) => (importNote = importText(r)));
@@ -239,6 +245,85 @@
 	let grayView = $state(false);
 	/** transform: corners move on their own (distort / perspective) */
 	let distort = $state(false);
+	/** transform: bend with a 4×4 grid (warp) */
+	let warp = $state(false);
+	/** notan (2 or 3 flat tones) and squint (blur) views, on the canvas and the reference */
+	let notan = $state<0 | 2 | 3>(0);
+	let squint = $state(false);
+	/** feathering the selection: how soft its edge gets (canvas px) */
+	let featherPx = $state(16);
+	/** a unit and an angle marked on the reference (fractions of the picture) */
+	type Mark = [[number, number], [number, number]];
+	let refUnit = $state<Mark | null>(null);
+	let refAngle = $state<Mark | null>(null);
+	/** where the reference sits when fitted inside the canvas (as the grader places it) */
+	const refPlaced = $derived.by(() => {
+		if (!reference?.width || !reference.height) return null;
+		const { width: W, height: H } = canvasSize;
+		const k = Math.min(W / reference.width, H / reference.height);
+		const [w, h] = [reference.width * k, reference.height * k];
+		return { x: (W - w) / 2, y: (H - h) / 2, w, h };
+	});
+	/** the unit's length on the canvas, in canvas px */
+	const measureUnit = $derived.by(() => {
+		if (!refUnit || !refPlaced) return 0;
+		const [[ax, ay], [bx, by]] = refUnit;
+		return Math.hypot((bx - ax) * refPlaced.w, (by - ay) * refPlaced.h);
+	});
+	/** the reference angle, as a guide line where that edge sits on the canvas */
+	const angleGuide = $derived.by(() => {
+		if (!refAngle || !refPlaced) return null;
+		const [[ax, ay], [bx, by]] = refAngle;
+		const deg = (Math.atan2(-(by - ay) * refPlaced.h, (bx - ax) * refPlaced.w) * 180) / Math.PI;
+		return {
+			p: [
+				refPlaced.x + ((ax + bx) / 2) * refPlaced.w,
+				refPlaced.y + ((ay + by) / 2) * refPlaced.h
+			] as [number, number],
+			deg
+		};
+	});
+	// a new picture: its marks no longer fit
+	$effect(() => {
+		void reference?.id;
+		refUnit = refAngle = null;
+	});
+
+	// ---- "How am I doing?": a quick look at the biggest problem, without handing in ----
+	let checkNote = $state<{ title: string; text: string } | null>(null);
+	let checking = $state(false);
+	async function checkNow() {
+		const sub = buildSubmission();
+		if (!sub || !gradable(sub) || checking) return;
+		checking = true;
+		try {
+			const g = await gradeSubmission(sub);
+			const fix = g.fb.fixes[0];
+			checkNote = g.grade.flags.includes('unrelated')
+				? {
+						title: 'Not quite the picture yet',
+						text: 'Your lines don’t follow the reference’s shapes yet. Start with its main outline.'
+					}
+				: fix
+					? { title: fix.title, text: fix.text }
+					: {
+							title: 'Looking good so far',
+							text: g.fb.praise?.text ?? 'Nothing big to fix yet. Keep going!'
+						};
+		} catch {
+			checkNote = { title: 'Couldn’t check right now', text: 'Try again in a moment.' };
+		} finally {
+			checking = false;
+		}
+	}
+
+	/** Ctrl+C / Ctrl+X / Ctrl+J: copy, cut, or copy to a new layer, then move it with Transform */
+	function copyCut(cut: boolean) {
+		if (canvas?.copySelection(cut)) importNote = '';
+	}
+	function pasteCopied() {
+		if (canvas?.paste()) tool = 'transform';
+	}
 	let quickShape = $state(true);
 	let shapeNote = $state('');
 	let shapeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -657,7 +742,14 @@
 		} else if (!mod && k === 'i') tool = tool === 'picker' ? 'brush' : 'picker';
 		else if (!mod && k === 'g') tool = tool === 'fill' ? 'brush' : 'fill';
 		else if (!mod && k === 'f') tool = tool === 'lasso-fill' ? 'brush' : 'lasso-fill';
-		else if (!mod && k === 'v') tool = tool === 'transform' ? 'brush' : 'transform';
+		else if (!mod && k === 'u') tool = tool === 'measure' ? 'brush' : 'measure';
+		else if (mod && (k === 'c' || k === 'x') && !e.shiftKey) {
+			e.preventDefault();
+			copyCut(k === 'x');
+		} else if (mod && k === 'j') {
+			e.preventDefault();
+			if (canvas?.copySelection(false)) pasteCopied();
+		} else if (!mod && k === 'v') tool = tool === 'transform' ? 'brush' : 'transform';
 		else if (!mod && k === 'k') tool = tool === 'liquify' ? 'brush' : 'liquify';
 		else if (tool === 'transform' && e.key === 'Enter') canvas?.transformCommit();
 		else if (tool === 'transform' && e.key === 'Escape') canvas?.transformCancel();
@@ -1105,6 +1197,26 @@
 					</div>
 				{/if}
 			</div>
+			{#if reference && !timeLimit && !sessionMode}
+				<div class="check-wrap">
+					<button
+						type="button"
+						class="check-btn"
+						disabled={status.blank || checking}
+						title="How am I doing? See the biggest thing to fix so far (it isn't handed in)"
+						onclick={checkNow}
+					>
+						{checking ? 'Checking…' : 'How am I doing?'}
+					</button>
+					{#if checkNote}
+						<div class="check-pop" role="status" aria-label="Quick check">
+							<b>{checkNote.title}</b>
+							<p>{checkNote.text}</p>
+							<button type="button" onclick={() => (checkNote = null)}>Got it</button>
+						</div>
+					{/if}
+				</div>
+			{/if}
 			<Button
 				onclick={submit}
 				disabled={status.blank || timeUp}
@@ -1418,9 +1530,24 @@
 					class="tool"
 					aria-pressed={distort}
 					title="Distort: drag each corner on its own (perspective, skew). Or hold Ctrl and drag a corner."
-					onclick={() => (distort = !distort)}
+					onclick={() => {
+						distort = !distort;
+						if (distort) warp = false;
+					}}
 				>
 					Distort
+				</button>
+				<button
+					type="button"
+					class="tool"
+					aria-pressed={warp}
+					title="Warp: bend it with a grid of 16 points"
+					onclick={() => {
+						warp = !warp;
+						if (warp) distort = false;
+					}}
+				>
+					Warp
 				</button>
 				<button type="button" class="tool" onclick={() => canvas?.transformFlip('x')}>
 					Flip ↔
@@ -1464,7 +1591,33 @@
 					</label>
 				{/if}
 				<button type="button" class="tool" onclick={() => canvas?.selectAll()}>All</button>
+				<button type="button" class="tool" title="Copy (Ctrl+C)" onclick={() => copyCut(false)}>
+					Copy
+				</button>
+				<button type="button" class="tool" title="Cut (Ctrl+X)" onclick={() => copyCut(true)}>
+					Cut
+				</button>
+				<button
+					type="button"
+					class="tool"
+					title="Paste as a new layer, then move it (Ctrl+V)"
+					onclick={pasteCopied}
+				>
+					Paste
+				</button>
 				{#if status.selection}
+					<label class="slider">
+						<span>Feather <b>{featherPx}px</b></span>
+						<input type="range" min="2" max="80" step="1" bind:value={featherPx} />
+					</label>
+					<button
+						type="button"
+						class="tool"
+						title="Soften the selection's edge, for gentle shading inside it"
+						onclick={() => canvas?.featherSelection(featherPx)}
+					>
+						Feather
+					</button>
 					<button type="button" class="tool" onclick={() => canvas?.deselect()}>None</button>
 					<button type="button" class="tool" onclick={() => canvas?.invertSelection()}>
 						Invert
@@ -1503,6 +1656,15 @@
 						{/each}
 					</select>
 				</label>
+			</div>
+		{/if}
+		{#if tool === 'measure'}
+			<div class="fill-opts" role="group" aria-label="Measure">
+				<span class="adjust-msg plain">
+					{measureUnit
+						? 'Drag across your drawing: the ticks are your unit from the reference.'
+						: 'Drag to measure in pixels. Mark a unit on the reference (the ruler button under it) to measure in units.'}
+				</span>
 			</div>
 		{/if}
 		{#if tool === 'lasso-fill'}
@@ -1556,6 +1718,15 @@
 								gray={grayView}
 								grid={refGrid}
 								onpick={picked}
+								{notan}
+								{squint}
+								unit={refUnit}
+								angle={refAngle}
+								onunit={(m) => {
+									refUnit = m;
+									if (m) tool = 'measure';
+								}}
+								onangle={(m) => (refAngle = m)}
 							/>
 						{/key}
 					{:else}
@@ -1604,6 +1775,12 @@
 						{fillReference}
 						bind:grayView
 						{distort}
+						{warp}
+						bind:notan
+						bind:squint
+						{measureUnit}
+						{angleGuide}
+						onsize={(v) => (size = v)}
 						{quickShape}
 						onshape={onShape}
 						{selectMode}
@@ -1708,6 +1885,15 @@
 							gray={grayView}
 							grid={refGrid}
 							onpick={picked}
+							{notan}
+							{squint}
+							unit={refUnit}
+							angle={refAngle}
+							onunit={(m) => {
+								refUnit = m;
+								if (m) tool = 'measure';
+							}}
+							onangle={(m) => (refAngle = m)}
 						/>
 					{/key}
 					<div class="place-btns">
@@ -1849,6 +2035,15 @@
 						gray={grayView}
 						grid={refGrid}
 						onpick={picked}
+						{notan}
+						{squint}
+						unit={refUnit}
+						angle={refAngle}
+						onunit={(m) => {
+							refUnit = m;
+							if (m) tool = 'measure';
+						}}
+						onangle={(m) => (refAngle = m)}
 					/>
 				{/key}
 			</section>
@@ -2015,6 +2210,53 @@
 	.tool[role='radio'][aria-checked='true'] {
 		background: var(--pp-accent-strong);
 		color: #fff;
+	}
+	.check-wrap {
+		position: relative;
+	}
+	.check-btn {
+		min-height: 40px;
+		padding: 8px 14px;
+		border: 0;
+		border-radius: var(--pp-radius-btn, 999px);
+		background: var(--pp-surface-sunk);
+		color: var(--pp-ink);
+		font: 600 15px var(--pp-font-body);
+		white-space: nowrap;
+		cursor: pointer;
+	}
+	.check-btn:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+	.check-pop {
+		position: absolute;
+		right: 0;
+		top: calc(100% + 8px);
+		z-index: 40;
+		width: min(320px, 80vw);
+		padding: 14px;
+		border-radius: 16px;
+		background: var(--pp-surface);
+		box-shadow: 0 10px 40px rgba(22, 22, 26, 0.25);
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+	.check-pop p {
+		margin: 0;
+		font-size: 14px;
+		color: var(--pp-ink-2);
+	}
+	.check-pop button {
+		align-self: flex-end;
+		padding: 6px 12px;
+		border: 0;
+		border-radius: 999px;
+		background: var(--pp-ink);
+		color: #fff;
+		font: 600 13px var(--pp-font-body);
+		cursor: pointer;
 	}
 	.ref-layer {
 		display: flex;

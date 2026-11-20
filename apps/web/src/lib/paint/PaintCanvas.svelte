@@ -100,7 +100,7 @@
 </script>
 
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import { loadBrush, loadEngine, PaintCanvas, type PaintBrush } from './brushes';
 	import { StrokeLog, type Stroke } from './strokes';
 	import { recognise, resample } from './quickshape';
@@ -123,6 +123,8 @@
 	} from './guides';
 	import { toGray } from '../grader';
 	import { boxToQuad, usableQuad, type Quad } from './homography';
+	import { meshLines, meshNodes, WARP_N } from './warp';
+	import { editable, moveHandle, shapeHandles, shapePath, type EditShape } from './shape-edit';
 
 	let {
 		width = 800,
@@ -150,6 +152,12 @@
 		fillReference = 0,
 		grayView = $bindable(false),
 		distort = false,
+		warp = false,
+		onsize,
+		notan = $bindable(0),
+		squint = $bindable(false),
+		measureUnit = 0,
+		angleGuide = null,
 		quickShape = true,
 		onshape,
 		selectMode = 'replace',
@@ -196,7 +204,8 @@
 			| 'liquify'
 			| 'guides'
 			| 'gradient'
-			| 'lasso-fill';
+			| 'lasso-fill'
+			| 'measure';
 		/** pictures can be dropped onto the canvas (as a new layer) */
 		allowImport?: boolean;
 		/** a dropped picture was imported (or why not) */
@@ -230,6 +239,18 @@
 		grayView?: boolean;
 		/** transform: dragging a corner moves just that corner (distort / perspective) */
 		distort?: boolean;
+		/** transform: bend with a 4×4 grid of points (warp) */
+		warp?: boolean;
+		/** the brush size was changed on the canvas (Ctrl+Alt+drag) */
+		onsize?: (size: number) => void;
+		/** notan view: the canvas in 2 or 3 flat tones (0 = off) */
+		notan?: 0 | 2 | 3;
+		/** squint view: blurred, to compare big shapes */
+		squint?: boolean;
+		/** the measuring tool's unit, in canvas px (from the reference; 0 = plain pixels) */
+		measureUnit?: number;
+		/** an angle taken from the reference: a guide line through `p` at `deg` (0 = flat, counter-clockwise) */
+		angleGuide?: { p: [number, number]; deg: number } | null;
 		/** hold at the end of a stroke to snap it to a clean shape */
 		quickShape?: boolean;
 		/** a stroke snapped to a shape */
@@ -331,6 +352,58 @@
 		brush.setColor((n >> 16) & 255, (n >> 8) & 255, n & 255);
 		brush.setEraser(er);
 		brushR = brush.radius();
+		editShape = null;
+	}
+
+	/** Ctrl+Alt+drag resizing the brush */
+	let sizeDrag: { id: number; x: number; size: number; at: [number, number] } | null = null;
+	/** the last QuickShape, still editable (its points can be dragged) */
+	let editShape = $state<EditShape | null>(null);
+	let shapeDrag: { id: number; index: number } | null = null;
+	let hoverHandle = $state(false);
+	/** the measuring tool's line (canvas px) and whether it's being dragged */
+	let measureSeg = $state<[[number, number], [number, number]] | null>(null);
+	let measuring: number | null = null;
+	/** ids for this canvas's notan filters */
+	const fid = `pp-notan-${Math.random().toString(36).slice(2, 9)}`;
+	const viewFilter = $derived(
+		[
+			grayView && !notan ? 'grayscale(1)' : '',
+			notan ? `url(#${fid}-${notan})` : '',
+			squint ? 'blur(5px)' : ''
+		]
+			.filter(Boolean)
+			.join(' ') || null
+	);
+
+	/** Redraw the editable shape in its new form: one step, replacing the last. */
+	function redrawShape(sh: EditShape) {
+		if (!paint || !brush) return;
+		if (paint.undo()) log.undo();
+		if (!paint.beginStroke()) return;
+		const stroke: Stroke = {
+			brushId,
+			eraser,
+			layer: paint.activeLayer,
+			color,
+			size,
+			opacity,
+			points: []
+		};
+		const t = Math.round(performance.now() - t0);
+		for (const [x, y] of resample(shapePath(sh), 3)) {
+			paint.strokeTo(brush, x, y, sh.pressure, 0, 0, 0.008);
+			stroke.points.push({
+				x: Math.round(x * 10) / 10,
+				y: Math.round(y * 10) / 10,
+				pressure: sh.pressure,
+				t
+			});
+		}
+		paint.endStroke(brush);
+		log.add(stroke);
+		log.labelLast('Shape');
+		schedule();
 	}
 
 	/** the brush's radius in canvas px, for the outline cursor */
@@ -391,6 +464,7 @@
 		if (recorded) {
 			logIt();
 			if (label) log.labelLast(label);
+			editShape = null;
 		}
 		schedule();
 		notify();
@@ -823,6 +897,8 @@
 	let shapeTimer: ReturnType<typeof setTimeout> | undefined;
 	let holdAnchor: { x: number; y: number } | null = null;
 	let snapped = false;
+	/** the shape the stroke in progress snapped to (editable once the pen lifts) */
+	let snappedShape: EditShape | null = null;
 
 	function armShape(e: PointerEvent) {
 		if (!quickShape || snapped || !current) return;
@@ -838,6 +914,7 @@
 		const shape = recognise(pts);
 		if (!shape) return;
 		const pressure = current.points.reduce((s, p) => s + p.pressure, 0) / current.points.length;
+		snappedShape = editable(shape, pressure);
 		const path = resample(shape.points, 3);
 		// redraw: drop the hand-drawn stroke, draw the clean one in its place
 		paint.cancelStroke();
@@ -894,16 +971,17 @@
 			for (let y = 0; y < height; y++)
 				for (let x = 0; x < width; x++) {
 					const i = y * width + x;
-					if (!m[i]) continue;
+					// a feathered selection's outline is where it's half selected
+					if (m[i] < 128) continue;
 					if (
 						x === 0 ||
 						y === 0 ||
 						x === width - 1 ||
 						y === height - 1 ||
-						!m[i - 1] ||
-						!m[i + 1] ||
-						!m[i - width] ||
-						!m[i + width]
+						m[i - 1] < 128 ||
+						m[i + 1] < 128 ||
+						m[i - width] < 128 ||
+						m[i + width] < 128
 					) {
 						edges.push(i);
 						x0 = Math.min(x0, x);
@@ -1007,6 +1085,51 @@
 		refreshAnts();
 	}
 
+	// ---- copy / cut / paste (the selection, or the whole layer) ----
+
+	/** what was copied: a full-canvas picture (straight RGBA), transparent outside the selection */
+	let clip: Uint8Array | null = null;
+
+	/** Copy the selected part of the layer (all of it with no selection); `cut` also clears it. */
+	export function copySelection(cut = false): boolean {
+		if (!paint || xf) return false;
+		const rgba = paint.layerRgba(paint.activeLayer);
+		if (!rgba.length) return false;
+		const sel = paint.selectionMask();
+		let any = false;
+		for (let i = 0; i < width * height; i++) {
+			// a feathered edge copies partly
+			if (sel.length) rgba[i * 4 + 3] = Math.round((rgba[i * 4 + 3] * sel[i]) / 255);
+			any ||= rgba[i * 4 + 3] > 0;
+		}
+		if (!any) return false;
+		clip = rgba;
+		if (cut) {
+			const layer = paint.activeLayer;
+			changed(paint.clear(), () => log.clear(layer), 'Cut');
+		}
+		return true;
+	}
+
+	/** Paste what was copied as a new layer, in the same place; false if nothing was copied. */
+	export function paste(): boolean {
+		if (!paint || !clip || xf) return false;
+		const id = paint.addImageLayer('Pasted', clip);
+		if (!id) return false;
+		paint.deselect();
+		refreshAnts();
+		changed(true, undefined, 'Paste');
+		return true;
+	}
+
+	/** Something has been copied (Ctrl+V pastes it). */
+	export const hasClip = () => !!clip;
+
+	/** Soften the selection's edge over about `radius` canvas px. */
+	export function featherSelection(radius: number) {
+		if (paint?.featherSelection(radius)) refreshAnts();
+	}
+
 	export function selectAll() {
 		paint?.selectAll();
 		refreshAnts();
@@ -1033,10 +1156,12 @@
 		fy: 1 | -1;
 		/** distort: the box's corners (tl, tr, br, bl) pinned here instead; overrides the rest */
 		quad?: Quad | null;
+		/** warp: 4×4 control points, row by row (a bicubic patch); overrides the rest */
+		mesh?: Pt[] | null;
 	}
 	let xf = $state<Xf | null>(null);
 	let xfDrag: {
-		mode: 'move' | 'rotate' | 'corner' | 'edge-x' | 'edge-y';
+		mode: 'move' | 'rotate' | 'corner' | 'edge-x' | 'edge-y' | 'node';
 		start: [number, number];
 		from: Xf;
 		/** which corner / edge was grabbed (distort moves just that one) */
@@ -1069,6 +1194,7 @@
 
 	/** the box's corners (tl, tr, br, bl) after the transform, in canvas px */
 	function xfCorners(x: Xf): Quad {
+		if (x.mesh) return [x.mesh[0], x.mesh[3], x.mesh[15], x.mesh[12]];
 		if (x.quad) return x.quad;
 		const m = xfMatrix(x);
 		const [x0, y0, x1, y1] = x.box;
@@ -1108,7 +1234,8 @@
 		xfRaf = requestAnimationFrame(() => {
 			xfRaf = 0;
 			if (!paint || !xf) return;
-			if (xf.quad) paint.transformPreviewH(new Float32Array(boxToQuad(xf.box, xf.quad)));
+			if (xf.mesh) paint.transformPreviewMesh(meshNodes(xf.mesh, WARP_N), WARP_N, WARP_N);
+			else if (xf.quad) paint.transformPreviewH(new Float32Array(boxToQuad(xf.box, xf.quad)));
 			else paint.transformPreview(...xfMatrix(xf));
 			render();
 		});
@@ -1121,6 +1248,7 @@
 			const b = paint.transformBegin();
 			if (b.length !== 4) return void ontransformend?.('empty');
 			xf = { box: [b[0], b[1], b[2], b[3]], tx: 0, ty: 0, sx: 1, sy: 1, rot: 0, fx: 1, fy: 1 };
+			if (untrack(() => warp)) xf = { ...xf, mesh: startMesh(xf) };
 			schedule();
 		} else if (tool !== 'transform' && xf) {
 			transformCommit();
@@ -1129,7 +1257,7 @@
 
 	export function transformCommit() {
 		if (!paint || !xf) return;
-		const label = xf.quad ? 'Distort' : 'Transform';
+		const label = xf.mesh ? 'Warp' : xf.quad ? 'Distort' : 'Transform';
 		xf = null;
 		changed(paint.transformCommit(), undefined, label);
 		refreshAnts();
@@ -1150,19 +1278,58 @@
 		(q[0][1] + q[1][1] + q[2][1] + q[3][1]) / 4
 	];
 	const mapQuad = (q: Quad, f: (p: Pt) => Pt): Quad => [f(q[0]), f(q[1]), f(q[2]), f(q[3])];
-	function rotateQuad(q: Quad, deg: number): Quad {
-		const [cx, cy] = quadMid(q);
+	function rotatePts(ps: Pt[], deg: number, about: Pt = meshMid(ps)): Pt[] {
+		const [cx, cy] = about;
 		const r = (deg * Math.PI) / 180;
 		const [cs, sn] = [Math.cos(r), Math.sin(r)];
-		return mapQuad(q, ([x, y]) => [
+		return ps.map(([x, y]) => [
 			cx + (x - cx) * cs - (y - cy) * sn,
 			cy + (x - cx) * sn + (y - cy) * cs
 		]);
 	}
+	const rotateQuad = (q: Quad, deg: number) => rotatePts(q, deg, quadMid(q)) as Quad;
+
+	/** the 4×4 warp grid laid evenly over the current corners */
+	function startMesh(x: Xf): Pt[] {
+		const [tl, tr, br, bl] = xfCorners(x);
+		const lerp = (a: Pt, b: Pt, t: number): Pt => [
+			a[0] + (b[0] - a[0]) * t,
+			a[1] + (b[1] - a[1]) * t
+		];
+		const out: Pt[] = [];
+		for (let r = 0; r < 4; r++)
+			for (let c = 0; c < 4; c++) out.push(lerp(lerp(tl, tr, c / 3), lerp(bl, br, c / 3), r / 3));
+		return out;
+	}
+	// a new tool ends shape editing and the measuring line
+	$effect(() => {
+		if (tool !== 'brush') editShape = null;
+		if (tool !== 'measure') measureSeg = null;
+	});
+
+	/** warp mode was switched on or off while transforming */
+	$effect(() => {
+		const on = warp;
+		const x = untrack(() => xf);
+		if (!x) return;
+		if (on && !x.mesh) xf = { ...x, mesh: startMesh(x), quad: null };
+		else if (!on && x.mesh) xf = { ...x, quad: xfCorners(x), mesh: null };
+		untrack(xfShow);
+	});
+	const meshMid = (m: Pt[]): Pt => [
+		m.reduce((s, p) => s + p[0], 0) / m.length,
+		m.reduce((s, p) => s + p[1], 0) / m.length
+	];
 
 	export function transformFlip(axis: 'x' | 'y') {
 		if (!xf) return;
-		if (xf.quad) {
+		if (xf.mesh) {
+			const [cx, cy] = meshMid(xf.mesh);
+			xf = {
+				...xf,
+				mesh: xf.mesh.map(([x, y]) => (axis === 'x' ? [2 * cx - x, y] : [x, 2 * cy - y]))
+			};
+		} else if (xf.quad) {
 			// mirror the pinned corners across the middle: the picture flips with them
 			const [cx, cy] = quadMid(xf.quad);
 			xf = {
@@ -1175,13 +1342,15 @@
 	}
 	export function transformRotate(deg: number) {
 		if (!xf) return;
-		if (xf.quad) xf = { ...xf, quad: rotateQuad(xf.quad, deg) };
+		if (xf.mesh) xf = { ...xf, mesh: rotatePts(xf.mesh, deg) };
+		else if (xf.quad) xf = { ...xf, quad: rotateQuad(xf.quad, deg) };
 		else xf = { ...xf, rot: (((xf.rot + deg) % 360) + 360) % 360 };
 		xfShow();
 	}
 	export function transformReset() {
 		if (!xf) return;
-		xf = { ...xf, tx: 0, ty: 0, sx: 1, sy: 1, rot: 0, fx: 1, fy: 1, quad: null };
+		xf = { ...xf, tx: 0, ty: 0, sx: 1, sy: 1, rot: 0, fx: 1, fy: 1, quad: null, mesh: null };
+		if (warp) xf = { ...xf, mesh: startMesh(xf) };
 		xfShow();
 	}
 
@@ -1192,6 +1361,10 @@
 		if (!xfShape) return null;
 		const r = 14 / Math.max(0.01, fit * zoom);
 		const near = (q: [number, number]) => Math.hypot(p[0] - q[0], p[1] - q[1]) <= r;
+		if (xf?.mesh) {
+			const ni = xf.mesh.findIndex(near);
+			if (ni >= 0) return { mode: 'node', index: ni };
+		}
 		if (near(xfShape.rotH)) return { mode: 'rotate', index: 0 };
 		const ci = xfShape.corners.findIndex(near);
 		if (ci >= 0) return { mode: 'corner', index: ci };
@@ -1241,6 +1414,21 @@
 		if (!xfDrag) return;
 		const p = toCanvas(e.clientX, e.clientY);
 		const f = xfDrag.from;
+		if (f.mesh) {
+			const [dx, dy] = [p[0] - xfDrag.start[0], p[1] - xfDrag.start[1]];
+			const m = f.mesh;
+			let next: Pt[];
+			if (xfDrag.mode === 'node')
+				next = m.map((q, i) => (i === xfDrag!.index ? [q[0] + dx, q[1] + dy] : q));
+			else if (xfDrag.mode === 'rotate') {
+				const [cx, cy] = meshMid(m);
+				const a0 = Math.atan2(xfDrag.start[1] - cy, xfDrag.start[0] - cx);
+				const a1 = Math.atan2(p[1] - cy, p[0] - cx);
+				next = rotatePts(m, ((a1 - a0) * 180) / Math.PI);
+			} else next = m.map(([x, y]) => [x + dx, y + dy]);
+			xf = { ...f, mesh: next };
+			return xfShow();
+		}
 		if (f.quad) {
 			quadMove(e, p, f as Xf & { quad: Quad });
 			return xfShow();
@@ -1694,6 +1882,23 @@
 		if (e.pointerType === 'mouse' && e.button === 1) return startPan(e);
 		if (spaceHeld) return startPan(e);
 		if (e.pointerType === 'mouse' && e.button !== 0) return;
+		// Ctrl+Alt + drag: resize the brush, watching its outline (as in Photoshop)
+		if (tool === 'brush' && e.altKey && (e.ctrlKey || e.metaKey) && e.pointerType !== 'touch') {
+			capture(e);
+			sizeDrag = { id: e.pointerId, x: e.clientX, size, at: toCanvas(e.clientX, e.clientY) };
+			return;
+		}
+		// editable shape: grab one of its points
+		if (tool === 'brush' && editShape && !locked) {
+			const p = toCanvas(e.clientX, e.clientY);
+			const r = 14 / Math.max(0.01, fit * zoom);
+			const i = shapeHandles(editShape).findIndex((q) => Math.hypot(p[0] - q[0], p[1] - q[1]) <= r);
+			if (i >= 0) {
+				capture(e);
+				shapeDrag = { id: e.pointerId, index: i };
+				return;
+			}
+		}
 		// eyedropper: the tool, or Alt+click with the brush
 		if (tool === 'picker' || (e.altKey && e.pointerType !== 'touch')) {
 			capture(e);
@@ -1705,9 +1910,12 @@
 		if (tool === 'transform') {
 			if (!xf) return;
 			const p = toCanvas(e.clientX, e.clientY);
-			const hit = xfHit(p) ?? { mode: 'move' as const, index: 0 };
+			const hit: { mode: NonNullable<typeof xfDrag>['mode']; index: number } = xfHit(p) ?? {
+				mode: 'move',
+				index: 0
+			};
 			// Distort (or Ctrl/Cmd + a corner, as in Photoshop): corners move on their own
-			if (!xf.quad && (distort || e.ctrlKey || e.metaKey) && hit.mode !== 'rotate')
+			if (!xf.quad && !xf.mesh && (distort || e.ctrlKey || e.metaKey) && hit.mode !== 'rotate')
 				xf = { ...xf, quad: xfCorners(xf) };
 			capture(e);
 			xfDrag = { ...hit, start: p, from: { ...xf } };
@@ -1745,6 +1953,13 @@
 				paint.selectWand(Math.floor(cx), Math.floor(cy), wandTolerance, true, opOf(e));
 			return refreshAnts();
 		}
+		if (tool === 'measure') {
+			capture(e);
+			const p = toCanvas(e.clientX, e.clientY);
+			measureSeg = [p, p];
+			measuring = e.pointerId;
+			return;
+		}
 		if (tool === 'lasso-fill') {
 			const l = shownLayers().find((x) => x.id === paint!.activeLayer);
 			if (l && (l.locked || !l.visible)) return onblocked?.(l.visible ? 'locked' : 'hidden');
@@ -1770,6 +1985,7 @@
 			return;
 		}
 		capture(e);
+		editShape = null;
 		current = { brushId, eraser, layer: paint.activeLayer, color, size, opacity, points: [] };
 		lastT = e.timeStamp;
 		smooth = null;
@@ -1807,6 +2023,18 @@
 	let picking: number | null = null;
 
 	function move(e: PointerEvent) {
+		if (sizeDrag && e.pointerId === sizeDrag.id) {
+			// right = bigger; the slider's range is ¼× to about 6×
+			const s = sizeDrag.size * Math.exp((e.clientX - sizeDrag.x) / 120);
+			onsize?.(Math.round(Math.min(6.06, Math.max(0.25, s)) * 100) / 100);
+			cursorAt = sizeDrag.at;
+			return;
+		}
+		if (shapeDrag && e.pointerId === shapeDrag.id && editShape) {
+			editShape = moveHandle(editShape, shapeDrag.index, toCanvas(e.clientX, e.clientY));
+			redrawShape(editShape);
+			return;
+		}
 		if (zoomDrag && e.pointerId === zoomDrag.id) {
 			const want = zoomDrag.z * Math.exp((zoomDrag.y - e.clientY) * 0.006);
 			zoomAt(want / zoom, zoomDrag.cx, zoomDrag.cy);
@@ -1822,6 +2050,14 @@
 			tool === 'brush' && e.pointerType !== 'touch' && !adjustOverlay
 				? toCanvas(e.clientX, e.clientY)
 				: null;
+		hoverHandle =
+			editShape && cursorAt
+				? shapeHandles(editShape).some(
+						(q) =>
+							Math.hypot(cursorAt![0] - q[0], cursorAt![1] - q[1]) <=
+							14 / Math.max(0.01, fit * zoom)
+					)
+				: false;
 		if (grad && e.pointerId === grad.id) {
 			grad = { ...grad, to: toCanvas(e.clientX, e.clientY) };
 			gradientShow();
@@ -1841,6 +2077,10 @@
 		if (xfDrag) return xfMove(e);
 		if (lassoFill) {
 			lassoFill = [...lassoFill, toCanvas(e.clientX, e.clientY)];
+			return;
+		}
+		if (measuring === e.pointerId && measureSeg) {
+			measureSeg = [measureSeg[0], toCanvas(e.clientX, e.clientY)];
 			return;
 		}
 		if (marquee) {
@@ -1894,6 +2134,15 @@
 	}
 
 	function up(e: PointerEvent) {
+		if (sizeDrag && e.pointerId === sizeDrag.id) {
+			sizeDrag = null;
+			return;
+		}
+		if (shapeDrag && e.pointerId === shapeDrag.id) {
+			shapeDrag = null;
+			notify();
+			return;
+		}
 		if (zoomDrag && e.pointerId === zoomDrag.id) {
 			zoomDrag = null;
 			return;
@@ -1921,6 +2170,10 @@
 			return;
 		}
 		if (lassoFill) return commitLassoFill();
+		if (measuring === e.pointerId) {
+			measuring = null;
+			return;
+		}
 		if (marquee) return commitMarquee();
 		if (picking === e.pointerId) {
 			picking = null;
@@ -1949,7 +2202,10 @@
 		if (!current || !paint || !brush) return;
 		if (heldBack.length) releaseHeld(); // a short stroke that never picked a direction
 		if (!snapped) catchUp();
+		// a snapped shape stays editable (not on shared canvases: others already have it)
+		editShape = snapped && !onlive && !maskStroke ? snappedShape : null;
 		snapped = false;
+		snappedShape = null;
 		paint.endStroke(brush);
 		const end = current.points.at(-1);
 		if (end) lastEnd = { x: end.x, y: end.y, p: end.pressure };
@@ -2021,6 +2277,7 @@
 	/** The history panel: go `steps` back (negative) or forward (positive) in one go. */
 	export function historyGo(steps: number) {
 		if (!paint) return;
+		editShape = null;
 		if (xf) transformCancel();
 		for (let i = 0; i < Math.abs(steps); i++) {
 			const ok = steps < 0 ? paint.undo() : paint.redo();
@@ -2033,6 +2290,7 @@
 	}
 
 	export function undo() {
+		editShape = null;
 		if (xf) return transformCancel();
 		if (paint?.undo()) log.undo();
 		schedule();
@@ -2452,7 +2710,8 @@
 	class:moving-overlay={adjustOverlay && !!overlaySrc}
 	class:picker={tool === 'picker'}
 	class:filling={tool === 'fill'}
-	class:outlined={showOutline}
+	class:outlined={showOutline && !hoverHandle}
+	class:on-handle={hoverHandle}
 	class:selecting={tool.startsWith('select')}
 	class:transforming={tool === 'transform'}
 	class:liquifying={tool === 'liquify'}
@@ -2482,7 +2741,7 @@
 			{height}
 			aria-label="Drawing canvas, {width} by {height} pixels"
 			data-ready={ready}
-			class:gray={grayView}
+			style:filter={viewFilter}
 		></canvas>
 		<canvas class="ants" bind:this={antsEl} {width} {height} aria-hidden="true"></canvas>
 		{#if guides && (guideGrid.length || guideRays.length || guides.ruler.on || guideAxes.length)}
@@ -2546,6 +2805,94 @@
 				<circle class="grad" cx={grad.to[0]} cy={grad.to[1]} r={hr} />
 			</svg>
 		{/if}
+		{#if editShape && tool === 'brush'}
+			{@const hr = 6 / Math.max(0.01, fit * zoom)}
+			<svg
+				class="xf"
+				viewBox="0 0 {width} {height}"
+				preserveAspectRatio="none"
+				aria-hidden="true"
+				data-testid="shape-handles"
+			>
+				{#each shapeHandles(editShape) as [x, y], i (i)}
+					<circle class="shape-h" cx={x} cy={y} r={hr} />
+				{/each}
+			</svg>
+		{/if}
+		{#if xf?.mesh}
+			{@const hr = 6 / Math.max(0.01, fit * zoom)}
+			<svg
+				class="xf"
+				viewBox="0 0 {width} {height}"
+				preserveAspectRatio="none"
+				aria-hidden="true"
+				data-testid="warp-grid"
+			>
+				{#each meshLines(xf.mesh) as line, i (i)}
+					<polyline class="warp-line" points={line.map((p) => p.join(',')).join(' ')} />
+				{/each}
+				{#each xf.mesh as [x, y], i (i)}
+					<circle class="shape-h" cx={x} cy={y} r={hr} />
+				{/each}
+			</svg>
+		{/if}
+		{#if angleGuide}
+			{@const far = 2 * Math.hypot(width, height)}
+			{@const r = (-angleGuide.deg * Math.PI) / 180}
+			<svg
+				class="xf"
+				viewBox="0 0 {width} {height}"
+				preserveAspectRatio="none"
+				aria-hidden="true"
+				data-testid="angle-guide"
+			>
+				<line
+					class="angle-guide"
+					x1={angleGuide.p[0] - Math.cos(r) * far}
+					y1={angleGuide.p[1] - Math.sin(r) * far}
+					x2={angleGuide.p[0] + Math.cos(r) * far}
+					y2={angleGuide.p[1] + Math.sin(r) * far}
+				/>
+			</svg>
+		{/if}
+		{#if measureSeg && tool === 'measure'}
+			{@const [[ax, ay], [bx, by]] = measureSeg}
+			{@const len = Math.hypot(bx - ax, by - ay)}
+			{@const k = 1 / Math.max(0.01, fit * zoom)}
+			{@const [ux, uy] = len ? [(bx - ax) / len, (by - ay) / len] : [1, 0]}
+			{@const deg = ((((Math.atan2(-(by - ay), bx - ax) * 180) / Math.PI) % 180) + 180) % 180}
+			{@const ticks = measureUnit > 0 ? Math.min(200, Math.floor(len / measureUnit)) : 0}
+			<svg
+				class="xf"
+				viewBox="0 0 {width} {height}"
+				preserveAspectRatio="none"
+				aria-hidden="true"
+				data-testid="measure"
+			>
+				<line class="measure" x1={ax} y1={ay} x2={bx} y2={by} />
+				{#each Array.from({ length: ticks + 1 }, (_, k) => k) as i (i)}
+					{@const [tx, ty] = [ax + ux * measureUnit * i, ay + uy * measureUnit * i]}
+					<line
+						class="measure"
+						x1={tx - uy * 7 * k}
+						y1={ty + ux * 7 * k}
+						x2={tx + uy * 7 * k}
+						y2={ty - ux * 7 * k}
+					/>
+				{/each}
+			</svg>
+			<span
+				class="measure-label"
+				role="status"
+				style="left: {(bx / width) * 100}%; top: {(by / height) * 100}%; transform: scale({(flipped
+					? -1
+					: 1) / zoom}, {1 / zoom}) translate(10px, 10px)"
+			>
+				{measureUnit > 0 ? `${(len / measureUnit).toFixed(1)} units` : `${Math.round(len)} px`} · {Math.round(
+					deg
+				)}°
+			</span>
+		{/if}
 		{#if lassoFill && lassoFill.length > 1}
 			<svg
 				class="xf"
@@ -2605,7 +2952,7 @@
 				<circle class="liq" cx={hoverAt[0]} cy={hoverAt[1]} r={liquifySize} />
 			</svg>
 		{/if}
-		{#if xfShape}
+		{#if xfShape && !xf?.mesh}
 			{@const hr = 7 / Math.max(0.01, fit * zoom)}
 			<svg class="xf" viewBox="0 0 {width} {height}" preserveAspectRatio="none" aria-hidden="true">
 				<polygon points={xfShape.corners.map((p) => p.join(',')).join(' ')} />
@@ -2699,6 +3046,34 @@
 			</button>
 			<button
 				type="button"
+				aria-label="Notan view, {notan ? `${notan} tones` : 'off'}"
+				aria-pressed={!!notan}
+				title="Notan: just 2 or 3 flat tones, to see the big light and dark shapes"
+				onclick={() => (notan = notan === 0 ? 2 : notan === 2 ? 3 : 0)}
+			>
+				<svg viewBox="0 0 24 24" aria-hidden="true">
+					<rect x="4" y="4" width="16" height="16" rx="3" /><path
+						d="M4 14 10 9l4 4 6-5v9a3 3 0 0 1-3 3H7a3 3 0 0 1-3-3Z"
+						class="half"
+					/>
+				</svg>
+				{#if notan}<span class="tones">{notan}</span>{/if}
+			</button>
+			<button
+				type="button"
+				aria-label="Squint view"
+				aria-pressed={squint}
+				title="Squint: blur the canvas and the reference to compare the big shapes"
+				onclick={() => (squint = !squint)}
+			>
+				<svg viewBox="0 0 24 24" aria-hidden="true">
+					<path d="M2 12s4-6 10-6 10 6 10 6" /><path
+						d="M4 15l-1.5 2M9 17l-.5 2.5M15 17l.5 2.5M20 15l1.5 2"
+					/>
+				</svg>
+			</button>
+			<button
+				type="button"
 				aria-label="Grayscale view"
 				aria-pressed={grayView}
 				title="Grayscale view: check light and dark without the colours"
@@ -2713,6 +3088,18 @@
 			{/if}
 		</div>
 	{/if}
+	<svg class="filters" aria-hidden="true">
+		{#each [2, 3] as n (n)}
+			<filter id="{fid}-{n}" color-interpolation-filters="sRGB">
+				<feColorMatrix type="saturate" values="0" />
+				<feComponentTransfer>
+					<feFuncR type="discrete" tableValues={n === 2 ? '0 1' : '0 0.55 1'} />
+					<feFuncG type="discrete" tableValues={n === 2 ? '0 1' : '0 0.55 1'} />
+					<feFuncB type="discrete" tableValues={n === 2 ? '0 1' : '0 0.55 1'} />
+				</feComponentTransfer>
+			</filter>
+		{/each}
+	</svg>
 	{#if !ready && !error}<p class="status">Warming up the brushes…</p>{/if}
 	{#if error}<p class="status error" role="alert">{error}</p>{/if}
 </div>
@@ -2741,6 +3128,9 @@
 	/* the brush outline (drawn in the canvas) replaces the pointer */
 	.viewport.outlined {
 		cursor: none;
+	}
+	.viewport.on-handle {
+		cursor: grab;
 	}
 	.viewport.selecting {
 		cursor: crosshair;
@@ -2791,9 +3181,7 @@
 	.xf line.shift-line {
 		stroke-dasharray: 6 4;
 	}
-	canvas.gray {
-		filter: grayscale(1);
-	}
+
 	.lasso-fill {
 		opacity: 0.45;
 		stroke: #16161a;
@@ -2822,6 +3210,50 @@
 	}
 	.view svg .half {
 		fill: currentColor;
+	}
+	.view .tones {
+		font: 700 11px var(--pp-font-body);
+		margin-left: 2px;
+	}
+	.filters {
+		position: absolute;
+		width: 0;
+		height: 0;
+	}
+	.xf .shape-h {
+		fill: #fff;
+		stroke: #3d6bff;
+		stroke-width: 2;
+		vector-effect: non-scaling-stroke;
+	}
+	.xf .warp-line {
+		fill: none;
+		stroke: #3d6bff;
+		stroke-width: 1;
+		opacity: 0.8;
+		vector-effect: non-scaling-stroke;
+	}
+	.xf .angle-guide {
+		stroke: #e8492f;
+		stroke-width: 1.5;
+		stroke-dasharray: 8 5;
+		vector-effect: non-scaling-stroke;
+	}
+	.xf .measure {
+		stroke: #e8492f;
+		stroke-width: 2;
+		vector-effect: non-scaling-stroke;
+	}
+	.measure-label {
+		position: absolute;
+		transform-origin: 0 0;
+		padding: 3px 8px;
+		border-radius: 999px;
+		background: #e8492f;
+		color: #fff;
+		font: 700 13px var(--pp-font-body);
+		white-space: nowrap;
+		pointer-events: none;
 	}
 	.guides {
 		position: absolute;

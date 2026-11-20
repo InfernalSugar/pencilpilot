@@ -5,6 +5,7 @@
 		| 'picker'
 		| 'fill'
 		| 'lasso-fill'
+		| 'measure'
 		| 'select-rect'
 		| 'select-lasso'
 		| 'select-wand'
@@ -24,6 +25,7 @@
 		'transform',
 		'liquify',
 		'gradient',
+		'measure',
 		'adjust'
 	];
 	export const SELECT_TOOLS: { id: ToolId; label: string; key: string; icon: string }[] = [
@@ -203,6 +205,30 @@
 						fill="currentColor"
 						fill-opacity="0.35"
 					/><path d="M8 19c0 1.5-1 2.5-2.5 2.5" />
+				</svg>
+			</button>
+		{/if}
+		{#if has('measure')}
+			<button
+				type="button"
+				class="tool"
+				aria-pressed={tool === 'measure'}
+				aria-label="Measure (U)"
+				title="Measure (U): drag to measure lengths and angles, in the unit you marked on the reference"
+				onclick={() => (tool = tool === 'measure' ? 'brush' : 'measure')}
+			>
+				<svg
+					width="22"
+					height="22"
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="2.3"
+					stroke-linecap="round"
+					stroke-linejoin="round"
+					aria-hidden="true"
+				>
+					<path d="M3 17 17 3l4 4L7 21Z" /><path d="m7 13 2 2M10 10l2 2M13 7l2 2" />
 				</svg>
 			</button>
 		{/if}

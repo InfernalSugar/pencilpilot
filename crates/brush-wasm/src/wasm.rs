@@ -514,6 +514,13 @@ impl PaintCanvas {
         self.inner.transform_preview_h(h)
     }
 
+    /// Warp: `nodes` are (x, y) pairs for a (cols+1)×(rows+1) grid over the lifted box.
+    #[wasm_bindgen(js_name = transformPreviewMesh)]
+    pub fn transform_preview_mesh(&mut self, nodes: &[f32], cols: u32, rows: u32) -> bool {
+        self.inner
+            .transform_preview_mesh(nodes, cols as usize, rows as usize)
+    }
+
     #[wasm_bindgen(js_name = transformCommit)]
     pub fn transform_commit(&mut self) -> bool {
         self.inner.transform_commit()
@@ -533,6 +540,12 @@ impl PaintCanvas {
 
     /// Set the selection from a canvas-sized mask (byte > 127 = selected);
     /// `op`: 0 replace, 1 add, 2 subtract, 3 intersect.
+    /// Soften the selection's edge over about `radius` px.
+    #[wasm_bindgen(js_name = featherSelection)]
+    pub fn feather_selection(&mut self, radius: f32) -> bool {
+        self.inner.feather_selection(radius)
+    }
+
     #[wasm_bindgen(js_name = setSelection)]
     pub fn set_selection(&mut self, mask: &[u8], op: u8) -> bool {
         self.inner.set_selection(mask, op)
