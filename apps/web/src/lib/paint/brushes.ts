@@ -51,16 +51,19 @@ export function brushSource(id: string): Promise<string> {
 
 /**
  * Fetch a brush's .myb and build an engine brush (each call returns a fresh
- * instance). "My brushes" (ids starting `my-`) are a built-in brush plus tweaks.
+ * instance). "My brushes" (ids starting `my-`) are a built-in brush plus tweaks,
+ * or an imported brush's own settings. `edit` changes the source first (the
+ * Smudge tool turns any brush into a smudging one).
  */
-export async function loadBrush(id: string): Promise<PaintBrush> {
+export async function loadBrush(id: string, edit?: (myb: string) => string): Promise<PaintBrush> {
 	await loadEngine();
+	let src: string;
 	if (isCustom(id)) {
 		const c = customBrush(id);
 		if (!c) throw new Error(`brush ${id}: not in My brushes on this device`);
-		return new PaintBrush(applyTweaks(await brushSource(c.base), c.tweaks));
-	}
-	return new PaintBrush(await brushSource(id));
+		src = applyTweaks(c.source ?? (await brushSource(c.base)), c.tweaks);
+	} else src = await brushSource(id);
+	return new PaintBrush(edit ? edit(src) : src);
 }
 
 /** An engine brush straight from .myb source (the brush editor's preview). */

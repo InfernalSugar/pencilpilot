@@ -22,10 +22,12 @@
 		/** holds an imported picture (or paint merged with one) */
 		imported: boolean;
 		empty: boolean;
+		/** an adjustment layer's settings (JSON, see tone.ts); null for paint layers */
+		adjust: string | null;
 	}
 	export type LayerSettings = Omit<
 		LayerInfo,
-		'id' | 'empty' | 'mask' | 'editingMask' | 'group' | 'imported'
+		'id' | 'empty' | 'mask' | 'editingMask' | 'group' | 'imported' | 'adjust'
 	>;
 
 	/** What happened to a picture brought in with `importImage`. */
@@ -125,6 +127,19 @@
 	import { boxToQuad, usableQuad, type Quad } from './homography';
 	import { meshLines, meshNodes, WARP_N } from './warp';
 	import { editable, moveHandle, shapeHandles, shapePath, type EditShape } from './shape-edit';
+	import { smudgeSource } from './smudge';
+	import { textureById, type BrushTexture } from './brush-textures';
+	import { Timelapse } from './timelapse';
+	import { mapTable, parseSpec, specName, toneTables, type AdjustSpec } from './tone';
+	import {
+		corner,
+		dragPart,
+		EMPTY_PATH,
+		hitPath,
+		pathD,
+		samplePath,
+		type PenPath
+	} from './pen-path';
 
 	let {
 		width = 800,
@@ -174,7 +189,13 @@
 		gradientEnd = 'transparent',
 		maxHeight = '78vh',
 		viewControls = true,
-		fill = false
+		fill = false,
+		smudgeStrength = 0.6,
+		brushTexture = null,
+		wandContiguous = true,
+		oncanvassize,
+		onquickmenu,
+		onpenpath
 	}: {
 		width?: number;
 		height?: number;
@@ -205,7 +226,9 @@
 			| 'guides'
 			| 'gradient'
 			| 'lasso-fill'
-			| 'measure';
+			| 'measure'
+			| 'smudge'
+			| 'pen';
 		/** pictures can be dropped onto the canvas (as a new layer) */
 		allowImport?: boolean;
 		/** a dropped picture was imported (or why not) */
@@ -226,7 +249,7 @@
 		/** a transform finished (kept or cancelled), or had nothing to move */
 		ontransformend?: (result: 'done' | 'cancelled' | 'empty') => void;
 		/** how a new selection combines with the current one (Shift = add, Alt = subtract) */
-		selectMode?: 'replace' | 'add' | 'subtract';
+		selectMode?: 'replace' | 'add' | 'subtract' | 'intersect';
 		/** magic wand: colour tolerance (0–1) */
 		wandTolerance?: number;
 		/** fill: how different a colour may be and still be filled (0–1) */
@@ -275,6 +298,18 @@
 		viewControls?: boolean;
 		/** fill the parent's height (the sheet is fitted and centred) instead of keeping the canvas's shape */
 		fill?: boolean;
+		/** the Smudge tool: how far it drags the paint (0–1) */
+		smudgeStrength?: number;
+		/** grain, picture tip and dual brush for the current brush (null = none) */
+		brushTexture?: BrushTexture | null;
+		/** magic wand: only the joined-up area (false: every similar colour, like Color Range) */
+		wandContiguous?: boolean;
+		/** the canvas changed size (resized, or that undone): set `width` / `height` to this */
+		oncanvassize?: (s: { width: number; height: number }) => void;
+		/** right-click / long-press on the canvas (screen coordinates) */
+		onquickmenu?: (x: number, y: number) => void;
+		/** the pen tool's path changed: how many points, and whether it's closed */
+		onpenpath?: (s: { points: number; closed: boolean }) => void;
 	} = $props();
 
 	let el: HTMLCanvasElement;
@@ -323,9 +358,11 @@
 	$effect(() => {
 		const id = brushId;
 		void (isCustom(id) && brushVersion);
+		const smudging = tool === 'smudge';
+		const strength = smudgeStrength;
 		if (!ready) return;
 		let cancelled = false;
-		loadBrush(id)
+		loadBrush(id, smudging ? (src) => smudgeSource(src, strength) : undefined)
 			.then((b) => {
 				if (cancelled) return b.free();
 				brush?.free();
@@ -350,7 +387,7 @@
 		brush.setOpacity(o);
 		const n = parseInt(c.slice(1), 16);
 		brush.setColor((n >> 16) & 255, (n >> 8) & 255, n & 255);
-		brush.setEraser(er);
+		brush.setEraser(er && tool !== 'smudge');
 		brushR = brush.radius();
 		editShape = null;
 	}
@@ -440,6 +477,8 @@
 
 	function notify() {
 		if (!paint) return;
+		if (paint.width !== width || paint.height !== height)
+			oncanvassize?.({ width: paint.width, height: paint.height });
 		const layers = layerList();
 		onchange?.({
 			canUndo: paint.canUndo(),
@@ -609,11 +648,79 @@
 		raf = 0;
 		flushLive();
 		if (!paint || !ctx || !memory) return;
+		// a new canvas size waits for the page to pass it in (the <canvas> resizes then)
+		if (paint.width !== width || paint.height !== height || el.width !== width) return;
 		const r = paint.flush();
-		if (r.length !== 4) return;
-		const data = new Uint8ClampedArray(memory.buffer, paint.rgbaPtr(), width * height * 4);
-		ctx.putImageData(new ImageData(data, width, height), 0, 0, r[0], r[1], r[2], r[3]);
+		if (r.length === 4) {
+			const data = new Uint8ClampedArray(memory.buffer, paint.rgbaPtr(), width * height * 4);
+			ctx.putImageData(new ImageData(data, width, height), 0, 0, r[0], r[1], r[2], r[3]);
+			filmDirty = true;
+		}
+		// a frame once each change has settled (not in the middle of a stroke or a drag)
+		if (filmDirty && !current && !liq && !grad && !paint.isTransforming() && !paint.isAdjusting()) {
+			filmDirty = false;
+			film.capture(el);
+		}
 	}
+
+	// ---- timelapse: a frame after every change ----
+
+	const film = new Timelapse();
+	/** the canvas changed since the last timelapse frame */
+	let filmDirty = false;
+	/** The timelapse of this drawing so far (frames after each change). */
+	export function timelapse(): Timelapse {
+		return film;
+	}
+	onMount(() => () => film.clear());
+
+	// the canvas got its new size: draw all of it again
+	$effect(() => {
+		const [w, h] = [width, height];
+		if (!paint || !ctx || paint.width !== w || paint.height !== h) return;
+		untrack(() => {
+			ctx!.fillStyle = '#fff';
+			ctx!.fillRect(0, 0, w, h);
+			const data = new Uint8ClampedArray(memory!.buffer, paint!.rgbaPtr(), w * h * 4);
+			paint!.flush();
+			ctx!.putImageData(new ImageData(data, w, h), 0, 0);
+			refreshAnts();
+		});
+	});
+
+	// ---- brush textures ----
+
+	/** texture ids given to the engine: app id → engine id */
+	// eslint-disable-next-line svelte/prefer-svelte-reactivity -- engine bookkeeping, never rendered
+	const texIds = new Map<string, number>();
+	function engineTexture(id: string | null): number {
+		if (!id || !paint) return 0;
+		const known = texIds.get(id);
+		if (known) return known;
+		const t = textureById(id);
+		if (!t) return 0;
+		const n = texIds.size + 1;
+		if (!paint.setTexture(n, t.w, t.h, t.px)) return 0;
+		texIds.set(id, n);
+		return n;
+	}
+	$effect(() => {
+		const t = brushTexture;
+		if (!ready || !paint) return;
+		untrack(() => {
+			if (!t) return paint!.setDabStyle(0, 1, 0, 0, 0, 0, 0, 1);
+			paint!.setDabStyle(
+				engineTexture(t.grain),
+				t.grainScale,
+				t.grainStrength,
+				engineTexture(t.tip),
+				engineTexture(t.dual),
+				t.dualSize,
+				t.dualScatter,
+				t.dualCount
+			);
+		});
+	});
 
 	// ---- view: zoom, pan, rotate, mirror (only how it's shown, never the drawing) ----
 
@@ -810,11 +917,18 @@
 
 	/** Fill at a client position with `hex` (default: the current colour). */
 	function fillAt(clientX: number, clientY: number, hex = color) {
-		if (!paint) return;
 		const [cx, cy] = toCanvas(clientX, clientY);
-		if (cx < 0 || cy < 0 || cx >= width || cy >= height) return;
+		return fillAtCanvas(cx, cy, hex, fillTolerance);
+	}
+
+	function fillAtCanvas(cx: number, cy: number, hex: string, tolerance: number): boolean {
+		if (!paint) return false;
+		if (cx < 0 || cy < 0 || cx >= width || cy >= height) return false;
 		const l = shownLayers().find((x) => x.id === paint!.activeLayer);
-		if (l && (l.locked || !l.visible)) return onblocked?.(l.visible ? 'locked' : 'hidden');
+		if (l && (l.locked || !l.visible)) {
+			onblocked?.(l.visible ? 'locked' : 'hidden');
+			return false;
+		}
 		const n = parseInt(hex.slice(1), 16) || 0;
 		const done = paint.fill(
 			Math.floor(cx),
@@ -823,13 +937,36 @@
 			(n >> 8) & 255,
 			n & 255,
 			opacity,
-			fillTolerance,
+			tolerance,
 			fillAllLayers,
 			2,
 			3,
 			fillReference
 		);
-		changed(done, undefined, 'Fill');
+		return changed(done, undefined, 'Fill');
+	}
+
+	/**
+	 * The last ColorDrop, still adjustable (Procreate: keep holding and slide):
+	 * a slider sets how far the colour spreads, refilling as it moves.
+	 */
+	let dropFill = $state<{
+		at: [number, number];
+		screen: [number, number];
+		hex: string;
+		tol: number;
+	} | null>(null);
+	let dropTimer: ReturnType<typeof setTimeout> | undefined;
+	function keepDropFill(ms = 6000) {
+		clearTimeout(dropTimer);
+		dropTimer = setTimeout(() => (dropFill = null), ms);
+	}
+	function refillDrop(tol: number) {
+		if (!dropFill || !paint) return;
+		if (paint.undo()) log.undo();
+		fillAtCanvas(dropFill.at[0], dropFill.at[1], dropFill.hex, tol);
+		dropFill = { ...dropFill, tol };
+		keepDropFill();
 	}
 
 	// ---- imported pictures ----
@@ -888,7 +1025,12 @@
 		const hex = e.dataTransfer?.getData('application/x-pp-color');
 		if (!hex || !/^#[0-9a-f]{6}$/i.test(hex) || locked) return;
 		e.preventDefault();
-		fillAt(e.clientX, e.clientY, hex);
+		const at = toCanvas(e.clientX, e.clientY);
+		if (fillAtCanvas(at[0], at[1], hex, fillTolerance)) {
+			const r = vp.getBoundingClientRect();
+			dropFill = { at, screen: [e.clientX - r.left, e.clientY - r.top], hex, tol: fillTolerance };
+			keepDropFill();
+		}
 	}
 
 	// ---- QuickShape: hold still at the end of a stroke ----
@@ -958,8 +1100,15 @@
 	let antsBox = { x0: 0, y0: 0, x1: 0, y1: 0 };
 	let antsPhase = 0;
 
+	/** 0 new, 1 add (Shift), 2 subtract (Alt), 3 intersect (Shift+Alt) */
 	const opOf = (e: PointerEvent | MouseEvent) =>
-		e.shiftKey ? 1 : e.altKey ? 2 : selectMode === 'add' ? 1 : selectMode === 'subtract' ? 2 : 0;
+		e.shiftKey && e.altKey
+			? 3
+			: e.shiftKey
+				? 1
+				: e.altKey
+					? 2
+					: { replace: 0, add: 1, subtract: 2, intersect: 3 }[selectMode];
 
 	/** Recompute the marching-ants outline from the engine's selection. */
 	function refreshAnts() {
@@ -1034,7 +1183,12 @@
 		if (!paint || !lassoFill) return;
 		const pts = lassoFill;
 		lassoFill = null;
-		if (pts.length < 3) return;
+		fillPolygon(pts, 'Lasso fill');
+	}
+
+	/** Fill a closed shape with the brush colour (one undo step). */
+	function fillPolygon(pts: [number, number][], label: string) {
+		if (!paint || pts.length < 3) return false;
 		const off = new OffscreenCanvas(width, height);
 		const c = off.getContext('2d')!;
 		c.fillStyle = '#fff';
@@ -1047,10 +1201,10 @@
 		const coverage = new Uint8Array(width * height);
 		for (let i = 0; i < coverage.length; i++) coverage[i] = rgba[i * 4 + 3];
 		const n = parseInt(color.slice(1), 16) || 0;
-		changed(
+		return changed(
 			paint.fillMask(coverage, (n >> 16) & 255, (n >> 8) & 255, n & 255, opacity),
 			undefined,
-			'Lasso fill'
+			label
 		);
 	}
 
@@ -1306,6 +1460,97 @@
 		if (tool !== 'brush') editShape = null;
 		if (tool !== 'measure') measureSeg = null;
 	});
+
+	// ---- pen tool: Bézier paths, stroked with the brush or filled ----
+
+	let penPath = $state<PenPath>(EMPTY_PATH);
+	let penDrag: { id: number; index: number; part: 'p' | 'hin' | 'hout'; broken: boolean } | null =
+		null;
+	$effect(() => {
+		const p = penPath;
+		untrack(() => onpenpath?.({ points: p.anchors.length, closed: p.closed }));
+	});
+
+	function penDown(e: PointerEvent) {
+		const p = toCanvas(e.clientX, e.clientY);
+		const r = 10 / Math.max(0.01, fit * zoom);
+		const hit = hitPath(penPath, p, r);
+		capture(e);
+		if (hit) {
+			// the first point again closes the path
+			if (hit.index === 0 && hit.part === 'p' && !penPath.closed && penPath.anchors.length > 2) {
+				penPath = { ...penPath, closed: true };
+				penDrag = { id: e.pointerId, index: 0, part: 'hout', broken: false };
+				return;
+			}
+			penDrag = { id: e.pointerId, ...hit, broken: e.altKey };
+			return;
+		}
+		if (penPath.closed) penPath = EMPTY_PATH;
+		penPath = { ...penPath, anchors: [...penPath.anchors, corner(p)] };
+		// dragging out of a new point pulls its handles (a smooth point)
+		penDrag = { id: e.pointerId, index: penPath.anchors.length - 1, part: 'hout', broken: false };
+	}
+
+	function penMove(e: PointerEvent) {
+		if (!penDrag || penDrag.id !== e.pointerId) return false;
+		const to = toCanvas(e.clientX, e.clientY);
+		penPath = dragPart(penPath, penDrag.index, penDrag.part, to, penDrag.broken || e.altKey);
+		return true;
+	}
+
+	/** Draw along the path with the current brush (one stroke, one undo step). */
+	export function penStroke(taper = true) {
+		if (!paint || !brush || penPath.anchors.length < 2) return false;
+		if (!paint.beginStroke()) {
+			const l = shownLayers().find((x) => x.id === paint!.activeLayer);
+			onblocked?.(l && !l.visible ? 'hidden' : 'locked');
+			return false;
+		}
+		const pts = samplePath(penPath, 2);
+		const stroke: Stroke = {
+			brushId,
+			eraser,
+			layer: paint.activeLayer,
+			color,
+			size,
+			opacity,
+			points: []
+		};
+		const t = Math.round(performance.now() - t0);
+		pts.forEach(([x, y], i) => {
+			// a light touch at the ends, like a hand-drawn line
+			const k = i / Math.max(1, pts.length - 1);
+			const pr = taper && !penPath.closed ? 0.25 + 0.6 * Math.sin(Math.PI * k) : 0.7;
+			paint!.strokeTo(brush!, x, y, pr, 0, 0, 0.008);
+			stroke.points.push({
+				x: Math.round(x * 10) / 10,
+				y: Math.round(y * 10) / 10,
+				pressure: pr,
+				t
+			});
+		});
+		paint.endStroke(brush);
+		changed(true, () => log.add(stroke), 'Pen path');
+		return true;
+	}
+
+	/** Fill inside the path with the brush colour. */
+	export function penFill() {
+		if (penPath.anchors.length < 3) return false;
+		return fillPolygon(samplePath({ ...penPath, closed: true }, 1.5), 'Pen fill');
+	}
+
+	export function penClear() {
+		penPath = EMPTY_PATH;
+	}
+
+	/** Take back the last point. */
+	export function penBack() {
+		penPath = penPath.closed
+			? { ...penPath, closed: false }
+			: { ...penPath, anchors: penPath.anchors.slice(0, -1) };
+	}
 
 	/** warp mode was switched on or off while transforming */
 	$effect(() => {
@@ -1603,6 +1848,10 @@
 		blur: number;
 		/** paint the layer this colour (keeps its transparency) */
 		recolour: string | null;
+		/** curves, levels and gradient map */
+		curves?: AdjustSpec['curves'];
+		levels?: AdjustSpec['levels'];
+		map?: AdjustSpec['map'];
 	}
 
 	export function adjustPreview(a: Adjustments) {
@@ -1617,9 +1866,66 @@
 			!!a.recolour,
 			r,
 			g,
-			b
+			b,
+			toneTables({ curves: a.curves ?? null, levels: a.levels ?? null }),
+			mapTable(a.map ?? null)
 		);
 		schedule();
+	}
+
+	// ---- adjustment layers (Photoshop's): they change what's below, and stay editable ----
+
+	/** Add an adjustment layer above the current one; its id (0 = not possible). */
+	export function addAdjustmentLayer(spec: AdjustSpec, name: string): number {
+		if (!paint) return 0;
+		const id = paint.addAdjustmentLayer(
+			name,
+			JSON.stringify(spec),
+			spec.hue,
+			spec.saturation,
+			spec.brightness,
+			spec.contrast,
+			toneTables(spec),
+			mapTable(spec.map)
+		);
+		changed(id > 0, undefined, 'Adjustment layer');
+		return id;
+	}
+
+	/** Change an adjustment layer live (`adjustmentCommit` makes it one undo step). */
+	export function adjustmentPreview(id: number, spec: AdjustSpec) {
+		if (!paint) return;
+		paint.adjustmentPreview(
+			id,
+			JSON.stringify(spec),
+			spec.hue,
+			spec.saturation,
+			spec.brightness,
+			spec.contrast,
+			toneTables(spec),
+			mapTable(spec.map)
+		);
+		schedule();
+	}
+
+	export function adjustmentCommit() {
+		if (paint) changed(paint.adjustmentCommit(), undefined, 'Adjustment layer');
+	}
+
+	/**
+	 * A new canvas size, keeping the drawing (one undo step): moved by (dx, dy)
+	 * canvas px (a crop, or more room), or with `scale` resized to fit. The page
+	 * hears the new size through `oncanvassize`.
+	 */
+	export function resizeCanvas(w: number, h: number, dx: number, dy: number, scale: boolean) {
+		if (!paint) return false;
+		if (xf) transformCancel();
+		penPath = EMPTY_PATH;
+		return changed(
+			paint.resizeCanvas(w, h, Math.round(dx), Math.round(dy), scale),
+			undefined,
+			'Canvas size'
+		);
 	}
 
 	/** keep the adjustment (one undo step) */
@@ -1824,6 +2130,8 @@
 
 	function down(e: PointerEvent) {
 		if (!paint || !brush) return;
+		if ((e.target as HTMLElement).closest('.drop-tol')) return;
+		dropFill = null;
 		// the view toolbar sits on top of the canvas area: its buttons aren't strokes
 		if ((e.target as HTMLElement).closest('.view')) return;
 		if (e.pointerType === 'pen') penSeen = true;
@@ -1947,10 +2255,14 @@
 			return;
 		}
 		if (tool === 'fill') return fillAt(e.clientX, e.clientY);
+		if (tool === 'pen') return penDown(e);
 		if (tool === 'select-wand') {
 			const [cx, cy] = toCanvas(e.clientX, e.clientY);
-			if (cx >= 0 && cy >= 0 && cx < width && cy < height)
-				paint.selectWand(Math.floor(cx), Math.floor(cy), wandTolerance, true, opOf(e));
+			if (cx >= 0 && cy >= 0 && cx < width && cy < height) {
+				const [x, y] = [Math.floor(cx), Math.floor(cy)];
+				if (wandContiguous) paint.selectWand(x, y, wandTolerance, true, opOf(e));
+				else paint.selectColourRange(x, y, wandTolerance, true, opOf(e));
+			}
 			return refreshAnts();
 		}
 		if (tool === 'measure') {
@@ -2023,6 +2335,7 @@
 	let picking: number | null = null;
 
 	function move(e: PointerEvent) {
+		if (penMove(e)) return;
 		if (sizeDrag && e.pointerId === sizeDrag.id) {
 			// right = bigger; the slider's range is ¼× to about 6×
 			const s = sizeDrag.size * Math.exp((e.clientX - sizeDrag.x) / 120);
@@ -2134,6 +2447,10 @@
 	}
 
 	function up(e: PointerEvent) {
+		if (penDrag && e.pointerId === penDrag.id) {
+			penDrag = null;
+			return;
+		}
 		if (sizeDrag && e.pointerId === sizeDrag.id) {
 			sizeDrag = null;
 			return;
@@ -2518,6 +2835,8 @@
 		rgba: Uint8Array;
 		/** greyscale mask, one byte per pixel (255 = shown) */
 		mask?: Uint8Array;
+		/** an adjustment layer's settings (JSON, see tone.ts) */
+		adjust?: string | null;
 	}
 
 	/** Everything needed to bring this drawing back later (bottom → top). */
@@ -2546,7 +2865,8 @@
 				imported: !!l.imported,
 				group: l.group,
 				rgba: paint!.layerRgba(l.id),
-				mask
+				mask,
+				adjust: l.adjust
 			};
 		});
 		return { layers, groups: groupList(), strokes: structuredClone(log.strokes) as Stroke[] };
@@ -2563,7 +2883,20 @@
 		// eslint-disable-next-line svelte/prefer-svelte-reactivity -- a local lookup, not state
 		const ids = new Map<number, number>();
 		for (const l of saved) {
-			const id = paint.restoreLayer(l.name, l.rgba, l.imported);
+			let id: number;
+			if (l.adjust) {
+				const spec = parseSpec(l.adjust);
+				id = paint.addAdjustmentLayer(
+					l.name,
+					l.adjust,
+					spec.hue,
+					spec.saturation,
+					spec.brightness,
+					spec.contrast,
+					toneTables(spec),
+					mapTable(spec.map)
+				);
+			} else id = paint.restoreLayer(l.name, l.rgba, l.imported);
 			if (!id) continue;
 			ids.set(l.id, id);
 			setRaw(
@@ -2622,6 +2955,19 @@
 				mask = new Uint8Array(width * height);
 				for (let i = 0; i < mask.length; i++) mask[i] = maskRgba[i * 4];
 			}
+			// Photoshop's own adjustment layers aren't written: the file's flat picture
+			// shows the change, and the layer is kept (hidden, empty) under its name
+			if (l.adjust)
+				return {
+					kind: 'layer',
+					name: `${l.name} (${specName(parseSpec(l.adjust))}, not editable)`.slice(0, 60),
+					rgba: new Uint8Array(width * height * 4),
+					opacity: l.opacity,
+					blend: l.blend,
+					visible: false,
+					clip: l.clip,
+					mask
+				};
 			return {
 				kind: 'layer',
 				name: l.name,
@@ -2725,6 +3071,17 @@
 	onlostpointercapture={up}
 	ondragover={dragOver}
 	ondrop={drop}
+	oncontextmenu={(e) => {
+		if (!onquickmenu) return;
+		e.preventDefault();
+		// a long press with a finger started a stroke: it was for the menu instead
+		if (current && paint) {
+			paint.cancelStroke();
+			current = null;
+			schedule();
+		}
+		onquickmenu(e.clientX, e.clientY);
+	}}
 	onpointerenter={() => (hovering = true)}
 	onpointerleave={() => {
 		hovering = false;
@@ -2853,6 +3210,45 @@
 					x2={angleGuide.p[0] + Math.cos(r) * far}
 					y2={angleGuide.p[1] + Math.sin(r) * far}
 				/>
+			</svg>
+		{/if}
+		{#if tool === 'pen' && penPath.anchors.length}
+			{@const k = 1 / Math.max(0.01, fit * zoom)}
+			<svg
+				class="xf"
+				viewBox="0 0 {width} {height}"
+				preserveAspectRatio="none"
+				aria-hidden="true"
+				data-testid="pen-path"
+				data-points={penPath.anchors.length}
+				data-closed={penPath.closed}
+			>
+				<path d={pathD(penPath)} fill="none" stroke="#fff" stroke-width={4 * k} />
+				<path d={pathD(penPath)} fill="none" stroke="#2f6bff" stroke-width={2 * k} />
+				{#each penPath.anchors as a, i (i)}
+					{#each [a.hin, a.hout] as hnd, j (j)}
+						{#if hnd[0] !== a.p[0] || hnd[1] !== a.p[1]}
+							<line
+								x1={a.p[0]}
+								y1={a.p[1]}
+								x2={hnd[0]}
+								y2={hnd[1]}
+								stroke="#2f6bff"
+								stroke-width={1.2 * k}
+							/>
+							<circle cx={hnd[0]} cy={hnd[1]} r={4 * k} fill="#2f6bff" />
+						{/if}
+					{/each}
+					<rect
+						x={a.p[0] - 5 * k}
+						y={a.p[1] - 5 * k}
+						width={10 * k}
+						height={10 * k}
+						fill={i === 0 && !penPath.closed ? '#2f6bff' : '#fff'}
+						stroke="#2f6bff"
+						stroke-width={1.5 * k}
+					/>
+				{/each}
 			</svg>
 		{/if}
 		{#if measureSeg && tool === 'measure'}
@@ -2996,6 +3392,28 @@
 			</div>
 		{/if}
 	</div>
+	{#if dropFill}
+		<div
+			class="drop-tol"
+			role="group"
+			aria-label="ColorDrop threshold"
+			data-testid="colordrop-threshold"
+			style="left: {dropFill.screen[0]}px; top: {dropFill.screen[1]}px"
+		>
+			<label>
+				<span>Spread <b>{Math.round(dropFill.tol * 100)}%</b></span>
+				<input
+					type="range"
+					min="0"
+					max="0.8"
+					step="0.02"
+					value={dropFill.tol}
+					onchange={(e) => refillDrop(+e.currentTarget.value)}
+				/>
+			</label>
+			<button type="button" aria-label="Done" onclick={() => (dropFill = null)}>✓</button>
+		</div>
+	{/if}
 	{#if viewControls && ready}
 		<div class="view" role="toolbar" aria-label="View">
 			<button type="button" aria-label="Zoom out" title="Zoom out (−)" onclick={zoomOut}>
@@ -3349,6 +3767,38 @@
 		object-fit: contain;
 		pointer-events: none;
 		mix-blend-mode: multiply;
+	}
+	.drop-tol {
+		position: absolute;
+		z-index: 5;
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 8px 10px;
+		transform: translate(-50%, 16px);
+		border-radius: 14px;
+		background: #23232b;
+		color: #fff;
+		font: 600 13px var(--pp-font-body, sans-serif);
+		box-shadow: 0 6px 18px rgba(0, 0, 0, 0.3);
+	}
+	.drop-tol label {
+		display: grid;
+		gap: 2px;
+	}
+	.drop-tol span {
+		display: flex;
+		justify-content: space-between;
+		gap: 12px;
+	}
+	.drop-tol button {
+		width: 36px;
+		height: 36px;
+		border: 0;
+		border-radius: 50%;
+		background: var(--pp-accent, #2f6bff);
+		color: #fff;
+		cursor: pointer;
 	}
 	.view {
 		position: absolute;

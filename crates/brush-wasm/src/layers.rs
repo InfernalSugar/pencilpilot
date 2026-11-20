@@ -86,6 +86,11 @@ pub struct LayerProps {
     pub clip: bool,
     /// holds an imported picture (or paint merged with one): set by the engine only
     pub imported: bool,
+    /// an adjustment layer: no pixels of its own, it changes the colours of
+    /// everything below it (through its mask and opacity); set by the engine only
+    pub adjust: Option<Box<crate::adjust::ColourAdjust>>,
+    /// the app's description of the adjustment (curve points etc.), kept as given
+    pub adjust_spec: String,
 }
 
 impl LayerProps {
@@ -99,6 +104,8 @@ impl LayerProps {
             alpha_lock: false,
             clip: false,
             imported: false,
+            adjust: None,
+            adjust_spec: String::new(),
         }
     }
 }
@@ -155,6 +162,8 @@ pub struct TileSource<'a> {
     /// the layer mask here: `None` = no mask; `Some(None)` = a mask with nothing
     /// painted in this tile (fully shown)
     pub mask: Option<Option<&'a TilePixels>>,
+    /// an adjustment layer's change (it has no pixels of its own)
+    pub adjust: Option<&'a crate::adjust::ColourAdjust>,
 }
 
 /// Composite the sources (bottom → top) for one pixel over white paper → sRGB8.
@@ -164,6 +173,20 @@ pub fn composite_pixel(sources: &[TileSource<'_>], row: usize, col: usize) -> [u
     // alpha of the nearest unclipped layer: what clipped layers above it show through
     let mut base = 0.0f32;
     for s in sources {
+        if let Some(adj) = s.adjust {
+            let m = match s.mask {
+                Some(Some(t)) => mask_value(t[row][col]),
+                _ => 1.0,
+            };
+            let a = s.opacity * m * if s.clip { base } else { 1.0 };
+            if s.visible && a > 0.0 {
+                let c = crate::adjust::colour_op(adj, dst);
+                for i in 0..3 {
+                    dst[i] += (c[i] - dst[i]) * a;
+                }
+            }
+            continue;
+        }
         let (cs, a) = s
             .tile
             .map_or(([0.0; 3], 0.0), |t| unpremul_srgb(t[row][col]));

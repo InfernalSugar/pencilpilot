@@ -37,8 +37,15 @@
 	let {
 		status,
 		controls,
-		aspect = 4 / 3
-	}: { status: CanvasStatus; controls: LayerControls | undefined; aspect?: number } = $props();
+		aspect = 4 / 3,
+		onadjustment
+	}: {
+		status: CanvasStatus;
+		controls: LayerControls | undefined;
+		aspect?: number;
+		/** open the Adjust panel: on the given adjustment layer, or (0) to make a new one */
+		onadjustment?: (id: number) => void;
+	} = $props();
 
 	const BLENDS: { id: BlendMode; label: string }[] = [
 		{ id: 'normal', label: 'Normal' },
@@ -211,6 +218,19 @@
 		>
 			<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M6 13l6 6 6-6" /></svg>
 		</button>
+		{#if onadjustment}
+			<button
+				type="button"
+				aria-label="New adjustment layer"
+				title="New adjustment layer: curves, levels, colour or a gradient map over everything below, changeable later"
+				disabled={status.layers.length >= MAX_LAYERS}
+				onclick={() => onadjustment?.(0)}
+			>
+				<svg viewBox="0 0 24 24" aria-hidden="true">
+					<circle cx="12" cy="12" r="8" /><path d="M12 4a8 8 0 0 1 0 16Z" />
+				</svg>
+			</button>
+		{/if}
 		<button
 			type="button"
 			aria-label="Import picture"
@@ -563,14 +583,29 @@
 							↳
 						</span>
 					{/if}
-					<canvas
-						class="thumb"
-						width={TW}
-						height={TH}
-						style="width:{TW}px;height:{TH}px"
-						use:thumb={l.id}
-						aria-hidden="true"
-					></canvas>
+					{#if l.adjust}
+						<button
+							type="button"
+							class="thumb adjust-thumb"
+							style="width:{TW}px;height:{TH}px"
+							aria-label="Change the adjustment {l.name}"
+							title="Adjustment layer: changes everything below it. Click to change it."
+							onclick={() => onadjustment?.(l.id)}
+						>
+							<svg viewBox="0 0 24 24" aria-hidden="true">
+								<circle cx="12" cy="12" r="8" /><path d="M12 4a8 8 0 0 1 0 16Z" />
+							</svg>
+						</button>
+					{:else}
+						<canvas
+							class="thumb"
+							width={TW}
+							height={TH}
+							style="width:{TW}px;height:{TH}px"
+							use:thumb={l.id}
+							aria-hidden="true"
+						></canvas>
+					{/if}
 					{#if l.mask}
 						<button
 							type="button"
@@ -810,6 +845,23 @@
 	.mask-btn.on {
 		outline: 2px solid var(--pp-accent-strong);
 		outline-offset: 1px;
+	}
+	.adjust-thumb {
+		display: grid;
+		place-items: center;
+		padding: 0;
+		border: 0;
+		cursor: pointer;
+	}
+	.adjust-thumb svg {
+		width: 22px;
+		height: 22px;
+		fill: none;
+		stroke: currentColor;
+		stroke-width: 2;
+	}
+	.adjust-thumb svg path {
+		fill: currentColor;
 	}
 	.mask-thumb {
 		background: #fff;

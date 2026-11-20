@@ -12,12 +12,19 @@
 	let {
 		size,
 		blank,
-		onpick
+		onpick,
+		onresize
 	}: {
 		size: CanvasSize;
 		/** nothing drawn yet: changing size needs no confirmation */
 		blank: boolean;
+		/** a fresh, empty canvas of this size */
 		onpick: (s: CanvasSize) => void;
+		/**
+		 * keep the drawing: `scale` it to the new size, or keep its size and place the
+		 * canvas around it (`anchor` 0–1 across and down: which part stays put)
+		 */
+		onresize?: (s: CanvasSize, how: { scale: boolean; anchor: [number, number] }) => void;
 	} = $props();
 
 	let open = $state(false);
@@ -25,6 +32,19 @@
 	let customW = $state(0);
 	let customH = $state(0);
 	let confirming = $state(false);
+	/** with a drawing: what a new size does to it */
+	let how = $state<'crop' | 'scale' | 'clear'>('crop');
+	let anchor = $state<[number, number]>([0.5, 0.5]);
+	const keeping = $derived(!blank && !!onresize && how !== 'clear');
+	const goLabel = $derived(
+		keeping ? 'Resize canvas' : confirming ? 'Clear and resize' : 'Use this size'
+	);
+	function anchorName(ax: number, ay: number) {
+		if (ax === 0.5 && ay === 0.5) return 'the middle';
+		const v = ay === 0 ? 'top' : ay === 1 ? 'bottom' : '';
+		const h = ax === 0 ? 'left' : ax === 1 ? 'right' : '';
+		return `the ${[v, h].filter(Boolean).join(' ')}`;
+	}
 
 	function toggle() {
 		open = !open;
@@ -47,6 +67,11 @@
 
 	function apply() {
 		if (!picked.ok || same) return;
+		if (keeping) {
+			onresize?.(picked.size, { scale: how === 'scale', anchor });
+			open = false;
+			return;
+		}
 		if (!blank && !confirming) {
 			confirming = true;
 			return;
@@ -105,16 +130,43 @@
 					</div>
 				{/if}
 			</fieldset>
+			{#if !blank && onresize}
+				<fieldset class="how">
+					<legend>Your drawing</legend>
+					{#each [['crop', 'Keep its size', 'Crop it, or add room around it'], ['scale', 'Resize it', 'It grows or shrinks with the canvas'], ['clear', 'Start over', 'A new, empty canvas']] as [id, label, hint] (id)}
+						<label class="opt">
+							<input type="radio" name="resize-how" value={id} bind:group={how} />
+							<span class="name">{label}</span>
+							<span class="dims">{hint}</span>
+						</label>
+					{/each}
+					{#if how === 'crop'}
+						<div class="anchor" role="radiogroup" aria-label="Keep in place">
+							{#each [0, 0.5, 1] as ay (ay)}
+								{#each [0, 0.5, 1] as ax (ax)}
+									<button
+										type="button"
+										role="radio"
+										aria-checked={anchor[0] === ax && anchor[1] === ay}
+										aria-label="Keep {anchorName(ax, ay)} in place"
+										onclick={() => (anchor = [ax, ay])}
+									></button>
+								{/each}
+							{/each}
+						</div>
+					{/if}
+				</fieldset>
+			{/if}
 			{#if !picked.ok && picked.why}<p class="why" role="alert">{picked.why}</p>{/if}
 			{#if picked.ok && sizeNote(picked.size)}<p class="note">{sizeNote(picked.size)}</p>{/if}
-			{#if confirming}
+			{#if confirming && !keeping}
 				<p class="warn" role="alert">
 					A new size means a fresh, empty canvas. Your drawing will be cleared.
 				</p>
 			{/if}
 			<div class="row">
 				<button type="button" class="go" disabled={!picked.ok || same} onclick={apply}>
-					{confirming ? 'Clear and resize' : 'Use this size'}
+					{goLabel}
 				</button>
 				<button type="button" class="cancel" onclick={() => (open = false)}>Cancel</button>
 			</div>
@@ -125,6 +177,27 @@
 <style>
 	.picker {
 		position: relative;
+	}
+	.how {
+		margin-top: 10px;
+	}
+	.anchor {
+		display: grid;
+		grid-template-columns: repeat(3, 28px);
+		gap: 4px;
+		margin-top: 8px;
+	}
+	.anchor button {
+		width: 28px;
+		height: 28px;
+		border: 2px solid var(--pp-line, #d8d8de);
+		border-radius: 6px;
+		background: var(--pp-surface, #fff);
+		cursor: pointer;
+	}
+	.anchor button[aria-checked='true'] {
+		background: var(--pp-accent, #2f6bff);
+		border-color: var(--pp-accent, #2f6bff);
 	}
 	.trigger {
 		display: flex;
