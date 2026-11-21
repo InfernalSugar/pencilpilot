@@ -3320,9 +3320,10 @@
 	 * layer shows the drawing the pairs give it (none: empty), and the flat picture is
 	 * that frame (on transparency if asked); masks aren't included then.
 	 */
-	export function exportLayered(
-		frame?: { pairs: [number, number][]; transparent?: boolean }
-	): PsdDoc | null {
+	export function exportLayered(frame?: {
+		pairs: [number, number][];
+		transparent?: boolean;
+	}): PsdDoc | null {
 		if (!paint || !ctx) return null;
 		render();
 		const groups = new Map(groupList().map((g) => [g.id, g]));
@@ -3331,9 +3332,7 @@
 			if (!shown) return paint!.layerRgba(l.id);
 			const d = shown.get(l.id) ?? 0;
 			const rgba = d ? paint!.drawingRgba(d) : null;
-			return rgba && rgba.length === width * height * 4
-				? rgba
-				: new Uint8Array(width * height * 4);
+			return rgba && rgba.length === width * height * 4 ? rgba : new Uint8Array(width * height * 4);
 		};
 		const toLayer = (l: LayerInfo): PsdLayer => {
 			const maskRgba = l.mask && !frame ? paint!.maskThumbnail(l.id, width, height) : null;
