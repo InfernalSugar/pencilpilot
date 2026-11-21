@@ -180,6 +180,7 @@
 		measureUnit = 0,
 		angleGuide = null,
 		quickShape = true,
+		closeFill = false,
 		onshape,
 		selectMode = 'replace',
 		selectFill = false,
@@ -299,6 +300,11 @@
 		angleGuide?: { p: [number, number]; deg: number } | null;
 		/** hold at the end of a stroke to snap it to a clean shape */
 		quickShape?: boolean;
+		/**
+		 * close and fill: a stroke that ends where it began fills inside with its colour
+		 * (not on shared canvases yet: others only get the stroke)
+		 */
+		closeFill?: boolean;
 		/** a stroke snapped to a shape */
 		onshape?: (kind: string) => void;
 		/** 0–1: steadies strokes (lazy brush, like Procreate's StreamLine) */
@@ -1231,6 +1237,37 @@
 		const pts = lassoFill;
 		lassoFill = null;
 		fillPolygon(pts, 'Lasso fill');
+	}
+
+	/**
+	 * Close and fill: a stroke that ends near where it began (within ~24 screen pixels,
+	 * and long enough to be a shape) fills inside with its colour, in the same undo step.
+	 */
+	function fillClosed(points: { x: number; y: number }[]): boolean {
+		if (!paint || points.length < 8) return false;
+		const near = 24 / Math.max(0.01, fit * zoom);
+		const [a, b] = [points[0], points.at(-1)!];
+		if (Math.hypot(b.x - a.x, b.y - a.y) > near) return false;
+		let path = 0;
+		for (let i = 1; i < points.length; i++)
+			path += Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y);
+		if (path < near * 4) return false;
+		const off = new OffscreenCanvas(width, height);
+		const c = off.getContext('2d')!;
+		c.fillStyle = '#fff';
+		c.beginPath();
+		c.moveTo(a.x, a.y);
+		for (const p of points.slice(1)) c.lineTo(p.x, p.y);
+		c.closePath();
+		c.fill();
+		const rgba = c.getImageData(0, 0, width, height).data;
+		const coverage = new Uint8Array(width * height);
+		for (let i = 0; i < coverage.length; i++) coverage[i] = rgba[i * 4 + 3];
+		const [r, g, bl] = rgbOf(color);
+		// (the stroke's own colour and opacity; one undo step with the stroke)
+		if (!paint.fillMask(coverage, r, g, bl, opacity)) return false;
+		paint.joinLastEdits();
+		return true;
 	}
 
 	/** Fill a closed shape with the brush colour (one undo step). */
@@ -2666,6 +2703,8 @@
 		else {
 			log.add(current);
 			if (lineStroke) log.labelLast('Straight line');
+			else if (closeFill && !current.eraser && !onlive && fillClosed(current.points))
+				log.labelLast('Close and fill');
 		}
 		current = null;
 		if (sendLive()) {

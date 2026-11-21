@@ -505,6 +505,7 @@
 		untrack(() => loadGuides(width, height));
 	});
 	toolOpts.quickShape = readLocal('pp.app.quickShape', true);
+	toolOpts.closeFill = readLocal('pp.app.closeFill', false);
 
 	/** a short note over the canvas (a snapped shape, a locked layer…) */
 	let canvasNote = $state('');
@@ -1141,6 +1142,18 @@
 			<button
 				type="button"
 				class="opt"
+				aria-pressed={toolOpts.closeFill}
+				title="Close and fill: a stroke that ends where it began fills inside with its colour"
+				onclick={() => {
+					toolOpts.closeFill = !toolOpts.closeFill;
+					keepLocal('pp.app.closeFill', toolOpts.closeFill);
+				}}
+			>
+				Close &amp; fill
+			</button>
+			<button
+				type="button"
+				class="opt"
 				disabled={!status || status.blank}
 				title="Watch the drawing being made, stroke by stroke"
 				onclick={() => (timelapseOpen = true)}
@@ -1180,6 +1193,7 @@
 					distort={toolOpts.distort}
 					warp={toolOpts.warp}
 					quickShape={toolOpts.quickShape}
+					closeFill={toolOpts.closeFill}
 					selectMode={toolOpts.selectMode}
 					selectFill={toolOpts.selectFill}
 					selectShape={toolOpts.selectShape}

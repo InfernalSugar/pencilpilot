@@ -1879,6 +1879,19 @@ impl Painter {
         ok
     }
 
+    /// Join the last two undo steps into one (a stroke and the fill that closed it).
+    pub fn join_last_edits(&mut self) -> bool {
+        if self.undo.len() < 2 || self.stroking.is_some() {
+            return false;
+        }
+        let newer = self.undo.pop().unwrap();
+        let older = self.undo.pop().unwrap();
+        // undoing: the newer one first
+        self.undo.push(Edit::Batch(vec![newer, older]));
+        self.edits += 1;
+        true
+    }
+
     /// Whether the last selection fill is still the latest edit (so it can be
     /// filled again with another colour or the selection as it is now).
     pub fn selection_fill_live(&self) -> bool {
@@ -4865,6 +4878,23 @@ mod tests {
         );
         // an unknown drawing is skipped
         assert!(p.onion_rgba(&[999, 0, 255], 1).iter().all(|&v| v == 0));
+    }
+
+    #[test]
+    fn two_edits_join_into_one_undo_step() {
+        let mut p = Painter::new(64, 64);
+        line(&mut p, &pen(), 20.0);
+        line(&mut p, &pen(), 40.0);
+        p.flush();
+        let one = p.rgba().to_vec();
+        assert!(p.join_last_edits());
+        assert!(p.undo());
+        p.flush();
+        assert!(!p.can_undo(), "both went in one step");
+        assert!(p.redo());
+        p.flush();
+        assert_eq!(p.rgba(), &one[..]);
+        assert!(!p.join_last_edits(), "only one step left to join");
     }
 
     #[test]
