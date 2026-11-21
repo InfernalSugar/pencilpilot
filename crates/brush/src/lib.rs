@@ -401,6 +401,9 @@ enum Edit {
         tiles: Vec<(u32, TileMap, Option<TileMap>)>,
     },
     Batch(Vec<Edit>),
+    /// A step of the app's own (the animation timeline changed): no pixels, just its
+    /// place in the history, so undo and redo come back to the app in order.
+    Note(u32),
 }
 
 /// The canvas: a stack of layers (bottom → top) over white paper, the
@@ -1155,6 +1158,7 @@ impl Painter {
                     tiles: old,
                 }
             }
+            Edit::Note(id) => Edit::Note(id),
             Edit::Batch(edits) => {
                 let mut inv: Vec<Edit> = edits.into_iter().map(|e| self.apply(e)).collect();
                 inv.reverse();
@@ -1880,6 +1884,23 @@ impl Painter {
     }
 
     /// Join the last two undo steps into one (a stroke and the fill that closed it).
+    /// Put a step of the app's own in the history (see [`Edit::Note`]); `id` > 0.
+    pub fn push_note(&mut self, id: u32) -> bool {
+        if id == 0 || self.stroking.is_some() {
+            return false;
+        }
+        self.push_undo(Edit::Note(id));
+        true
+    }
+
+    /// The app's step the next undo / redo goes back over (0: none).
+    pub fn undo_note(&self) -> u32 {
+        self.undo.last().map_or(0, edit_note)
+    }
+    pub fn redo_note(&self) -> u32 {
+        self.redo.last().map_or(0, edit_note)
+    }
+
     pub fn join_last_edits(&mut self) -> bool {
         if self.undo.len() < 2 || self.stroking.is_some() {
             return false;
@@ -4044,6 +4065,14 @@ fn swap_tiles(tiles: &mut TileMap, snap: Snapshot) -> Snapshot {
 }
 
 /// The drawing an undo step changes (the first one, for a batch; 0 for none).
+fn edit_note(e: &Edit) -> u32 {
+    match e {
+        Edit::Note(id) => *id,
+        Edit::Batch(list) => list.iter().map(edit_note).find(|&d| d != 0).unwrap_or(0),
+        _ => 0,
+    }
+}
+
 fn edit_drawing(e: &Edit) -> u32 {
     match e {
         Edit::Tiles {
@@ -4971,6 +5000,34 @@ mod tests {
         p.flush();
         assert_eq!(p.rgba(), &one[..]);
         assert!(!p.join_last_edits(), "only one step left to join");
+    }
+
+    #[test]
+    fn the_apps_steps_take_their_place_in_the_history() {
+        let mut p = Painter::new(64, 64);
+        line(&mut p, &pen(), 20.0);
+        assert!(p.push_note(7));
+        assert!(!p.push_note(0));
+        assert_eq!(p.undo_note(), 7);
+        assert_eq!(p.undo_drawing(), 0, "a note changes no drawing");
+        p.flush();
+        let drawn = p.rgba().to_vec();
+        // undoing the note changes no pixels, and comes back on redo
+        assert!(p.undo());
+        p.flush();
+        assert_eq!(p.rgba(), &drawn[..]);
+        assert_eq!(p.redo_note(), 7);
+        assert_eq!(p.undo_note(), 0);
+        assert!(p.redo());
+        // joined with the stroke before it: one step that names both
+        line(&mut p, &pen(), 40.0);
+        assert!(p.push_note(8));
+        assert!(p.join_last_edits());
+        assert_eq!(p.undo_note(), 8);
+        assert_ne!(p.undo_drawing(), 0);
+        assert!(p.undo());
+        assert_eq!(p.redo_note(), 8);
+        assert_eq!(p.undo_note(), 7);
     }
 
     #[test]

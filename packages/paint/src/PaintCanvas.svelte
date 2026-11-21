@@ -2928,6 +2928,22 @@
 		notify();
 	}
 
+	/**
+	 * A step of the app's own in the history (an animation timeline edit): undo and redo
+	 * reach it in order with the drawing steps (`undoNote` / `redoNote` say when).
+	 * `join`: it belongs with the step just before (a stroke that started a drawing).
+	 */
+	export function historyNote(id: number, label: string, join = false) {
+		if (!paint?.pushNote(id)) return false;
+		log.layerChange();
+		log.labelLast(label);
+		if (join && paint.joinLastEdits()) log.joinLast();
+		notify();
+		return true;
+	}
+	export const undoNote = () => paint?.undoNote() ?? 0;
+	export const redoNote = () => paint?.redoNote() ?? 0;
+
 	// ---- drawings (animation cels) ----
 	// Each layer shows one drawing; the others are kept by the engine. A timeline
 	// says which drawing each layer shows on each frame (see the app's timeline).

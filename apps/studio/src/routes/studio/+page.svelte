@@ -205,7 +205,56 @@
 					setStaticDrawing(trackIn(cut, l.id), l.drawing);
 			} else if (drawingAt(cut.tracks[l.id], f) !== l.drawing)
 				setDrawing(trackIn(cut, l.id), f, l.drawing);
+			// (one undo step with the stroke that made the drawing)
+			tlJoin = true;
 		}
+	}
+
+	// ---- undo for the timeline: each edit is a step in the canvas's history ----
+	/** the timeline as of its last step, and which canvas that was on */
+	let tlSaved = '';
+	let tlFor = -1;
+	/** step id → the timeline before and after it */
+	// eslint-disable-next-line svelte/prefer-svelte-reactivity -- history bookkeeping, never rendered
+	const tlSteps = new Map<number, { before: string; after: string }>();
+	let tlNext = 1;
+	/** what the next timeline step is called in the History panel */
+	let tlLabel = '';
+	/** the next timeline step goes with the canvas's last step */
+	let tlJoin = false;
+
+	/** If the timeline changed since its last step, make the change a step. */
+	function recordTimeline() {
+		if (!canvas || timelineFor !== canvasKey) return;
+		const now = JSON.stringify(timeline);
+		if (tlFor !== canvasKey) {
+			// a new document: its timeline is where history starts
+			[tlSaved, tlFor] = [now, canvasKey];
+			tlSteps.clear();
+		}
+		const [join, label] = [tlJoin, tlLabel || 'Timeline change'];
+		[tlJoin, tlLabel] = [false, ''];
+		if (now === tlSaved) return;
+		const id = tlNext++;
+		tlSteps.set(id, { before: tlSaved, after: now });
+		tlSaved = now;
+		canvas.historyNote(id, label, join);
+	}
+	$effect(() => {
+		void docVersion;
+		void timelineFor;
+		untrack(recordTimeline);
+	});
+
+	/** Undo / redo reached a timeline step: put the timeline as it was. */
+	function putTimeline(json: string | undefined) {
+		if (!json) return;
+		timeline = JSON.parse(json) as Timeline;
+		tlSaved = json;
+		scene = Math.min(scene, timeline.scenes.length - 1);
+		cutIndex = Math.min(cutIndex, theScene().cuts.length - 1);
+		docVersion++;
+		void showFrame();
 	}
 
 	/** frame changes, one after another (fetching drawings takes a moment) */
@@ -306,6 +355,7 @@
 			}
 		}
 		soundTick++;
+		tlLabel = 'Add sound';
 		docVersion++;
 	}
 
@@ -315,6 +365,7 @@
 		const s = theScene();
 		if (playing && s.markers?.some((m) => m.frame === f)) return;
 		toggleMarker(s, f);
+		tlLabel = 'Marker';
 		docVersion++;
 	}
 
@@ -343,6 +394,7 @@
 		const place = async () => {
 			if (!layer || !ids.length) return;
 			placeFrames(trackIn(theCut(), layer), frame, ids);
+			tlLabel = 'Import frames';
 			if (status?.layers.some((l) => l.id === drawingOn)) c.selectLayer(drawingOn);
 			docVersion++;
 			await showFrame();
@@ -578,6 +630,7 @@
 			if (lipStop) throw new Error('cancelled');
 			const shapes = shapeFrames(cues, fps, r.frames, lipSettings.step, lipSettings.lead);
 			writeMouths(trackIn(theCut(), ls.layer), r.from, shapes, chart);
+			tlLabel = 'Lip-sync';
 			lipSync = null;
 			note(`Lip-synced ${r.frames} frames of “${r.clip.name}”.`, 3000);
 			timelineEdited(true);
@@ -969,8 +1022,11 @@
 		// (a frame still coming from the store: let it arrive first)
 		await showQueue;
 		if (toolOpts.adjustOpen) toolOpts.closeAdjust(false);
+		recordTimeline();
+		const step = canvas?.undoNote() ?? 0;
 		await reveal(canvas?.undoDrawing() ?? 0);
 		canvas?.undo();
+		if (step) putTimeline(tlSteps.get(step)?.before);
 	}
 	/** The History panel: several steps, each with its drawing brought back first. */
 	async function historyGo(steps: number) {
@@ -980,8 +1036,11 @@
 		// (a frame still coming from the store: let it arrive first)
 		await showQueue;
 		if (toolOpts.adjustOpen) toolOpts.closeAdjust(false);
+		recordTimeline();
+		const step = canvas?.redoNote() ?? 0;
 		await reveal(canvas?.redoDrawing() ?? 0);
 		canvas?.redo();
+		if (step) putTimeline(tlSteps.get(step)?.after);
 	}
 	// paste a picture (or what was copied) as a new layer
 	$effect(() => {

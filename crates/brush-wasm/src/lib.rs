@@ -529,6 +529,24 @@ impl PaintCanvas {
     }
 
     /// Paint a coverage mask (one byte per canvas pixel) in this colour: the lasso fill.
+    /// A step of the app's own in the history (the timeline changed); `id` > 0.
+    #[wasm_bindgen(js_name = pushNote)]
+    pub fn push_note(&mut self, id: u32) -> bool {
+        self.inner.push_note(id)
+    }
+
+    /// The app's step the next undo goes back over (0 = none).
+    #[wasm_bindgen(js_name = undoNote)]
+    pub fn undo_note(&self) -> u32 {
+        self.inner.undo_note()
+    }
+
+    /// The app's step the next redo goes forward over (0 = none).
+    #[wasm_bindgen(js_name = redoNote)]
+    pub fn redo_note(&self) -> u32 {
+        self.inner.redo_note()
+    }
+
     /// Join the last two undo steps into one.
     #[wasm_bindgen(js_name = joinLastEdits)]
     pub fn join_last_edits(&mut self) -> bool {
