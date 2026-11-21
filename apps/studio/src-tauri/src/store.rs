@@ -103,6 +103,7 @@ pub fn recovery_write(
     id: &str,
     packet: &[u8],
     path: Option<&str>,
+    frames: Option<&mut anim::FrameStore>,
 ) -> Result<(), String> {
     check_id(id)?;
     let dir = recovery_dir(data);
@@ -112,6 +113,7 @@ pub fn recovery_write(
         packet,
         &format!("PencilPilot {}", env!("CARGO_PKG_VERSION")),
         &now,
+        frames,
     )?;
     p.save(&dir.join(format!("{id}.ppstudio")))
         .map_err(|e| e.to_string())?;
@@ -155,9 +157,13 @@ pub fn recovery_list(data: &Path) -> Vec<RecoveryItem> {
     out
 }
 
-pub fn recovery_open(data: &Path, id: &str) -> Result<Vec<u8>, String> {
+pub fn recovery_open(
+    data: &Path,
+    id: &str,
+    frames: Option<&mut anim::FrameStore>,
+) -> Result<Vec<u8>, String> {
     check_id(id)?;
-    project::open(&recovery_dir(data).join(format!("{id}.ppstudio")))
+    project::open(&recovery_dir(data).join(format!("{id}.ppstudio")), frames)
 }
 
 pub fn recovery_discard(data: &Path, id: &str) -> Result<(), String> {
@@ -239,9 +245,17 @@ pub fn versions_list(data: &Path, project_file: &Path) -> Vec<VersionItem> {
     out
 }
 
-pub fn version_open(data: &Path, project_file: &Path, id: &str) -> Result<Vec<u8>, String> {
+pub fn version_open(
+    data: &Path,
+    project_file: &Path,
+    id: &str,
+    frames: Option<&mut anim::FrameStore>,
+) -> Result<Vec<u8>, String> {
     check_id(id)?;
-    project::open(&versions_dir(data, project_file).join(format!("{id}.ppstudio")))
+    project::open(
+        &versions_dir(data, project_file).join(format!("{id}.ppstudio")),
+        frames,
+    )
 }
 
 // ---- settings ----
@@ -425,16 +439,16 @@ mod tests {
     fn recovery_copies_are_listed_opened_and_discarded() {
         let data = temp("recovery");
         assert!(recovery_list(&data).is_empty());
-        recovery_write(&data, "doc-1", &packet(10), Some("/art/fox.ppstudio")).unwrap();
-        recovery_write(&data, "doc-2", &packet(20), None).unwrap();
+        recovery_write(&data, "doc-1", &packet(10), Some("/art/fox.ppstudio"), None).unwrap();
+        recovery_write(&data, "doc-2", &packet(20), None, None).unwrap();
         // writing again replaces it
-        recovery_write(&data, "doc-1", &packet(30), Some("/art/fox.ppstudio")).unwrap();
+        recovery_write(&data, "doc-1", &packet(30), Some("/art/fox.ppstudio"), None).unwrap();
         let list = recovery_list(&data);
         assert_eq!(list.len(), 2);
         let fox = list.iter().find(|i| i.id == "doc-1").unwrap();
         assert_eq!(fox.path.as_deref(), Some("/art/fox.ppstudio"));
         assert_eq!((fox.width, fox.height), (32, 32));
-        assert_eq!(shade_of(&recovery_open(&data, "doc-1").unwrap()), 30);
+        assert_eq!(shade_of(&recovery_open(&data, "doc-1", None).unwrap()), 30);
         recovery_discard(&data, "doc-1").unwrap();
         recovery_discard(&data, "doc-1").unwrap(); // already gone: fine
         assert_eq!(recovery_list(&data).len(), 1);
@@ -446,10 +460,10 @@ mod tests {
         let data = temp("ids");
         for bad in ["", "../x", "a/b", "UPPER", "a.b"] {
             assert!(
-                recovery_write(&data, bad, &packet(1), None).is_err(),
+                recovery_write(&data, bad, &packet(1), None, None).is_err(),
                 "{bad}"
             );
-            assert!(recovery_open(&data, bad).is_err(), "{bad}");
+            assert!(recovery_open(&data, bad, None).is_err(), "{bad}");
         }
         fs::remove_dir_all(&data).unwrap();
     }
@@ -460,22 +474,22 @@ mod tests {
         let file = data.join("walk.ppstudio");
         // first save: nothing to keep yet
         keep_version(&data, &file, VERSIONS_KEPT).unwrap();
-        project::save(&file, &packet(1), "t").unwrap();
+        project::save(&file, &packet(1), "t", None).unwrap();
         assert!(versions_list(&data, &file).is_empty());
         for shade in 2..=4 {
             keep_version(&data, &file, VERSIONS_KEPT).unwrap();
-            project::save(&file, &packet(shade), "t").unwrap();
+            project::save(&file, &packet(shade), "t", None).unwrap();
             std::thread::sleep(std::time::Duration::from_millis(3));
         }
         let list = versions_list(&data, &file);
         assert_eq!(list.len(), 3);
         // newest first: the version saved just before the current file
         assert_eq!(
-            shade_of(&version_open(&data, &file, &list[0].id).unwrap()),
+            shade_of(&version_open(&data, &file, &list[0].id, None).unwrap()),
             3
         );
         assert_eq!(
-            shade_of(&version_open(&data, &file, &list[2].id).unwrap()),
+            shade_of(&version_open(&data, &file, &list[2].id, None).unwrap()),
             1
         );
         assert!(list[0].bytes > 0);
@@ -486,7 +500,7 @@ mod tests {
     fn only_the_newest_versions_stay() {
         let data = temp("prune");
         let file = data.join("p.ppstudio");
-        project::save(&file, &packet(1), "t").unwrap();
+        project::save(&file, &packet(1), "t", None).unwrap();
         for _ in 0..VERSIONS_KEPT + 5 {
             keep_version(&data, &file, VERSIONS_KEPT).unwrap();
             std::thread::sleep(std::time::Duration::from_millis(2));
@@ -500,8 +514,8 @@ mod tests {
         let data = temp("recent");
         let a = data.join("a.ppstudio");
         let b = data.join("b.ppstudio");
-        project::save(&a, &packet(1), "t").unwrap();
-        project::save(&b, &packet(2), "t").unwrap();
+        project::save(&a, &packet(1), "t", None).unwrap();
+        project::save(&b, &packet(2), "t", None).unwrap();
         recent_add(&data, &a).unwrap();
         recent_add(&data, &b).unwrap();
         recent_add(&data, &a).unwrap(); // again: back to the top, not twice
@@ -535,7 +549,7 @@ mod tests {
         assert!(settings_set(&data, &serde_json::json!([1, 2])).is_err());
         // 0: no versions at all
         let file = data.join("p.ppstudio");
-        project::save(&file, &packet(1), "t").unwrap();
+        project::save(&file, &packet(1), "t", None).unwrap();
         keep_version(&data, &file, 0).unwrap();
         assert!(versions_list(&data, &file).is_empty());
         fs::remove_dir_all(&data).unwrap();

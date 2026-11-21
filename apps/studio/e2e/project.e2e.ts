@@ -23,6 +23,17 @@ async function stubTauri(page: Page, stub: Stub = {}) {
 	await page.route('**/__packet', (r) =>
 		kept ? r.fulfill({ body: kept }) : r.fulfill({ status: 404 })
 	);
+	// the frame store lives here, so it outlasts a page (as the app's Rust side does)
+	const frameStore = new Map<string, Buffer>();
+	await page.route('**/__frame/*', async (r) => {
+		const id = r.request().url().split('/').pop()!;
+		if (r.request().method() === 'POST') {
+			frameStore.set(id, r.request().postDataBuffer() ?? Buffer.alloc(0));
+			return r.fulfill({ body: 'ok' });
+		}
+		const b = frameStore.get(id);
+		return b ? r.fulfill({ body: b }) : r.fulfill({ status: 404 });
+	});
 	await page.addInitScript((stub: Stub) => {
 		const w = window as unknown as Record<string, unknown>;
 		const calls: { cmd: string; path?: string; bytes?: number; head?: number[]; json?: string }[] =
@@ -30,6 +41,10 @@ async function stubTauri(page: Page, stub: Stub = {}) {
 		w.__calls = calls;
 		w.isTauri = true;
 		const packet = async () => (await fetch('/__packet')).arrayBuffer();
+		// the frame store: drawing id → its tiles as the engine packs them
+		const frames = new Map<number, Uint8Array>();
+		w.__frames = frames;
+		const TILE = 64 * 64 * 4;
 		w.__TAURI_INTERNALS__ = {
 			transformCallback: () => 0,
 			unregisterCallback: () => {},
@@ -78,6 +93,43 @@ async function stubTauri(page: Page, stub: Stub = {}) {
 						return stub.recent ?? [];
 					case 'export_write':
 						return path;
+					case 'frames_put': {
+						const b = bytes!;
+						const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+						let at = 4;
+						for (let i = 0, n = v.getUint32(0, true); i < n; i++) {
+							const id = v.getUint32(at, true);
+							const end = at + 8 + v.getUint32(at + 4, true) * (8 + TILE);
+							frames.set(id, b.slice(at + 4, end));
+							await fetch(`/__frame/${id}`, { method: 'POST', body: b.slice(at + 4, end) });
+							at = end;
+						}
+						return null;
+					}
+					case 'frames_get': {
+						for (const id of (args as { ids: number[] }).ids)
+							if (!frames.has(id)) {
+								const r = await fetch(`/__frame/${id}`);
+								if (r.ok) frames.set(id, new Uint8Array(await r.arrayBuffer()));
+							}
+						const ids = (args as { ids: number[] }).ids.filter((id) => frames.has(id));
+						const size = ids.reduce((n, id) => n + 4 + frames.get(id)!.length, 4);
+						const out = new Uint8Array(size);
+						const v = new DataView(out.buffer);
+						v.setUint32(0, ids.length, true);
+						let at = 4;
+						for (const id of ids) {
+							v.setUint32(at, id, true);
+							out.set(frames.get(id)!, at + 4);
+							at += 4 + frames.get(id)!.length;
+						}
+						return out.buffer;
+					}
+					case 'frames_retain': {
+						const keep = (args as { keep: number[] }).keep;
+						for (const id of [...frames.keys()]) if (!keep.includes(id)) frames.delete(id);
+						return null;
+					}
 					default:
 						// recovery writes, events (window close) and anything else
 						return null;
@@ -544,4 +596,60 @@ test('timeline: drag a drawing to move it, or its edge to hold it longer', async
 	await expect(tl.getByRole('button', { name: /drawing 2, frame 4$/ })).toBeVisible();
 	await expect(tl.getByTestId('frame')).toHaveText('4');
 	await expect.poll(() => ink(page, 0, 0.45)).toBeGreaterThan(50);
+});
+
+test('frame store: drawings leave the window and come back exactly', async ({ page }) => {
+	await stubTauri(page);
+	// keep just one drawing in the engine besides the ones showing
+	await page.addInitScript(() => localStorage.setItem('pp.dev.keepDrawings', '1'));
+	await ready(page);
+	const tl = page.getByRole('region', { name: 'Timeline' });
+	const inks: number[] = [];
+	for (let i = 0; i < 4; i++) {
+		if (i) await tl.getByRole('button', { name: 'New drawing' }).click();
+		await scribble(page, 0.15 + i * 0.2);
+		let last = -1;
+		await expect
+			.poll(async () => {
+				const before = last;
+				last = await ink(page);
+				return last === before && last > 0;
+			})
+			.toBe(true);
+		inks.push(last);
+	}
+	// every frame again: each drawing back from the store, the same as drawn
+	for (let i = 0; i < 4; i++) {
+		await tl.getByRole('button', { name: `Frame ${i + 1}`, exact: true }).click();
+		await expect.poll(() => ink(page, 0.1 + i * 0.2, 0.3 + i * 0.2)).toBeGreaterThan(50);
+		await expect
+			.poll(async () => Math.abs((await ink(page)) - inks[i]) / inks[i])
+			.toBeLessThan(0.02);
+	}
+	const sent = (await calls(page)).filter((c) => c.cmd === 'frames_put').length;
+	const fetched = (await calls(page)).filter((c) => c.cmd === 'frames_get').length;
+	expect(sent).toBeGreaterThan(0);
+	expect(fetched).toBeGreaterThan(0);
+	expect(
+		await page.evaluate(
+			() => (window as unknown as { __frames: Map<number, unknown> }).__frames.size
+		)
+	).toBeGreaterThanOrEqual(3);
+	// undo from frame 1: the last stroke was frame 4's, whose drawing left the window;
+	// it comes back, frame 4 shows, and the stroke goes
+	await tl.getByRole('button', { name: 'Frame 1', exact: true }).click();
+	await page.keyboard.press('Control+z');
+	await expect(tl.getByTestId('frame')).toHaveText('4');
+	await expect.poll(() => ink(page)).toBe(0);
+	await page.keyboard.press('Control+Shift+z');
+	await expect.poll(async () => Math.abs((await ink(page)) - inks[3]) / inks[3]).toBeLessThan(0.02);
+	// saved: the packet names the drawings without their pixels (the store has them)
+	await page.keyboard.press('Control+s');
+	await expect(page.getByTestId('project-name')).toHaveText('Walk cycle', { timeout: 20_000 });
+	await page.keyboard.press('Control+o');
+	await expect(tl.getByRole('button', { name: /drawing 4, frame 4$/ })).toBeVisible({
+		timeout: 20_000
+	});
+	await tl.getByRole('button', { name: 'Frame 2', exact: true }).click();
+	await expect.poll(async () => Math.abs((await ink(page)) - inks[1]) / inks[1]).toBeLessThan(0.02);
 });

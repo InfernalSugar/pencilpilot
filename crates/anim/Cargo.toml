@@ -1,0 +1,14 @@
+[package]
+name = "pencilpilot-anim"
+description = "PencilPilot's animation frame store: every drawing's tiles, each kept once, in memory up to a budget and on disk past it"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[lib]
+name = "anim"
+
+[dependencies]
+blake3 = "1"
+pencilpilot-ppstudio = { path = "../ppstudio" }

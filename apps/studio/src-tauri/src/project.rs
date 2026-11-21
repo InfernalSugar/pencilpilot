@@ -14,6 +14,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use anim::FrameStore;
 use ppstudio::{Canvas, Frame, Group, Layer, Project, Scene, Timeline};
 use serde::{Deserialize, Serialize};
 
@@ -36,8 +37,10 @@ pub struct PacketLayer {
 pub struct PacketDrawing {
     pub id: u32,
     pub layer: u32,
-    /// [offset, length] of whole-canvas RGBA8 in the blobs
-    pub rgba: [usize; 2],
+    /// [offset, length] of whole-canvas RGBA8 in the blobs; none: it's in the frame
+    /// store (the app's [`FrameStore`])
+    #[serde(default)]
+    pub rgba: Option<[usize; 2]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -97,7 +100,12 @@ fn slice(blobs: &[u8], at: [usize; 2]) -> Result<&[u8], String> {
 }
 
 /// The window's document → a project file's contents.
-pub fn to_project(packet: &[u8], app: &str, now: &str) -> Result<Project, String> {
+pub fn to_project(
+    packet: &[u8],
+    app: &str,
+    now: &str,
+    mut frames: Option<&mut FrameStore>,
+) -> Result<Project, String> {
     let (h, blobs) = decode(packet)?;
     let mut p = Project::new(app, now, h.canvas.width, h.canvas.height, h.fps.max(1));
     if let Some(created) = h.created {
@@ -116,23 +124,60 @@ pub fn to_project(packet: &[u8], app: &str, now: &str) -> Result<Project, String
         p.manifest.timeline.frames = vec![frame];
     } else {
         // an animation: every drawing (each with its layer's mask), and the scenes
+        let mut masks: std::collections::HashMap<u32, Option<Vec<ppstudio::TileRef>>> =
+            Default::default();
         for d in &h.drawings {
             let layer = h
                 .layers
                 .iter()
                 .find(|l| l.layer.id == d.layer)
                 .ok_or_else(|| format!("drawing {} names layer {}", d.id, d.layer))?;
+            let name = format!("D{}", d.id);
+            let Some(at) = d.rgba else {
+                // in the frame store: its tiles go straight in
+                let store = frames
+                    .as_deref_mut()
+                    .ok_or_else(|| format!("drawing {} isn't in the packet", d.id))?;
+                let mask = match masks.get(&d.layer) {
+                    Some(m) => m.clone(),
+                    None => {
+                        let m = match layer.mask {
+                            Some(m) => {
+                                Some(p.put_mask(slice(blobs, m)?).map_err(|e| e.to_string())?)
+                            }
+                            None => None,
+                        };
+                        masks.insert(d.layer, m.clone());
+                        m
+                    }
+                };
+                if store.contains(d.id) {
+                    store
+                        .write_into(&mut p, d.id, &name, mask)
+                        .map_err(|e| e.to_string())?;
+                } else {
+                    // never painted
+                    p.manifest.drawings.insert(
+                        name,
+                        ppstudio::Drawing {
+                            tiles: vec![],
+                            mask,
+                        },
+                    );
+                }
+                continue;
+            };
             let mask = layer.mask.map(|m| slice(blobs, m)).transpose()?;
             // an empty drawing comes as no bytes at all
             let blank;
-            let rgba = match slice(blobs, d.rgba)? {
+            let rgba = match slice(blobs, at)? {
                 [] => {
                     blank = vec![0u8; (h.canvas.width * h.canvas.height * 4) as usize];
                     &blank[..]
                 }
                 px => px,
             };
-            p.put_drawing(&format!("D{}", d.id), rgba, mask)
+            p.put_drawing(&name, rgba, mask)
                 .map_err(|e| e.to_string())?;
         }
         p.manifest.timeline.frames = Timeline::flatten(&h.scenes);
@@ -156,7 +201,9 @@ pub fn to_project(packet: &[u8], app: &str, now: &str) -> Result<Project, String
 }
 
 /// A project file's contents → the packet the window restores from (its first frame).
-pub fn from_project(p: &Project) -> Result<Vec<u8>, String> {
+/// With a frame store, an animation's drawings go into it (emptied first) and the
+/// packet names them without pixels; the window fetches the ones it shows.
+pub fn from_project(p: &Project, mut frames: Option<&mut FrameStore>) -> Result<Vec<u8>, String> {
     let m = &p.manifest;
     let frame = &m.timeline.frames[0];
     let mut blobs = Vec::new();
@@ -166,9 +213,17 @@ pub fn from_project(p: &Project) -> Result<Vec<u8>, String> {
         at
     };
     let n = (m.canvas.width * m.canvas.height) as usize;
+    let stored = frames.is_some() && !m.timeline.scenes.is_empty();
+    if let Some(store) = frames.as_deref_mut()
+        && stored
+    {
+        store.retain(&Default::default());
+    }
     let mut layers = Vec::new();
     for l in &m.layers {
         let (rgba, mask) = match frame.cels.get(&l.id) {
+            // (an animation's layers come empty: their drawings come from the store)
+            Some(d) if stored => (Vec::new(), p.drawing(d).map_err(|e| e.to_string())?.1),
             Some(d) => p.drawing(d).map_err(|e| e.to_string())?,
             None => (vec![0; n * 4], None),
         };
@@ -189,12 +244,14 @@ pub fn from_project(p: &Project) -> Result<Vec<u8>, String> {
                 if drawings.iter().any(|d: &PacketDrawing| d.id == id) {
                     continue;
                 }
-                let (rgba, _) = p.drawing(name).map_err(|e| e.to_string())?;
-                drawings.push(PacketDrawing {
-                    id,
-                    layer,
-                    rgba: put(&rgba),
-                });
+                let rgba = match frames.as_deref_mut() {
+                    Some(store) => {
+                        store.read_from(p, name, id).map_err(|e| e.to_string())?;
+                        None
+                    }
+                    None => Some(put(&p.drawing(name).map_err(|e| e.to_string())?.0)),
+                };
+                drawings.push(PacketDrawing { id, layer, rgba });
             }
         }
     }
@@ -270,14 +327,19 @@ pub fn percent_decode(s: &str) -> Result<String, String> {
     String::from_utf8(out).map_err(|_| "bad path encoding".into())
 }
 
-pub fn save(path: &Path, packet: &[u8], app: &str) -> Result<(), String> {
-    let p = to_project(packet, app, &now_rfc3339())?;
+pub fn save(
+    path: &Path,
+    packet: &[u8],
+    app: &str,
+    frames: Option<&mut FrameStore>,
+) -> Result<(), String> {
+    let p = to_project(packet, app, &now_rfc3339(), frames)?;
     p.save(path).map_err(|e| e.to_string())
 }
 
-pub fn open(path: &Path) -> Result<Vec<u8>, String> {
+pub fn open(path: &Path, frames: Option<&mut FrameStore>) -> Result<Vec<u8>, String> {
     let p = Project::open(path).map_err(|e| e.to_string())?;
-    from_project(&p)
+    from_project(&p, frames)
 }
 
 #[cfg(test)]
@@ -353,12 +415,12 @@ mod tests {
             PacketDrawing {
                 id: 7,
                 layer: 3,
-                rgba: h.layers[0].rgba,
+                rgba: Some(h.layers[0].rgba),
             },
             PacketDrawing {
                 id: 9,
                 layer: 3,
-                rgba: [at, second.len()],
+                rgba: Some([at, second.len()]),
             },
         ];
         h.scenes = vec![Scene {
@@ -369,18 +431,41 @@ mod tests {
             }],
         }];
         let pk = encode(&h, &blobs).unwrap();
-        let p = to_project(&pk, "test", "2026-11-21T00:00:00Z").unwrap();
+        let p = to_project(&pk, "test", "2026-11-21T00:00:00Z", None).unwrap();
         assert_eq!(p.manifest.timeline.frames.len(), 2);
         assert_eq!(p.manifest.timeline.frames[1].hold, 3);
-        let back = from_project(&p).unwrap();
+        let back = from_project(&p, None).unwrap();
         let (h2, b2) = decode(&back).unwrap();
         assert_eq!(h2.scenes, h.scenes);
         assert_eq!(h2.drawings.len(), 2);
         let d9 = h2.drawings.iter().find(|d| d.id == 9).unwrap();
         assert_eq!(d9.layer, 3);
-        assert_eq!(slice(b2, d9.rgba).unwrap(), &second[..]);
+        assert_eq!(slice(b2, d9.rgba.unwrap()).unwrap(), &second[..]);
         // the layer shows the first frame's drawing
         assert_eq!(slice(b2, h2.layers[0].rgba).unwrap(), &rgba[..]);
+
+        // with the frame store: opening puts the drawings in it, the packet carries none
+        let mut store = FrameStore::new(usize::MAX, None).unwrap();
+        store.put(99, []).unwrap(); // the last document's: forgotten on opening
+        let back = from_project(&p, Some(&mut store)).unwrap();
+        let (h3, b3) = decode(&back).unwrap();
+        assert!(h3.drawings.iter().all(|d| d.rgba.is_none()));
+        assert!(h3.layers[0].rgba[1] == 0, "the layer comes empty");
+        assert_eq!(
+            slice(b3, h3.layers[0].mask.unwrap()).unwrap().len(),
+            100 * 70
+        );
+        assert!(store.contains(7) && store.contains(9) && !store.contains(99));
+        // and saving takes them from the store
+        let mut h4 = h3.clone();
+        h4.layers[0].rgba = [0, 0];
+        let pk4 = encode(&h4, b3).unwrap();
+        let p4 = to_project(&pk4, "test", "now", Some(&mut store)).unwrap();
+        assert_eq!(p4.drawing("D9").unwrap().0, second);
+        assert_eq!(p4.drawing("D7").unwrap().0, rgba);
+        assert!(p4.manifest.drawings["D9"].mask.is_some());
+        // without a store, a packet naming stored drawings is refused
+        assert!(to_project(&pk4, "test", "now", None).is_err());
     }
 
     #[test]
@@ -389,8 +474,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pp-app-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("test.ppstudio");
-        save(&path, &pk, "PencilPilot test").unwrap();
-        let back = open(&path).unwrap();
+        save(&path, &pk, "PencilPilot test", None).unwrap();
+        let back = open(&path, None).unwrap();
         let (h, blobs) = decode(&back).unwrap();
         assert_eq!(h.layers.len(), 1);
         let l = &h.layers[0];
@@ -413,7 +498,10 @@ mod tests {
         assert!(decode(b"nope").is_err());
         let (mut pk, ..) = packet();
         pk.truncate(pk.len() - 10_000);
-        assert!(to_project(&pk, "t", "now").is_err(), "a layer past the end");
+        assert!(
+            to_project(&pk, "t", "now", None).is_err(),
+            "a layer past the end"
+        );
         assert!(project_path("relative/file").is_err());
         assert_eq!(
             project_path("/tmp/drawing").unwrap(),
