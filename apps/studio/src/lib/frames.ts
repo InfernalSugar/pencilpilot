@@ -67,6 +67,8 @@ export class FrameCache {
 	#dirty = new Set<number>();
 	/** the store has these (sent to it, or opened from a file) */
 	#stored = new Set<number>();
+	/** how many times each drawing was changed (playback re-renders the frames it's on) */
+	#versions = new Map<number, number>();
 	/** when each drawing was last shown or changed */
 	#used = new Map<number, number>();
 	#clock = 0;
@@ -88,8 +90,14 @@ export class FrameCache {
 		for (const id of ids) {
 			if (!id) continue;
 			this.#dirty.add(id);
+			this.#versions.set(id, (this.#versions.get(id) ?? 0) + 1);
 			this.#used.set(id, ++this.#clock);
 		}
+	}
+
+	/** A drawing's change count (it goes up with every change). */
+	version(id: number): number {
+		return this.#versions.get(id) ?? 0;
 	}
 
 	/** The store has these (a project was opened into it). */

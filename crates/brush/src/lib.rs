@@ -3389,7 +3389,17 @@ impl Painter {
     /// Recomposite changed tiles into the RGBA buffer. Returns the area that
     /// changed, or `None` if nothing did.
     /// One tile of the picture, composited (None if it's off the canvas).
-    fn composite_tile(&self, (tx, ty): TileKey) -> Option<ComposedTile> {
+    fn composite_tile(&self, key: TileKey) -> Option<ComposedTile> {
+        self.composite_tile_with(key, None)
+    }
+
+    /// One tile composited, with some layers showing other drawings (`over`: layer id →
+    /// that drawing's tiles; none = an empty cel).
+    fn composite_tile_with(
+        &self,
+        (tx, ty): TileKey,
+        over: Option<&HashMap<u32, Option<&TileMap>>>,
+    ) -> Option<ComposedTile> {
         let ts = TILE_SIZE as i32;
         let (w, h) = (self.width as i32, self.height as i32);
         let (px0, py0) = (tx * ts, ty * ts);
@@ -3417,7 +3427,10 @@ impl Painter {
                 let tile = if adjust.is_some() {
                     None
                 } else {
-                    l.colour().tiles.get(&(tx, ty))
+                    match over.and_then(|o| o.get(&l.id)) {
+                        Some(tiles) => tiles.and_then(|t| t.get(&(tx, ty))),
+                        None => l.colour().tiles.get(&(tx, ty)),
+                    }
                 };
                 (clipping || (visible && (tile.is_some() || adjust.is_some()))).then(|| {
                     TileSource {
@@ -3507,6 +3520,68 @@ impl Painter {
 
     pub fn rgba(&self) -> &[u8] {
         &self.rgba
+    }
+
+    /// Size of a [`Painter::render_frame`] picture made `shrink` times smaller.
+    pub fn frame_size(&self, shrink: u32) -> (u32, u32) {
+        let k = shrink.max(1);
+        (self.width.div_ceil(k), self.height.div_ceil(k))
+    }
+
+    /// The whole picture as it would look with other drawings showing (an animation
+    /// frame), without changing anything: `pairs` is (layer id, drawing id) flattened
+    /// (drawing 0 = an empty cel; layers not named show what they show). Made `shrink`
+    /// times smaller (each pixel the average of its square), as RGBA8 over the paper.
+    /// Drawings must be here (showing or kept); a missing one shows as empty.
+    pub fn render_frame(&self, pairs: &[u32], shrink: u32) -> Vec<u8> {
+        let k = shrink.max(1) as usize;
+        let over: HashMap<u32, Option<&TileMap>> = pairs
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&[l, d]| (l, self.drawing_tiles(d)))
+            .collect();
+        let ts = TILE_SIZE;
+        let (w, h) = (self.width as usize, self.height as usize);
+        let keys: Vec<TileKey> = (0..h.div_ceil(ts))
+            .flat_map(|ty| (0..w.div_ceil(ts)).map(move |tx| (tx as i32, ty as i32)))
+            .collect();
+        #[cfg(not(target_arch = "wasm32"))]
+        let done: Vec<ComposedTile> = {
+            use rayon::prelude::*;
+            keys.par_iter()
+                .filter_map(|&key| self.composite_tile_with(key, Some(&over)))
+                .collect()
+        };
+        #[cfg(target_arch = "wasm32")]
+        let done: Vec<ComposedTile> = keys
+            .iter()
+            .filter_map(|&key| self.composite_tile_with(key, Some(&over)))
+            .collect();
+        let (ow, oh) = (w.div_ceil(k), h.div_ceil(k));
+        let mut sum = vec![[0u32; 4]; ow * oh];
+        for t in done {
+            let tw = (t.x1 - t.x0) as usize;
+            for (row, y) in (t.y0..t.y1).enumerate() {
+                let o = (y as usize / k) * ow;
+                for (i, px) in t.px[row * tw..(row + 1) * tw].iter().enumerate() {
+                    let s = &mut sum[o + (t.x0 as usize + i) / k];
+                    s[0] += px[0] as u32;
+                    s[1] += px[1] as u32;
+                    s[2] += px[2] as u32;
+                    s[3] += 1;
+                }
+            }
+        }
+        let mut out = vec![255u8; ow * oh * 4];
+        for (px, s) in out.as_chunks_mut::<4>().0.iter_mut().zip(&sum) {
+            for c in 0..3 {
+                if let Some(v) = (s[c] + s[3] / 2).checked_div(s[3]) {
+                    px[c] = v as u8;
+                }
+            }
+        }
+        out
     }
 
     /// A small preview of one layer on its own (straight-alpha sRGB RGBA8,
@@ -4487,6 +4562,45 @@ mod tests {
         assert!(p.put_drawing_tiles(d, &back));
         p.undo();
         assert!(p.drawing_empty(d));
+    }
+
+    #[test]
+    fn frames_render_without_changing_the_canvas() {
+        let mut p = Painter::new(256, 128);
+        let layer = p.active_layer();
+        line(&mut p, &pen(), 30.0);
+        let first = p.layer_drawing(layer);
+        p.show_drawings(&[layer, 0]);
+        line(&mut p, &pen(), 100.0);
+        p.flush();
+        let before = p.rgba().to_vec();
+        // frame 1 at full size: the top line, not the bottom one
+        let f1 = p.render_frame(&[layer, first], 1);
+        let dark = |img: &[u8], w: usize, y0: usize, y1: usize| {
+            img[y0 * w * 4..y1 * w * 4]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|px| px[0] < 128)
+                .count()
+        };
+        assert!(dark(&f1, 256, 20, 40) > 50);
+        assert_eq!(dark(&f1, 256, 90, 110), 0);
+        // what shows now, at a quarter of the size (each side): about the same ink area
+        let small = p.render_frame(&[], 4);
+        assert_eq!(p.frame_size(4), (64, 32));
+        assert_eq!(small.len(), 64 * 32 * 4);
+        let grey = small
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|px| px[0] < 230)
+            .count();
+        assert!(grey > 5, "{grey}");
+        // an empty cel, and the canvas untouched by any of it
+        let blank = p.render_frame(&[layer, 0], 2);
+        assert!(blank.iter().all(|&v| v == 255));
+        assert_eq!(p.rgba(), &before[..]);
     }
 
     fn px(p: &Painter, x: u32, y: u32) -> [u8; 3] {

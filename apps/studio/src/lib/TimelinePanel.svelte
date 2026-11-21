@@ -25,13 +25,19 @@
 		type Timeline,
 		type Track
 	} from './timeline';
+	import type { PlayMode, PlayRange } from './playback';
 
 	let {
 		timeline,
 		scene = $bindable(0),
 		cut = $bindable(0),
 		frame = $bindable(0),
-		fps,
+		fps = $bindable(24),
+		playing = false,
+		playMode = $bindable<PlayMode>('loop'),
+		playRange = $bindable<PlayRange | null>(null),
+		onplay,
+		onrange,
 		layers,
 		active,
 		newDrawing,
@@ -42,7 +48,14 @@
 		scene?: number;
 		cut?: number;
 		frame?: number;
-		fps: number;
+		fps?: number;
+		playing?: boolean;
+		playMode?: PlayMode;
+		/** the frames played (none: the whole cut) */
+		playRange?: PlayRange | null;
+		onplay: () => void;
+		/** loop from / to the current frame */
+		onrange: (end: 'from' | 'to') => void;
 		/** bottom → top, as the canvas lists them */
 		layers: LayerInfo[];
 		/** the active layer's id */
@@ -199,6 +212,15 @@
 	}
 
 	const seconds = (f: number) => `${Math.floor(f / fps)}+${String(f % fps).padStart(2, '0')}`;
+
+	// ---- scrubbing: drag along the frame numbers ----
+	let scrubbing = false;
+	function scrubAt(e: PointerEvent) {
+		const ruler = e.currentTarget as HTMLElement;
+		const f = Math.floor((e.clientX - ruler.getBoundingClientRect().left) / CELL);
+		if (f !== frame) go(Math.max(0, Math.min(shown - 1, f)));
+	}
+	const inRange = (f: number) => !!playRange && f >= playRange.from && f <= playRange.to;
 </script>
 
 <section class="timeline" aria-label="Timeline">
@@ -233,6 +255,58 @@
 		<button type="button" class="b" title="A new scene after this one" onclick={newScene}>
 			+ Scene
 		</button>
+		<span class="sep"></span>
+		<button
+			type="button"
+			class="b play"
+			aria-pressed={playing}
+			aria-label={playing ? 'Stop' : 'Play'}
+			title={playing ? 'Stop' : 'Play the cut (or the loop range)'}
+			onclick={onplay}
+		>
+			{playing ? '■' : '▶'}
+		</button>
+		<select aria-label="Frames a second" title="Frames a second" bind:value={fps}>
+			{#each [6, 8, 12, 15, 24, 25, 30, 48, 50, 60] as n (n)}<option value={n}>
+					{n} fps
+				</option>{/each}
+		</select>
+		<div class="seg" role="radiogroup" aria-label="Play">
+			{#each [['once', 'Once'], ['loop', 'Loop'], ['pingpong', 'Ping-pong']] as [id, label] (id)}
+				<button
+					type="button"
+					class="b"
+					role="radio"
+					aria-checked={playMode === id}
+					onclick={() => (playMode = id as PlayMode)}
+				>
+					{label}
+				</button>
+			{/each}
+		</div>
+		<button
+			type="button"
+			class="b"
+			title="Play from this frame"
+			aria-pressed={!!playRange && playRange.from === frame}
+			onclick={() => onrange('from')}
+		>
+			In
+		</button>
+		<button
+			type="button"
+			class="b"
+			title="Play to this frame"
+			aria-pressed={!!playRange && playRange.to === frame}
+			onclick={() => onrange('to')}
+		>
+			Out
+		</button>
+		{#if playRange}
+			<button type="button" class="b" title="Play the whole cut" onclick={() => (playRange = null)}>
+				Frames {playRange.from + 1}–{playRange.to + 1} ×
+			</button>
+		{/if}
 		<span class="sep"></span>
 		<button type="button" class="b" aria-label="Previous frame" onclick={() => go(frame - 1)}>
 			‹
@@ -335,13 +409,27 @@
 
 	<div class="grid" style="--cell: {CELL}px; --cols: {shown}">
 		<div class="corner"></div>
-		<div class="ruler" role="group" aria-label="Frames">
+		<div
+			class="ruler"
+			role="group"
+			aria-label="Frames"
+			onpointerdown={(e) => {
+				if (e.button !== 0) return;
+				scrubbing = true;
+				(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+				scrubAt(e);
+			}}
+			onpointermove={(e) => scrubbing && scrubAt(e)}
+			onpointerup={() => (scrubbing = false)}
+			onpointercancel={() => (scrubbing = false)}
+		>
 			{#each Array.from({ length: shown }, (_, i) => i) as f (f)}
 				<button
 					type="button"
 					class="tick"
 					class:now={f === frame}
 					class:past={f >= length}
+					class:ranged={inRange(f)}
 					aria-label="Frame {f + 1}"
 					aria-current={f === frame ? 'true' : undefined}
 					onclick={() => go(f)}
@@ -445,6 +533,7 @@
 		cursor: not-allowed;
 	}
 	.b[aria-pressed='true'],
+	.b[aria-checked='true'],
 	.b.strong {
 		background: var(--pp-accent-strong);
 		color: #fff;
@@ -494,6 +583,7 @@
 	.ruler {
 		display: flex;
 		height: 20px;
+		touch-action: none;
 	}
 	.tick {
 		flex: none;
@@ -508,6 +598,10 @@
 	}
 	.tick.past {
 		opacity: 0.45;
+	}
+	.tick.ranged {
+		background: rgba(255, 214, 80, 0.22);
+		color: var(--pp-on-ink);
 	}
 	.tick.now {
 		background: var(--pp-accent-strong);

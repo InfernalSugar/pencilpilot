@@ -21,6 +21,8 @@ describe('keyboard shortcuts', () => {
 		expect(comboOf(key('F5', { alt: true }))).toBe('Alt+F5');
 		expect(comboOf(key('Shift', { shift: true }))).toBeNull();
 		expect(comboOf(key('Escape'))).toBeNull();
+		expect(comboOf(key(' '))).toBeNull();
+		expect(comboOf(key(' ', { shift: true }))).toBe('Shift+Space');
 	});
 
 	it('find the action a key runs', () => {
