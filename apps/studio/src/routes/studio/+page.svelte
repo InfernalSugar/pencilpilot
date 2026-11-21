@@ -919,7 +919,7 @@
 	}
 
 	/** Draw a rendered frame: what the cut's camera sees, as big as fits. */
-	function drawPlayer(bmp: ImageBitmap | undefined) {
+	function drawPlayer(bmp: ImageBitmap | undefined, whole = false) {
 		const el = playerEl;
 		if (!el || !bmp) return;
 		const dpr = window.devicePixelRatio || 1;
@@ -928,9 +928,13 @@
 		const g = el.getContext('2d');
 		if (!g) return;
 		// the camera, in the rendered frame's pixels
-		const cam = cameraOf(theCut(), canvasSize);
-		const s = bmp.width / canvasSize.width;
-		const [sx, sy, sw, sh] = [cam.x * s, cam.y * s, cam.width * s, cam.height * s];
+		const cam = whole
+			? { x: 0, y: 0, width: canvasSize.width, height: canvasSize.height }
+			: cameraOf(theCut(), canvasSize);
+		const s = bmp.width / (whole ? bmp.width : canvasSize.width);
+		const [sx, sy, sw, sh] = whole
+			? [0, 0, bmp.width, bmp.height]
+			: [cam.x * s, cam.y * s, cam.width * s, cam.height * s];
 		const k = Math.min(w / sw, h / sh);
 		const [dw, dh] = [sw * k, sh * k];
 		g.fillStyle = getComputedStyle(el).backgroundColor || '#e8e4da';
@@ -1043,10 +1047,133 @@
 		if (flipping) stopPlay();
 	}
 
+	// ---- playing the whole scene: every cut, each through its camera, with transitions ----
+	let playScope = $state<'cut' | 'scene'>('cut');
+
+	async function playScene() {
+		if (!canvas || !status) return;
+		await showQueue;
+		const si = scene;
+		const sc = theScene();
+		const cuts = cutsIn(timeline, 'scene', { scene: si, cut: cutIndex }, null);
+		const layerIds = status.layers.filter((l) => !l.adjust).map((l) => l.id);
+		const runs = plan(timeline, cuts, layerIds, fps, fps);
+		const frames = outputFrames(
+			runs,
+			(src) => timeline.scenes[src.scene]?.cuts[src.cut]?.transition,
+			fps
+		);
+		if (!frames.length) return;
+		// a small picture of each distinct frame, through its cut's camera
+		const cam0 = cameraOf(sc.cuts[0], canvasSize);
+		const k0 = Math.min(1, 720 / Math.max(cam0.width, cam0.height));
+		const out = {
+			width: Math.max(2, Math.round(cam0.width * k0)),
+			height: Math.max(2, Math.round(cam0.height * k0))
+		};
+		playing = true;
+		// eslint-disable-next-line svelte/prefer-svelte-reactivity -- a local cache, not state
+		const byKey = new Map<string, ImageBitmap>();
+		const pics: ImageBitmap[] = [];
+		preparing = { done: 0, total: runs.length };
+		try {
+			for (const run of runs) {
+				if (!playing || !canvas) return;
+				const cut = timeline.scenes[run.source.scene].cuts[run.source.cut];
+				const cam = cameraOf(cut, canvasSize);
+				const key = `${run.source.cut}:${JSON.stringify(run.pairs)}`;
+				let pic = byKey.get(key);
+				if (!pic) {
+					const at = placeCamera(cam, out);
+					const k = Math.max(1, Math.floor(1 / at.k));
+					await cache.ensure(run.pairs.map(([, d]) => d));
+					const r = canvas.renderFrame(run.pairs, k);
+					if (!r) return stopPlay();
+					const src = await createImageBitmap(new ImageData(r.rgba, r.width, r.height));
+					const c = new OffscreenCanvas(out.width, out.height);
+					const g = c.getContext('2d')!;
+					g.fillStyle = '#fff';
+					g.fillRect(0, 0, out.width, out.height);
+					g.imageSmoothingQuality = 'high';
+					g.drawImage(
+						src,
+						cam.x / k,
+						cam.y / k,
+						cam.width / k,
+						cam.height / k,
+						at.x,
+						at.y,
+						at.width,
+						at.height
+					);
+					src.close();
+					pic = c.transferToImageBitmap();
+					byKey.set(key, pic);
+					cache.trim();
+				}
+				pics.push(pic);
+				preparing = { done: preparing!.done + 1, total: runs.length };
+			}
+		} catch (e) {
+			note(`Couldn’t play: ${e}`);
+			return stopPlay();
+		} finally {
+			preparing = null;
+		}
+		const view = new OffscreenCanvas(out.width, out.height);
+		const vg = view.getContext('2d')!;
+		const clips = sc.audio ?? [];
+		let t0 = performance.now();
+		let lastN = -1;
+		if (clips.length) sounds.play(clips, 0, fps);
+		const tick = () => {
+			if (!playing) {
+				for (const b of byKey.values()) b.close();
+				return;
+			}
+			let n = Math.floor(((performance.now() - t0) * fps) / 1000);
+			if (n >= frames.length) {
+				if (playMode === 'once') return stopPlay();
+				t0 = performance.now();
+				n = 0;
+				if (clips.length) sounds.play(clips, 0, fps);
+			}
+			if (n !== lastN) {
+				lastN = n;
+				const fr = frames[n];
+				vg.globalAlpha = 1;
+				vg.drawImage(pics[fr.run], 0, 0);
+				if (fr.over) {
+					vg.globalAlpha = fr.over.alpha;
+					vg.drawImage(pics[fr.over.run], 0, 0);
+					vg.globalAlpha = 1;
+				}
+				if (fr.dim !== undefined) {
+					vg.fillStyle = `rgba(0, 0, 0, ${1 - fr.dim})`;
+					vg.fillRect(0, 0, out.width, out.height);
+				}
+				if (fr.white) {
+					vg.fillStyle = `rgba(255, 255, 255, ${fr.white})`;
+					vg.fillRect(0, 0, out.width, out.height);
+				}
+				// the timeline follows along
+				const src = runs[fr.run].source;
+				if (cutIndex !== src.cut) cutIndex = src.cut;
+				if (frame !== src.frame) frame = src.frame;
+				const bmp = view.transferToImageBitmap();
+				drawPlayer(bmp, true);
+				bmp.close();
+			}
+			playTimer = requestAnimationFrame(tick);
+		};
+		tick();
+	}
+
 	/** Play the range (or the cut) from the start of it, or stop. */
 	async function togglePlay() {
 		if (playing) return stopPlay();
 		if (!canvas || !status) return;
+		if (playScope === 'scene') return playScene();
 		await showQueue;
 		const cut = theCut();
 		const len = cutLength(cut, timeline.statics);
@@ -2537,6 +2664,7 @@
 					bind:fps
 					{playing}
 					bind:playMode
+					bind:playScope
 					bind:playRange
 					{onion}
 					bind:cameraView
