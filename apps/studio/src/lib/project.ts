@@ -169,21 +169,29 @@ export async function openProject(path: string): Promise<ProjectDoc> {
 	return unpack(bytes);
 }
 
-/** Ask where to save (a native dialog); null if cancelled. */
-export async function askSavePath(name: string): Promise<string | null> {
+/** A file name inside a folder (none: just the name). */
+async function inFolder(folder: string | null | undefined, name: string): Promise<string> {
+	if (!folder) return name;
+	const { join } = await import('@tauri-apps/api/path');
+	return join(folder, name);
+}
+
+/** Ask where to save (a native dialog, starting in `folder`); null if cancelled. */
+export async function askSavePath(name: string, folder?: string | null): Promise<string | null> {
 	const { save } = await import('@tauri-apps/plugin-dialog');
 	return save({
-		defaultPath: `${name}.${EXTENSION}`,
+		defaultPath: await inFolder(folder, `${name}.${EXTENSION}`),
 		filters: [{ name: 'PencilPilot project', extensions: [EXTENSION] }]
 	});
 }
 
-/** Ask which project to open; null if cancelled. */
-export async function askOpenPath(): Promise<string | null> {
+/** Ask which project to open (starting in `folder`); null if cancelled. */
+export async function askOpenPath(folder?: string | null): Promise<string | null> {
 	const { open } = await import('@tauri-apps/plugin-dialog');
 	const p = await open({
 		multiple: false,
 		directory: false,
+		defaultPath: folder ?? undefined,
 		filters: [{ name: 'PencilPilot project', extensions: [EXTENSION] }]
 	});
 	return typeof p === 'string' ? p : null;
@@ -237,10 +245,14 @@ export const openVersion = async (path: string, id: string) =>
 // ---- exports ----
 
 /** Ask where to export (PNG or PSD); null if cancelled. */
-export async function askExportPath(name: string, kind: 'png' | 'psd'): Promise<string | null> {
+export async function askExportPath(
+	name: string,
+	kind: 'png' | 'psd',
+	folder?: string | null
+): Promise<string | null> {
 	const { save } = await import('@tauri-apps/plugin-dialog');
 	return save({
-		defaultPath: `${name}.${kind}`,
+		defaultPath: await inFolder(folder, `${name}.${kind}`),
 		filters: [
 			kind === 'png'
 				? { name: 'PNG picture', extensions: ['png'] }

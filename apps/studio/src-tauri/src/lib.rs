@@ -64,7 +64,7 @@ fn project_save(app: AppHandle, request: Request<'_>) -> Result<String, String> 
     let path = path_header(&request)?;
     let packet = raw_body(&request)?;
     let data = data_dir(&app)?;
-    store::keep_version(&data, &path)?;
+    store::keep_version(&data, &path, store::versions_kept(&data))?;
     let name = format!("PencilPilot {}", env!("CARGO_PKG_VERSION"));
     project::save(&path, packet, &name)?;
     // the home screen's list; a failure there mustn't fail the save
@@ -81,6 +81,22 @@ fn project_open(app: AppHandle, request: Request<'_>) -> Result<Response, String
         let _ = store::recent_add(&data, &path);
     }
     Ok(Response::new(packet))
+}
+
+#[tauri::command]
+fn settings_get(app: AppHandle) -> Result<serde_json::Value, String> {
+    Ok(store::settings_get(&data_dir(&app)?))
+}
+
+#[tauri::command]
+fn settings_set(app: AppHandle, settings: serde_json::Value) -> Result<(), String> {
+    store::settings_set(&data_dir(&app)?, &settings)
+}
+
+/// Where the app keeps its own files (shown in Settings).
+#[tauri::command]
+fn data_folder(app: AppHandle) -> Result<String, String> {
+    Ok(data_dir(&app)?.to_string_lossy().into_owned())
 }
 
 #[tauri::command]
@@ -166,7 +182,10 @@ pub fn run() {
             version_open,
             export_write,
             recent_list,
-            recent_remove
+            recent_remove,
+            settings_get,
+            settings_set,
+            data_folder
         ])
         .run(tauri::generate_context!())
         .expect("error while running PencilPilot");

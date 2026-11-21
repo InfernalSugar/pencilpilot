@@ -111,6 +111,7 @@ colour flats and lip-sync are free (local).
   ✅ Unsaved work is copied to the app's data folder every 20 s and offered back at the next start (Recover / Discard / Decide later); each save keeps the replaced file as a version (last 20, Versions menu); closing or opening over unsaved work asks first; Export → PNG or layered PSD.
 - **S1-T05** The native engine behind PaintCanvas (same API as WASM), with multi-threaded compositing `brush` `app`
 - **S1-T06** Settings: keyboard shortcuts editor, pen curve, tablet gestures, storage location `app`
+  ✅ A Settings screen (from home and the studio): every shortcut can be changed (a taken key swaps), pen pressure on / off and the pressure curve, what one finger does and the tap gestures, the projects folder (dialogs start there), how often unsaved work is copied, and how many versions are kept. Kept in the app's data folder. (The tool buttons' tooltips still show the default keys: S1-T01.)
 
 ## S2 — Animation core (≈4–5 weeks)
 - **S2-T01** `crates/anim` frame store: sparse tiles, hash dedup, memory / disk tiers, tests at 1080p and 4K `anim`
