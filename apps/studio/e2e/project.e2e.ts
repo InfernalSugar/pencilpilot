@@ -705,13 +705,18 @@ test('playback: plays the cut at its frame rate, loops a range, ping-pongs, scru
 	// the player's picture: a frame rendered small, the line where it belongs
 	await page.keyboard.press('Shift+Space');
 	await expect(player).toBeVisible();
-	const lit = await player.evaluate((el: HTMLCanvasElement) => {
-		const d = el.getContext('2d')!.getImageData(0, 0, el.width, el.height).data;
-		let n = 0;
-		for (let i = 0; i < d.length; i += 4) if (d[i] < 150) n++;
-		return n;
-	});
-	expect(lit).toBeGreaterThan(20);
+	// (once its frames are ready)
+	await expect
+		.poll(() =>
+			player.evaluate((el: HTMLCanvasElement) => {
+				if (!el.width || !el.height) return 0;
+				const d = el.getContext('2d')!.getImageData(0, 0, el.width, el.height).data;
+				let n = 0;
+				for (let i = 0; i < d.length; i += 4) if (d[i] < 150) n++;
+				return n;
+			})
+		)
+		.toBeGreaterThan(20);
 	await tl.getByRole('button', { name: 'Stop' }).click();
 	await expect(player).toHaveCount(0);
 
