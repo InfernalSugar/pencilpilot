@@ -420,6 +420,10 @@ pub struct Painter {
     rgba: Vec<u8>,
     undo: Vec<Edit>,
     redo: Vec<Edit>,
+    /// counts changes to the history (new edits, undo, redo)
+    edits: u64,
+    /// the last selection fill, while it's still the latest edit (`edits` then)
+    sel_fill_at: Option<u64>,
     /// drawings (animation cels) that aren't showing on their layer right now
     cels: HashMap<u32, TileMap>,
     next_drawing: u32,
@@ -465,6 +469,8 @@ impl Painter {
             rgba: vec![255; (width * height * 4) as usize],
             undo: Vec::new(),
             redo: Vec::new(),
+            edits: 0,
+            sel_fill_at: None,
             cels: HashMap::new(),
             next_drawing: 1,
             stroking: None,
@@ -1561,6 +1567,7 @@ impl Painter {
     }
 
     fn push_undo(&mut self, mut e: Edit) {
+        self.edits += 1;
         self.tag_drawings(&mut e);
         self.undo.push(e);
         if self.undo.len() > UNDO_LIMIT {
@@ -1855,6 +1862,44 @@ impl Painter {
             mask: self.editing_mask(active),
             snap,
         });
+        true
+    }
+
+    /// Fill the selection with `rgb` at `opacity` on the active layer (soft edges
+    /// partly): one undo step. False if there's no selection or nothing changed.
+    pub fn fill_selection(&mut self, rgb: [u8; 3], opacity: f32) -> bool {
+        if self.selection.is_none() {
+            return false;
+        }
+        let n = (self.width * self.height) as usize;
+        let ok = self.fill_mask(&vec![255; n], rgb, opacity);
+        if ok {
+            self.sel_fill_at = Some(self.edits);
+        }
+        ok
+    }
+
+    /// Whether the last selection fill is still the latest edit (so it can be
+    /// filled again with another colour or the selection as it is now).
+    pub fn selection_fill_live(&self) -> bool {
+        self.sel_fill_at == Some(self.edits) && self.stroking.is_none()
+    }
+
+    /// Fill again, in place of the last selection fill (Procreate's Color Fill: a new
+    /// colour, or shapes added to the selection, change the fill): still one undo
+    /// step. False (and nothing done) if it isn't the latest edit any more.
+    pub fn refill_selection(&mut self, rgb: [u8; 3], opacity: f32) -> bool {
+        if !self.selection_fill_live() || !self.idle() {
+            return false;
+        }
+        let Some(e) = self.undo.pop() else {
+            return false;
+        };
+        // put the pixels back as they were before it (no redo for it)
+        self.apply(e);
+        self.edits += 1;
+        self.sel_fill_at = None;
+        self.fill_selection(rgb, opacity);
         true
     }
 
@@ -3465,6 +3510,7 @@ impl Painter {
         let Some(e) = self.undo.pop() else {
             return false;
         };
+        self.edits += 1;
         let inv = self.apply(e);
         self.redo.push(inv);
         true
@@ -3478,6 +3524,7 @@ impl Painter {
         let Some(e) = self.redo.pop() else {
             return false;
         };
+        self.edits += 1;
         let inv = self.apply(e);
         self.undo.push(inv);
         true
@@ -4818,6 +4865,45 @@ mod tests {
         );
         // an unknown drawing is skipped
         assert!(p.onion_rgba(&[999, 0, 255], 1).iter().all(|&v| v == 0));
+    }
+
+    #[test]
+    fn colour_fill_selections_can_be_filled_again() {
+        let mut p = Painter::new(128, 128);
+        let mut mask = vec![0u8; 128 * 128];
+        for y in 10..40 {
+            for x in 10..40 {
+                mask[y * 128 + x] = 255;
+            }
+        }
+        assert!(!p.fill_selection([255, 0, 0], 1.0), "no selection, no fill");
+        p.set_selection(&mask, 0);
+        assert!(p.fill_selection([255, 0, 0], 1.0));
+        assert!(p.selection_fill_live());
+        p.flush();
+        assert_eq!(px(&p, 20, 20), [255, 0, 0]);
+        // another colour, and a second square added: one fill, one undo step
+        assert!(p.refill_selection([0, 0, 255], 1.0));
+        let mut more = vec![0u8; 128 * 128];
+        for y in 60..90 {
+            for x in 60..90 {
+                more[y * 128 + x] = 255;
+            }
+        }
+        p.set_selection(&more, 1);
+        assert!(p.refill_selection([0, 0, 255], 1.0));
+        p.flush();
+        assert_eq!(px(&p, 20, 20), [0, 0, 255]);
+        assert_eq!(px(&p, 70, 70), [0, 0, 255]);
+        assert!(p.undo());
+        p.flush();
+        assert_eq!(px(&p, 20, 20), [255, 255, 255]);
+        assert_eq!(px(&p, 70, 70), [255, 255, 255]);
+        assert!(!p.can_undo());
+        // after another edit, the fill stays as it is
+        assert!(p.redo());
+        assert!(!p.selection_fill_live());
+        assert!(!p.refill_selection([0, 255, 0], 1.0));
     }
 
     #[test]

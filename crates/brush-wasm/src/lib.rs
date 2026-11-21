@@ -529,6 +529,24 @@ impl PaintCanvas {
     }
 
     /// Paint a coverage mask (one byte per canvas pixel) in this colour: the lasso fill.
+    /// Fill the selection with a colour (one undo step).
+    #[wasm_bindgen(js_name = fillSelection)]
+    pub fn fill_selection(&mut self, r: u8, g: u8, b: u8, opacity: f32) -> bool {
+        self.inner.fill_selection([r, g, b], opacity)
+    }
+
+    /// The last selection fill is still the latest edit.
+    #[wasm_bindgen(js_name = selectionFillLive)]
+    pub fn selection_fill_live(&self) -> bool {
+        self.inner.selection_fill_live()
+    }
+
+    /// Fill again in place of the last selection fill (new colour or selection).
+    #[wasm_bindgen(js_name = refillSelection)]
+    pub fn refill_selection(&mut self, r: u8, g: u8, b: u8, opacity: f32) -> bool {
+        self.inner.refill_selection([r, g, b], opacity)
+    }
+
     #[wasm_bindgen(js_name = fillMask)]
     pub fn fill_mask(&mut self, coverage: &[u8], r: u8, g: u8, b: u8, opacity: f32) -> bool {
         self.inner.fill_mask(coverage, [r, g, b], opacity)

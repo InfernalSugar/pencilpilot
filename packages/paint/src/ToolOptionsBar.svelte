@@ -349,6 +349,35 @@
 					</button>
 				{/each}
 			</div>
+			<button
+				type="button"
+				class="tool"
+				aria-pressed={opts.selectFill}
+				title="Colour fill: each selection fills with the colour as you make it. Shapes you add, or another colour, change the fill until you deselect."
+				onclick={() => (opts.selectFill = !opts.selectFill)}
+			>
+				Colour fill
+			</button>
+		{/if}
+		{#if tool === 'select-rect'}
+			<div class="seg" role="radiogroup" aria-label="Selection shape">
+				{#each [['rect', 'Rectangle'], ['ellipse', 'Ellipse']] as [id, label] (id)}
+					<button
+						type="button"
+						class="tool"
+						role="radio"
+						aria-checked={opts.selectShape === id}
+						onclick={() => (opts.selectShape = id as typeof opts.selectShape)}
+					>
+						{label}
+					</button>
+				{/each}
+			</div>
+		{/if}
+		{#if tool === 'select-lasso'}
+			<span class="adjust-msg plain">
+				Drag to draw, or click point by point (click the first point or press Enter to close).
+			</span>
 		{/if}
 		{#if tool === 'select-wand'}
 			<label class="slider">
@@ -392,6 +421,14 @@
 				onclick={() => canvas?.featherSelection(opts.featherPx)}
 			>
 				Feather
+			</button>
+			<button
+				type="button"
+				class="tool"
+				title="Fill what's selected with the colour"
+				onclick={() => canvas?.fillSelection()}
+			>
+				Fill
 			</button>
 			<button type="button" class="tool" onclick={() => canvas?.deselect()}>None</button>
 			<button type="button" class="tool" onclick={() => canvas?.invertSelection()}> Invert </button>

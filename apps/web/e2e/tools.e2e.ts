@@ -367,6 +367,72 @@ test('selections: lasso, magic wand with add, and fill inside', async ({ page })
 	expect((await pixel(page, 0.1, 0.9))[0]).toBe(255);
 });
 
+test('colour fill: selections fill as they are made, change together, one undo', async ({
+	page
+}) => {
+	await ready(page);
+	const blue = async (x: number, y: number) => {
+		const [r, , b] = await pixel(page, x, y);
+		return b > 200 && r < 120;
+	};
+	const red = async (x: number, y: number) => {
+		const [r, g, b] = await pixel(page, x, y);
+		return r > 200 && g < 120 && b < 120;
+	};
+	const white = async (x: number, y: number) => (await pixel(page, x, y))[1] > 240;
+	await page.getByRole('radio', { name: 'Colour #3d6bff' }).click();
+	await page.keyboard.press('m');
+	await page.getByRole('button', { name: 'Colour fill' }).click();
+	// a rectangle: filled as soon as it's made
+	await drag(page, [0.1, 0.1], [0.3, 0.3]);
+	await expect.poll(() => blue(0.2, 0.2)).toBe(true);
+	// an ellipse added with Shift: the same fill grows (not the ellipse's corners)
+	await page.getByRole('radio', { name: 'Ellipse' }).click();
+	await page.keyboard.down('Shift');
+	await drag(page, [0.5, 0.5], [0.8, 0.8]);
+	await page.keyboard.up('Shift');
+	await expect.poll(() => blue(0.65, 0.65)).toBe(true);
+	expect(await white(0.52, 0.52)).toBe(true);
+	// another colour: the whole fill changes
+	await page.getByRole('radio', { name: 'Colour #e8492f' }).click();
+	await expect.poll(() => red(0.2, 0.2)).toBe(true);
+	expect(await red(0.65, 0.65)).toBe(true);
+	// all of it is one undo step
+	await page.keyboard.press('Control+z');
+	await expect.poll(() => white(0.2, 0.2)).toBe(true);
+	expect(await white(0.65, 0.65)).toBe(true);
+	await page.keyboard.press('Control+Shift+z');
+	await expect.poll(() => red(0.65, 0.65)).toBe(true);
+
+	// the lasso point by point: click, click, click, then the first point again
+	await page.keyboard.press('Control+d');
+	await page.keyboard.press('l');
+	const b = await box(page);
+	for (const [x, y] of [
+		[0.1, 0.6],
+		[0.35, 0.6],
+		[0.2, 0.9],
+		[0.1, 0.6]
+	])
+		await page.mouse.click(b.x + b.width * x, b.y + b.height * y);
+	await expect.poll(() => red(0.2, 0.7)).toBe(true);
+	expect(await white(0.33, 0.85)).toBe(true);
+
+	// colour fill off: a selection stays empty until Fill
+	await page.getByRole('button', { name: 'Colour fill' }).click();
+	await page.keyboard.press('m');
+	await page.getByRole('radio', { name: 'Rectangle' }).click();
+	await page.getByRole('radio', { name: 'Colour #3d6bff' }).click();
+	await drag(page, [0.6, 0.1], [0.9, 0.3]);
+	await expect.poll(() => ants(page)).toBeGreaterThan(100);
+	expect(await white(0.75, 0.2)).toBe(true);
+	await page
+		.getByRole('group', { name: 'Selection' })
+		.getByRole('button', { name: 'Fill', exact: true })
+		.click();
+	await expect.poll(() => blue(0.75, 0.2)).toBe(true);
+});
+
 /** the ink's bounding box as fractions of the canvas */
 const inkFrac = (page: Page) =>
 	canvas(page).evaluate((c: HTMLCanvasElement) => {
