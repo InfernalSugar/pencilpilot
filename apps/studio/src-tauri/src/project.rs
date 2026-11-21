@@ -14,7 +14,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ppstudio::{Canvas, Frame, Group, Layer, Project};
+use ppstudio::{Canvas, Frame, Group, Layer, Project, Scene, Timeline};
 use serde::{Deserialize, Serialize};
 
 const MAGIC: &[u8; 4] = b"PPS1";
@@ -29,6 +29,15 @@ pub struct PacketLayer {
     /// [offset, length] of the whole-canvas grey mask, if it has one
     #[serde(default)]
     pub mask: Option<[usize; 2]>,
+}
+
+/// One animation drawing (cel): its id ("D<id>" in the file), its layer, its pixels.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PacketDrawing {
+    pub id: u32,
+    pub layer: u32,
+    /// [offset, length] of whole-canvas RGBA8 in the blobs
+    pub rgba: [usize; 2],
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -51,6 +60,12 @@ pub struct Header {
     pub created: Option<String>,
     #[serde(default)]
     pub thumbnail: Option<[usize; 2]>,
+    /// the animation (drawings named "D<id>"); none: one frame of the layers as they are
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scenes: Vec<Scene>,
+    /// every drawing the scenes show
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub drawings: Vec<PacketDrawing>,
 }
 
 pub fn encode(header: &Header, blobs: &[u8]) -> Result<Vec<u8>, String> {
@@ -88,16 +103,42 @@ pub fn to_project(packet: &[u8], app: &str, now: &str) -> Result<Project, String
     if let Some(created) = h.created {
         p.manifest.created = created;
     }
-    let mut frame = Frame::default();
-    for l in &h.layers {
-        let id = format!("L{}", l.layer.id);
-        let mask = l.mask.map(|m| slice(blobs, m)).transpose()?;
-        p.put_drawing(&id, slice(blobs, l.rgba)?, mask)
-            .map_err(|e| e.to_string())?;
-        frame.cels.insert(l.layer.id, id);
-        p.manifest.layers.push(l.layer.clone());
+    if h.scenes.is_empty() {
+        // one frame: the layers as they are
+        let mut frame = Frame::default();
+        for l in &h.layers {
+            let id = format!("L{}", l.layer.id);
+            let mask = l.mask.map(|m| slice(blobs, m)).transpose()?;
+            p.put_drawing(&id, slice(blobs, l.rgba)?, mask)
+                .map_err(|e| e.to_string())?;
+            frame.cels.insert(l.layer.id, id);
+        }
+        p.manifest.timeline.frames = vec![frame];
+    } else {
+        // an animation: every drawing (each with its layer's mask), and the scenes
+        for d in &h.drawings {
+            let layer = h
+                .layers
+                .iter()
+                .find(|l| l.layer.id == d.layer)
+                .ok_or_else(|| format!("drawing {} names layer {}", d.id, d.layer))?;
+            let mask = layer.mask.map(|m| slice(blobs, m)).transpose()?;
+            // an empty drawing comes as no bytes at all
+            let blank;
+            let rgba = match slice(blobs, d.rgba)? {
+                [] => {
+                    blank = vec![0u8; (h.canvas.width * h.canvas.height * 4) as usize];
+                    &blank[..]
+                }
+                px => px,
+            };
+            p.put_drawing(&format!("D{}", d.id), rgba, mask)
+                .map_err(|e| e.to_string())?;
+        }
+        p.manifest.timeline.frames = Timeline::flatten(&h.scenes);
+        p.manifest.timeline.scenes = h.scenes;
     }
-    p.manifest.timeline.frames = vec![frame];
+    p.manifest.layers = h.layers.iter().map(|l| l.layer.clone()).collect();
     p.manifest.groups = h.groups;
     p.manifest.active_layer = h.active_layer;
     p.manifest.extra = h.extra;
@@ -137,6 +178,26 @@ pub fn from_project(p: &Project) -> Result<Vec<u8>, String> {
             mask: mask.as_deref().map(&mut put),
         });
     }
+    // an animation's drawings, each with the layer it's on
+    let mut drawings = Vec::new();
+    for cut in m.timeline.scenes.iter().flat_map(|s| &s.cuts) {
+        for (&layer, track) in &cut.tracks {
+            for name in track.iter().filter_map(|e| e.drawing.as_ref()) {
+                let Some(id) = name.strip_prefix('D').and_then(|n| n.parse::<u32>().ok()) else {
+                    return Err(format!("drawing {name} isn't an app drawing"));
+                };
+                if drawings.iter().any(|d: &PacketDrawing| d.id == id) {
+                    continue;
+                }
+                let (rgba, _) = p.drawing(name).map_err(|e| e.to_string())?;
+                drawings.push(PacketDrawing {
+                    id,
+                    layer,
+                    rgba: put(&rgba),
+                });
+            }
+        }
+    }
     let thumbnail = p.thumbnail.as_deref().map(&mut put);
     let header = Header {
         canvas: m.canvas.clone(),
@@ -148,6 +209,8 @@ pub fn from_project(p: &Project) -> Result<Vec<u8>, String> {
         extra: m.extra.clone(),
         created: Some(m.created.clone()),
         thumbnail,
+        scenes: m.timeline.scenes.clone(),
+        drawings,
     };
     encode(&header, &blobs)
 }
@@ -265,8 +328,59 @@ mod tests {
             extra: serde_json::json!({ "color": "#ff0000" }),
             created: None,
             thumbnail: Some([n * 5, thumb.len()]),
+            scenes: vec![],
+            drawings: vec![],
         };
         (encode(&header, &blobs).unwrap(), rgba, mask)
+    }
+
+    #[test]
+    fn an_animation_survives_save_and_open() {
+        use ppstudio::{Cut, Exposure};
+        let (pk, rgba, _) = packet();
+        let (mut h, blobs) = decode(&pk).unwrap();
+        let mut blobs = blobs.to_vec();
+        // a second drawing: one red pixel elsewhere
+        let mut second = vec![0u8; rgba.len()];
+        second[..4].copy_from_slice(&[255, 0, 0, 255]);
+        let at = blobs.len();
+        blobs.extend_from_slice(&second);
+        let ex = |d: u32, length| Exposure {
+            drawing: Some(format!("D{d}")),
+            length,
+        };
+        h.drawings = vec![
+            PacketDrawing {
+                id: 7,
+                layer: 3,
+                rgba: h.layers[0].rgba,
+            },
+            PacketDrawing {
+                id: 9,
+                layer: 3,
+                rgba: [at, second.len()],
+            },
+        ];
+        h.scenes = vec![Scene {
+            name: "Scene 1".into(),
+            cuts: vec![Cut {
+                name: "Cut 1".into(),
+                tracks: [(3, vec![ex(7, 2), ex(9, 3)])].into_iter().collect(),
+            }],
+        }];
+        let pk = encode(&h, &blobs).unwrap();
+        let p = to_project(&pk, "test", "2026-11-21T00:00:00Z").unwrap();
+        assert_eq!(p.manifest.timeline.frames.len(), 2);
+        assert_eq!(p.manifest.timeline.frames[1].hold, 3);
+        let back = from_project(&p).unwrap();
+        let (h2, b2) = decode(&back).unwrap();
+        assert_eq!(h2.scenes, h.scenes);
+        assert_eq!(h2.drawings.len(), 2);
+        let d9 = h2.drawings.iter().find(|d| d.id == 9).unwrap();
+        assert_eq!(d9.layer, 3);
+        assert_eq!(slice(b2, d9.rgba).unwrap(), &second[..]);
+        // the layer shows the first frame's drawing
+        assert_eq!(slice(b2, h2.layers[0].rgba).unwrap(), &rgba[..]);
     }
 
     #[test]

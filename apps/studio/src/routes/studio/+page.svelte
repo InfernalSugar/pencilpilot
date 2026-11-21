@@ -53,6 +53,20 @@
 	import { actionFor, comboOf, showKey, type ActionId } from '#lib/shortcuts.js';
 	import { page } from '$app/state';
 	import VersionsMenu from '#lib/VersionsMenu.svelte';
+	import TimelinePanel from '#lib/TimelinePanel.svelte';
+	import {
+		drawingAt,
+		drawingsIn,
+		findDrawing,
+		fromFile,
+		layerOfDrawing,
+		newTimeline,
+		setDrawing,
+		showing,
+		trackIn,
+		toFile,
+		type Timeline
+	} from '#lib/timeline.js';
 
 	let canvas = $state<PaintCanvas>();
 	let status = $state<CanvasStatus | null>(null);
@@ -77,6 +91,83 @@
 	let fps = $state(start.kind === 'new' ? start.fps : 24);
 	/** bumps for a new, empty canvas (opening a project of another size remounts it) */
 	let canvasKey = $state(0);
+
+	// ---- the animation: which drawing each layer shows on each frame ----
+	let timeline = $state<Timeline>(newTimeline([]));
+	/** the timeline belongs to this canvas (a new canvas starts a new one) */
+	let timelineFor = $state(-1);
+	let scene = $state(0);
+	let cutIndex = $state(0);
+	let frame = $state(0);
+	let timelinePanel = $state<TimelinePanel>();
+	const theCut = () => {
+		const s = timeline.scenes[scene] ?? timeline.scenes[0];
+		return s.cuts[cutIndex] ?? s.cuts[0];
+	};
+	/** changes to the document (the canvas's and the timeline's); moving between frames isn't one */
+	let docVersion = $state(0);
+	/** the canvas is changing frames: its report isn't an edit */
+	let quiet = false;
+	/** the frame the canvas shows (the timeline's frame can be ahead of it for a moment) */
+	let onCanvas = { scene: 0, cut: 0, frame: 0 };
+
+	function canvasChanged(s: CanvasStatus) {
+		status = s;
+		if (quiet) return;
+		docVersion++;
+		// drawing on an empty cel started a drawing (or a pasted picture got one): it's
+		// on this frame now
+		if (timelineFor !== canvasKey) return;
+		const cut = timeline.scenes[onCanvas.scene]?.cuts[onCanvas.cut];
+		if (!cut) return;
+		const f = onCanvas.frame;
+		for (const l of s.layers)
+			if (!l.adjust && l.drawing && drawingAt(cut.tracks[l.id], f) !== l.drawing)
+				setDrawing(trackIn(cut, l.id), f, l.drawing);
+	}
+
+	/** Show what the timeline has on the current frame. */
+	function showFrame() {
+		if (!canvas || !status) return;
+		// pictures pasted or imported here get drawings first, so they're kept
+		canvas.ensureDrawings();
+		const layers = status.layers.filter((l) => !l.adjust).map((l) => l.id);
+		quiet = true;
+		const ok = canvas.showDrawings(showing(theCut(), layers, frame));
+		quiet = false;
+		if (ok) onCanvas = { scene, cut: cutIndex, frame };
+		else {
+			// stay where the canvas is
+			[scene, cutIndex, frame] = [onCanvas.scene, onCanvas.cut, onCanvas.frame];
+			note('Finish what you’re doing first (a transform, an adjustment or a mask).');
+		}
+	}
+
+	/** The timeline changed (or the frame did). */
+	function timelineEdited(changed: boolean) {
+		if (changed) docVersion++;
+		showFrame();
+	}
+
+	/** Undo / redo a stroke from another frame: go there first, so it's seen. */
+	function reveal(drawing: number) {
+		if (!drawing || !status || status.layers.some((l) => l.drawing === drawing)) return;
+		const at = findDrawing(timeline, drawing, { scene, cut: cutIndex });
+		if (!at) return;
+		[scene, cutIndex, frame] = [at.scene, at.cut, at.frame];
+		showFrame();
+	}
+
+	// a new, empty canvas: a new timeline
+	$effect(() => {
+		if (!status || pending || timelineFor === canvasKey) return;
+		untrack(() => {
+			timeline = newTimeline(status!.layers.map((l) => ({ id: l.id, drawing: l.drawing })));
+			timelineFor = canvasKey;
+			[scene, cutIndex, frame] = [0, 0, 0];
+			onCanvas = { scene: 0, cut: 0, frame: 0 };
+		});
+	});
 
 	// ---- the tools' own options (the same as the website's studio) ----
 	const toolOpts = new ToolOptions({
@@ -151,7 +242,7 @@
 				label: 'Redo',
 				icon: 'm15 14 5-5-5-5M20 9H9a5 5 0 0 0 0 10h3',
 				disabled: !status?.canRedo,
-				run: () => canvas?.redo()
+				run: () => redo()
 			},
 			{
 				id: 'picker',
@@ -188,7 +279,13 @@
 	/** undo also cancels an open Adjust panel */
 	function undo() {
 		if (toolOpts.adjustOpen) toolOpts.closeAdjust(false);
+		reveal(canvas?.undoDrawing() ?? 0);
 		canvas?.undo();
+	}
+	function redo() {
+		if (toolOpts.adjustOpen) toolOpts.closeAdjust(false);
+		reveal(canvas?.redoDrawing() ?? 0);
+		canvas?.redo();
 	}
 	// paste a picture (or what was copied) as a new layer
 	$effect(() => {
@@ -227,8 +324,10 @@
 	let recoveredVersion = 0;
 	let busy = $state<'' | 'saving' | 'opening' | 'exporting'>('');
 	let fileNote = $state('');
+	/** something is drawn, on this frame or another */
+	const drawn = $derived(!!status && (!status.blank || drawingsIn(timeline).length > 0));
 	const unsaved = $derived(
-		!!status && (savedVersion === -1 || (!status.blank && status.version !== savedVersion))
+		!!status && (savedVersion === -1 || (drawn && docVersion !== savedVersion))
 	);
 	/** a document being loaded, waiting for its canvas (and whether it starts unsaved) */
 	let pending = $state.raw<{ doc: ProjectDoc; unsaved: boolean } | null>(null);
@@ -237,8 +336,18 @@
 	/** Everything the window knows, as a project document. */
 	async function currentDoc(): Promise<ProjectDoc> {
 		if (!canvas) throw new Error('the canvas isn’t ready');
+		canvas.ensureDrawings();
 		const snap = canvas.snapshotLayers();
 		if (!snap) throw new Error('the canvas isn’t ready');
+		const layerIds = snap.layers.filter((l) => !l.adjust).map((l) => l.id);
+		const c = canvas;
+		const drawings = drawingsIn(timeline).flatMap((id) => {
+			const layer = layerOfDrawing(timeline, id);
+			if (layer === null || !layerIds.includes(layer)) return [];
+			// an empty drawing goes as no bytes
+			const rgba = c.drawingEmpty(id) ? new Uint8Array(0) : c.drawingRgba(id);
+			return [{ id, layer, rgba }];
+		});
 		return {
 			width: canvasSize.width,
 			height: canvasSize.height,
@@ -247,9 +356,11 @@
 			groups: snap.groups,
 			activeLayer: status?.active ?? 0,
 			strokes: snap.strokes,
-			extra: { brushId, color, size, opacity, smoothing },
+			extra: { brushId, color, size, opacity, smoothing, scene, cut: cutIndex, frame },
 			created,
-			thumbnail: await canvas.thumbnail()
+			thumbnail: await canvas.thumbnail(),
+			scenes: toFile(timeline, layerIds),
+			drawings
 		};
 	}
 
@@ -261,7 +372,7 @@
 		busy = 'saving';
 		fileNote = '';
 		try {
-			const versionAtSave = status?.version ?? 0;
+			const versionAtSave = docVersion;
 			path = await saveProject(target, await currentDoc());
 			created ??= new Date().toISOString();
 			savedVersion = versionAtSave;
@@ -369,11 +480,44 @@
 		const p = pending;
 		if (!p || !canvas || !status) return;
 		pending = null;
-		canvas.restoreLayers(p.doc.layers, p.doc.groups, p.doc.strokes);
-		if (p.doc.activeLayer) canvas.selectLayer(p.doc.activeLayer);
-		// opened: nothing unsaved (the canvas reported its new state as it restored);
-		// recovered or an old version: all of it is unsaved
-		savedVersion = p.unsaved ? -1 : untrack(() => status?.version ?? 0);
+		const doc = p.doc;
+		const anim = !!doc.scenes?.length;
+		const c = canvas;
+		untrack(() => {
+			// an animation's layers start empty: their drawings come next
+			c.restoreLayers(
+				anim ? doc.layers.map((l) => ({ ...l, rgba: new Uint8Array(l.rgba.length) })) : doc.layers,
+				doc.groups,
+				doc.strokes
+			);
+			// the canvas gave the layers new ids (in the same order)
+			const now = status?.layers ?? [];
+			const ids = new Map(doc.layers.map((l, i) => [l.id, now[i]?.id ?? 0] as [number, number]));
+			const at = (v: unknown) => (typeof v === 'number' && v >= 0 ? Math.floor(v) : 0);
+			if (anim) {
+				for (const d of doc.drawings ?? []) c.putDrawing(d.id, d.rgba);
+				timeline = fromFile(doc.scenes!, ids);
+				scene = Math.min(at(doc.extra.scene), timeline.scenes.length - 1);
+				cutIndex = Math.min(at(doc.extra.cut), timeline.scenes[scene].cuts.length - 1);
+				frame = at(doc.extra.frame);
+			} else {
+				c.ensureDrawings();
+				timeline = newTimeline(
+					(status?.layers ?? []).map((l) => ({ id: l.id, drawing: l.drawing }))
+				);
+				[scene, cutIndex, frame] = [0, 0, 0];
+			}
+			timelineFor = canvasKey;
+			onCanvas = { scene, cut: cutIndex, frame };
+			if (anim) {
+				onCanvas = { scene: -1, cut: -1, frame: -1 };
+				showFrame();
+			}
+			const active = ids.get(doc.activeLayer);
+			if (active) c.selectLayer(active);
+			// opened: nothing unsaved; recovered or an old version: all of it is unsaved
+			savedVersion = p.unsaved ? -1 : docVersion;
+		});
 		busy = '';
 	});
 
@@ -399,8 +543,8 @@
 
 	// autosave: a recovery copy of unsaved work, as often as Settings says, while it changes
 	async function autosave() {
-		if (!unsaved || busy || !status || status.version === recoveredVersion) return;
-		const version = status.version;
+		if (!unsaved || busy || !status || docVersion === recoveredVersion) return;
+		const version = docVersion;
 		try {
 			await writeRecovery(docId, path, await currentDoc());
 			recoveredVersion = version;
@@ -519,10 +663,11 @@
 		} else if (action === 'smaller') size = Math.max(0.25, +(size / 1.25).toFixed(2));
 		else if (action === 'bigger') size = Math.min(6, +(size * 1.25).toFixed(2));
 		else if (action === 'undo') undo();
-		else if (action === 'redo') {
-			if (toolOpts.adjustOpen) toolOpts.closeAdjust(false);
-			canvas?.redo();
-		} else if (action === 'adjust') toolOpts.openAdjust();
+		else if (action === 'redo') redo();
+		else if (action === 'prev-frame') timelinePanel?.step(-1);
+		else if (action === 'next-frame') timelinePanel?.step(1);
+		else if (action === 'new-drawing') timelinePanel?.addDrawing();
+		else if (action === 'adjust') toolOpts.openAdjust();
 		else if (action === 'copy' || action === 'cut') toolOpts.copyCut(action === 'cut');
 		else if (action === 'copy-to-layer') {
 			if (canvas?.copySelection(false)) toolOpts.pasteCopied();
@@ -621,7 +766,7 @@
 				type="button"
 				class="act"
 				disabled={!status?.canRedo}
-				onclick={() => canvas?.redo()}
+				onclick={redo}
 				title="Redo ({keyOf('redo')})"
 			>
 				Redo
@@ -741,10 +886,27 @@
 								: 'This layer is locked. Unlock it or pick another layer to draw.'
 						)}
 					onquickmenu={(x, y) => (quickMenu = { x, y })}
-					onchange={(s) => (status = s)}
+					onchange={canvasChanged}
 				/>
 			{/key}
 			{#if canvasNote}<p class="canvas-note" role="status">{canvasNote}</p>{/if}
+		{/snippet}
+		{#snippet bottom()}
+			{#if status && timelineFor === canvasKey}
+				<TimelinePanel
+					bind:this={timelinePanel}
+					{timeline}
+					bind:scene
+					bind:cut={cutIndex}
+					bind:frame
+					{fps}
+					layers={status.layers}
+					active={status.active}
+					newDrawing={() => canvas?.newDrawing() ?? 0}
+					onlayer={(id) => canvas?.selectLayer(id)}
+					onedit={timelineEdited}
+				/>
+			{/if}
 		{/snippet}
 		{#snippet panel(t: string)}
 			{#if t === 'layers' && status}

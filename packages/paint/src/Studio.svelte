@@ -25,6 +25,7 @@
 		context,
 		banner,
 		stage,
+		bottom,
 		dockTop,
 		panel,
 		dockBottom,
@@ -47,6 +48,8 @@
 		/** a note above the canvas */
 		banner?: Snippet;
 		stage: Snippet;
+		/** under the canvas, as wide as it (the app's timeline) */
+		bottom?: Snippet;
 		/** top of the dock (reference, players…) */
 		dockTop?: Snippet;
 		/** the dock's tab content */
@@ -198,6 +201,7 @@
 			{/if}
 			{@render banner?.()}
 			<div class="stage">{@render stage()}</div>
+			{#if bottom}<div class="bottom">{@render bottom()}</div>{/if}
 		</div>
 
 		{#if hasDock}
@@ -391,6 +395,10 @@
 		background: var(--pp-surface-sunk);
 		border-radius: 18px;
 		overflow: hidden;
+	}
+	.bottom {
+		flex: none;
+		min-width: 0;
 	}
 
 	.dock {

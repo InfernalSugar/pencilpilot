@@ -461,3 +461,87 @@ test('studio layout: each tool shows its options, as on the website', async ({ p
 		'true'
 	);
 });
+
+test('timeline: drawings on frames, timing, undo across frames, saved and opened', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	const tl = page.getByRole('region', { name: 'Timeline' });
+	const frameNo = tl.getByTestId('frame');
+	const top = () => ink(page, 0, 0.45);
+	const bottom = () => ink(page, 0.5, 1);
+	// frame 1: a line at the top
+	await scribble(page, 0.3);
+	await expect.poll(top).toBeGreaterThan(50);
+	await expect(tl.getByRole('button', { name: /drawing 1, frame 1$/ })).toBeVisible();
+	// a new drawing: frame 2, empty, then a line at the bottom
+	await tl.getByRole('button', { name: 'New drawing' }).click();
+	await expect(frameNo).toHaveText('2');
+	await expect.poll(top).toBe(0);
+	await scribble(page, 0.7);
+	await expect.poll(bottom).toBeGreaterThan(50);
+	// back to frame 1: its own line
+	await tl.getByRole('button', { name: 'Frame 1', exact: true }).click();
+	await expect.poll(top).toBeGreaterThan(50);
+	expect(await bottom()).toBe(0);
+	// on twos: drawing 1 shows on frames 1–2, drawing 2 moves to frame 3
+	await tl.getByRole('button', { name: '2s' }).click();
+	await expect(tl.getByRole('button', { name: /drawing 1, frame 1–2/ })).toBeVisible();
+	await expect(tl.getByRole('button', { name: /drawing 2, frame 3$/ })).toBeVisible();
+	await page.keyboard.press('.');
+	await expect(frameNo).toHaveText('2');
+	expect(await top()).toBeGreaterThan(50);
+	// undo from frame 1's side: the last stroke was drawing 2's, so it goes there first
+	await tl.getByRole('button', { name: 'Frame 1', exact: true }).click();
+	await page.keyboard.press('Control+z');
+	await expect(frameNo).toHaveText('3');
+	await expect.poll(bottom).toBe(0);
+	await page.keyboard.press('Control+Shift+z');
+	await expect.poll(bottom).toBeGreaterThan(50);
+
+	// saved and opened again: the frames and their timing come back
+	await page.keyboard.press('Control+s');
+	await expect(page.getByTestId('project-name')).toHaveText('Walk cycle', { timeout: 20_000 });
+	const saved = (await calls(page)).filter((c) => c.cmd === 'project_save').at(-1)!;
+	expect(saved.head).toEqual([0x50, 0x50, 0x53, 0x31]);
+	await page.keyboard.press('Control+o');
+	await expect(tl.getByRole('button', { name: /drawing 2, frame 3$/ })).toBeVisible({
+		timeout: 20_000
+	});
+	await expect(frameNo).toHaveText('3');
+	await expect.poll(bottom).toBeGreaterThan(50);
+	expect(await top()).toBe(0);
+	await tl.getByRole('button', { name: 'Frame 1', exact: true }).click();
+	await expect.poll(top).toBeGreaterThan(50);
+});
+
+test('timeline: drag a drawing to move it, or its edge to hold it longer', async ({ page }) => {
+	await stubTauri(page);
+	await ready(page);
+	const tl = page.getByRole('region', { name: 'Timeline' });
+	await scribble(page, 0.3);
+	await tl.getByRole('button', { name: 'New drawing' }).click();
+	await scribble(page, 0.7);
+	const second = tl.getByRole('button', { name: /drawing 2, frame 2$/ });
+	await expect(second).toBeVisible();
+	// its right edge, two frames on: held for 3
+	const box = (await second.boundingBox())!;
+	await page.mouse.move(box.x + box.width - 3, box.y + box.height / 2);
+	await page.mouse.down();
+	await page.mouse.move(box.x + box.width - 3 + 44, box.y + box.height / 2, { steps: 6 });
+	await page.mouse.up();
+	await expect(tl.getByRole('button', { name: /drawing 2, frame 2–4/ })).toBeVisible();
+	// drag drawing 1 after it: now drawing 2 comes first
+	const first = tl.getByRole('button', { name: /drawing 1, frame 1$/ });
+	const b1 = (await first.boundingBox())!;
+	await page.mouse.move(b1.x + 8, b1.y + b1.height / 2);
+	await page.mouse.down();
+	await page.mouse.move(b1.x + 8 + 22 * 4, b1.y + b1.height / 2, { steps: 8 });
+	await page.mouse.up();
+	// (drawings are numbered in order: the moved one is now "2")
+	await expect(tl.getByRole('button', { name: /drawing 1, frame 1–3/ })).toBeVisible();
+	await expect(tl.getByRole('button', { name: /drawing 2, frame 4$/ })).toBeVisible();
+	await expect(tl.getByTestId('frame')).toHaveText('4');
+	await expect.poll(() => ink(page, 0, 0.45)).toBeGreaterThan(50);
+});

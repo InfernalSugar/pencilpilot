@@ -7,6 +7,7 @@
  */
 import type { GroupInfo, LayerSnapshot } from '@pencilpilot/paint/PaintCanvas.svelte';
 import type { Stroke } from '@pencilpilot/paint/strokes';
+import type { FileScene } from './timeline';
 
 export const EXTENSION = 'ppstudio';
 
@@ -25,6 +26,17 @@ export interface ProjectDoc {
 	created?: string;
 	/** PNG for the project browser */
 	thumbnail?: Uint8Array | null;
+	/** the animation (drawings named "D<id>"); none: one frame of the layers as they are */
+	scenes?: FileScene[];
+	/** every drawing the scenes show, with the layer it's on */
+	drawings?: ProjectDrawing[];
+}
+
+export interface ProjectDrawing {
+	id: number;
+	layer: number;
+	/** straight-alpha RGBA, canvas size */
+	rgba: Uint8Array;
 }
 
 interface PacketLayer {
@@ -53,6 +65,8 @@ interface Header {
 	extra: Record<string, unknown>;
 	created?: string | null;
 	thumbnail?: [number, number] | null;
+	scenes?: FileScene[];
+	drawings?: { id: number; layer: number; rgba: [number, number] }[];
 }
 
 const MAGIC = [0x50, 0x50, 0x53, 0x31]; // "PPS1"
@@ -90,7 +104,17 @@ export function pack(doc: ProjectDoc): Uint8Array {
 		strokes: doc.strokes,
 		extra: doc.extra,
 		created: doc.created ?? null,
-		thumbnail: doc.thumbnail ? put(doc.thumbnail) : null
+		thumbnail: doc.thumbnail ? put(doc.thumbnail) : null,
+		...(doc.scenes?.length
+			? {
+					scenes: doc.scenes,
+					drawings: (doc.drawings ?? []).map((d) => ({
+						id: d.id,
+						layer: d.layer,
+						rgba: put(d.rgba)
+					}))
+				}
+			: {})
 	};
 	const json = new TextEncoder().encode(JSON.stringify(header));
 	const out = new Uint8Array(8 + json.length + at);
@@ -142,7 +166,9 @@ export function unpack(packet: ArrayBuffer | Uint8Array): ProjectDoc {
 		strokes: h.strokes ?? [],
 		extra: h.extra ?? {},
 		created: h.created ?? undefined,
-		thumbnail: h.thumbnail ? get(h.thumbnail) : null
+		thumbnail: h.thumbnail ? get(h.thumbnail) : null,
+		scenes: h.scenes ?? [],
+		drawings: (h.drawings ?? []).map((d) => ({ id: d.id, layer: d.layer, rgba: get(d.rgba) }))
 	};
 }
 

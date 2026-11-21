@@ -732,6 +732,71 @@ impl PaintCanvas {
         self.inner.remote_end(key, &brush.inner);
     }
 
+    // ---- drawings (animation cels) ----
+
+    /// The drawing a layer shows (0 = none yet).
+    #[wasm_bindgen(js_name = layerDrawing)]
+    pub fn layer_drawing(&self, id: u32) -> u32 {
+        self.inner.layer_drawing(id)
+    }
+
+    /// Give layers with paint but no drawing one of their own.
+    #[wasm_bindgen(js_name = ensureDrawings)]
+    pub fn ensure_drawings(&mut self) {
+        self.inner.ensure_drawings();
+    }
+
+    /// Show other drawings: (layer id, drawing id) pairs, flattened; 0 = an empty cel.
+    #[wasm_bindgen(js_name = showDrawings)]
+    pub fn show_drawings(&mut self, pairs: &[u32]) -> bool {
+        self.inner.show_drawings(pairs)
+    }
+
+    #[wasm_bindgen(js_name = newDrawing)]
+    pub fn new_drawing(&mut self) -> u32 {
+        self.inner.new_drawing()
+    }
+
+    #[wasm_bindgen(js_name = copyDrawing)]
+    pub fn copy_drawing(&mut self, drawing: u32) -> u32 {
+        self.inner.copy_drawing(drawing)
+    }
+
+    /// A drawing's pixels (straight-alpha RGBA8, canvas size).
+    #[wasm_bindgen(js_name = drawingRgba)]
+    pub fn drawing_rgba(&self, drawing: u32) -> Vec<u8> {
+        self.inner.drawing_rgba(drawing)
+    }
+
+    #[wasm_bindgen(js_name = drawingEmpty)]
+    pub fn drawing_empty(&self, drawing: u32) -> bool {
+        self.inner.drawing_empty(drawing)
+    }
+
+    /// Load a drawing's pixels (opening a project). Not an undo step.
+    #[wasm_bindgen(js_name = putDrawing)]
+    pub fn put_drawing(&mut self, drawing: u32, rgba: &[u8]) -> bool {
+        self.inner.put_drawing(drawing, rgba)
+    }
+
+    /// Forget kept drawings not in `keep` (and not needed by undo).
+    #[wasm_bindgen(js_name = dropDrawingsExcept)]
+    pub fn drop_drawings_except(&mut self, keep: &[u32]) {
+        self.inner.drop_drawings_except(keep);
+    }
+
+    /// The drawing the next undo changes (0 = none).
+    #[wasm_bindgen(js_name = undoDrawing)]
+    pub fn undo_drawing(&self) -> u32 {
+        self.inner.undo_drawing()
+    }
+
+    /// The drawing the next redo changes (0 = none).
+    #[wasm_bindgen(js_name = redoDrawing)]
+    pub fn redo_drawing(&self) -> u32 {
+        self.inner.redo_drawing()
+    }
+
     /// Forget the undo/redo history.
     #[wasm_bindgen(js_name = clearHistory)]
     pub fn clear_history(&mut self) {

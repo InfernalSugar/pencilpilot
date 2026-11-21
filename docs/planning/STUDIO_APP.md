@@ -118,6 +118,7 @@ colour flats and lip-sync are free (local).
 ## S2 — Animation core (≈4–5 weeks)
 - **S2-T01** `crates/anim` frame store: sparse tiles, hash dedup, memory / disk tiers, tests at 1080p and 4K `anim`
 - **S2-T02** Timeline: scenes → cuts → layers × frames; exposures (1s / 2s / 3s), hold, insert, delete, drag `anim` `app`
+  ✅ A timeline under the canvas: scenes and cuts, a row per layer with its exposures. New drawing, hold on 1s / 2s / 3s or ±1, a whole layer on ones / twos / threes, insert / delete frames, remove a drawing; drag a drawing to move it or its edge to hold it longer; `,` / `.` step frames, `N` new drawing. Drawing on an empty cel starts a drawing there. The engine keeps every drawing and swaps them when the frame changes (nothing copied); undo steps remember their drawing, and undoing one from another frame goes to that frame first. Saved in `.ppstudio` (`timeline.scenes`, FORMAT.md). Still to come with S2-T01's native frame store: drawings live in the window's memory for now, and a save sends each one as full RGBA, so very long cuts at 4K are heavy; resizing the canvas waits until then too.
 - **S2-T03** Exposure-sheet view (X-sheet) alongside the timeline, with dialogue and action columns `anim` `design`
 - **S2-T04** Onion skin (red before, green after, how many, opacity, tint) and a light table to pin any frames `anim`
 - **S2-T05** Playback: fixed fps, loop a range, ping-pong, scrub, frame-step keys, playback cache `anim`
