@@ -182,6 +182,8 @@
 		quickShape = true,
 		onshape,
 		selectMode = 'replace',
+		selectFill = false,
+		selectShape = 'rect',
 		wandTolerance = 0.15,
 		ontransformend,
 		penPressure = true,
@@ -263,6 +265,14 @@
 		ontransformend?: (result: 'done' | 'cancelled' | 'empty') => void;
 		/** how a new selection combines with the current one (Shift = add, Alt = subtract) */
 		selectMode?: 'replace' | 'add' | 'subtract' | 'intersect';
+		/**
+		 * colour fill (Procreate's Color Fill): each selection made fills with the colour;
+		 * shapes added to it, or another colour picked, change that fill until you
+		 * deselect or change tools
+		 */
+		selectFill?: boolean;
+		/** the rectangle select tool's shape */
+		selectShape?: 'rect' | 'ellipse';
 		/** magic wand: colour tolerance (0–1) */
 		wandTolerance?: number;
 		/** fill: how different a colour may be and still be filled (0–1) */
@@ -1122,8 +1132,14 @@
 
 	// ---- selections ----
 
-	/** a rectangle or lasso being dragged (canvas px), shown live */
-	let marquee = $state<{ kind: 'rect' | 'lasso'; pts: [number, number][]; op: number } | null>(
+	/** a rectangle, ellipse or lasso being dragged (canvas px), shown live */
+	let marquee = $state<{
+		kind: 'rect' | 'ellipse' | 'lasso';
+		pts: [number, number][];
+		op: number;
+	} | null>(null);
+	/** a lasso placed point by point (click, click…; click the first point or Enter to close) */
+	let poly = $state<{ pts: [number, number][]; op: number; at: [number, number] | null } | null>(
 		null
 	);
 	let antsEl: HTMLCanvasElement | undefined = $state();
@@ -1244,31 +1260,113 @@
 		const { kind, pts, op } = marquee;
 		marquee = null;
 		const area =
-			kind === 'rect' ? Math.abs((pts[1][0] - pts[0][0]) * (pts[1][1] - pts[0][1])) : pts.length;
+			kind === 'lasso' ? pts.length : Math.abs((pts[1][0] - pts[0][0]) * (pts[1][1] - pts[0][1]));
 		if (area < 4) {
+			// a click on the lasso starts a shape placed point by point
+			if (kind === 'lasso') {
+				poly = { pts: [pts[0]], op, at: null };
+				return;
+			}
 			// a click without a drag clears the selection (replace mode)
 			if (op === 0) paint.deselect();
 			return refreshAnts();
 		}
+		select(kind, pts, op);
+	}
+
+	/** A click while placing a lasso point by point: a point, or closing the shape. */
+	function polyClick(p: [number, number]) {
+		if (!poly) return;
+		const [fx, fy] = poly.pts[0];
+		const near = 12 / Math.max(0.01, fit * zoom);
+		if (poly.pts.length >= 3 && Math.hypot(p[0] - fx, p[1] - fy) <= near) return closePoly();
+		poly = { ...poly, pts: [...poly.pts, p] };
+	}
+	function closePoly() {
+		const pl = poly;
+		poly = null;
+		if (pl && pl.pts.length >= 3) select('lasso', pl.pts, pl.op);
+	}
+	// another tool: the half-placed shape goes
+	$effect(() => {
+		if (tool !== 'select-lasso') untrack(() => (poly = null));
+	});
+
+	/** Rasterise a rectangle, ellipse or lasso to a mask, and combine it into the selection. */
+	function select(kind: 'rect' | 'ellipse' | 'lasso', pts: [number, number][], op: number) {
+		if (!paint) return;
 		const off = new OffscreenCanvas(width, height);
 		const c = off.getContext('2d')!;
 		c.fillStyle = '#fff';
 		c.beginPath();
-		if (kind === 'rect') {
-			const [[ax, ay], [bx, by]] = pts;
-			c.rect(Math.min(ax, bx), Math.min(ay, by), Math.abs(bx - ax), Math.abs(by - ay));
-		} else {
+		if (kind === 'lasso') {
 			c.moveTo(...pts[0]);
 			for (const p of pts.slice(1)) c.lineTo(...p);
 			c.closePath();
+		} else {
+			const [[ax, ay], [bx, by]] = pts;
+			const [x, y, w, h] = [
+				Math.min(ax, bx),
+				Math.min(ay, by),
+				Math.abs(bx - ax),
+				Math.abs(by - ay)
+			];
+			if (kind === 'rect') c.rect(x, y, w, h);
+			else c.ellipse(x + w / 2, y + h / 2, w / 2, h / 2, 0, 0, Math.PI * 2);
 		}
 		c.fill();
 		const rgba = c.getImageData(0, 0, width, height).data;
 		const mask = new Uint8Array(width * height);
 		for (let i = 0; i < mask.length; i++) mask[i] = rgba[i * 4 + 3];
 		paint.setSelection(mask, op);
-		refreshAnts();
+		selected(op);
 	}
+
+	// ---- colour fill: selections fill with the colour as they're made ----
+
+	/** this session's fill can still change (a new colour, shapes added) */
+	let fillLive = false;
+	const rgbOf = (hex: string) => {
+		const n = parseInt(hex.slice(1), 16) || 0;
+		return [(n >> 16) & 255, (n >> 8) & 255, n & 255] as const;
+	};
+
+	/** The selection changed (`op` as made): with colour fill on, fill it. */
+	function selected(op: number) {
+		refreshAnts();
+		if (!paint || !selectFill) return;
+		const [r, g, b] = rgbOf(color);
+		// added to, taken from, or crossed with the last fill's selection: that fill
+		// changes; a new selection is a new fill (the last one stays)
+		if (op !== 0 && fillLive && paint.selectionFillLive()) {
+			changed(paint.refillSelection(r, g, b, opacity), () => {});
+			return;
+		}
+		fillLive = changed(paint.fillSelection(r, g, b, opacity), undefined, 'Colour fill');
+	}
+
+	/** Fill the selection with the colour now (one undo step). */
+	export function fillSelection(): boolean {
+		if (!paint) return false;
+		const [r, g, b] = rgbOf(color);
+		const ok = changed(paint.fillSelection(r, g, b, opacity), undefined, 'Fill selection');
+		fillLive = ok && selectFill;
+		return ok;
+	}
+
+	// another colour while the fill can still change: it changes too
+	$effect(() => {
+		const [c, o] = [color, opacity];
+		untrack(() => {
+			if (!paint || !fillLive || !selectFill || !paint.selectionFillLive()) return;
+			const [r, g, b] = rgbOf(c);
+			changed(paint.refillSelection(r, g, b, o), () => {});
+		});
+	});
+	// colour fill off, or another tool: the fill is kept as it is
+	$effect(() => {
+		if (!selectFill || !(tool.startsWith('select') || tool === 'picker')) fillLive = false;
+	});
 
 	// ---- copy / cut / paste (the selection, or the whole layer) ----
 
@@ -1321,6 +1419,7 @@
 	}
 	export function deselect() {
 		paint?.deselect();
+		fillLive = false;
 		refreshAnts();
 	}
 	export function invertSelection() {
@@ -2291,8 +2390,10 @@
 			const [cx, cy] = toCanvas(e.clientX, e.clientY);
 			if (cx >= 0 && cy >= 0 && cx < width && cy < height) {
 				const [x, y] = [Math.floor(cx), Math.floor(cy)];
-				if (wandContiguous) paint.selectWand(x, y, wandTolerance, true, opOf(e));
-				else paint.selectColourRange(x, y, wandTolerance, true, opOf(e));
+				const op = opOf(e);
+				if (wandContiguous) paint.selectWand(x, y, wandTolerance, true, op);
+				else paint.selectColourRange(x, y, wandTolerance, true, op);
+				return selected(op);
 			}
 			return refreshAnts();
 		}
@@ -2310,10 +2411,13 @@
 			lassoFill = [toCanvas(e.clientX, e.clientY)];
 			return;
 		}
+		if (tool === 'select-lasso' && poly) return polyClick(toCanvas(e.clientX, e.clientY));
 		if (tool === 'select-rect' || tool === 'select-lasso') {
 			capture(e);
 			const p = toCanvas(e.clientX, e.clientY);
-			marquee = { kind: tool === 'select-rect' ? 'rect' : 'lasso', pts: [p, p], op: opOf(e) };
+			const kind =
+				tool === 'select-lasso' ? 'lasso' : selectShape === 'ellipse' ? 'ellipse' : 'rect';
+			marquee = { kind, pts: [p, p], op: opOf(e) };
 			return;
 		}
 		if (adjustOverlay && overlaySrc) {
@@ -2430,11 +2534,12 @@
 		if (marquee) {
 			const p = toCanvas(e.clientX, e.clientY);
 			marquee =
-				marquee.kind === 'rect'
-					? { ...marquee, pts: [marquee.pts[0], p] }
-					: { ...marquee, pts: [...marquee.pts, p] };
+				marquee.kind === 'lasso'
+					? { ...marquee, pts: [...marquee.pts, p] }
+					: { ...marquee, pts: [marquee.pts[0], p] };
 			return;
 		}
+		if (poly) poly = { ...poly, at: toCanvas(e.clientX, e.clientY) };
 		if (e.pointerType === 'touch' && touches.has(e.pointerId)) {
 			touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
 			const st = tap?.starts.get(e.pointerId);
@@ -2609,6 +2714,10 @@
 	}
 	function keydown(e: KeyboardEvent) {
 		if (e.key === 'Shift') shiftHeld = true;
+		if (poly && !typing(e.target) && (e.key === 'Enter' || e.key === 'Escape')) {
+			if (e.key === 'Enter') closePoly();
+			else poly = null;
+		}
 		if (e.code === 'Space' && hovering && !typing(e.target)) {
 			e.preventDefault();
 			spaceHeld = true;
@@ -3516,17 +3625,41 @@
 				preserveAspectRatio="none"
 				aria-hidden="true"
 			>
-				{#if marquee.kind === 'rect'}
-					{@const [[ax, ay], [bx, by]] = marquee.pts}
-					<rect
-						x={Math.min(ax, bx)}
-						y={Math.min(ay, by)}
-						width={Math.abs(bx - ax)}
-						height={Math.abs(by - ay)}
-					/>
-				{:else}
+				{#if marquee.kind === 'lasso'}
 					<polygon points={marquee.pts.map((p) => p.join(',')).join(' ')} />
+				{:else}
+					{@const [[ax, ay], [bx, by]] = marquee.pts}
+					{#if marquee.kind === 'rect'}
+						<rect
+							x={Math.min(ax, bx)}
+							y={Math.min(ay, by)}
+							width={Math.abs(bx - ax)}
+							height={Math.abs(by - ay)}
+						/>
+					{:else}
+						<ellipse
+							cx={(ax + bx) / 2}
+							cy={(ay + by) / 2}
+							rx={Math.abs(bx - ax) / 2}
+							ry={Math.abs(by - ay) / 2}
+						/>
+					{/if}
 				{/if}
+			</svg>
+		{/if}
+		{#if poly}
+			{@const r = 5 / Math.max(0.01, fit * zoom)}
+			<svg
+				class="marquee"
+				viewBox="0 0 {width} {height}"
+				preserveAspectRatio="none"
+				aria-hidden="true"
+				data-testid="lasso-points"
+			>
+				<polygon
+					points={[...poly.pts, ...(poly.at ? [poly.at] : [])].map((p) => p.join(',')).join(' ')}
+				/>
+				<circle class="first" cx={poly.pts[0][0]} cy={poly.pts[0][1]} {r} />
 			</svg>
 		{/if}
 		{#if camera}
@@ -3761,6 +3894,13 @@
 	/* an overlay: it must never hide the drawing (the plain canvas rule paints paper white) */
 	canvas.ants {
 		background: transparent;
+	}
+	.marquee .first {
+		fill: #fff;
+		stroke: #3d6bff;
+		stroke-width: 2;
+		stroke-dasharray: none;
+		vector-effect: non-scaling-stroke;
 	}
 	.marquee {
 		fill: rgba(61, 107, 255, 0.12);
