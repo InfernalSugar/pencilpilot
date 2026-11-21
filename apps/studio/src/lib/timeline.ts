@@ -99,6 +99,18 @@ export interface Timeline {
 	scenes: Scene[];
 	/** static layers' ids: one drawing all cut long */
 	statics: number[];
+	/** lip-sync mouth charts, one per mouth layer */
+	mouths?: MouthChart[];
+}
+
+/** Lip-sync's mouth shapes (Rhubarb's: A–F, and the extended G, H and X). */
+export const MOUTH_SHAPES = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'X'] as const;
+export type MouthShape = (typeof MOUTH_SHAPES)[number];
+
+/** A mouth chart: the drawing of a layer drawn for each mouth shape. */
+export interface MouthChart {
+	layer: number;
+	shapes: Partial<Record<MouthShape, number>>;
 }
 
 /** The longest an exposure can be held. */
@@ -383,6 +395,8 @@ export function drawingsIn(tl: Timeline): number[] {
 	for (const s of tl.scenes)
 		for (const c of s.cuts)
 			for (const t of Object.values(c.tracks)) for (const e of t) if (e.drawing) out.add(e.drawing);
+	// (a mouth chart's drawings are kept whether a frame shows them or not)
+	for (const m of tl.mouths ?? []) for (const d of Object.values(m.shapes)) if (d) out.add(d);
 	return [...out];
 }
 
@@ -412,6 +426,7 @@ export function layerOfDrawing(tl: Timeline, drawing: number): number | null {
 		for (const c of s.cuts)
 			for (const [layer, t] of Object.entries(c.tracks))
 				if (t.some((e) => e.drawing === drawing)) return +layer;
+	for (const m of tl.mouths ?? []) if (Object.values(m.shapes).includes(drawing)) return m.layer;
 	return null;
 }
 
@@ -509,11 +524,30 @@ export function toFile(tl: Timeline, layers: number[]): FileScene[] {
 export const staticsToFile = (tl: Timeline, layers: number[]) =>
 	tl.statics.filter((l) => layers.includes(l));
 
+/** A mouth chart as the file keeps it (drawings named "D<id>"). */
+export interface FileMouthChart {
+	layer: number;
+	shapes: Record<string, string>;
+}
+
+/** The mouth charts the file keeps, for the layers that exist. */
+export const mouthsToFile = (tl: Timeline, layers: number[]): FileMouthChart[] =>
+	(tl.mouths ?? [])
+		.filter((m) => layers.includes(m.layer))
+		.map((m) => ({
+			layer: m.layer,
+			shapes: Object.fromEntries(
+				Object.entries(m.shapes).flatMap(([k, d]) => (d ? [[k, `D${d}`]] : []))
+			)
+		}))
+		.filter((m) => Object.keys(m.shapes).length);
+
 /** A file's scenes back into a timeline; `layerIds` maps the file's layer ids to the canvas's. */
 export function fromFile(
 	scenes: FileScene[],
 	layerIds: Map<number, number>,
-	statics: number[] = []
+	statics: number[] = [],
+	mouths: FileMouthChart[] = []
 ): Timeline {
 	const camera = (c: Camera | undefined) =>
 		c && [c.x, c.y, c.width, c.height].every(Number.isFinite) && c.width > 0 && c.height > 0
@@ -525,7 +559,18 @@ export function fromFile(
 			if (Number.isInteger(+f) && +f >= 0 && typeof text === 'string' && text) out[+f] = text;
 		return Object.keys(out).length ? { [key]: out } : {};
 	};
+	const charts = mouths.flatMap((m): MouthChart[] => {
+		const layer = layerIds.get(m.layer);
+		if (layer === undefined) return [];
+		const shapes: MouthChart['shapes'] = {};
+		for (const [k, d] of Object.entries(m.shapes ?? {})) {
+			const id = Number(String(d).replace(/^D/, ''));
+			if ((MOUTH_SHAPES as readonly string[]).includes(k) && id > 0) shapes[k as MouthShape] = id;
+		}
+		return [{ layer, shapes }];
+	});
 	return {
+		...(charts.length ? { mouths: charts } : {}),
 		statics: statics.flatMap((l) => {
 			const id = layerIds.get(l);
 			return id === undefined ? [] : [id];

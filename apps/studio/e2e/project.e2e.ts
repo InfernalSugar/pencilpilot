@@ -99,6 +99,19 @@ async function stubTauri(page: Page, stub: Stub = {}) {
 						return { ffmpeg: '/usr/bin/ffmpeg', video: ['mp4', 'prores', 'webm'] };
 					case 'export_end':
 						return '/home/me/Walk cycle.gif';
+					case 'lipsync_tools':
+						return '/opt/rhubarb/rhubarb';
+					case 'lipsync_run': {
+						// Rhubarb's answer for half a second (a frame at 24 fps is 1/24 s): rest,
+						// wide open, half a frame of closed lips, open
+						const f = 1 / 24;
+						return [
+							{ start: 0, end: 2 * f, value: 'X' },
+							{ start: 2 * f, end: 4 * f, value: 'D' },
+							{ start: 4 * f, end: 4.5 * f, value: 'A' },
+							{ start: 4.5 * f, end: 0.5, value: 'C' }
+						];
+					}
 					case 'frames_put': {
 						const b = bytes!;
 						const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
@@ -1156,4 +1169,71 @@ test('sound: a clip with its waveform, markers, kept in the file, mixed into a v
 	// 3 frames at 24 fps at 48 kHz stereo 16-bit: 6000 samples
 	expect(all[sound].bytes).toBe(44 + 6000 * 4);
 	expect(sound).toBeLessThan(all.findIndex((c) => c.cmd === 'export_begin'));
+});
+
+test('lip-sync: a mouth chart, Rhubarb’s shapes on twos, kept in the file', async ({ page }) => {
+	await stubTauri(page);
+	await ready(page);
+	const tl = page.getByRole('region', { name: 'Timeline' });
+	// four mouths on frames 1–4 (A, B, C, D in order)
+	await scribble(page, 0.2);
+	for (const x of [0.4, 0.6, 0.8]) {
+		await tl.getByRole('button', { name: 'New drawing' }).click();
+		await scribble(page, x);
+	}
+	await tl.getByRole('button', { name: 'Frame 1', exact: true }).click();
+	await tl.getByLabel('Sound files').setInputFiles({
+		name: 'line.wav',
+		mimeType: 'audio/wav',
+		buffer: toneWav(0.5, 0.5)
+	});
+	await tl.getByRole('button', { name: 'Lip-sync: line' }).click();
+	const dlg = page.getByRole('dialog', { name: 'Lip-sync' });
+	await expect(dlg.getByRole('heading')).toHaveText('Lip-sync “line”');
+	await expect(dlg).toContainText('Frames 1–4 of this cut');
+	await expect(dlg.getByRole('button', { name: 'Lip-sync', exact: true })).toBeDisabled();
+	await dlg.getByRole('button', { name: 'Fill in order' }).click();
+	await expect(dlg.getByLabel('Mouth A')).toHaveValue(/[1-9]/);
+	await expect(dlg.getByLabel('Mouth D')).not.toHaveValue('0');
+	await expect(dlg.getByLabel('Mouth X')).toHaveValue('0');
+	await expect(dlg).toContainText('No drawing for E, F');
+	// the line is longer than the cut: make room for all of it
+	await dlg.getByLabel('Make the cut long enough for the whole line').check();
+	await expect(dlg).toContainText('Frames 1–12 of this cut');
+	await dlg.getByLabel('Language').selectOption('other');
+	await dlg.getByRole('button', { name: 'Lip-sync', exact: true }).click();
+	await expect(dlg).toBeHidden({ timeout: 15_000 });
+	await expect(page.getByText('Lip-synced 12 frames of “line”.')).toBeVisible();
+
+	const all = await calls(page);
+	const sent = all.find((c) => c.cmd === 'lipsync_audio')!;
+	expect(sent.head).toEqual([0x52, 0x49, 0x46, 0x46]); // RIFF
+	// half a second at 16 kHz, stereo 16-bit
+	expect(sent.bytes).toBe(44 + 8000 * 4);
+	const run = JSON.parse(all.find((c) => c.cmd === 'lipsync_run')!.json!);
+	expect(run.opts).toEqual({ english: false, dialog: '', extended: '' });
+
+	// on twos: rest (no X drawn: A stands in), D, the closed lips kept, then C
+	await page.getByRole('tab', { name: /X.sheet/ }).click();
+	const xs = page.getByRole('region', { name: 'Exposure sheet' });
+	const cellAt = (f: number) =>
+		xs.getByRole('gridcell', { name: new RegExp(`^Layer 1, frame ${f}:`) });
+	const want = [1, 1, 2, 2, 1, 1, 3, 3, 3, 3, 3, 3];
+	for (const [i, d] of want.entries())
+		await expect(cellAt(i + 1)).toHaveAccessibleName(
+			`Layer 1, frame ${i + 1}: ${d === want[i - 1] ? 'held' : `drawing ${d}`}`
+		);
+	await expect(tl.getByTestId('frame').locator('..')).toContainText('of 12');
+
+	// saved and opened: the chart comes back, with drawing B, which no frame shows now
+	await page.keyboard.press('Control+s');
+	await expect(page.getByTestId('project-name')).toHaveText('Walk cycle', { timeout: 20_000 });
+	await page.keyboard.press('Control+o');
+	await expect(cellAt(12)).toBeVisible({ timeout: 20_000 });
+	await tl.getByRole('button', { name: 'Lip-sync: line' }).click();
+	await expect(dlg.getByLabel('Mouth B')).not.toHaveValue('0');
+	await expect(dlg.getByLabel('Mouth B').locator('option:checked')).toHaveText(
+		/another cut|Drawing/
+	);
+	await expect(dlg.locator('.shape.set img')).toHaveCount(4);
 });

@@ -428,6 +428,7 @@ mod tests {
             drawings: vec![],
             static_layers: vec![],
             audio: vec![],
+            mouth_charts: vec![],
         };
         encode(&header, &rgba).unwrap()
     }

@@ -50,9 +50,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: apps/studio/src-tauri -> target
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
+      # Rhubarb (lip-sync), so the tests run it on a recording
+      - run: node ../scripts/fetch-rhubarb.mjs
       - run: cargo test
+        env:
+          PENCILPILOT_RHUBARB: ${{ github.workspace }}/apps/studio/src-tauri/rhubarb/rhubarb
 
   bundle:
     name: Installers (${{ matrix.name }})
@@ -91,7 +98,15 @@ jobs:
       - run: pnpm install --frozen-lockfile --filter "@pencilpilot/studio..."
       # ffmpeg for video export, bundled (GPL v3; src-tauri/ffmpeg/NOTICE.md)
       - run: node apps/studio/scripts/fetch-ffmpeg.mjs
-      - run: pnpm --filter @pencilpilot/studio tauri build --config src-tauri/tauri.ffmpeg.conf.json
+      # Rhubarb for lip-sync (MIT; src-tauri/rhubarb/LICENSE.md)
+      - run: node apps/studio/scripts/fetch-rhubarb.mjs
+      - run: pnpm --filter @pencilpilot/studio tauri build --config src-tauri/tauri.bundle.conf.json
+      # the lip-sync program and its speech models made it into the package, runnable
+      - if: runner.os == 'Linux'
+        run: |
+          deb=$(ls apps/studio/src-tauri/target/release/bundle/deb/*.deb)
+          dpkg-deb -c "$deb" | grep -E 'rhubarb/rhubarb$' | grep -E '^-rwx'
+          dpkg-deb -c "$deb" | grep -q 'rhubarb/res/sphinx/acoustic-model/means'
       - uses: actions/upload-artifact@v4
         if: github.event_name != 'pull_request'
         with:
