@@ -6,7 +6,7 @@
   "type": "module",
   "main": "index.mjs",
   "scripts": {
-    "test": "node --test test/"
+    "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
