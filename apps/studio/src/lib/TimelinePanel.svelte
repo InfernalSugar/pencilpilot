@@ -64,6 +64,7 @@
 		playing = false,
 		playMode = $bindable<PlayMode>('loop'),
 		playScope = $bindable<'cut' | 'scene'>('cut'),
+		shift = $bindable({ before: { x: 0, y: 0, r: 0 }, after: { x: 0, y: 0, r: 0 } }),
 		playRange = $bindable<PlayRange | null>(null),
 		onplay,
 		onrange,
@@ -95,6 +96,11 @@
 		playMode?: PlayMode;
 		/** play this cut, or the whole scene with its transitions */
 		playScope?: 'cut' | 'scene';
+		/** shift & trace: how far the onion skin's drawings before / after are moved (view only) */
+		shift?: {
+			before: { x: number; y: number; r: number };
+			after: { x: number; y: number; r: number };
+		};
 		/** the frames played (none: the whole cut) */
 		playRange?: PlayRange | null;
 		onplay: () => void;
@@ -527,6 +533,14 @@
 	}
 	const inRange = (f: number) => !!playRange && f >= playRange.from && f <= playRange.to;
 	let onionOpen = $state(false);
+	/** shift & trace: which side the controls move */
+	let shiftSide = $state<'before' | 'after'>('before');
+	function nudge(dx: number, dy: number, dr: number, big: boolean) {
+		const k = big ? 10 : 1;
+		const s = shift[shiftSide];
+		shift[shiftSide] = { x: s.x + dx * k * 2, y: s.y + dy * k * 2, r: s.r + dr * k };
+	}
+	let padDrag: { x: number; y: number } | null = null;
 </script>
 
 <section class="timeline" aria-label="Timeline">
@@ -684,6 +698,86 @@
 						<input type="checkbox" bind:checked={onion.keysOnly} />
 						Keys and breakdowns only
 					</label>
+					<div class="shift" role="group" aria-label="Shift and trace">
+						<b>Shift &amp; trace</b>
+						<div class="seg" role="radiogroup" aria-label="Move">
+							{#each [['before', 'Before'], ['after', 'After']] as [id, label] (id)}
+								<button
+									type="button"
+									class="b"
+									role="radio"
+									aria-checked={shiftSide === id}
+									onclick={() => (shiftSide = id as 'before' | 'after')}
+								>
+									{label}
+								</button>
+							{/each}
+						</div>
+						<div
+							class="pad"
+							role="slider"
+							tabindex="0"
+							aria-label="Drag to move the {shiftSide === 'before'
+								? 'drawings before'
+								: 'drawings after'}"
+							aria-valuetext="{shift[shiftSide].x}, {shift[shiftSide].y} px, {shift[shiftSide].r}°"
+							aria-valuenow={shift[shiftSide].x}
+							title="Drag to move them; arrow keys nudge (Shift: further)"
+							onpointerdown={(e) => {
+								(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+								padDrag = { x: e.clientX, y: e.clientY };
+							}}
+							onpointermove={(e) => {
+								if (!padDrag) return;
+								const s = shift[shiftSide];
+								shift[shiftSide] = {
+									...s,
+									x: s.x + Math.round((e.clientX - padDrag.x) * 2),
+									y: s.y + Math.round((e.clientY - padDrag.y) * 2)
+								};
+								padDrag = { x: e.clientX, y: e.clientY };
+							}}
+							onpointerup={() => (padDrag = null)}
+							onkeydown={(e) => {
+								const d = {
+									ArrowLeft: [-1, 0],
+									ArrowRight: [1, 0],
+									ArrowUp: [0, -1],
+									ArrowDown: [0, 1]
+								}[e.key];
+								if (!d) return;
+								e.preventDefault();
+								e.stopPropagation();
+								nudge(d[0], d[1], 0, e.shiftKey);
+							}}
+						>
+							{shift[shiftSide].x}, {shift[shiftSide].y}
+						</div>
+						<button
+							type="button"
+							class="b"
+							aria-label="Turn left"
+							onclick={(e) => nudge(0, 0, -1, e.shiftKey)}
+						>
+							↺
+						</button>
+						<button
+							type="button"
+							class="b"
+							aria-label="Turn right"
+							onclick={(e) => nudge(0, 0, 1, e.shiftKey)}
+						>
+							↻
+						</button>
+						<button
+							type="button"
+							class="b"
+							onclick={() =>
+								(shift = { before: { x: 0, y: 0, r: 0 }, after: { x: 0, y: 0, r: 0 } })}
+						>
+							Put back
+						</button>
+					</div>
 					<div class="seg" role="radiogroup" aria-label="Onion skin layers">
 						{#each [['active', 'This layer'], ['all', 'All layers']] as [id, label] (id)}
 							<button
@@ -1696,6 +1790,28 @@
 	}
 	.cel[data-kind='key'] {
 		box-shadow: inset 0 0 0 2px var(--pp-ink);
+	}
+	.shift {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 6px;
+		padding-top: 6px;
+		border-top: 1px solid rgba(255, 255, 255, 0.12);
+	}
+	.shift > b {
+		width: 100%;
+	}
+	.pad {
+		display: grid;
+		place-items: center;
+		width: 72px;
+		height: 44px;
+		border-radius: 8px;
+		background: rgba(255, 255, 255, 0.1);
+		font-size: 11px;
+		cursor: move;
+		touch-action: none;
 	}
 	.pop .check {
 		display: flex;

@@ -828,15 +828,65 @@
 		if (entries.length) {
 			await cache.ensure(entries.map((e) => e.drawing));
 			if (token !== onionToken || !canvas) return;
-			const img = canvas.onionRgba(entries, Math.max(1, Math.ceil(canvasSize.width / 1920)));
-			if (img) bmp = await createImageBitmap(img);
+			const k = Math.max(1, Math.ceil(canvasSize.width / 1920));
+			const moved = isShifted(shift.before) || isShifted(shift.after);
+			if (!moved) {
+				const img = canvas.onionRgba(entries, k);
+				if (img) bmp = await createImageBitmap(img);
+			} else {
+				// shift & trace: each side drawn where it was moved to
+				const sides = [
+					{ list: entries.filter((e) => e.colour === onion.beforeColour), at: shift.before },
+					{ list: entries.filter((e) => e.colour === onion.afterColour), at: shift.after },
+					{
+						list: entries.filter(
+							(e) => e.colour !== onion.beforeColour && e.colour !== onion.afterColour
+						),
+						at: { x: 0, y: 0, r: 0 }
+					}
+				];
+				const out = new OffscreenCanvas(
+					Math.ceil(canvasSize.width / k),
+					Math.ceil(canvasSize.height / k)
+				);
+				const g = out.getContext('2d')!;
+				for (const side of sides) {
+					if (!side.list.length) continue;
+					const img = canvas.onionRgba(side.list, k);
+					if (!img) continue;
+					const part = await createImageBitmap(img);
+					g.save();
+					g.translate(out.width / 2 + side.at.x / k, out.height / 2 + side.at.y / k);
+					g.rotate((side.at.r * Math.PI) / 180);
+					g.drawImage(part, -out.width / 2, -out.height / 2);
+					g.restore();
+					part.close();
+				}
+				bmp = out.transferToImageBitmap();
+			}
 		}
 		if (token !== onionToken) return bmp?.close();
 		onionImage?.close();
 		onionImage = bmp;
 	}
+	// ---- shift & trace: move the onion skin's drawings (only how they show) to line up ----
+	type Shift = { x: number; y: number; r: number };
+	let shift = $state<{ before: Shift; after: Shift }>({
+		before: { x: 0, y: 0, r: 0 },
+		after: { x: 0, y: 0, r: 0 }
+	});
+	const isShifted = (s: Shift) => s.x !== 0 || s.y !== 0 || s.r !== 0;
+	// a new frame: back where they belong
+	$effect(() => {
+		void [frame, cutIndex, scene];
+		untrack(() => {
+			if (isShifted(shift.before) || isShifted(shift.after))
+				shift = { before: { x: 0, y: 0, r: 0 }, after: { x: 0, y: 0, r: 0 } };
+		});
+	});
 	// settings, pins or the active layer changed
 	$effect(() => {
+		void $state.snapshot(shift);
 		void $state.snapshot(onion);
 		void [...pinned];
 		void status?.active;
@@ -2665,6 +2715,7 @@
 					{playing}
 					bind:playMode
 					bind:playScope
+					bind:shift
 					bind:playRange
 					{onion}
 					bind:cameraView
