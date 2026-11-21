@@ -153,6 +153,20 @@ pub struct Timeline {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub static_layers: Vec<u32>,
+    /// mouth charts for lip-sync: which drawing of a layer is each mouth shape
+    #[serde(default, rename = "mouthCharts", skip_serializing_if = "Vec::is_empty")]
+    pub mouth_charts: Vec<MouthChart>,
+}
+
+/// The mouth shapes lip-sync uses (Rhubarb's: A–F, and the extended G, H and X).
+pub const MOUTH_SHAPES: &str = "ABCDEFGHX";
+
+/// A mouth chart: the drawing of a layer drawn for each mouth shape.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct MouthChart {
+    pub layer: u32,
+    /// shape ("A"…"H", "X") → drawing id
+    pub shapes: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -370,6 +384,7 @@ impl Project {
                     frames: vec![Frame::default()],
                     scenes: Vec::new(),
                     static_layers: Vec::new(),
+                    mouth_charts: Vec::new(),
                 },
                 drawings: BTreeMap::new(),
                 extra: serde_json::Value::Null,
@@ -543,6 +558,22 @@ impl Project {
         for layer in &m.timeline.static_layers {
             if !m.layers.iter().any(|l| l.id == *layer) {
                 return Err(Error::Invalid(format!("static layer {layer} isn't there")));
+            }
+        }
+        for chart in &m.timeline.mouth_charts {
+            if !m.layers.iter().any(|l| l.id == chart.layer) {
+                return Err(Error::Invalid(format!(
+                    "a mouth chart names layer {}",
+                    chart.layer
+                )));
+            }
+            for (shape, d) in &chart.shapes {
+                if shape.len() != 1 || !MOUTH_SHAPES.contains(shape.as_str()) {
+                    return Err(Error::Invalid(format!("mouth shape {shape}")));
+                }
+                if !m.drawings.contains_key(d) {
+                    return Err(Error::Invalid(format!("a mouth chart names drawing {d}")));
+                }
             }
         }
         for cut in m.timeline.scenes.iter().flat_map(|s| &s.cuts) {
@@ -1017,18 +1048,33 @@ mod tests {
             frame: 2,
             label: "beat".into(),
         });
+        // a mouth chart, with a drawing ("X") no frame shows
+        p.manifest.timeline.mouth_charts.push(MouthChart {
+            layer: 1,
+            shapes: [("A".to_string(), "A".to_string()), ("X".into(), "X".into())]
+                .into_iter()
+                .collect(),
+        });
         let mut buf = std::io::Cursor::new(Vec::new());
         p.write(&mut buf).unwrap();
         let back = Project::read(std::io::Cursor::new(buf.into_inner())).unwrap();
         assert_eq!(back.manifest.timeline, p.manifest.timeline);
         assert_eq!(back.audio.get(&file).unwrap(), b"RIFF fake wav");
 
-        // a static layer that isn't there, a camera with no size, or a sound file that
-        // isn't in the archive is damage
-        for bad in 0..3 {
+        // a static layer that isn't there, a camera with no size, a sound file that isn't
+        // in the archive, or a mouth chart naming an unknown shape, layer or drawing is
+        // damage
+        for bad in 0..6 {
             let mut q = p.clone();
+            let chart = &mut q.manifest.timeline.mouth_charts[0];
             if bad == 0 {
                 q.manifest.timeline.static_layers = vec![9];
+            } else if bad == 3 {
+                chart.shapes.insert("Q".into(), "A".into());
+            } else if bad == 4 {
+                chart.layer = 9;
+            } else if bad == 5 {
+                chart.shapes.insert("B".into(), "NOPE".into());
             } else if bad == 2 {
                 // (a name that climbs out of audio/)
                 q.manifest.timeline.scenes[0].audio[0].file = "../x.wav".into();

@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anim::FrameStore;
-use ppstudio::{Canvas, Frame, Group, Layer, Project, Scene, Timeline};
+use ppstudio::{Canvas, Frame, Group, Layer, MouthChart, Project, Scene, Timeline};
 use serde::{Deserialize, Serialize};
 
 const MAGIC: &[u8; 4] = b"PPS1";
@@ -75,6 +75,9 @@ pub struct Header {
     /// the sound files the scenes play
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub audio: Vec<PacketAudio>,
+    /// lip-sync mouth charts (their drawings are among `drawings`)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mouth_charts: Vec<MouthChart>,
 }
 
 /// A sound file: the name the scenes use for it, and its bytes in the blobs. (Saved,
@@ -213,6 +216,7 @@ pub fn to_project(
         p.manifest.timeline.frames = Timeline::flatten(&scenes, &h.static_layers);
         p.manifest.timeline.scenes = scenes;
         p.manifest.timeline.static_layers = h.static_layers;
+        p.manifest.timeline.mouth_charts = h.mouth_charts;
     }
     p.manifest.layers = h.layers.iter().map(|l| l.layer.clone()).collect();
     p.manifest.groups = h.groups;
@@ -264,27 +268,38 @@ pub fn from_project(p: &Project, mut frames: Option<&mut FrameStore>) -> Result<
             mask: mask.as_deref().map(&mut put),
         });
     }
-    // an animation's drawings, each with the layer it's on
+    // an animation's drawings, each with the layer it's on (and mouth charts' drawings,
+    // shown or not)
     let mut drawings = Vec::new();
+    let mut named: Vec<(u32, &String)> = Vec::new();
     for cut in m.timeline.scenes.iter().flat_map(|s| &s.cuts) {
         for (&layer, track) in &cut.tracks {
-            for name in track.iter().filter_map(|e| e.drawing.as_ref()) {
-                let Some(id) = name.strip_prefix('D').and_then(|n| n.parse::<u32>().ok()) else {
-                    return Err(format!("drawing {name} isn't an app drawing"));
-                };
-                if drawings.iter().any(|d: &PacketDrawing| d.id == id) {
-                    continue;
-                }
-                let rgba = match frames.as_deref_mut() {
-                    Some(store) => {
-                        store.read_from(p, name, id).map_err(|e| e.to_string())?;
-                        None
-                    }
-                    None => Some(put(&p.drawing(name).map_err(|e| e.to_string())?.0)),
-                };
-                drawings.push(PacketDrawing { id, layer, rgba });
-            }
+            named.extend(
+                track
+                    .iter()
+                    .filter_map(|e| e.drawing.as_ref())
+                    .map(|d| (layer, d)),
+            );
         }
+    }
+    for chart in &m.timeline.mouth_charts {
+        named.extend(chart.shapes.values().map(|d| (chart.layer, d)));
+    }
+    for (layer, name) in named {
+        let Some(id) = name.strip_prefix('D').and_then(|n| n.parse::<u32>().ok()) else {
+            return Err(format!("drawing {name} isn't an app drawing"));
+        };
+        if drawings.iter().any(|d: &PacketDrawing| d.id == id) {
+            continue;
+        }
+        let rgba = match frames.as_deref_mut() {
+            Some(store) => {
+                store.read_from(p, name, id).map_err(|e| e.to_string())?;
+                None
+            }
+            None => Some(put(&p.drawing(name).map_err(|e| e.to_string())?.0)),
+        };
+        drawings.push(PacketDrawing { id, layer, rgba });
     }
     let thumbnail = p.thumbnail.as_deref().map(&mut put);
     let mut audio: Vec<PacketAudio> = Vec::new();
@@ -313,6 +328,7 @@ pub fn from_project(p: &Project, mut frames: Option<&mut FrameStore>) -> Result<
         drawings,
         static_layers: m.timeline.static_layers.clone(),
         audio,
+        mouth_charts: m.timeline.mouth_charts.clone(),
     };
     encode(&header, &blobs)
 }
@@ -439,6 +455,7 @@ mod tests {
             drawings: vec![],
             static_layers: vec![],
             audio: vec![],
+            mouth_charts: vec![],
         };
         (encode(&header, &blobs).unwrap(), rgba, mask)
     }
@@ -533,6 +550,33 @@ mod tests {
         assert_eq!(ps.manifest.timeline.static_layers, vec![3]);
         let (hs2, _) = decode(&from_project(&ps, None).unwrap()).unwrap();
         assert_eq!(hs2.static_layers, vec![3]);
+
+        // a mouth chart whose drawing 11 no frame shows: kept, drawing and all
+        let mut hm = h.clone();
+        let mut blobs_m = blobs.clone();
+        let at = blobs_m.len();
+        blobs_m.extend_from_slice(&rgba);
+        hm.drawings.push(PacketDrawing {
+            id: 11,
+            layer: 3,
+            rgba: Some([at, rgba.len()]),
+        });
+        hm.mouth_charts = vec![MouthChart {
+            layer: 3,
+            shapes: [
+                ("A".to_string(), "D11".to_string()),
+                ("D".into(), "D9".into()),
+            ]
+            .into_iter()
+            .collect(),
+        }];
+        let pm = to_project(&encode(&hm, &blobs_m).unwrap(), "test", "now", None).unwrap();
+        assert!(pm.manifest.drawings.contains_key("D11"));
+        let pk_m = from_project(&pm, None).unwrap();
+        let (hm2, bm2) = decode(&pk_m).unwrap();
+        assert_eq!(hm2.mouth_charts, hm.mouth_charts);
+        let d11 = hm2.drawings.iter().find(|d| d.id == 11).unwrap();
+        assert_eq!(slice(bm2, d11.rgba.unwrap()).unwrap(), &rgba[..]);
 
         // with the frame store: opening puts the drawings in it, the packet carries none
         let mut store = FrameStore::new(usize::MAX, None).unwrap();

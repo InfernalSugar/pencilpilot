@@ -7,7 +7,7 @@
  */
 import type { GroupInfo, LayerSnapshot } from '@pencilpilot/paint/PaintCanvas.svelte';
 import type { Stroke } from '@pencilpilot/paint/strokes';
-import type { FileScene } from './timeline';
+import type { FileMouthChart, FileScene } from './timeline';
 
 export const EXTENSION = 'ppstudio';
 
@@ -32,6 +32,8 @@ export interface ProjectDoc {
 	drawings?: ProjectDrawing[];
 	/** static layers (one drawing all cut long) */
 	statics?: number[];
+	/** lip-sync mouth charts (their drawings are among `drawings`) */
+	mouths?: FileMouthChart[];
 	/** the sound files the scenes play (the key they use, the file as imported) */
 	audio?: { file: string; bytes: Uint8Array }[];
 }
@@ -71,6 +73,7 @@ interface Header {
 	thumbnail?: [number, number] | null;
 	scenes?: FileScene[];
 	staticLayers?: number[];
+	mouthCharts?: FileMouthChart[];
 	audio?: { file: string; bytes: [number, number] }[];
 	drawings?: { id: number; layer: number; rgba?: [number, number] | null }[];
 }
@@ -115,6 +118,7 @@ export function pack(doc: ProjectDoc): Uint8Array {
 			? {
 					scenes: doc.scenes,
 					staticLayers: doc.statics ?? [],
+					...(doc.mouths?.length ? { mouthCharts: doc.mouths } : {}),
 					audio: (doc.audio ?? []).map((a) => ({ file: a.file, bytes: put(a.bytes) })),
 					drawings: (doc.drawings ?? []).map((d) => ({
 						id: d.id,
@@ -177,6 +181,7 @@ export function unpack(packet: ArrayBuffer | Uint8Array): ProjectDoc {
 		thumbnail: h.thumbnail ? get(h.thumbnail) : null,
 		scenes: h.scenes ?? [],
 		...(h.staticLayers?.length ? { statics: h.staticLayers } : {}),
+		...(h.mouthCharts?.length ? { mouths: h.mouthCharts } : {}),
 		...(h.audio?.length
 			? { audio: h.audio.map((a) => ({ file: a.file, bytes: get(a.bytes) })) }
 			: {}),

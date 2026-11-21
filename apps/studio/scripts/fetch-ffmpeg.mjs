@@ -3,7 +3,7 @@
  * Fetch the ffmpeg build bundled into the app's installers, for this machine's Rust
  * target, and check it against a pinned SHA-256. It goes to
  * src-tauri/binaries/pencilpilot-ffmpeg-<target>[.exe], where `tauri build --config
- * src-tauri/tauri.ffmpeg.conf.json` picks it up (named so it never clashes with a
+ * src-tauri/tauri.bundle.conf.json` picks it up (named so it never clashes with a
  * system ffmpeg in /usr/bin).
  *
  * The builds are GPL v3 (with libx264, prores_ks, libvpx); src-tauri/ffmpeg/NOTICE.md

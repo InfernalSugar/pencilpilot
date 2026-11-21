@@ -76,6 +76,7 @@
 		audio,
 		soundTick = 0,
 		onsound,
+		onlipsync,
 		onmarker,
 		onedit
 	}: {
@@ -119,6 +120,8 @@
 		soundTick?: number;
 		/** sound files picked to add at this frame */
 		onsound?: (files: File[]) => void;
+		/** lip-sync a sound clip (by id) */
+		onlipsync?: (clip: number) => void;
 		/** add or take away a marker on this frame */
 		onmarker?: () => void;
 		/** the timeline changed (or the frame did): show it */
@@ -1185,6 +1188,25 @@
 				>
 					{c.muted ? '×' : '♪'}
 				</button>
+				{#if onlipsync}
+					<button
+						type="button"
+						class="kind"
+						aria-label="Lip-sync: {c.name}"
+						title="Lip-sync: mouths for this line"
+						onclick={() => onlipsync(c.id)}
+					>
+						<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+							<path
+								d="M1.5 8c2-2.6 4-3.4 6.5-1.6C10.5 4.6 12.5 5.4 14.5 8c-2 2.8-4.2 4-6.5 4S3.5 10.8 1.5 8Z M1.5 8h13"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="1.5"
+								stroke-linejoin="round"
+							/>
+						</svg>
+					</button>
+				{/if}
 				<button
 					type="button"
 					class="kind"

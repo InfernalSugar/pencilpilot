@@ -56,6 +56,17 @@
 	import XSheet from '#lib/XSheet.svelte';
 	import { AudioBank, wav } from '#lib/audio.js';
 	import ExportDialog from '#lib/ExportDialog.svelte';
+	import LipSyncDialog from '#lib/LipSyncDialog.svelte';
+	import {
+		LIPSYNC_DEFAULTS,
+		autoChart,
+		dialogueText,
+		extendedOf,
+		shapeFrames,
+		writeMouths,
+		type Cue,
+		type LipSyncSettings
+	} from '#lib/lipsync.js';
 	import {
 		EXPORT_DEFAULTS,
 		FORMATS,
@@ -79,6 +90,7 @@
 	import {
 		cutLength,
 		cutStart,
+		drawingNumbers,
 		toggleMarker,
 		drawingAt,
 		drawingsIn,
@@ -94,6 +106,9 @@
 		showing,
 		trackIn,
 		toFile,
+		mouthsToFile,
+		type MouthChart,
+		type MouthShape,
 		type Timeline
 	} from '#lib/timeline.js';
 
@@ -284,6 +299,166 @@
 		if (playing && s.markers?.some((m) => m.frame === f)) return;
 		toggleMarker(s, f);
 		docVersion++;
+	}
+
+	// ---- lip-sync (S3-T02): Rhubarb in src-tauri/src/lipsync.rs ----
+	let lipSync = $state<{
+		clip: number;
+		rhubarb: string | null;
+		layer: number;
+		dialog: string;
+		toEnd: boolean;
+		progress: number | null;
+		error: string;
+	} | null>(null);
+	let lipSettings = $state<LipSyncSettings>({
+		...LIPSYNC_DEFAULTS,
+		...readLocal<Partial<LipSyncSettings>>('pp.app.lipsync', {})
+	});
+	$effect(() => keepLocal('pp.app.lipsync', $state.snapshot(lipSettings)));
+	let lipStop = false;
+
+	/** Layers mouths can go on: paint layers that animate (not static, not adjustments). */
+	const mouthLayers = () =>
+		(status?.layers ?? []).filter((l) => !l.adjust && !timeline.statics.includes(l.id));
+
+	/** A layer's mouth chart (made if it has none; read back for `$state`). */
+	function chartOf(layer: number): MouthChart {
+		if (!timeline.mouths) timeline.mouths = [];
+		const list = timeline.mouths;
+		if (!list.some((m) => m.layer === layer)) list.push({ layer, shapes: {} });
+		return list.find((m) => m.layer === layer)!;
+	}
+
+	/** A layer's drawings to choose mouths from: this cut's first (numbered), then others. */
+	function drawingChoices(layer: number): { id: number; label: string }[] {
+		const nums = drawingNumbers(theCut().tracks[layer] ?? []);
+		const out = [...nums].map(([id, n]) => ({ id, label: `Drawing ${n}` }));
+		for (const id of drawingsIn(timeline))
+			if (!nums.has(id) && layerOfDrawing(timeline, id) === layer)
+				out.push({ id, label: `Drawing #${id} (another cut)` });
+		return out;
+	}
+
+	/** A small picture of one drawing, cropped to what's drawn on it. */
+	async function drawingThumb(layer: number, drawing: number): Promise<string | null> {
+		if (!canvas || !status) return null;
+		await cache.ensure([drawing]);
+		const k = Math.max(1, Math.ceil(Math.max(canvasSize.width, canvasSize.height) / 512));
+		const pairs = status.layers
+			.filter((l) => !l.adjust)
+			.map((l): [number, number] => [l.id, l.id === layer ? drawing : 0]);
+		const r = canvas.renderFrame(pairs, k, true);
+		if (!r) return null;
+		let [x0, y0, x1, y1] = [r.width, r.height, -1, -1];
+		for (let y = 0; y < r.height; y++)
+			for (let x = 0; x < r.width; x++)
+				if (r.rgba[(y * r.width + x) * 4 + 3] > 16) {
+					if (x < x0) x0 = x;
+					if (x > x1) x1 = x;
+					if (y < y0) y0 = y;
+					if (y > y1) y1 = y;
+				}
+		if (x1 < 0) return null;
+		const w = x1 - x0 + 1;
+		const h = y1 - y0 + 1;
+		const side = 112;
+		const s = Math.min(1, (side - 8) / Math.max(w, h));
+		const c = document.createElement('canvas');
+		c.width = c.height = side;
+		const g = c.getContext('2d')!;
+		g.fillStyle = '#fff';
+		g.fillRect(0, 0, side, side);
+		const bmp = await createImageBitmap(new ImageData(r.rgba, r.width, r.height));
+		g.drawImage(bmp, x0, y0, w, h, (side - w * s) / 2, (side - h * s) / 2, w * s, h * s);
+		return c.toDataURL();
+	}
+
+	/** Where a clip's lip-sync goes in this cut: from which frame, how many. */
+	function lipRange(clipId: number, toEnd: boolean) {
+		const c = sceneClips().find((x) => x.id === clipId);
+		if (!c) return null;
+		const cs = cutStart(theScene(), cutIndex, timeline.statics);
+		const len = sounds.frames(c.file, fps);
+		const from = Math.max(0, c.start - cs);
+		const end = c.start + len - cs;
+		const cutLen = cutLength(theCut(), timeline.statics);
+		const to = toEnd ? end : Math.min(end, cutLen);
+		return { clip: c, from, frames: Math.max(0, to - from), longer: end > cutLen, cs };
+	}
+
+	async function openLipSync(clipId: number) {
+		if (playing) stopPlay();
+		const { invoke } = await import('@tauri-apps/api/core');
+		const rhubarb = await invoke<string | null>('lipsync_tools').catch(() => null);
+		const r = lipRange(clipId, false);
+		if (!r) return;
+		const layers = mouthLayers();
+		const charted = timeline.mouths?.find((m) => layers.some((l) => l.id === m.layer));
+		const layer =
+			charted?.layer ??
+			(layers.some((l) => l.id === status?.active) ? status!.active : layers[0]?.id);
+		if (layer === undefined) return;
+		lipSync = {
+			clip: clipId,
+			rhubarb,
+			layer,
+			dialog: dialogueText(theCut().dialogue, r.from, r.from + r.frames),
+			// (a cut with nothing in it yet: the line makes it)
+			toEnd: cutLength(theCut(), timeline.statics) <= 1,
+			progress: null,
+			error: ''
+		};
+	}
+
+	async function runLipSync() {
+		const ls = lipSync;
+		if (!ls || !canvas || ls.progress !== null) return;
+		const r = lipRange(ls.clip, ls.toEnd);
+		if (!r || r.frames <= 0) {
+			ls.error = 'This sound isn’t heard in this cut.';
+			return;
+		}
+		const chart = chartOf(ls.layer);
+		const { invoke } = await import('@tauri-apps/api/core');
+		const { listen } = await import('@tauri-apps/api/event');
+		ls.error = '';
+		ls.progress = 0;
+		lipStop = false;
+		const off = await listen<number>('lipsync-progress', (e) => {
+			if (lipSync && lipSync.progress !== null) lipSync.progress = e.payload;
+		});
+		try {
+			const mix = await sounds.mixdown(
+				[{ clips: [{ ...r.clip, muted: false, gain: 1 }], from: r.cs + r.from, frames: r.frames }],
+				fps,
+				16000
+			);
+			if (!mix) throw new Error('the sound couldn’t be read');
+			await invoke('lipsync_audio', wav(mix));
+			const cues = await invoke<Cue[]>('lipsync_run', {
+				opts: { english: lipSettings.english, dialog: ls.dialog, extended: extendedOf(chart) }
+			});
+			if (lipStop) throw new Error('cancelled');
+			const shapes = shapeFrames(cues, fps, r.frames, lipSettings.step, lipSettings.lead);
+			writeMouths(trackIn(theCut(), ls.layer), r.from, shapes, chart);
+			lipSync = null;
+			note(`Lip-synced ${r.frames} frames of “${r.clip.name}”.`, 3000);
+			timelineEdited(true);
+		} catch (e) {
+			if (lipSync) {
+				lipSync.progress = null;
+				lipSync.error = String(e).includes('cancelled') ? '' : `Couldn’t lip-sync: ${e}`;
+			}
+		} finally {
+			off();
+		}
+	}
+
+	async function cancelLipSync() {
+		lipStop = true;
+		const { invoke } = await import('@tauri-apps/api/core');
+		await invoke('lipsync_cancel').catch(() => {});
 	}
 
 	/** Undo / redo a stroke from another frame: go there first, so it's seen. */
@@ -751,6 +926,7 @@
 			thumbnail: await canvas.thumbnail(),
 			scenes: toFile(timeline, layerIds),
 			statics: staticsToFile(timeline, layerIds),
+			mouths: mouthsToFile(timeline, layerIds),
 			audio: [
 				...new Set(timeline.scenes.flatMap((s) => (s.audio ?? []).map((a) => a.file)))
 			].flatMap((file) => {
@@ -1020,7 +1196,7 @@
 				// (drawings in the frame store come when their frames show)
 				for (const d of doc.drawings ?? []) if (d.rgba) c.putDrawing(d.id, d.rgba);
 				cache.stored((doc.drawings ?? []).filter((d) => !d.rgba).map((d) => d.id));
-				timeline = fromFile(doc.scenes!, ids, doc.statics);
+				timeline = fromFile(doc.scenes!, ids, doc.statics, doc.mouths);
 				sounds.clear();
 				void Promise.all(
 					(doc.audio ?? []).map((a) =>
@@ -1496,6 +1672,7 @@
 					audio={sounds}
 					{soundTick}
 					onsound={(files) => void addSounds(files)}
+					onlipsync={(id) => void openLipSync(id)}
 					onmarker={markFrame}
 					onlayer={(id) => canvas?.selectLayer(id)}
 					onedit={(changed) => {
@@ -1563,6 +1740,46 @@
 					onstart={() => void runAnimExport()}
 					oncancel={() => (exportStop = true)}
 					onclose={() => (animExport = null)}
+				/>
+			{/if}
+			{#if lipSync}
+				{@const ls = lipSync}
+				{@const r = lipRange(ls.clip, ls.toEnd)}
+				{@const chart = timeline.mouths?.find((m) => m.layer === ls.layer) ?? {
+					layer: ls.layer,
+					shapes: {}
+				}}
+				<LipSyncDialog
+					name={r?.clip.name ?? ''}
+					range={{ from: r?.from ?? 0, frames: r?.frames ?? 0 }}
+					longer={!!r?.longer}
+					bind:toEnd={ls.toEnd}
+					layers={mouthLayers()}
+					bind:layer={ls.layer}
+					{chart}
+					choices={drawingChoices(ls.layer)}
+					thumb={(d) => drawingThumb(ls.layer, d)}
+					bind:settings={lipSettings}
+					bind:dialog={ls.dialog}
+					rhubarb={ls.rhubarb}
+					progress={ls.progress}
+					error={ls.error}
+					onchart={(k: MouthShape, d: number) => {
+						const c = chartOf(ls.layer);
+						if (d) c.shapes[k] = d;
+						else delete c.shapes[k];
+						docVersion++;
+					}}
+					onauto={() => {
+						autoChart(
+							chartOf(ls.layer),
+							drawingChoices(ls.layer).map((c) => c.id)
+						);
+						docVersion++;
+					}}
+					onstart={() => void runLipSync()}
+					oncancel={() => void cancelLipSync()}
+					onclose={() => (lipSync = null)}
 				/>
 			{/if}
 			{#if timelapseOpen && canvas}
