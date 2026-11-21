@@ -3,3 +3,5 @@ src-tauri/gen
 build
 .svelte-kit
 static/brushes
+test-results
+playwright-report
