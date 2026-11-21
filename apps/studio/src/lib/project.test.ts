@@ -49,7 +49,28 @@ const doc = (): ProjectDoc => ({
 	strokes: [{ brushId: 'pen', eraser: false, points: [{ x: 1, y: 2, pressure: 0.5, t: 0 }] }],
 	extra: { color: '#ff0000' },
 	created: '2026-11-21T00:00:00Z',
-	thumbnail: Uint8Array.from([137, 80, 78, 71])
+	thumbnail: Uint8Array.from([137, 80, 78, 71]),
+	scenes: [
+		{
+			name: 'Scene 1',
+			cuts: [
+				{
+					name: 'Cut 1',
+					tracks: {
+						1: [
+							{ drawing: 'D3', length: 2 },
+							{ drawing: null, length: 1 },
+							{ drawing: 'D4', length: 1 }
+						]
+					}
+				}
+			]
+		}
+	],
+	drawings: [
+		{ id: 3, layer: 1, rgba: Uint8Array.from({ length: 32 }, (_, i) => i) },
+		{ id: 4, layer: 1, rgba: Uint8Array.from({ length: 32 }, (_, i) => 31 - i) }
+	]
 });
 
 describe('project packets', () => {

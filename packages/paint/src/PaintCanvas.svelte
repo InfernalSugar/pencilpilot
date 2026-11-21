@@ -22,12 +22,14 @@
 		/** holds an imported picture (or paint merged with one) */
 		imported: boolean;
 		empty: boolean;
+		/** the drawing (animation cel) it shows; 0 = none yet (drawing on it starts one) */
+		drawing: number;
 		/** an adjustment layer's settings (JSON, see tone.ts); null for paint layers */
 		adjust: string | null;
 	}
 	export type LayerSettings = Omit<
 		LayerInfo,
-		'id' | 'empty' | 'mask' | 'editingMask' | 'group' | 'imported' | 'adjust'
+		'id' | 'empty' | 'mask' | 'editingMask' | 'group' | 'imported' | 'adjust' | 'drawing'
 	>;
 
 	/** What happened to a picture brought in with `importImage`. */
@@ -2627,6 +2629,47 @@
 		schedule();
 		notify();
 	}
+
+	// ---- drawings (animation cels) ----
+	// Each layer shows one drawing; the others are kept by the engine. A timeline
+	// says which drawing each layer shows on each frame (see the app's timeline).
+
+	/** Show other drawings: [layer id, drawing id] pairs (drawing 0 = an empty cel). */
+	export function showDrawings(pairs: [number, number][]): boolean {
+		if (!paint) return false;
+		editShape = null;
+		const ok = paint.showDrawings(new Uint32Array(pairs.flat()));
+		schedule();
+		notify();
+		return ok;
+	}
+	/** Give layers with paint but no drawing (a pasted picture) one of their own. */
+	export function ensureDrawings() {
+		if (!paint) return;
+		const before = paint.layersJson();
+		paint.ensureDrawings();
+		if (paint.layersJson() !== before) notify();
+	}
+	/** A new, empty drawing's id. */
+	export const newDrawing = () => paint?.newDrawing() ?? 0;
+	/** A copy of a drawing; returns the copy's id. */
+	export const copyDrawing = (drawing: number) => paint?.copyDrawing(drawing) ?? 0;
+	/** A drawing's pixels (straight-alpha RGBA, canvas size). */
+	export const drawingRgba = (drawing: number) =>
+		paint?.drawingRgba(drawing) ?? new Uint8Array(width * height * 4);
+	export const drawingEmpty = (drawing: number) => paint?.drawingEmpty(drawing) ?? true;
+	/** Load a drawing's pixels (opening a project). */
+	export function putDrawing(drawing: number, rgba: Uint8Array): boolean {
+		const ok = paint?.putDrawing(drawing, rgba) ?? false;
+		schedule();
+		return ok;
+	}
+	/** Forget kept drawings not in `keep` (and not needed by undo). */
+	export const dropDrawingsExcept = (keep: number[]) =>
+		paint?.dropDrawingsExcept(new Uint32Array(keep));
+	/** The drawing the next undo / redo changes (0: none, or not a drawing). */
+	export const undoDrawing = () => paint?.undoDrawing() ?? 0;
+	export const redoDrawing = () => paint?.redoDrawing() ?? 0;
 
 	/** Erase the active layer. */
 	export function clear() {
