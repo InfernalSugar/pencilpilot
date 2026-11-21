@@ -169,7 +169,18 @@ pub struct TileSource<'a> {
 /// Composite the sources (bottom → top) for one pixel over white paper → sRGB8.
 #[inline]
 pub fn composite_pixel(sources: &[TileSource<'_>], row: usize, col: usize) -> [u8; 3] {
-    let mut dst = [1.0f32; 3];
+    composite_pixel_on(sources, row, col, [1.0; 3])
+}
+
+/// Composite the sources for one pixel over a paper of colour `paper` (sRGB, 0–1).
+#[inline]
+pub fn composite_pixel_on(
+    sources: &[TileSource<'_>],
+    row: usize,
+    col: usize,
+    paper: [f32; 3],
+) -> [u8; 3] {
+    let mut dst = paper;
     // alpha of the nearest unclipped layer: what clipped layers above it show through
     let mut base = 0.0f32;
     for s in sources {

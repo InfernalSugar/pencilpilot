@@ -22,6 +22,8 @@ pencilpilot-ppstudio = { path = "../../../crates/ppstudio" }
 pencilpilot-anim = { path = "../../../crates/anim" }
 tauri-plugin-dialog = "2"
 blake3 = "1"
+png = "0.18"
+gif = "0.14"
 
 [profile.release]
 codegen-units = 1
