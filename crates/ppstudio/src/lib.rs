@@ -169,6 +169,12 @@ pub struct Cut {
     /// the part of the canvas the cut shows; none: all of it
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub camera: Option<Camera>,
+    /// exposure-sheet notes, frame → text: what happens
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub action: BTreeMap<u32, String>,
+    /// exposure-sheet notes, frame → text: what's said
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub dialogue: BTreeMap<u32, String>,
 }
 
 /// A rectangle of the canvas, in canvas pixels.
@@ -782,6 +788,7 @@ mod tests {
             name: "C".into(),
             tracks: tracks.into_iter().collect(),
             camera: None,
+            ..Default::default()
         };
         // cut 1: layer 1 on twos (A A B B), layer 2 held all along; cut 2: one frame
         let scenes = vec![Scene {
@@ -850,6 +857,10 @@ mod tests {
                     width: 48.0,
                     height: 27.0,
                 }),
+                action: [(0, "turns".to_string())].into_iter().collect(),
+                dialogue: [(1, "hel-".to_string()), (2, "lo".to_string())]
+                    .into_iter()
+                    .collect(),
             }],
         }];
         assert_eq!(scenes[0].cuts[0].length(&[]), 11);

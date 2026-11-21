@@ -7,6 +7,7 @@ import {
 	deleteFrame,
 	deleteFrameAll,
 	drawingAt,
+	drawingNumbers,
 	drawingsIn,
 	findDrawing,
 	fitCamera,
@@ -19,7 +20,9 @@ import {
 	newTimeline,
 	removeExposure,
 	setDrawing,
+	setKey,
 	setLength,
+	setNote,
 	setStatic,
 	setStaticDrawing,
 	setTiming,
@@ -237,5 +240,44 @@ describe('timeline', () => {
 		// a broken camera is dropped
 		file[0].cuts[0].camera = { x: 0, y: 0, width: 0, height: 5 };
 		expect(fromFile(file, new Map()).scenes[0].cuts[0].camera).toBeUndefined();
+	});
+
+	it('writes drawings and notes as on an exposure sheet', () => {
+		const t: Track = [
+			{ drawing: 1, length: 4 },
+			{ drawing: 2, length: 2 }
+		];
+		// a key mid-hold: from there to the end of that hold
+		setKey(t, 2, 3);
+		expect(frames(t, 6)).toEqual([1, 1, 3, 3, 2, 2]);
+		// an empty cel, and a key past the end
+		setKey(t, 4, 0);
+		setKey(t, 8, 1);
+		expect(frames(t, 10)).toEqual([1, 1, 3, 3, 0, 0, 0, 0, 1, 0]);
+		// a drawing exposed again keeps its number
+		expect([...drawingNumbers(t)]).toEqual([
+			[1, 1],
+			[3, 2]
+		]);
+
+		const cut: Cut = { id: 1, name: 'Cut 1', tracks: { 1: t } };
+		setNote(cut, 'dialogue', 2, ' hel- ');
+		setNote(cut, 'dialogue', 4, 'lo');
+		setNote(cut, 'action', 0, 'turns');
+		expect(cut.dialogue).toEqual({ 2: 'hel-', 4: 'lo' });
+		// notes move with inserted and deleted frames
+		insertFrameAll(cut, 1);
+		expect(cut.dialogue).toEqual({ 3: 'hel-', 5: 'lo' });
+		expect(cut.action).toEqual({ 0: 'turns' });
+		deleteFrameAll(cut, 3);
+		expect(cut.dialogue).toEqual({ 4: 'lo' });
+		setNote(cut, 'action', 0, '');
+		expect(cut.action).toBeUndefined();
+		// kept in the file
+		const tl = newTimeline([]);
+		tl.scenes[0].cuts[0] = cut;
+		const back = fromFile(toFile(tl, [1]), new Map([[1, 1]]));
+		expect(back.scenes[0].cuts[0].dialogue).toEqual({ 4: 'lo' });
+		expect(back.scenes[0].cuts[0].action).toBeUndefined();
 	});
 });

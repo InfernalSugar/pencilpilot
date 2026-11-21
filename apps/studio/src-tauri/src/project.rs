@@ -440,6 +440,8 @@ mod tests {
                     width: 80.0,
                     height: 45.0,
                 }),
+                dialogue: [(3, "ah".to_string())].into_iter().collect(),
+                ..Default::default()
             }],
         }];
         let pk = encode(&h, &blobs).unwrap();
