@@ -820,6 +820,13 @@ impl PaintCanvas {
         self.inner.forget_drawing(drawing)
     }
 
+    /// Onion skin: (drawing, 0xRRGGBB, opacity 0–255) triples, farthest first, as tinted
+    /// lines on transparency, made `shrink` times smaller. Straight-alpha RGBA8.
+    #[wasm_bindgen(js_name = onionRgba)]
+    pub fn onion_rgba(&self, entries: &[u32], shrink: u32) -> Vec<u8> {
+        self.inner.onion_rgba(entries, shrink)
+    }
+
     /// An animation frame as it would look ((layer, drawing) pairs flattened), made
     /// `shrink` times smaller; RGBA8. Changes nothing.
     #[wasm_bindgen(js_name = renderFrame)]

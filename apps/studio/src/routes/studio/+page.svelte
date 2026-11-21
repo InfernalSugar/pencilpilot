@@ -55,6 +55,7 @@
 	import VersionsMenu from '#lib/VersionsMenu.svelte';
 	import TimelinePanel from '#lib/TimelinePanel.svelte';
 	import { FrameCache } from '#lib/frames.js';
+	import { cleanOnion, onionEntries, type OnionSettings } from '#lib/onion.js';
 	import {
 		clampRange,
 		frameAt,
@@ -184,6 +185,7 @@
 		if (ok) {
 			onCanvas = { scene, cut: cutIndex, frame };
 			cache.shown(now.map(([, d]) => d));
+			void updateOnion();
 			// what stopped showing goes to the store; the engine keeps a few
 			const gone = leaving.filter((d) => d && !now.some(([, n]) => n === d));
 			void cache.push(gone).then(() => cache.trim());
@@ -211,6 +213,50 @@
 		}
 		[scene, cutIndex, frame] = [at.scene, at.cut, at.frame];
 		await showFrame();
+	}
+
+	// ---- onion skin and light table: other drawings, tinted, over the canvas ----
+	let onion = $state<OnionSettings>(cleanOnion(readLocal('pp.app.onion', null)));
+	$effect(() => keepLocal('pp.app.onion', $state.snapshot(onion)));
+	/** frames pinned to the light table (in this cut) */
+	let pinned = $state<number[]>([]);
+	let onionImage = $state.raw<ImageBitmap | null>(null);
+	let onionToken = 0;
+
+	/** Make the onion skin for the frame the canvas shows. */
+	async function updateOnion() {
+		const token = ++onionToken;
+		const c = canvas;
+		if (!c || !status || timelineFor !== canvasKey) return;
+		const cut = timeline.scenes[onCanvas.scene]?.cuts[onCanvas.cut];
+		if (!cut) return;
+		const layers = status.layers.filter((l) => !l.adjust).map((l) => l.id);
+		const entries = onionEntries(cut, layers, status.active, onCanvas.frame, onion, pinned);
+		let bmp: ImageBitmap | null = null;
+		if (entries.length) {
+			await cache.ensure(entries.map((e) => e.drawing));
+			if (token !== onionToken || !canvas) return;
+			const img = canvas.onionRgba(entries, Math.max(1, Math.ceil(canvasSize.width / 1920)));
+			if (img) bmp = await createImageBitmap(img);
+		}
+		if (token !== onionToken) return bmp?.close();
+		onionImage?.close();
+		onionImage = bmp;
+	}
+	// settings, pins or the active layer changed
+	$effect(() => {
+		void $state.snapshot(onion);
+		void [...pinned];
+		void status?.active;
+		untrack(() => void updateOnion());
+	});
+	// another cut: its own pins
+	$effect(() => {
+		void [scene, cutIndex];
+		untrack(() => (pinned = []));
+	});
+	function pinFrame() {
+		pinned = pinned.includes(frame) ? pinned.filter((f) => f !== frame) : [...pinned, frame];
 	}
 
 	// ---- playback: frames rendered small, once each, then played at the frame rate ----
@@ -872,6 +918,8 @@
 		else if (action === 'play') void togglePlay();
 		else if (action === 'set-in') setRange('from');
 		else if (action === 'set-out') setRange('to');
+		else if (action === 'onion') onion.on = !onion.on;
+		else if (action === 'pin-frame') pinFrame();
 		else if (action === 'adjust') toolOpts.openAdjust();
 		else if (action === 'copy' || action === 'cut') toolOpts.copyCut(action === 'cut');
 		else if (action === 'copy-to-layer') {
@@ -1093,6 +1141,7 @@
 					onquickmenu={(x, y) => (quickMenu = { x, y })}
 					onchange={canvasChanged}
 					locked={switching}
+					onionImage={playing ? null : onionImage}
 				/>
 			{/key}
 			{#if playing}
@@ -1122,6 +1171,9 @@
 					{playing}
 					bind:playMode
 					bind:playRange
+					{onion}
+					bind:pinned
+					onpin={pinFrame}
 					onplay={togglePlay}
 					onrange={setRange}
 					layers={status.layers}

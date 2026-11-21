@@ -3522,6 +3522,79 @@ impl Painter {
         &self.rgba
     }
 
+    /// Onion skin: drawings as tinted lines over each other, on transparency, for showing
+    /// over the canvas. `entries` are (drawing, colour 0xRRGGBB, opacity 0–255) triples,
+    /// farthest first (each is laid over the ones before). Made `shrink` times smaller
+    /// ([`Painter::frame_size`]); thin lines keep their strength when shrunk. Straight-alpha
+    /// RGBA8. Drawings must be here; a missing one is skipped.
+    pub fn onion_rgba(&self, entries: &[u32], shrink: u32) -> Vec<u8> {
+        let k = shrink.max(1) as usize;
+        let ts = TILE_SIZE;
+        let (w, h) = (self.width as usize, self.height as usize);
+        let (ow, oh) = (w.div_ceil(k), h.div_ceil(k));
+        // straight-alpha colour and alpha, laid one over another
+        let mut rgb = vec![[0f32; 3]; ow * oh];
+        let mut alpha = vec![0f32; ow * oh];
+        let mut cover = vec![0f32; ow * oh];
+        let per = 1.0 / (k * k) as f32;
+        for e in entries.as_chunks::<3>().0 {
+            let [drawing, colour, opacity] = *e;
+            let Some(tiles) = self.drawing_tiles(drawing) else {
+                continue;
+            };
+            let tint = [
+                ((colour >> 16) & 255) as f32 / 255.0,
+                ((colour >> 8) & 255) as f32 / 255.0,
+                (colour & 255) as f32 / 255.0,
+            ];
+            let op = (opacity.min(255)) as f32 / 255.0;
+            cover.iter_mut().for_each(|c| *c = 0.0);
+            let mut touched = Vec::new();
+            for (&(tx, ty), px) in tiles {
+                for (py, row) in px.iter().enumerate() {
+                    let y = ty as i64 * ts as i64 + py as i64;
+                    if y < 0 || y >= h as i64 {
+                        continue;
+                    }
+                    for (pxi, p) in row.iter().enumerate() {
+                        if p[3] == 0 {
+                            continue;
+                        }
+                        let x = tx as i64 * ts as i64 + pxi as i64;
+                        if x < 0 || x >= w as i64 {
+                            continue;
+                        }
+                        let o = (y as usize / k) * ow + x as usize / k;
+                        if cover[o] == 0.0 {
+                            touched.push(o);
+                        }
+                        cover[o] += p[3] as f32 / 32768.0 * per;
+                    }
+                }
+            }
+            for o in touched {
+                // shrunk lines get a boost (a 1 px line in a 4×4 square is still a line)
+                let a = (cover[o] * k as f32).min(1.0) * op;
+                let keep = alpha[o] * (1.0 - a);
+                let out = a + keep;
+                for c in 0..3 {
+                    rgb[o][c] = (tint[c] * a + rgb[o][c] * keep) / out.max(1e-6);
+                }
+                alpha[o] = out;
+            }
+        }
+        let mut img = vec![0u8; ow * oh * 4];
+        for (i, px) in img.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            if alpha[i] > 0.0 {
+                for c in 0..3 {
+                    px[c] = (rgb[i][c] * 255.0).round() as u8;
+                }
+                px[3] = (alpha[i] * 255.0).round() as u8;
+            }
+        }
+        img
+    }
+
     /// Size of a [`Painter::render_frame`] picture made `shrink` times smaller.
     pub fn frame_size(&self, shrink: u32) -> (u32, u32) {
         let k = shrink.max(1);
@@ -4601,6 +4674,45 @@ mod tests {
         let blank = p.render_frame(&[layer, 0], 2);
         assert!(blank.iter().all(|&v| v == 255));
         assert_eq!(p.rgba(), &before[..]);
+    }
+
+    #[test]
+    fn onion_skins_tint_drawings_over_each_other() {
+        let mut p = Painter::new(256, 128);
+        let layer = p.active_layer();
+        line(&mut p, &pen(), 30.0);
+        let before = p.layer_drawing(layer);
+        p.show_drawings(&[layer, 0]);
+        line(&mut p, &pen(), 100.0);
+        let after = p.layer_drawing(layer);
+        let img = p.onion_rgba(&[before, 0xff0000, 128, after, 0x00ff00, 255], 1);
+        let at = |x: usize, y: usize| {
+            let i = (y * 256 + x) * 4;
+            [img[i], img[i + 1], img[i + 2], img[i + 3]]
+        };
+        // red, half see-through, where the earlier line is; green where the later one is
+        let r = at(100, 30);
+        assert!(
+            r[0] > 200 && r[1] < 50 && (100..=140).contains(&r[3]),
+            "{r:?}"
+        );
+        let g = at(100, 100);
+        assert!(g[1] > 200 && g[0] < 50 && g[3] > 240, "{g:?}");
+        assert_eq!(at(100, 70)[3], 0, "clear between them");
+        // shrunk: the lines are still there
+        let small = p.onion_rgba(&[before, 0xff0000, 255], 4);
+        assert_eq!(small.len(), 64 * 32 * 4);
+        assert!(
+            small
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|px| px[3] > 128)
+                .count()
+                > 10
+        );
+        // an unknown drawing is skipped
+        assert!(p.onion_rgba(&[999, 0, 255], 1).iter().all(|&v| v == 0));
     }
 
     fn px(p: &Painter, x: u32, y: u32) -> [u8; 3] {
