@@ -54,6 +54,12 @@ export class ToolOptions {
 	fillAllLayers = $state(true);
 	/** fill: find shapes on this layer (a line-art "reference" layer); 0 = per fillAllLayers */
 	fillRefLayer = $state(0);
+	/** an animation (the app): fills can carry on through the next frames */
+	animated = $state(false);
+	/** fill: carry each fill on through the following frames (with a line layer) */
+	fillAcross = $state(false);
+	/** make colour layers (a Colour layer under the lines, a Shadow clipped to it) */
+	setupColour: (() => void) | null = null;
 	/** transform: corners move on their own (distort / perspective) */
 	distort = $state(false);
 	/** transform: bend with a 4×4 grid (warp) */

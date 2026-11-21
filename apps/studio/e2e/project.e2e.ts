@@ -1622,3 +1622,82 @@ test('keys, breakdowns and in-betweens marked; flipping rolls and flips the keys
 		xs.getByRole('gridcell', { name: 'Layer 1, frame 4: drawing 4 (in-between)' })
 	).toBeVisible();
 });
+
+test('colour: colour layers under the lines, a fill carried through the frames', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	const tl = page.getByRole('region', { name: 'Timeline' });
+	const b = (await canvas(page).boundingBox())!;
+	/** a closed box (one stroke), in fractions of the canvas */
+	const box = async (x0: number, y0: number, x1: number, y1: number) => {
+		const at = (x: number, y: number) => [b.x + b.width * x, b.y + b.height * y] as const;
+		await page.mouse.move(...at(x0, y0));
+		await page.mouse.down();
+		for (const [x, y] of [
+			[x1, y0],
+			[x1, y1],
+			[x0, y1],
+			[x0, y0]
+		])
+			await page.mouse.move(...at(x, y), { steps: 12 });
+		await page.mouse.up();
+	};
+	/** the colour at a point of the canvas (fractions) */
+	const px = (x: number, y: number) =>
+		canvas(page).evaluate(
+			(el: HTMLCanvasElement, [x, y]) => [
+				...el
+					.getContext('2d')!
+					.getImageData(Math.round(el.width * x), Math.round(el.height * y), 1, 1).data
+			],
+			[x, y]
+		);
+	const dark = async (x: number, y: number) => (await px(x, y))[0] < 100;
+	// the lines: a box moving right over three drawings, on twos
+	for (const [i, x] of [0.2, 0.26, 0.32].entries()) {
+		if (i) await tl.getByRole('button', { name: 'New drawing' }).click();
+		await box(x, 0.3, x + 0.25, 0.6);
+		await tl.getByRole('button', { name: '2s' }).click();
+	}
+	await tl.getByRole('button', { name: 'Frame 1', exact: true }).click();
+
+	// colour layers for the lines; carry fills on
+	await page.getByRole('button', { name: 'Fill (G)' }).click();
+	await page.getByRole('button', { name: 'Set up colour layers' }).click();
+	await expect(page.getByText('Fill on the Colour layer')).toBeVisible();
+	const carry = page.getByRole('button', { name: 'Carry to next frames' });
+	await carry.click();
+	await expect(carry).toHaveAttribute('aria-pressed', 'true');
+
+	// one fill inside the box on frame 1: every drawing's box gets it
+	expect(await dark(0.32, 0.45)).toBe(false);
+	await page.mouse.click(b.x + b.width * 0.32, b.y + b.height * 0.45);
+	await expect(page.getByText('Filled on 3 drawings.')).toBeVisible({ timeout: 20_000 });
+	await expect(tl.getByTestId('frame')).toHaveText('1');
+	await expect.poll(() => dark(0.32, 0.45)).toBe(true);
+	expect(await dark(0.6, 0.45)).toBe(false);
+	for (const [f, x] of [
+		[3, 0.38],
+		[5, 0.44]
+	] as const) {
+		await tl.getByRole('button', { name: `Frame ${f}`, exact: true }).click();
+		await expect.poll(() => dark(x, 0.45)).toBe(true);
+		// (outside the box: not coloured)
+		expect(await dark(x + 0.2, 0.45)).toBe(false);
+		// held as long as the line drawing
+		await tl.getByRole('button', { name: `Frame ${f + 1}`, exact: true }).click();
+		await expect.poll(() => dark(x, 0.45)).toBe(true);
+	}
+	// the colour layer's drawings follow the lines' timing
+	await expect(
+		tl.getByRole('button', { name: /^Colour \(Layer 1\): drawing 3, frame 5–6$/ })
+	).toBeVisible();
+
+	// one undo takes the whole carried fill
+	await page.keyboard.press('Control+z');
+	await expect.poll(() => dark(0.44, 0.45)).toBe(false);
+	await tl.getByRole('button', { name: 'Frame 1', exact: true }).click();
+	await expect.poll(() => dark(0.32, 0.45)).toBe(false);
+});
