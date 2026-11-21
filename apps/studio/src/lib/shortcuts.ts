@@ -42,6 +42,9 @@ export type ActionId =
 	| 'prev-frame'
 	| 'next-frame'
 	| 'new-drawing'
+	| 'play'
+	| 'set-in'
+	| 'set-out'
 	| 'save'
 	| 'save-as'
 	| 'open';
@@ -96,6 +99,9 @@ export const ACTIONS: Action[] = [
 	{ id: 'prev-frame', label: 'Previous frame', group: 'Animation', key: ',' },
 	{ id: 'next-frame', label: 'Next frame', group: 'Animation', key: '.' },
 	{ id: 'new-drawing', label: 'New drawing after this one', group: 'Animation', key: 'N' },
+	{ id: 'play', label: 'Play / stop', group: 'Animation', key: 'Shift+Space' },
+	{ id: 'set-in', label: 'Loop from this frame', group: 'Animation', key: 'Alt+I' },
+	{ id: 'set-out', label: 'Loop to this frame', group: 'Animation', key: 'Alt+O' },
 	{ id: 'save', label: 'Save', group: 'File', key: 'Ctrl+S' },
 	{ id: 'save-as', label: 'Save as…', group: 'File', key: 'Ctrl+Shift+S' },
 	{ id: 'open', label: 'Open…', group: 'File', key: 'Ctrl+O' }
@@ -116,8 +122,10 @@ export function comboOf(e: {
 	altKey: boolean;
 	shiftKey: boolean;
 }): string | null {
-	if (RESERVED.has(e.key)) return null;
-	let key = e.key.length === 1 ? e.key.toUpperCase() : e.key;
+	const mod = e.ctrlKey || e.metaKey || e.altKey || e.shiftKey;
+	// Space on its own moves the view; with a modifier it can be a shortcut
+	if (RESERVED.has(e.key) && !(e.key === ' ' && mod)) return null;
+	let key = e.key === ' ' ? 'Space' : e.key.length === 1 ? e.key.toUpperCase() : e.key;
 	// Shift changes the character on some keys; keep the plain one ("Shift+[", not "{")
 	const shifted: Record<string, string> = { '{': '[', '}': ']', '?': '/', '+': '=', _: '-' };
 	if (e.shiftKey && shifted[key]) key = shifted[key];

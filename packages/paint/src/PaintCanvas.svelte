@@ -2684,6 +2684,23 @@
 	export const historyDrawings = (): number[] => [...(paint?.historyDrawings() ?? [])];
 	/** Let go of a kept drawing (the frame store has it). */
 	export const forgetDrawing = (drawing: number) => paint?.forgetDrawing(drawing) ?? false;
+	/**
+	 * An animation frame as it would look, without changing the canvas: [layer, drawing]
+	 * pairs (layers not named show what they show), made `shrink` times smaller.
+	 */
+	export function renderFrame(
+		pairs: [number, number][],
+		shrink = 1
+	): { rgba: Uint8ClampedArray<ArrayBuffer>; width: number; height: number } | null {
+		if (!paint) return null;
+		const k = Math.max(1, Math.round(shrink));
+		const rgba = paint.renderFrame(new Uint32Array(pairs.flat()), k);
+		return {
+			rgba: new Uint8ClampedArray(rgba.buffer as ArrayBuffer, rgba.byteOffset, rgba.length),
+			width: Math.ceil(width / k),
+			height: Math.ceil(height / k)
+		};
+	}
 	/** The drawing the next undo / redo changes (0: none, or not a drawing). */
 	export const undoDrawing = () => paint?.undoDrawing() ?? 0;
 	export const redoDrawing = () => paint?.redoDrawing() ?? 0;

@@ -56,6 +56,15 @@
 	import TimelinePanel from '#lib/TimelinePanel.svelte';
 	import { FrameCache } from '#lib/frames.js';
 	import {
+		clampRange,
+		frameAt,
+		framesOf,
+		previewShrink,
+		type PlayMode,
+		type PlayRange
+	} from '#lib/playback.js';
+	import {
+		cutLength,
 		drawingAt,
 		drawingsIn,
 		findDrawing,
@@ -202,6 +211,133 @@
 		}
 		[scene, cutIndex, frame] = [at.scene, at.cut, at.frame];
 		await showFrame();
+	}
+
+	// ---- playback: frames rendered small, once each, then played at the frame rate ----
+	let playing = $state(false);
+	let playMode = $state<PlayMode>('loop');
+	/** the frames to play (none: the whole cut) */
+	let playRange = $state<PlayRange | null>(null);
+	/** rendering frames before playing: how far along */
+	let preparing = $state<{ done: number; total: number } | null>(null);
+	let playerEl = $state<HTMLCanvasElement>();
+	/** rendered frames, by what's on them (drawings and their changes, the layers) */
+	// eslint-disable-next-line svelte/prefer-svelte-reactivity -- a cache, not state
+	let rendered = new Map<string, ImageBitmap>();
+	let renderedFor = -1;
+	let playTimer = 0;
+
+	/** What a frame looks like depends on: its drawings (and their changes), the layers. */
+	function frameKey(pairs: [number, number][], shrink: number) {
+		const layers = (status?.layers ?? []).map((l) => [
+			l.id,
+			l.visible,
+			l.opacity,
+			l.blend,
+			l.clip,
+			l.mask,
+			l.group,
+			l.adjust,
+			l.drawing ? 0 : l.empty
+		]);
+		return JSON.stringify([
+			pairs.map(([l, d]) => [l, d, cache.version(d)]),
+			layers,
+			status?.groups ?? [],
+			shrink
+		]);
+	}
+
+	function drawPlayer(bmp: ImageBitmap | undefined) {
+		const el = playerEl;
+		if (!el || !bmp) return;
+		const dpr = window.devicePixelRatio || 1;
+		const [w, h] = [Math.round(el.clientWidth * dpr), Math.round(el.clientHeight * dpr)];
+		if (el.width !== w || el.height !== h) [el.width, el.height] = [w, h];
+		const g = el.getContext('2d');
+		if (!g) return;
+		const k = Math.min(w / bmp.width, h / bmp.height);
+		const [dw, dh] = [bmp.width * k, bmp.height * k];
+		g.fillStyle = getComputedStyle(el).backgroundColor || '#e8e4da';
+		g.fillRect(0, 0, w, h);
+		g.imageSmoothingQuality = 'high';
+		g.drawImage(bmp, (w - dw) / 2, (h - dh) / 2, dw, dh);
+	}
+
+	/** Play the range (or the cut) from the start of it, or stop. */
+	async function togglePlay() {
+		if (playing) return stopPlay();
+		if (!canvas || !status) return;
+		await showQueue;
+		const cut = theCut();
+		const range = clampRange(playRange ?? { from: 0, to: cutLength(cut) - 1 }, cutLength(cut));
+		const shrink = previewShrink(canvasSize.width);
+		const layerIds = status.layers.filter((l) => !l.adjust).map((l) => l.id);
+		if (renderedFor !== canvasKey) {
+			for (const b of rendered.values()) b.close();
+			rendered = new Map();
+			renderedFor = canvasKey;
+		}
+		playing = true;
+		// eslint-disable-next-line svelte/prefer-svelte-reactivity -- a local lookup, not state
+		const keys = new Map<number, string>();
+		const todo = framesOf(range);
+		preparing = { done: 0, total: todo.length };
+		try {
+			for (const f of todo) {
+				if (!playing || !canvas) return;
+				const pairs = showing(cut, layerIds, f);
+				const key = frameKey(pairs, shrink);
+				keys.set(f, key);
+				if (!rendered.has(key)) {
+					await cache.ensure(pairs.map(([, d]) => d));
+					const r = canvas?.renderFrame(pairs, shrink);
+					if (!r) return stopPlay();
+					rendered.set(key, await createImageBitmap(new ImageData(r.rgba, r.width, r.height)));
+					cache.trim();
+				}
+				preparing = { done: preparing!.done + 1, total: todo.length };
+			}
+		} catch (e) {
+			note(`Couldn’t play: ${e}`);
+			return stopPlay();
+		} finally {
+			preparing = null;
+		}
+		// a few hundred frames at most stay rendered
+		while (rendered.size > 400) {
+			const [k, b] = rendered.entries().next().value!;
+			b.close();
+			rendered.delete(k);
+		}
+		const t0 = performance.now();
+		const tick = () => {
+			if (!playing) return;
+			const n = Math.floor(((performance.now() - t0) * fps) / 1000);
+			const f = frameAt(n, range, playMode);
+			if (f === null) return stopPlay();
+			if (f !== frame) frame = f;
+			drawPlayer(rendered.get(keys.get(f)!));
+			playTimer = requestAnimationFrame(tick);
+		};
+		tick();
+	}
+
+	function stopPlay() {
+		if (!playing) return;
+		playing = false;
+		preparing = null;
+		cancelAnimationFrame(playTimer);
+		// the canvas shows where playback stopped
+		void showFrame();
+	}
+
+	/** Loop from (or to) the current frame. */
+	function setRange(end: 'from' | 'to') {
+		const len = cutLength(theCut());
+		const r = playRange ?? { from: 0, to: len - 1 };
+		playRange = clampRange(end === 'from' ? { ...r, from: frame } : { ...r, to: frame }, len);
+		if (end === 'from' && playRange.to < frame) playRange = { from: frame, to: len - 1 };
 	}
 
 	// a new, empty canvas: a new timeline
@@ -717,6 +853,8 @@
 		if (e.key === 'Escape' && status?.selection) return canvas?.deselect();
 		const combo = comboOf(e);
 		const action = combo ? actionFor(settings.keys, combo) : null;
+		// while playing: Esc or any other shortcut stops first
+		if (playing && (e.key === 'Escape' || (action && action !== 'play'))) stopPlay();
 		if (!action) return;
 		e.preventDefault();
 		const toolFor = TOOL_ACTIONS[action];
@@ -731,6 +869,9 @@
 		else if (action === 'prev-frame') timelinePanel?.step(-1);
 		else if (action === 'next-frame') timelinePanel?.step(1);
 		else if (action === 'new-drawing') timelinePanel?.addDrawing();
+		else if (action === 'play') void togglePlay();
+		else if (action === 'set-in') setRange('from');
+		else if (action === 'set-out') setRange('to');
 		else if (action === 'adjust') toolOpts.openAdjust();
 		else if (action === 'copy' || action === 'cut') toolOpts.copyCut(action === 'cut');
 		else if (action === 'copy-to-layer') {
@@ -954,6 +1095,19 @@
 					locked={switching}
 				/>
 			{/key}
+			{#if playing}
+				<canvas
+					class="player"
+					bind:this={playerEl}
+					aria-label="Playing frame {frame + 1}"
+					data-testid="player"
+				></canvas>
+				{#if preparing}
+					<p class="canvas-note" role="status">
+						Getting frames ready… {preparing.done} of {preparing.total}
+					</p>
+				{/if}
+			{/if}
 			{#if canvasNote}<p class="canvas-note" role="status">{canvasNote}</p>{/if}
 		{/snippet}
 		{#snippet bottom()}
@@ -964,12 +1118,20 @@
 					bind:scene
 					bind:cut={cutIndex}
 					bind:frame
-					{fps}
+					bind:fps
+					{playing}
+					bind:playMode
+					bind:playRange
+					onplay={togglePlay}
+					onrange={setRange}
 					layers={status.layers}
 					active={status.active}
 					newDrawing={() => canvas?.newDrawing() ?? 0}
 					onlayer={(id) => canvas?.selectLayer(id)}
-					onedit={timelineEdited}
+					onedit={(changed) => {
+						if (playing) stopPlay();
+						timelineEdited(changed);
+					}}
 				/>
 			{/if}
 		{/snippet}
@@ -1117,6 +1279,14 @@
 	.opt:disabled {
 		opacity: 0.35;
 		cursor: not-allowed;
+	}
+	.player {
+		position: absolute;
+		inset: 0;
+		z-index: 15;
+		width: 100%;
+		height: 100%;
+		background: var(--pp-surface-sunk);
 	}
 	.canvas-note {
 		position: absolute;

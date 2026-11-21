@@ -123,6 +123,7 @@ colour flats and lip-sync are free (local).
 - **S2-T03** Exposure-sheet view (X-sheet) alongside the timeline, with dialogue and action columns `anim` `design`
 - **S2-T04** Onion skin (red before, green after, how many, opacity, tint) and a light table to pin any frames `anim`
 - **S2-T05** Playback: fixed fps, loop a range, ping-pong, scrub, frame-step keys, playback cache `anim`
+  ✅ Play / stop (Shift+Space, Esc stops), 6–60 fps, once / loop / ping-pong, a loop range (In / Out, Alt+I / Alt+O), scrubbing along the frame numbers, `,` / `.` frame steps. Frames are rendered once each, small (at most 960 px wide), by the engine without touching the canvas, and kept by what's on them, so playing again is instant and only changed frames render again (24 frames at 1080p get ready in about 0.4 s in the window).
 - **S2-T06** Cel layers (one drawing per exposure) vs static layers (backgrounds, overlays), and per-cut camera frame (safe areas) `anim`
 - **S2-T07** Frame tools: copy / paste / duplicate / reverse frames, cycles, "boil" (redraw-looking jitter on held frames) `anim`
 
