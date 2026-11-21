@@ -1,6 +1,6 @@
-# ADR-0010 — PencilPilot Studio: a desktop and tablet app for drawing and frame-by-frame animation
+# ADR-0010 — The PencilPilot app: a desktop and tablet app for drawing and frame-by-frame animation
 
-**Status:** Proposed (2026-11-20)
+**Status:** Accepted (2026-11-21). The app is called **PencilPilot**, like the website; the docs say "the app" where they need to tell them apart. Desktop first; tablets once the pen test (S0-T05) shows pressure and latency are good enough.
 
 ## Context
 The website's studio (M10, M11) now has a full raster painting toolset: the hokusai /
@@ -10,7 +10,7 @@ with the same look and feel, for drawing and for making frame-by-frame anime, wi
 help that the website deliberately doesn't have (ADR-0002, ADR-0009).
 
 ## Decision
-1. **A separate app, "PencilPilot Studio"** (working name), in this monorepo as `apps/studio`.
+1. **A separate app, "PencilPilot"**, in this monorepo as `apps/studio` (package `@pencilpilot/studio`).
    The website stays as it is: practice and grading, no generative AI.
 2. **Tauri 2** shell (Windows, macOS, Linux, then iPadOS and Android tablets).
    - The paint engine is Rust, so it runs **natively** in the app (multi-threaded, no WASM
