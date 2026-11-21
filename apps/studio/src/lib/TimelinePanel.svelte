@@ -2,7 +2,9 @@
 	/**
 	 * The timeline under the canvas: the scene and cut, a frame ruler, and a row per
 	 * layer (top layer first) with its exposures. Click a frame to go there; drag an
-	 * exposure to move it, or its right edge to hold it longer or shorter.
+	 * exposure to move it, or its right edge to hold it longer or shorter. A static layer
+	 * (a background, an overlay) shows one drawing all cut long; the camera frames the
+	 * part of the canvas the cut shows.
 	 *
 	 * The timeline is changed in place; the studio is told (`onedit`) so it can show
 	 * the right drawings and count the change as unsaved.
@@ -11,17 +13,22 @@
 	import {
 		addCut,
 		addScene,
+		cameraOf,
 		cutLength,
 		deleteFrameAll,
 		exposureAt,
 		insertExposure,
 		insertFrameAll,
 		moveExposure,
+		fitCamera,
 		removeExposure,
+		setStatic,
 		setLength,
 		setTiming,
 		startOf,
+		staticDrawing,
 		trackIn,
+		type Camera,
 		type Timeline,
 		type Track
 	} from './timeline';
@@ -42,6 +49,8 @@
 		onion,
 		pinned = $bindable<number[]>([]),
 		onpin,
+		cameraView = $bindable({ show: true, safe: false }),
+		canvasSize,
 		layers,
 		active,
 		newDrawing,
@@ -64,6 +73,9 @@
 		pinned?: number[];
 		/** pin or unpin the current frame */
 		onpin: () => void;
+		/** show the camera frame over the canvas, and its safe areas */
+		cameraView?: { show: boolean; safe: boolean };
+		canvasSize: { width: number; height: number };
 		/** loop from / to the current frame */
 		onrange: (end: 'from' | 'to') => void;
 		/** bottom → top, as the canvas lists them */
@@ -81,14 +93,17 @@
 	const CELL = 22;
 	const theScene = $derived(timeline.scenes[scene] ?? timeline.scenes[0]);
 	const theCut = $derived(theScene.cuts[cut] ?? theScene.cuts[0]);
-	const length = $derived(cutLength(theCut));
+	const statics = $derived(timeline.statics);
+	const length = $derived(cutLength(theCut, statics));
 	/** room to draw past the end */
 	const shown = $derived(Math.max(length + 8, 24));
 	const rows = $derived([...layers].reverse().filter((l) => !l.adjust));
 
 	const trackOf = (layer: number): Track => trackIn(theCut, layer);
 	const activeTrack = $derived(theCut.tracks[active] ?? []);
-	const here = $derived(exposureAt(activeTrack, frame));
+	/** the active layer is static: its timing doesn't apply */
+	const activeStatic = $derived(statics.includes(active));
+	const here = $derived(activeStatic ? null : exposureAt(activeTrack, frame));
 
 	function go(f: number) {
 		frame = Math.max(0, f);
@@ -112,6 +127,7 @@
 	// ---- buttons ----
 	/** a new, empty drawing after this one (or here, past the end), and go to it */
 	export function addDrawing() {
+		if (activeStatic) return;
 		const t = trackOf(active);
 		const d = newDrawing();
 		if (!d) return;
@@ -146,14 +162,53 @@
 		edited();
 	}
 	function insertFrame() {
-		insertFrameAll(theCut, frame);
+		insertFrameAll(theCut, frame, statics);
 		edited();
 	}
 	function deleteFrame() {
-		deleteFrameAll(theCut, frame);
-		frame = Math.min(frame, cutLength(theCut) - 1);
+		deleteFrameAll(theCut, frame, statics);
+		frame = Math.min(frame, cutLength(theCut, statics) - 1);
 		edited();
 	}
+	function toggleStatic(layer: number) {
+		setStatic(timeline, layer, !statics.includes(layer));
+		edited();
+	}
+
+	// ---- the camera ----
+	const camera = $derived(cameraOf(theCut, canvasSize));
+	const ASPECTS: [string, number][] = [
+		['16:9', 16 / 9],
+		['4:3', 4 / 3],
+		['1:1', 1],
+		['2.39:1', 2.39],
+		['9:16', 9 / 16]
+	];
+	function setCamera(c: Camera | null) {
+		if (c) theCut.camera = cameraOf({ ...theCut, camera: c }, canvasSize);
+		else delete theCut.camera;
+		cameraView.show = true;
+		edited();
+	}
+	/** one of the camera's numbers changed */
+	function cameraField(key: keyof Camera, v: number) {
+		if (!Number.isFinite(v)) return;
+		setCamera({ ...camera, [key]: v });
+	}
+	/** zoom the camera about its centre, keeping its shape */
+	function zoomCamera(k: number) {
+		const width = Math.min(canvasSize.width, camera.width * k);
+		const height = Math.min(canvasSize.height, (width * camera.height) / camera.width);
+		const w = (height * camera.width) / camera.height;
+		setCamera({
+			x: camera.x + (camera.width - w) / 2,
+			y: camera.y + (camera.height - height) / 2,
+			width: w,
+			height
+		});
+	}
+	let cameraOpen = $state(false);
+
 	function newCut() {
 		cut = addCut(theScene, cut);
 		frame = 0;
@@ -382,6 +437,82 @@
 				{pinned.length} pinned ×
 			</button>
 		{/if}
+		<div class="onion">
+			<button
+				type="button"
+				class="b"
+				aria-pressed={cameraView.show && (!!theCut.camera || cameraView.safe)}
+				title="Camera: the part of the canvas this cut shows (playback shows only that)"
+				onclick={() => (cameraView.show = !cameraView.show)}
+			>
+				Camera
+			</button>
+			<button
+				type="button"
+				class="b caret"
+				aria-label="Camera settings"
+				aria-expanded={cameraOpen}
+				onclick={() => (cameraOpen = !cameraOpen)}
+			>
+				▾
+			</button>
+			{#if cameraOpen}
+				<div class="pop wide" role="group" aria-label="Camera">
+					<div class="seg wrap" role="group" aria-label="Camera shape">
+						<button
+							type="button"
+							class="b"
+							aria-pressed={!theCut.camera}
+							onclick={() => setCamera(null)}
+						>
+							Whole canvas
+						</button>
+						{#each ASPECTS as [label, k] (label)}
+							<button type="button" class="b" onclick={() => setCamera(fitCamera(k, canvasSize))}>
+								{label}
+							</button>
+						{/each}
+					</div>
+					<div class="nums">
+						{#each [['x', 'X'], ['y', 'Y'], ['width', 'W'], ['height', 'H']] as [key, label] (key)}
+							<label>
+								{label}
+								<input
+									type="number"
+									aria-label="Camera {key}"
+									min="0"
+									value={Math.round(camera[key as keyof Camera])}
+									onchange={(e) => cameraField(key as keyof Camera, +e.currentTarget.value)}
+								/>
+							</label>
+						{/each}
+					</div>
+					<div class="seg">
+						<button
+							type="button"
+							class="b"
+							title="Zoom in (a smaller frame)"
+							onclick={() => zoomCamera(0.9)}
+						>
+							Zoom in
+						</button>
+						<button
+							type="button"
+							class="b"
+							title="Zoom out (a bigger frame)"
+							onclick={() => zoomCamera(1 / 0.9)}
+						>
+							Zoom out
+						</button>
+					</div>
+					<label>
+						<input type="checkbox" bind:checked={cameraView.safe} />
+						Safe areas (action 90%, title 80%)
+					</label>
+					<small class="hint">Each cut has its own camera; a new cut starts with this one.</small>
+				</div>
+			{/if}
+		</div>
 		<span class="sep"></span>
 		<button type="button" class="b" aria-label="Previous frame" onclick={() => go(frame - 1)}>
 			‹
@@ -395,7 +526,10 @@
 		<button
 			type="button"
 			class="b strong"
-			title="A new, empty drawing after this one on the active layer"
+			title={activeStatic
+				? 'A static layer shows one drawing all cut long'
+				: 'A new, empty drawing after this one on the active layer'}
+			disabled={activeStatic}
 			onclick={addDrawing}
 		>
 			New drawing
@@ -442,6 +576,7 @@
 			class="b"
 			aria-label="Timing for the whole layer"
 			title="Every drawing on this layer on ones, twos or threes"
+			disabled={activeStatic}
 			value=""
 			onchange={(e) => {
 				const n = +e.currentTarget.value;
@@ -517,57 +652,80 @@
 		{#each rows as l (l.id)}
 			{@const t = theCut.tracks[l.id] ?? []}
 			{@const nums = numbers(t)}
-			<button
-				type="button"
-				class="name"
-				class:on={l.id === active}
-				onclick={() => onlayer(l.id)}
-				title={l.name}
-			>
-				{l.name}
-			</button>
+			{@const still = statics.includes(l.id)}
+			<div class="name" class:on={l.id === active}>
+				<button type="button" class="label" onclick={() => onlayer(l.id)} title={l.name}>
+					{l.name}
+				</button>
+				<button
+					type="button"
+					class="kind"
+					aria-pressed={still}
+					aria-label="Static layer: {l.name}"
+					title={still
+						? 'Static: one drawing all cut long (a background or overlay). Click for a cel layer.'
+						: 'Cel layer: a drawing per exposure. Click to make it static (a background or overlay).'}
+					onclick={() => toggleStatic(l.id)}
+				>
+					{still ? 'S' : 'C'}
+				</button>
+			</div>
 			<div
 				class="row"
 				class:on={l.id === active}
+				class:still
 				role="presentation"
 				data-layer={l.id}
 				onclick={(e) => cellClick(e, l.id)}
 			>
 				<div class="playhead" style="left: {frame * CELL}px"></div>
-				{#each t as e, i (i)}
-					{@const start = startOf(t, i)}
-					{#if e.drawing}
-						<button
-							type="button"
-							class="cel"
-							class:here={l.id === active && here?.index === i}
-							class:dragging={drag?.layer === l.id && drag.index === i}
-							style="left: {start * CELL}px; width: {e.length * CELL}px; {drag?.layer === l.id &&
-							drag.index === i &&
-							drag.mode === 'move'
-								? `transform: translateX(${drag.by * CELL}px)`
-								: ''}"
-							aria-label="{l.name}: drawing {nums[i]}, frame {start + 1}{e.length > 1
-								? `–${start + e.length}`
-								: ''}"
-							onpointerdown={(ev) => dragStart(ev, l.id, i, 'move')}
-							onpointermove={dragMove}
-							onpointerup={dragEnd}
-							onpointercancel={() => (drag = null)}
-							onclick={(ev) => ev.stopPropagation()}
+				{#if still}
+					{#if staticDrawing(t)}
+						<div
+							class="cel static"
+							class:here={l.id === active}
+							style="left: 0; width: {length * CELL}px"
+							aria-label="{l.name}: static, all cut long"
 						>
-							<span>{nums[i]}</span>
-							<span
-								class="edge"
-								role="presentation"
-								title="Drag to hold it longer or shorter"
-								onpointerdown={(ev) => dragStart(ev, l.id, i, 'hold')}
+							<span>Static</span>
+						</div>
+					{/if}
+				{:else}
+					{#each t as e, i (i)}
+						{@const start = startOf(t, i)}
+						{#if e.drawing}
+							<button
+								type="button"
+								class="cel"
+								class:here={l.id === active && here?.index === i}
+								class:dragging={drag?.layer === l.id && drag.index === i}
+								style="left: {start * CELL}px; width: {e.length * CELL}px; {drag?.layer === l.id &&
+								drag.index === i &&
+								drag.mode === 'move'
+									? `transform: translateX(${drag.by * CELL}px)`
+									: ''}"
+								aria-label="{l.name}: drawing {nums[i]}, frame {start + 1}{e.length > 1
+									? `–${start + e.length}`
+									: ''}"
+								onpointerdown={(ev) => dragStart(ev, l.id, i, 'move')}
 								onpointermove={dragMove}
 								onpointerup={dragEnd}
-							></span>
-						</button>
-					{/if}
-				{/each}
+								onpointercancel={() => (drag = null)}
+								onclick={(ev) => ev.stopPropagation()}
+							>
+								<span>{nums[i]}</span>
+								<span
+									class="edge"
+									role="presentation"
+									title="Drag to hold it longer or shorter"
+									onpointerdown={(ev) => dragStart(ev, l.id, i, 'hold')}
+									onpointermove={dragMove}
+									onpointerup={dragEnd}
+								></span>
+							</button>
+						{/if}
+					{/each}
+				{/if}
 			</div>
 		{/each}
 	</div>
@@ -736,13 +894,26 @@
 		position: sticky;
 		left: 0;
 		z-index: 1;
+		display: flex;
+		align-items: center;
 		height: 28px;
 		margin: 2px 0;
-		padding: 0 8px;
-		border: 0;
 		border-radius: 8px 0 0 8px;
 		background: #1f1f24;
 		color: var(--pp-on-ink-muted);
+	}
+	.name.on {
+		color: #fff;
+		background: #34343c;
+	}
+	.name .label {
+		flex: 1;
+		min-width: 0;
+		height: 100%;
+		padding: 0 4px 0 8px;
+		border: 0;
+		background: none;
+		color: inherit;
 		font: 600 12px var(--pp-font-body);
 		text-align: left;
 		white-space: nowrap;
@@ -750,9 +921,53 @@
 		text-overflow: ellipsis;
 		cursor: pointer;
 	}
-	.name.on {
+	.name .kind {
+		flex: none;
+		width: 20px;
+		height: 20px;
+		margin-right: 4px;
+		padding: 0;
+		border: 0;
+		border-radius: 6px;
+		background: #2a2a30;
+		color: var(--pp-on-ink-muted);
+		font: 700 10px var(--pp-font-body);
+		cursor: pointer;
+	}
+	.name .kind[aria-pressed='true'] {
+		background: #3d6bff;
 		color: #fff;
-		background: #34343c;
+	}
+	.cel.static {
+		padding-left: 8px;
+		background: #c9d6ff;
+		cursor: default;
+	}
+	.cel.static.here {
+		background: #9fb6ff;
+	}
+	.pop.wide {
+		width: 300px;
+	}
+	.seg.wrap {
+		flex-wrap: wrap;
+	}
+	.nums {
+		display: grid;
+		grid-template-columns: repeat(4, 1fr);
+		gap: 6px;
+	}
+	.nums label {
+		flex-direction: column;
+		align-items: stretch;
+		gap: 2px;
+		font-size: 11px;
+	}
+	.pop .nums input[type='number'] {
+		width: 100%;
+	}
+	.hint {
+		color: var(--pp-on-ink-muted);
 	}
 	.row {
 		position: relative;

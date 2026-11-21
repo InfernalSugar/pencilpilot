@@ -42,11 +42,13 @@ This crate (`pencilpilot-ppstudio`) reads and writes it.
       { "name": "Scene 1",
         "cuts": [
           { "name": "Cut 1",
+            "camera": { "x": 0, "y": 0, "width": 1920, "height": 1080 },  // optional
             "tracks": {          // layer id → its exposures, in order
               "1": [ { "drawing": "D1", "length": 2 },     // held for 2 frames ("on twos")
                      { "drawing": null, "length": 1 },     // an empty cel
                      { "drawing": "D2", "length": 2 } ] } } ] }
-    ]
+    ],
+    "staticLayers": [ 2 ]        // optional: layers that show one drawing all cut long
   },
   "drawings": {
     "D1": {
@@ -80,6 +82,12 @@ This crate (`pencilpilot-ppstudio`) reads and writes it.
   track. `frames` is then the scenes flattened (every cut in turn; runs of identical
   frames joined into holds), so a simple reader can play the file without knowing about
   cuts.
+- A **static layer** (`staticLayers`: a background or an overlay) shows its first
+  drawing in a cut on every frame of the cut, and its track doesn't count towards the
+  cut's length. Its other exposures are kept (made a cel layer again, it animates).
+- A cut's **camera** is the part of the canvas it shows, in canvas pixels (none: the
+  whole canvas). Players and exports show what's inside it. Apps may mark safe areas
+  (action 90%, title 80% of the camera, centred); they aren't stored.
 - Without `scenes`, `frames` is the whole timeline (a single picture has one frame).
 - The app names drawings `D<number>`; a drawing belongs to one layer. Every drawing a
   frame or exposure names must be in `drawings`.

@@ -3,6 +3,12 @@
  * for some frames: 1 = "on ones", 2 = "on twos"). Drawings are the paint engine's ids
  * (0 = an empty cel); the engine keeps their pixels (PaintCanvas.showDrawings).
  *
+ * A static layer (a background, an overlay) shows one drawing all cut long: its first
+ * drawing in the cut. Its track keeps any others (turn it back into a cel layer and
+ * they animate again), and doesn't count towards the cut's length.
+ *
+ * Each cut can frame part of the canvas (its camera); playback shows what's inside.
+ *
  * These functions change a track or cut in place (so they work on `$state`) and are
  * pure otherwise. Frames count from 0.
  */
@@ -17,11 +23,21 @@ export interface Exposure {
 /** One layer's exposures in a cut, in order. */
 export type Track = Exposure[];
 
+/** A rectangle of the canvas, in canvas pixels. */
+export interface Camera {
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+}
+
 export interface Cut {
 	id: number;
 	name: string;
 	/** layer id → its exposures; a layer missing here is empty all cut long */
 	tracks: Record<number, Track>;
+	/** the part of the canvas the cut shows (none: all of it) */
+	camera?: Camera;
 }
 
 export interface Scene {
@@ -32,6 +48,8 @@ export interface Scene {
 
 export interface Timeline {
 	scenes: Scene[];
+	/** static layers' ids: one drawing all cut long */
+	statics: number[];
 }
 
 /** The longest an exposure can be held. */
@@ -48,8 +66,31 @@ export function trackIn(cut: Cut, layer: number): Track {
 
 export const trackLength = (t: Track) => t.reduce((n, e) => n + e.length, 0);
 
-/** Frames long: its longest track, at least one frame. */
-export const cutLength = (cut: Cut) => Math.max(1, ...Object.values(cut.tracks).map(trackLength));
+/** Frames long: its longest track (static layers aside), at least one frame. */
+export const cutLength = (cut: Cut, statics: number[] = []) =>
+	Math.max(
+		1,
+		...Object.entries(cut.tracks)
+			.filter(([l]) => !statics.includes(+l))
+			.map(([, t]) => trackLength(t))
+	);
+
+/** What a static layer shows all cut long: its first drawing (0: none yet). */
+export const staticDrawing = (t: Track | undefined) => t?.find((e) => e.drawing)?.drawing ?? 0;
+
+/** Give a static layer its drawing for the cut (in place of its first one). */
+export function setStaticDrawing(t: Track, drawing: number) {
+	const e = t.find((x) => x.drawing);
+	if (e) e.drawing = drawing;
+	else setDrawing(t, 0, drawing);
+}
+
+/** Make a layer static (one drawing all cut long) or a cel layer again. */
+export function setStatic(tl: Timeline, layer: number, on: boolean) {
+	const i = tl.statics.indexOf(layer);
+	if (on && i < 0) tl.statics.push(layer);
+	if (!on && i >= 0) tl.statics.splice(i, 1);
+}
 
 /** The exposure showing on `frame`: its index and first frame (null past the end). */
 export function exposureAt(t: Track, frame: number): { index: number; start: number } | null {
@@ -155,19 +196,71 @@ function merge(t: Track) {
 	trimEnd(t);
 }
 
-/** Every track in the cut: one more frame at `frame` (each holds what it shows). */
-export function insertFrameAll(cut: Cut, frame: number) {
-	for (const t of Object.values(cut.tracks)) insertFrame(t, frame);
+/** The cel layers' tracks in a cut (static layers' don't follow frames). */
+const celTracks = (cut: Cut, statics: number[]) =>
+	Object.entries(cut.tracks)
+		.filter(([l]) => !statics.includes(+l))
+		.map(([, t]) => t);
+
+/** Every cel track in the cut: one more frame at `frame` (each holds what it shows). */
+export function insertFrameAll(cut: Cut, frame: number, statics: number[] = []) {
+	for (const t of celTracks(cut, statics)) insertFrame(t, frame);
 }
 
-/** Every track in the cut: `frame` taken out. */
-export function deleteFrameAll(cut: Cut, frame: number) {
-	for (const t of Object.values(cut.tracks)) deleteFrame(t, frame);
+/** Every cel track in the cut: `frame` taken out. */
+export function deleteFrameAll(cut: Cut, frame: number, statics: number[] = []) {
+	for (const t of celTracks(cut, statics)) deleteFrame(t, frame);
 }
 
 /** What each layer shows on `frame`: [layer id, drawing id] pairs, for every layer given. */
-export function showing(cut: Cut, layers: number[], frame: number): [number, number][] {
-	return layers.map((l) => [l, drawingAt(cut.tracks[l], frame)]);
+export function showing(
+	cut: Cut,
+	layers: number[],
+	frame: number,
+	statics: number[] = []
+): [number, number][] {
+	return layers.map((l) => [
+		l,
+		statics.includes(l) ? staticDrawing(cut.tracks[l]) : drawingAt(cut.tracks[l], frame)
+	]);
+}
+
+// ---- the camera: the part of the canvas a cut shows ----
+
+/** A cut's camera (the whole canvas when it has none), kept on the canvas. */
+export function cameraOf(cut: Cut, canvas: { width: number; height: number }): Camera {
+	const c = cut.camera;
+	if (!c) return { x: 0, y: 0, width: canvas.width, height: canvas.height };
+	const width = Math.max(1, Math.min(canvas.width, Math.round(c.width)));
+	const height = Math.max(1, Math.min(canvas.height, Math.round(c.height)));
+	return {
+		x: Math.max(0, Math.min(canvas.width - width, Math.round(c.x))),
+		y: Math.max(0, Math.min(canvas.height - height, Math.round(c.y))),
+		width,
+		height
+	};
+}
+
+/** The biggest frame of an aspect ratio (width / height) that fits the canvas, centred. */
+export function fitCamera(aspect: number, canvas: { width: number; height: number }): Camera {
+	let width = canvas.width;
+	let height = Math.round(width / aspect);
+	if (height > canvas.height) {
+		height = canvas.height;
+		width = Math.round(height * aspect);
+	}
+	return {
+		x: Math.round((canvas.width - width) / 2),
+		y: Math.round((canvas.height - height) / 2),
+		width,
+		height
+	};
+}
+
+/** A frame shrunk about its centre (safe areas: action 90%, title 80%). */
+export function inset(c: Camera, share: number): Camera {
+	const [w, h] = [c.width * share, c.height * share];
+	return { x: c.x + (c.width - w) / 2, y: c.y + (c.height - h) / 2, width: w, height: h };
 }
 
 /** Every drawing a timeline uses (each once). */
@@ -212,7 +305,10 @@ export function layerOfDrawing(tl: Timeline, drawing: number): number | null {
 export function newTimeline(layers: { id: number; drawing: number }[]): Timeline {
 	const tracks: Record<number, Track> = {};
 	for (const l of layers) tracks[l.id] = l.drawing ? [{ drawing: l.drawing, length: 1 }] : [];
-	return { scenes: [{ id: 1, name: 'Scene 1', cuts: [{ id: 1, name: 'Cut 1', tracks }] }] };
+	return {
+		scenes: [{ id: 1, name: 'Scene 1', cuts: [{ id: 1, name: 'Cut 1', tracks }] }],
+		statics: []
+	};
 }
 
 const nextId = (items: { id: number }[]) => Math.max(0, ...items.map((i) => i.id)) + 1;
@@ -220,7 +316,14 @@ const nextId = (items: { id: number }[]) => Math.max(0, ...items.map((i) => i.id
 /** A new empty cut after `index` in a scene; returns its index. */
 export function addCut(scene: Scene, index: number): number {
 	const id = nextId(scene.cuts);
-	scene.cuts.splice(index + 1, 0, { id, name: `Cut ${scene.cuts.length + 1}`, tracks: {} });
+	const camera = scene.cuts[index]?.camera;
+	scene.cuts.splice(index + 1, 0, {
+		id,
+		name: `Cut ${scene.cuts.length + 1}`,
+		tracks: {},
+		// (framed like the cut before it)
+		...(camera ? { camera: { ...camera } } : {})
+	});
 	return index + 1;
 }
 
@@ -244,6 +347,7 @@ export interface FileExposure {
 export interface FileCut {
 	name: string;
 	tracks: Record<string, FileExposure[]>;
+	camera?: Camera;
 }
 export interface FileScene {
 	name: string;
@@ -256,6 +360,7 @@ export function toFile(tl: Timeline, layers: number[]): FileScene[] {
 		name: s.name,
 		cuts: s.cuts.map((c) => ({
 			name: c.name,
+			...(c.camera ? { camera: { ...c.camera } } : {}),
 			tracks: Object.fromEntries(
 				Object.entries(c.tracks)
 					.filter(([l]) => layers.includes(+l))
@@ -268,15 +373,32 @@ export function toFile(tl: Timeline, layers: number[]): FileScene[] {
 	}));
 }
 
+/** The static layers the file names, for the layers that exist. */
+export const staticsToFile = (tl: Timeline, layers: number[]) =>
+	tl.statics.filter((l) => layers.includes(l));
+
 /** A file's scenes back into a timeline; `layerIds` maps the file's layer ids to the canvas's. */
-export function fromFile(scenes: FileScene[], layerIds: Map<number, number>): Timeline {
+export function fromFile(
+	scenes: FileScene[],
+	layerIds: Map<number, number>,
+	statics: number[] = []
+): Timeline {
+	const camera = (c: Camera | undefined) =>
+		c && [c.x, c.y, c.width, c.height].every(Number.isFinite) && c.width > 0 && c.height > 0
+			? { camera: { x: c.x, y: c.y, width: c.width, height: c.height } }
+			: {};
 	return {
+		statics: statics.flatMap((l) => {
+			const id = layerIds.get(l);
+			return id === undefined ? [] : [id];
+		}),
 		scenes: scenes.map((s, si) => ({
 			id: si + 1,
 			name: s.name,
 			cuts: s.cuts.map((c, ci) => ({
 				id: ci + 1,
 				name: c.name,
+				...camera(c.camera),
 				tracks: Object.fromEntries(
 					Object.entries(c.tracks).flatMap(([l, t]) => {
 						const id = layerIds.get(+l);

@@ -624,7 +624,10 @@ test('symmetry: strokes are mirrored live, one undo removes all copies, the cent
 			[x0, x1]
 		);
 	await expect.poll(() => inkAt(0.7, 0.92)).toBeGreaterThan(30);
-	expect(Math.abs((await inkAt(0.08, 0.32)) - (await inkAt(0.68, 0.92)))).toBeLessThan(40);
+	// (the mirrored copy can land a frame later: wait for the two sides to match)
+	await expect
+		.poll(async () => Math.abs((await inkAt(0.08, 0.32)) - (await inkAt(0.68, 0.92))))
+		.toBeLessThan(40);
 	await page.getByRole('button', { name: /Undo/ }).click();
 	await expect.poll(() => inkAt(0, 1)).toBe(0);
 

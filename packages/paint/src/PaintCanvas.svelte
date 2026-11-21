@@ -156,6 +156,7 @@
 		overlaySrc = null,
 		overlayOpacity = 0.3,
 		onionImage = null,
+		camera = null,
 		overlayTransform = { x: 0, y: 0, scale: 1, rotate: 0 },
 		adjustOverlay = false,
 		onoverlaymove,
@@ -218,6 +219,11 @@
 		overlayOpacity?: number;
 		/** onion skin / light table: tinted drawings over the canvas (from `onionRgba`) */
 		onionImage?: ImageBitmap | null;
+		/**
+		 * an animation cut's camera (canvas pixels): outside it is dimmed, and its safe
+		 * areas (action 90%, title 80%) are marked when `safe` is on
+		 */
+		camera?: { x: number; y: number; width: number; height: number; safe?: boolean } | null;
 		/** where the overlay sits: offset (fraction of the canvas), scale and rotation (degrees) */
 		overlayTransform?: { x: number; y: number; scale: number; rotate: number };
 		/** what a press on the canvas does */
@@ -3520,6 +3526,48 @@
 				{/if}
 			</svg>
 		{/if}
+		{#if camera}
+			{@const c = camera}
+			<svg
+				class="camera"
+				viewBox="0 0 {width} {height}"
+				preserveAspectRatio="none"
+				aria-hidden="true"
+				data-testid="camera"
+			>
+				<path
+					class="outside"
+					fill-rule="evenodd"
+					d="M0 0H{width}V{height}H0Z M{c.x} {c.y}h{c.width}v{c.height}h{-c.width}Z"
+				/>
+				<rect class="frame" x={c.x} y={c.y} width={c.width} height={c.height} />
+				{#if c.safe}
+					{#each [0.9, 0.8] as k (k)}
+						<rect
+							class="safe"
+							x={c.x + (c.width * (1 - k)) / 2}
+							y={c.y + (c.height * (1 - k)) / 2}
+							width={c.width * k}
+							height={c.height * k}
+						/>
+					{/each}
+					<line
+						class="safe"
+						x1={c.x + c.width / 2}
+						y1={c.y + c.height / 2 - c.height * 0.03}
+						x2={c.x + c.width / 2}
+						y2={c.y + c.height / 2 + c.height * 0.03}
+					/>
+					<line
+						class="safe"
+						x1={c.x + c.width / 2 - c.height * 0.03}
+						y1={c.y + c.height / 2}
+						x2={c.x + c.width / 2 + c.height * 0.03}
+						y2={c.y + c.height / 2}
+					/>
+				{/if}
+			</svg>
+		{/if}
 		{#if onionImage}
 			<div class="overlay-clip">
 				<canvas class="overlay onion" bind:this={onionEl} data-testid="onion"></canvas>
@@ -3818,6 +3866,29 @@
 		font: 700 13px var(--pp-font-body);
 		white-space: nowrap;
 		pointer-events: none;
+	}
+	.camera {
+		position: absolute;
+		inset: 0;
+		width: 100%;
+		height: 100%;
+		pointer-events: none;
+	}
+	.camera .outside {
+		fill: rgba(22, 22, 26, 0.32);
+	}
+	.camera .frame {
+		fill: none;
+		stroke: #3d6bff;
+		stroke-width: 2;
+		vector-effect: non-scaling-stroke;
+	}
+	.camera .safe {
+		fill: none;
+		stroke: rgba(61, 107, 255, 0.55);
+		stroke-width: 1;
+		stroke-dasharray: 6 5;
+		vector-effect: non-scaling-stroke;
 	}
 	.guides {
 		position: absolute;

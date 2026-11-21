@@ -426,6 +426,7 @@ mod tests {
             thumbnail: None,
             scenes: vec![],
             drawings: vec![],
+            static_layers: vec![],
         };
         encode(&header, &rgba).unwrap()
     }
