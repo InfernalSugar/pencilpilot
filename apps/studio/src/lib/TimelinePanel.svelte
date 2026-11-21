@@ -17,6 +17,7 @@
 		cutLength,
 		cutStart,
 		deleteFrameAll,
+		drawingAt,
 		drawingNumbers,
 		exposureAt,
 		insertExposure,
@@ -32,7 +33,8 @@
 		trackIn,
 		type Camera,
 		type Timeline,
-		type Track
+		type Track,
+		type DrawingKind
 	} from './timeline';
 	import type { PlayMode, PlayRange } from './playback';
 	import {
@@ -66,6 +68,8 @@
 		onion,
 		pinned = $bindable<number[]>([]),
 		onpin,
+		onflip,
+		onmark,
 		cameraView = $bindable({ show: true, safe: false }),
 		canvasSize,
 		layers,
@@ -96,6 +100,10 @@
 		pinned?: number[];
 		/** pin or unpin the current frame */
 		onpin: () => void;
+		/** flipping: pressed (start) or let go (stop) */
+		onflip?: (kind: 'roll' | 'keys', down: boolean) => void;
+		/** mark the drawing here: key → breakdown → in-between → none */
+		onmark?: () => void;
 		/** show the camera frame over the canvas, and its safe areas */
 		cameraView?: { show: boolean; safe: boolean };
 		canvasSize: { width: number; height: number };
@@ -140,6 +148,12 @@
 
 	const trackOf = (layer: number): Track => trackIn(theCut, layer);
 	const activeTrack = $derived(theCut.tracks[active] ?? []);
+	const KIND_NAME: Record<DrawingKind, string> = {
+		key: 'Key',
+		breakdown: 'Breakdown',
+		inbetween: 'In-between'
+	};
+	const KIND_SHORT: Record<DrawingKind, string> = { key: 'K', breakdown: 'B', inbetween: 'i' };
 	/** the active layer is static: its timing doesn't apply */
 	const activeStatic = $derived(statics.includes(active));
 	const here = $derived(activeStatic ? null : exposureAt(activeTrack, frame));
@@ -629,6 +643,10 @@
 						Opacity <b>{Math.round(onion.opacity * 100)}%</b>
 						<input type="range" min="0.05" max="1" step="0.05" bind:value={onion.opacity} />
 					</label>
+					<label class="check">
+						<input type="checkbox" bind:checked={onion.keysOnly} />
+						Keys and breakdowns only
+					</label>
 					<div class="seg" role="radiogroup" aria-label="Onion skin layers">
 						{#each [['active', 'This layer'], ['all', 'All layers']] as [id, label] (id)}
 							<button
@@ -645,6 +663,37 @@
 				</div>
 			{/if}
 		</div>
+		{#if onflip}
+			{#each [['roll', 'Flip', 'Hold to flip the drawings around this one (R)'], ['keys', 'Flip keys', 'Hold to flip through the keys and breakdowns (Shift+R)']] as [kind, label, title] (kind)}
+				<button
+					type="button"
+					class="b"
+					{title}
+					onpointerdown={(e) => {
+						(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+						onflip(kind as 'roll' | 'keys', true);
+					}}
+					onpointerup={() => onflip(kind as 'roll' | 'keys', false)}
+					onpointercancel={() => onflip(kind as 'roll' | 'keys', false)}
+				>
+					{label}
+				</button>
+			{/each}
+		{/if}
+		{#if onmark}
+			{@const markable = drawingAt(activeTrack, frame)}
+			{@const k = markable ? timeline.kinds?.[markable] : undefined}
+			<button
+				type="button"
+				class="b"
+				disabled={!markable}
+				aria-label="Mark this drawing: {k ? KIND_NAME[k] : 'unmarked'}"
+				title="Mark this drawing as a key, breakdown or in-between (Shift+K)"
+				onclick={onmark}
+			>
+				{k ? KIND_NAME[k] : 'Mark'}
+			</button>
+		{/if}
 		<button
 			type="button"
 			class="b"
@@ -1144,9 +1193,10 @@
 								drag.mode === 'move'
 									? `transform: translateX(${drag.by * CELL}px)`
 									: ''}"
-								aria-label="{l.name}: drawing {nums[i]}, frame {start + 1}{e.length > 1
-									? `–${start + e.length}`
-									: ''}"
+								data-kind={timeline.kinds?.[e.drawing]}
+								aria-label="{l.name}: drawing {nums[i]}{timeline.kinds?.[e.drawing]
+									? ` (${KIND_NAME[timeline.kinds[e.drawing]]})`
+									: ''}, frame {start + 1}{e.length > 1 ? `–${start + e.length}` : ''}"
 								onpointerdown={(ev) => dragStart(ev, l.id, i, 'move')}
 								onpointermove={dragMove}
 								onpointerup={dragEnd}
@@ -1154,6 +1204,11 @@
 								onclick={(ev) => ev.stopPropagation()}
 							>
 								<span>{nums[i]}</span>
+								{#if timeline.kinds?.[e.drawing]}
+									<span class="kind-mark" aria-hidden="true">
+										{KIND_SHORT[timeline.kinds[e.drawing]]}
+									</span>
+								{/if}
 								<span
 									class="edge"
 									role="presentation"
@@ -1583,6 +1638,32 @@
 		width: var(--cell);
 		background: rgba(255, 90, 60, 0.18);
 		pointer-events: none;
+	}
+	.kind-mark {
+		margin-left: 4px;
+		padding: 0 4px;
+		border-radius: 999px;
+		background: var(--pp-ink);
+		color: var(--pp-paper, #fff);
+		font-size: 9px;
+		line-height: 14px;
+	}
+	.cel[data-kind='breakdown'] .kind-mark {
+		border-radius: 3px;
+		background: #6b5bd6;
+	}
+	.cel[data-kind='inbetween'] .kind-mark {
+		background: transparent;
+		color: inherit;
+		box-shadow: inset 0 0 0 1px currentColor;
+	}
+	.cel[data-kind='key'] {
+		box-shadow: inset 0 0 0 2px var(--pp-ink);
+	}
+	.pop .check {
+		display: flex;
+		align-items: center;
+		gap: 6px;
 	}
 	.cel {
 		position: absolute;

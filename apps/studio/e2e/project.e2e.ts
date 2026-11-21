@@ -1541,3 +1541,84 @@ test('undo: timeline edits are steps in the history, with the strokes', async ({
 	await page.keyboard.press('Control+z');
 	await expect.poll(() => ink(page)).toBe(0);
 });
+
+test('keys, breakdowns and in-betweens marked; flipping rolls and flips the keys', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	const tl = page.getByRole('region', { name: 'Timeline' });
+	const frameNo = tl.getByTestId('frame');
+	await scribble(page, 0.2);
+	for (const y of [0.4, 0.6, 0.8]) {
+		await tl.getByRole('button', { name: 'New drawing' }).click();
+		await scribble(page, y);
+	}
+	// frame 1 a key, frame 3 a breakdown, frame 4 an in-between
+	await tl.getByRole('button', { name: 'Frame 1', exact: true }).click();
+	await page.keyboard.press('Shift+K');
+	await expect(tl.getByRole('button', { name: 'Mark this drawing: Key' })).toBeVisible();
+	await expect(tl.getByRole('button', { name: 'Layer 1: drawing 1 (Key), frame 1' })).toBeVisible();
+	await tl.getByRole('button', { name: 'Frame 3', exact: true }).click();
+	await page.keyboard.press('Shift+K');
+	await page.keyboard.press('Shift+K');
+	await tl.getByRole('button', { name: 'Frame 4', exact: true }).click();
+	await tl.getByRole('button', { name: /^Mark this drawing/ }).click();
+	await tl.getByRole('button', { name: /^Mark this drawing/ }).click();
+	await tl.getByRole('button', { name: /^Mark this drawing/ }).click();
+	await expect(tl.getByRole('button', { name: 'Mark this drawing: In-between' })).toBeVisible();
+	await page.getByRole('tab', { name: /X.sheet/ }).click();
+	const xs = page.getByRole('region', { name: 'Exposure sheet' });
+	await expect(
+		xs.getByRole('gridcell', { name: 'Layer 1, frame 1: drawing 1 (key)' })
+	).toBeVisible();
+	await expect(
+		xs.getByRole('gridcell', { name: 'Layer 1, frame 3: drawing 3 (breakdown)' })
+	).toBeVisible();
+
+	// hold Shift+R: the key and the breakdown flip (frames 1 and 3, nothing between)
+	await tl.getByRole('button', { name: 'Frame 2', exact: true }).click();
+	const seen = new Set<string>();
+	await page.keyboard.down('Shift');
+	await page.keyboard.down('R');
+	for (let i = 0; i < 12; i++) {
+		seen.add((await frameNo.textContent())!);
+		await page.waitForTimeout(60);
+	}
+	await page.keyboard.up('R');
+	await page.keyboard.up('Shift');
+	expect([...seen].sort()).toEqual(['1', '3']);
+	await expect(frameNo).toHaveText('2');
+
+	// hold R on frame 4: the drawings around it roll by, then back to 4
+	await tl.getByRole('button', { name: 'Frame 4', exact: true }).click();
+	seen.clear();
+	await page.keyboard.down('R');
+	for (let i = 0; i < 14; i++) {
+		seen.add((await frameNo.textContent())!);
+		await page.waitForTimeout(60);
+	}
+	await page.keyboard.up('R');
+	expect([...seen].sort()).toEqual(['2', '3', '4']);
+	await expect(frameNo).toHaveText('4');
+	await expect.poll(() => ink(page, 0.75, 1)).toBeGreaterThan(20);
+
+	// the onion skin can keep to keys and breakdowns
+	await tl.getByRole('button', { name: 'Onion skin settings' }).click();
+	await tl.getByLabel('Keys and breakdowns only').check();
+	await tl.getByRole('button', { name: 'Onion skin settings' }).click();
+
+	// undoable, and kept in the file
+	await page.keyboard.press('Control+z');
+	await expect(tl.getByRole('button', { name: 'Mark this drawing: Breakdown' })).toBeVisible();
+	await page.keyboard.press('Control+Shift+z');
+	await page.keyboard.press('Control+s');
+	await expect(page.getByTestId('project-name')).toHaveText('Walk cycle', { timeout: 20_000 });
+	await page.keyboard.press('Control+o');
+	await expect(xs.getByRole('gridcell', { name: 'Layer 1, frame 1: drawing 1 (key)' })).toBeVisible(
+		{ timeout: 20_000 }
+	);
+	await expect(
+		xs.getByRole('gridcell', { name: 'Layer 1, frame 4: drawing 4 (in-between)' })
+	).toBeVisible();
+});

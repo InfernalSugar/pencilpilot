@@ -93,6 +93,7 @@
 	} from '#lib/exporting.js';
 	import TimelinePanel from '#lib/TimelinePanel.svelte';
 	import { fitInside, naturalOrder, placeFrames, sequenceName } from '#lib/rotoscope.js';
+	import { FLIP_FPS, drawingStarts, flipIndex, keyFrames, rollFrames } from '#lib/flip.js';
 	import { FrameCache } from '#lib/frames.js';
 	import { cleanOnion, onionEntries, type OnionSettings } from '#lib/onion.js';
 	import {
@@ -123,6 +124,10 @@
 		trackIn,
 		toFile,
 		mouthsToFile,
+		kindsToFile,
+		kindsFromFile,
+		nextKind,
+		setKind,
 		type Camera,
 		type MouthChart,
 		type MouthShape,
@@ -682,7 +687,15 @@
 		const layers = status.layers
 			.filter((l) => !l.adjust && !timeline.statics.includes(l.id))
 			.map((l) => l.id);
-		const entries = onionEntries(cut, layers, status.active, onCanvas.frame, onion, pinned);
+		const entries = onionEntries(
+			cut,
+			layers,
+			status.active,
+			onCanvas.frame,
+			onion,
+			pinned,
+			timeline.kinds
+		);
 		let bmp: ImageBitmap | null = null;
 		if (entries.length) {
 			await cache.ensure(entries.map((e) => e.drawing));
@@ -798,14 +811,13 @@
 		g.drawImage(bmp, sx, sy, sw, sh, (w - dw) / 2, (h - dh) / 2, dw, dh);
 	}
 
-	/** Play the range (or the cut) from the start of it, or stop. */
-	async function togglePlay() {
-		if (playing) return stopPlay();
-		if (!canvas || !status) return;
-		await showQueue;
+	/**
+	 * Render frames of this cut for the player (each distinct picture once, kept for next
+	 * time); frame → its picture's key. Null if playing stopped meanwhile.
+	 */
+	async function renderFrames(todo: number[]): Promise<Map<number, string> | null> {
+		if (!canvas || !status) return null;
 		const cut = theCut();
-		const len = cutLength(cut, timeline.statics);
-		const range = clampRange(playRange ?? { from: 0, to: len - 1 }, len);
 		const shrink = previewShrink(canvasSize.width);
 		const layerIds = status.layers.filter((l) => !l.adjust).map((l) => l.id);
 		if (renderedFor !== canvasKey) {
@@ -813,21 +825,22 @@
 			rendered = new Map();
 			renderedFor = canvasKey;
 		}
-		playing = true;
 		// eslint-disable-next-line svelte/prefer-svelte-reactivity -- a local lookup, not state
 		const keys = new Map<number, string>();
-		const todo = framesOf(range);
 		preparing = { done: 0, total: todo.length };
 		try {
 			for (const f of todo) {
-				if (!playing || !canvas) return;
+				if (!playing || !canvas) return null;
 				const pairs = showing(cut, layerIds, f, timeline.statics);
 				const key = frameKey(pairs, shrink);
 				keys.set(f, key);
 				if (!rendered.has(key)) {
 					await cache.ensure(pairs.map(([, d]) => d));
 					const r = canvas?.renderFrame(pairs, shrink);
-					if (!r) return stopPlay();
+					if (!r) {
+						stopPlay();
+						return null;
+					}
 					rendered.set(key, await createImageBitmap(new ImageData(r.rgba, r.width, r.height)));
 					cache.trim();
 				}
@@ -835,7 +848,8 @@
 			}
 		} catch (e) {
 			note(`Couldn’t play: ${e}`);
-			return stopPlay();
+			stopPlay();
+			return null;
 		} finally {
 			preparing = null;
 		}
@@ -845,6 +859,73 @@
 			b.close();
 			rendered.delete(k);
 		}
+		return keys;
+	}
+
+	// ---- flipping: hold a key, the drawings roll by; let go, you're back ----
+	let flipping: { origin: number; timer: ReturnType<typeof setInterval> } | null = null;
+
+	/** Start flipping: the drawings around this frame, or the cut's keys and breakdowns. */
+	async function startFlip(kind: 'roll' | 'keys') {
+		if (flipping || playing || !status) return;
+		await showQueue;
+		const cut = theCut();
+		const layers = status.layers.filter((l) => !l.adjust).map((l) => l.id);
+		const list =
+			kind === 'roll'
+				? rollFrames(drawingStarts(cut, [status.active], timeline.statics), frame)
+				: keyFrames(cut, layers, timeline.kinds ?? {}, timeline.statics);
+		if (list.length < 2) {
+			note(
+				kind === 'roll'
+					? 'Nothing to flip: draw a drawing or two more.'
+					: 'Mark keys or breakdowns first (Shift+K) to flip through them.'
+			);
+			return;
+		}
+		const origin = frame;
+		flipping = { origin, timer: 0 as unknown as ReturnType<typeof setInterval> };
+		playing = true;
+		const keys = await renderFrames(list);
+		if (!keys || !flipping) return;
+		let i = 0;
+		const show = () => {
+			const f = list[flipIndex(i++, list.length)];
+			frame = f;
+			drawPlayer(rendered.get(keys.get(f)!));
+		};
+		show();
+		flipping.timer = setInterval(show, 1000 / FLIP_FPS);
+	}
+
+	/** Mark the active layer's drawing on this frame: key → breakdown → in-between → none. */
+	function markKind() {
+		if (!status) return;
+		const d = drawingAt(theCut().tracks[status.active], frame);
+		if (!d) return note('No drawing here to mark.');
+		const k = nextKind(timeline.kinds?.[d]);
+		setKind(timeline, d, k);
+		tlLabel = k ? `Mark ${k === 'inbetween' ? 'in-between' : k}` : 'Unmark drawing';
+		docVersion++;
+		note(k ? `Marked as ${k === 'inbetween' ? 'an in-between' : `a ${k}`}.` : 'Unmarked.', 1500);
+	}
+
+	/** Let go: back to the frame flipping started on. */
+	function endFlip() {
+		if (flipping) stopPlay();
+	}
+
+	/** Play the range (or the cut) from the start of it, or stop. */
+	async function togglePlay() {
+		if (playing) return stopPlay();
+		if (!canvas || !status) return;
+		await showQueue;
+		const cut = theCut();
+		const len = cutLength(cut, timeline.statics);
+		const range = clampRange(playRange ?? { from: 0, to: len - 1 }, len);
+		playing = true;
+		const keys = await renderFrames(framesOf(range));
+		if (!keys) return;
 		const t0 = performance.now();
 		// the scene's sound plays along (forwards only: a ping-pong's way back is silent)
 		const clips = sceneClips();
@@ -881,6 +962,11 @@
 	function stopPlay() {
 		if (!playing) return;
 		playing = false;
+		if (flipping) {
+			clearInterval(flipping.timer);
+			frame = flipping.origin;
+			flipping = null;
+		}
 		sounds.stop();
 		preparing = null;
 		cancelAnimationFrame(playTimer);
@@ -1123,6 +1209,10 @@
 			scenes: toFile(timeline, layerIds),
 			statics: staticsToFile(timeline, layerIds),
 			mouths: mouthsToFile(timeline, layerIds),
+			kinds: kindsToFile(
+				timeline,
+				drawings.map((d) => d.id)
+			),
 			audio: [
 				...new Set(timeline.scenes.flatMap((s) => (s.audio ?? []).map((a) => a.file)))
 			].flatMap((file) => {
@@ -1732,6 +1822,8 @@
 				for (const d of doc.drawings ?? []) if (d.rgba) c.putDrawing(d.id, d.rgba);
 				cache.stored((doc.drawings ?? []).filter((d) => !d.rgba).map((d) => d.id));
 				timeline = fromFile(doc.scenes!, ids, doc.statics, doc.mouths);
+				const kinds = kindsFromFile(doc.kinds);
+				if (Object.keys(kinds).length) timeline.kinds = kinds;
 				sounds.clear();
 				void Promise.all(
 					(doc.audio ?? []).map((a) =>
@@ -1899,6 +1991,11 @@
 		if (e.key === 'Escape' && status?.selection) return canvas?.deselect();
 		const combo = comboOf(e);
 		const action = combo ? actionFor(settings.keys, combo) : null;
+		// flipping: the key held down repeats (it keeps flipping)
+		if ((action === 'flip' || action === 'flip-keys') && (e.repeat || flipping)) {
+			e.preventDefault();
+			return;
+		}
 		// while playing: Esc or any other shortcut stops first
 		if (playing && (e.key === 'Escape' || (action && action !== 'play' && action !== 'add-marker')))
 			stopPlay();
@@ -1917,6 +2014,9 @@
 		else if (action === 'next-frame') timelinePanel?.step(1);
 		else if (action === 'new-drawing') timelinePanel?.addDrawing();
 		else if (action === 'add-marker') markFrame();
+		else if (action === 'flip') void startFlip('roll');
+		else if (action === 'flip-keys') void startFlip('keys');
+		else if (action === 'mark-kind') markKind();
 		else if (action === 'copy-frames') timelinePanel?.copyRange();
 		else if (action === 'paste-frames') timelinePanel?.pasteRange();
 		else if (action === 'duplicate-frames') void timelinePanel?.duplicateRange();
@@ -1947,7 +2047,15 @@
 	}
 </script>
 
-<svelte:window onkeydown={onkey} />
+<svelte:window
+	onkeydown={onkey}
+	onkeyup={(e) => {
+		// letting go of the flip key: back where flipping started
+		const a = flipping ? actionFor(settings.keys, comboOf(e) ?? '') : null;
+		if (a === 'flip' || a === 'flip-keys' || e.key === 'Shift') endFlip();
+	}}
+	onblur={endFlip}
+/>
 
 <div class="app">
 	<Studio backHref={resolve('/')} tabs={TABS} bind:tab bind:dockOpen>
@@ -2255,6 +2363,8 @@
 					{canvasSize}
 					bind:pinned
 					onpin={pinFrame}
+					onflip={(kind, down) => (down ? void startFlip(kind) : endFlip())}
+					onmark={markKind}
 					onplay={togglePlay}
 					onrange={setRange}
 					layers={status.layers}

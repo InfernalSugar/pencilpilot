@@ -101,6 +101,28 @@ export interface Timeline {
 	statics: number[];
 	/** lip-sync mouth charts, one per mouth layer */
 	mouths?: MouthChart[];
+	/** what each drawing is in the animation: a key, a breakdown or an in-between */
+	kinds?: Record<number, DrawingKind>;
+}
+
+/** What a drawing is in the animation (shown on the timeline and the X-sheet). */
+export type DrawingKind = 'key' | 'breakdown' | 'inbetween';
+export const DRAWING_KINDS: DrawingKind[] = ['key', 'breakdown', 'inbetween'];
+
+/** Mark a drawing as a key, a breakdown or an in-between (null: unmarked). */
+export function setKind(tl: Timeline, drawing: number, kind: DrawingKind | null) {
+	if (!drawing) return;
+	if (!tl.kinds) tl.kinds = {};
+	const k = tl.kinds;
+	if (kind) k[drawing] = kind;
+	else delete k[drawing];
+	if (!Object.keys(k).length) delete tl.kinds;
+}
+
+/** The next mark for a drawing: none → key → breakdown → in-between → none. */
+export function nextKind(kind: DrawingKind | undefined): DrawingKind | null {
+	if (!kind) return 'key';
+	return DRAWING_KINDS[DRAWING_KINDS.indexOf(kind) + 1] ?? null;
 }
 
 /** Lip-sync's mouth shapes (Rhubarb's: A–F, and the extended G, H and X). */
@@ -523,6 +545,28 @@ export function toFile(tl: Timeline, layers: number[]): FileScene[] {
 /** The static layers the file names, for the layers that exist. */
 export const staticsToFile = (tl: Timeline, layers: number[]) =>
 	tl.statics.filter((l) => layers.includes(l));
+
+/** Drawing marks as the file keeps them ("D<id>" → kind), for drawings it keeps. */
+export function kindsToFile(tl: Timeline, drawings: number[]): Record<string, DrawingKind> {
+	const keep = new Set(drawings);
+	return Object.fromEntries(
+		Object.entries(tl.kinds ?? {})
+			.filter(([d]) => keep.has(+d))
+			.map(([d, k]) => [`D${d}`, k])
+	);
+}
+
+/** A file's drawing marks back (unknown kinds left out). */
+export function kindsFromFile(
+	raw: Record<string, string> | undefined
+): Record<number, DrawingKind> {
+	const out: Record<number, DrawingKind> = {};
+	for (const [d, k] of Object.entries(raw ?? {})) {
+		const id = Number(d.replace(/^D/, ''));
+		if (id > 0 && (DRAWING_KINDS as string[]).includes(k)) out[id] = k as DrawingKind;
+	}
+	return out;
+}
 
 /** A mouth chart as the file keeps it (drawings named "D<id>"). */
 export interface FileMouthChart {

@@ -43,6 +43,9 @@ export type ActionId =
 	| 'next-frame'
 	| 'new-drawing'
 	| 'add-marker'
+	| 'mark-kind'
+	| 'flip'
+	| 'flip-keys'
 	| 'copy-frames'
 	| 'paste-frames'
 	| 'duplicate-frames'
@@ -105,6 +108,19 @@ export const ACTIONS: Action[] = [
 	{ id: 'prev-frame', label: 'Previous frame', group: 'Animation', key: ',' },
 	{ id: 'next-frame', label: 'Next frame', group: 'Animation', key: '.' },
 	{ id: 'new-drawing', label: 'New drawing after this one', group: 'Animation', key: 'N' },
+	{
+		id: 'mark-kind',
+		label: 'Mark the drawing: key, breakdown, in-between',
+		group: 'Animation',
+		key: 'Shift+K'
+	},
+	{ id: 'flip', label: 'Flip the drawings around this one (hold)', group: 'Animation', key: 'R' },
+	{
+		id: 'flip-keys',
+		label: 'Flip the keys and breakdowns (hold)',
+		group: 'Animation',
+		key: 'Shift+R'
+	},
 	{
 		id: 'add-marker',
 		label: 'Marker on this frame (tap while playing)',
