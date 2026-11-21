@@ -188,3 +188,79 @@ export async function askOpenPath(): Promise<string | null> {
 	});
 	return typeof p === 'string' ? p : null;
 }
+
+// ---- recovery copies (autosave) and versions (see src-tauri/src/store.rs) ----
+
+export interface RecoveryItem {
+	id: string;
+	/** the project file it belongs to (null: never saved) */
+	path: string | null;
+	savedAt: string;
+	width: number;
+	height: number;
+	/** base64 PNG */
+	thumbnail: string | null;
+}
+
+export interface VersionItem {
+	id: string;
+	savedAt: string;
+	bytes: number;
+	thumbnail: string | null;
+}
+
+/** A fresh id for a document's recovery copy (letters, digits and dashes). */
+export const newDocId = () => crypto.randomUUID().toLowerCase();
+
+async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+	const { invoke } = await import('@tauri-apps/api/core');
+	return invoke<T>(cmd, args);
+}
+
+/** Keep the unsaved document as recovery copy `id` (replacing the last one). */
+export async function writeRecovery(id: string, path: string | null, doc: ProjectDoc) {
+	const { invoke } = await import('@tauri-apps/api/core');
+	await invoke('recovery_write', pack(doc), {
+		headers: { id, path: encodeURIComponent(path ?? '') }
+	});
+}
+
+export const listRecovery = () => call<RecoveryItem[]>('recovery_list');
+export const discardRecovery = (id: string) => call<void>('recovery_discard', { id });
+export const openRecovery = async (id: string) =>
+	unpack(await call<ArrayBuffer>('recovery_open', { id }));
+
+export const listVersions = (path: string) => call<VersionItem[]>('versions_list', { path });
+export const openVersion = async (path: string, id: string) =>
+	unpack(await call<ArrayBuffer>('version_open', { path, id }));
+
+// ---- exports ----
+
+/** Ask where to export (PNG or PSD); null if cancelled. */
+export async function askExportPath(name: string, kind: 'png' | 'psd'): Promise<string | null> {
+	const { save } = await import('@tauri-apps/plugin-dialog');
+	return save({
+		defaultPath: `${name}.${kind}`,
+		filters: [
+			kind === 'png'
+				? { name: 'PNG picture', extensions: ['png'] }
+				: { name: 'Photoshop file', extensions: ['psd'] }
+		]
+	});
+}
+
+export async function writeExport(path: string, bytes: Uint8Array): Promise<string> {
+	const { invoke } = await import('@tauri-apps/api/core');
+	return invoke<string>('export_write', bytes, { headers: { path: encodeURIComponent(path) } });
+}
+
+/** "just now", "5 min ago", "3 h ago", or the date. */
+export function ago(iso: string, now = Date.now()): string {
+	const t = Date.parse(iso);
+	if (Number.isNaN(t)) return '';
+	const s = Math.max(0, (now - t) / 1000);
+	if (s < 60) return 'just now';
+	if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+	if (s < 86_400) return `${Math.floor(s / 3600)} h ago`;
+	return new Date(t).toLocaleString();
+}

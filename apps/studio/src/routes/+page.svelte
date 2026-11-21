@@ -23,14 +23,26 @@
 	} from '@pencilpilot/paint/brushes';
 	import Logo from '@pencilpilot/ui/Logo.svelte';
 	import { onMount, tick, untrack } from 'svelte';
+	import { isTauri } from '@tauri-apps/api/core';
 	import {
+		askExportPath,
 		askOpenPath,
 		askSavePath,
+		discardRecovery,
+		listRecovery,
+		newDocId,
 		openProject,
+		openRecovery,
+		openVersion,
 		projectName,
 		saveProject,
-		type ProjectDoc
+		writeExport,
+		writeRecovery,
+		type ProjectDoc,
+		type RecoveryItem
 	} from '#lib/project.js';
+	import RecoverDialog from '#lib/RecoverDialog.svelte';
+	import VersionsMenu from '#lib/VersionsMenu.svelte';
 
 	let canvas = $state<PaintCanvas>();
 	let status = $state<CanvasStatus | null>(null);
@@ -53,13 +65,42 @@
 	// ---- the project file ----
 	let path = $state<string | null>(null);
 	let created = $state<string | undefined>(undefined);
-	/** the canvas version when last saved or opened (anything newer is unsaved) */
+	/** this document's recovery copy (a new one for each opened or new document) */
+	let docId = newDocId();
+	/** the canvas version when last saved or opened (anything newer is unsaved; -1: all of it) */
 	let savedVersion = $state(1);
-	let busy = $state<'' | 'saving' | 'opening'>('');
+	/** the canvas version in the recovery copy */
+	let recoveredVersion = 0;
+	let busy = $state<'' | 'saving' | 'opening' | 'exporting'>('');
 	let fileNote = $state('');
-	const unsaved = $derived(!!status && !status.blank && status.version !== savedVersion);
-	/** a project being opened, waiting for its canvas */
-	let pending = $state.raw<ProjectDoc | null>(null);
+	const unsaved = $derived(
+		!!status && (savedVersion === -1 || (!status.blank && status.version !== savedVersion))
+	);
+	/** a document being loaded, waiting for its canvas (and whether it starts unsaved) */
+	let pending = $state.raw<{ doc: ProjectDoc; unsaved: boolean } | null>(null);
+	/** recovery copies found at start-up */
+	let recoverable = $state<RecoveryItem[]>([]);
+	let exportOpen = $state(false);
+	let recoverLater = $state(false);
+
+	/** Everything the window knows, as a project document. */
+	async function currentDoc(): Promise<ProjectDoc> {
+		if (!canvas) throw new Error('the canvas isn’t ready');
+		const snap = canvas.snapshotLayers();
+		if (!snap) throw new Error('the canvas isn’t ready');
+		return {
+			width: canvasSize.width,
+			height: canvasSize.height,
+			fps,
+			layers: snap.layers,
+			groups: snap.groups,
+			activeLayer: status?.active ?? 0,
+			strokes: snap.strokes,
+			extra: { brushId, color, size, opacity, smoothing },
+			created,
+			thumbnail: await canvas.thumbnail()
+		};
+	}
 
 	async function save(as = false) {
 		if (!canvas || busy) return;
@@ -68,23 +109,13 @@
 		busy = 'saving';
 		fileNote = '';
 		try {
-			const snap = canvas.snapshotLayers();
-			if (!snap) throw new Error('the canvas isn’t ready');
 			const versionAtSave = status?.version ?? 0;
-			path = await saveProject(target, {
-				width: canvasSize.width,
-				height: canvasSize.height,
-				fps,
-				layers: snap.layers,
-				groups: snap.groups,
-				activeLayer: status?.active ?? 0,
-				strokes: snap.strokes,
-				extra: { brushId, color, size, opacity, smoothing },
-				created,
-				thumbnail: await canvas.thumbnail()
-			});
+			path = await saveProject(target, await currentDoc());
 			created ??= new Date().toISOString();
 			savedVersion = versionAtSave;
+			// saved for real: the recovery copy has done its job
+			await discardRecovery(docId).catch(() => {});
+			recoveredVersion = 0;
 		} catch (e) {
 			fileNote = `Couldn’t save: ${e}`;
 		} finally {
@@ -92,28 +123,43 @@
 		}
 	}
 
-	async function open() {
+	/** Unsaved changes would be lost: ask first. True to go ahead. */
+	async function okToDrop(): Promise<boolean> {
+		if (!unsaved) return true;
+		const { ask } = await import('@tauri-apps/plugin-dialog');
+		return ask(`“${projectName(path)}” has changes that aren’t saved. Lose them?`, {
+			title: 'Unsaved changes',
+			kind: 'warning',
+			okLabel: 'Lose changes',
+			cancelLabel: 'Keep working'
+		});
+	}
+
+	/** Put a document on a fresh canvas of its size. */
+	function load(doc: ProjectDoc, opts: { path: string | null; unsaved: boolean; id?: string }) {
+		path = opts.path;
+		created = doc.created;
+		fps = doc.fps;
+		docId = opts.id ?? newDocId();
+		recoveredVersion = 0;
+		const x = doc.extra;
+		if (typeof x.brushId === 'string') brushId = x.brushId;
+		if (typeof x.color === 'string') color = x.color;
+		if (typeof x.size === 'number') size = x.size;
+		if (typeof x.opacity === 'number') opacity = x.opacity;
+		if (typeof x.smoothing === 'number') smoothing = x.smoothing;
+		status = null;
+		canvasSize = { width: doc.width, height: doc.height };
+		canvasKey++;
+		pending = { doc, unsaved: opts.unsaved };
+	}
+
+	async function run(what: 'opening', job: () => Promise<void>) {
 		if (busy) return;
-		const target = await askOpenPath();
-		if (!target) return;
-		busy = 'opening';
+		busy = what;
 		fileNote = '';
 		try {
-			const doc = await openProject(target);
-			path = target;
-			created = doc.created;
-			fps = doc.fps;
-			const x = doc.extra;
-			if (typeof x.brushId === 'string') brushId = x.brushId;
-			if (typeof x.color === 'string') color = x.color;
-			if (typeof x.size === 'number') size = x.size;
-			if (typeof x.opacity === 'number') opacity = x.opacity;
-			if (typeof x.smoothing === 'number') smoothing = x.smoothing;
-			// a fresh canvas of the project's size, then its layers
-			status = null;
-			canvasSize = { width: doc.width, height: doc.height };
-			canvasKey++;
-			pending = doc;
+			await job();
 			await tick();
 		} catch (e) {
 			fileNote = `Couldn’t open: ${e}`;
@@ -121,16 +167,110 @@
 		}
 	}
 
-	// the new canvas is ready: put the project's layers on it
+	async function open() {
+		if (busy || !(await okToDrop())) return;
+		const target = await askOpenPath();
+		if (!target) return;
+		const old = docId;
+		await run('opening', async () => {
+			load(await openProject(target), { path: target, unsaved: false });
+			await discardRecovery(old).catch(() => {});
+		});
+	}
+
+	async function openOldVersion(id: string) {
+		if (!path || busy || !(await okToDrop())) return;
+		const file = path;
+		await run('opening', async () =>
+			load(await openVersion(file, id), { path: file, unsaved: true })
+		);
+	}
+
+	async function recover(item: RecoveryItem) {
+		recoverable = recoverable.filter((r) => r.id !== item.id);
+		// keeps the same recovery copy, so more autosaves update it
+		await run('opening', async () =>
+			load(await openRecovery(item.id), { path: item.path, unsaved: true, id: item.id })
+		);
+	}
+
+	async function discard(item: RecoveryItem) {
+		recoverable = recoverable.filter((r) => r.id !== item.id);
+		await discardRecovery(item.id).catch(() => {});
+	}
+
+	async function exportAs(kind: 'png' | 'psd') {
+		if (!canvas || busy) return;
+		const target = await askExportPath(projectName(path), kind);
+		if (!target) return;
+		busy = 'exporting';
+		fileNote = '';
+		try {
+			let bytes: Uint8Array;
+			if (kind === 'png') {
+				const d = canvas.exportDrawing();
+				if (!d) throw new Error('nothing to export');
+				bytes = new Uint8Array(await (await fetch(d.png)).arrayBuffer());
+			} else {
+				const doc = canvas.exportLayered();
+				if (!doc) throw new Error('nothing to export');
+				const { writePsd } = await import('@pencilpilot/paint/psd');
+				bytes = writePsd(doc);
+			}
+			await writeExport(target, bytes);
+		} catch (e) {
+			fileNote = `Couldn’t export: ${e}`;
+		} finally {
+			busy = '';
+		}
+	}
+
+	// the new canvas is ready: put the document's layers on it
 	$effect(() => {
-		const doc = pending;
-		if (!doc || !canvas || !status) return;
+		const p = pending;
+		if (!p || !canvas || !status) return;
 		pending = null;
-		canvas.restoreLayers(doc.layers, doc.groups, doc.strokes);
-		if (doc.activeLayer) canvas.selectLayer(doc.activeLayer);
-		// just opened: nothing unsaved (the canvas reported its new state as it restored)
-		savedVersion = untrack(() => status?.version ?? 0);
+		canvas.restoreLayers(p.doc.layers, p.doc.groups, p.doc.strokes);
+		if (p.doc.activeLayer) canvas.selectLayer(p.doc.activeLayer);
+		// opened: nothing unsaved (the canvas reported its new state as it restored);
+		// recovered or an old version: all of it is unsaved
+		savedVersion = p.unsaved ? -1 : untrack(() => status?.version ?? 0);
 		busy = '';
+	});
+
+	// autosave: a recovery copy of unsaved work, every 20 seconds while it changes
+	const AUTOSAVE_MS = 20_000;
+	async function autosave() {
+		if (!unsaved || busy || !status || status.version === recoveredVersion) return;
+		const version = status.version;
+		try {
+			await writeRecovery(docId, path, await currentDoc());
+			recoveredVersion = version;
+		} catch {
+			// a failed autosave is retried next time; the work is still on screen
+		}
+	}
+
+	onMount(() => {
+		if (!isTauri()) return;
+		const timer = setInterval(autosave, AUTOSAVE_MS);
+		listRecovery()
+			.then((list) => (recoverable = list))
+			.catch(() => {});
+		// closing with unsaved work: ask; closing on purpose drops the recovery copy
+		let stop: (() => void) | undefined;
+		import('@tauri-apps/api/window').then(({ getCurrentWindow }) =>
+			getCurrentWindow()
+				.onCloseRequested(async (e) => {
+					if (unsaved && !(await okToDrop())) return e.preventDefault();
+					await discardRecovery(docId).catch(() => {});
+				})
+				.then((un) => (stop = un))
+		);
+		return () => {
+			clearInterval(timer);
+			stop?.();
+		};
 	});
 
 	onMount(() => {
@@ -232,6 +372,40 @@
 			>
 				{busy === 'saving' ? 'Saving…' : 'Save'}
 			</button>
+			<VersionsMenu {path} disabled={!!busy} onopen={openOldVersion} />
+			<div class="export">
+				<button
+					type="button"
+					class="act"
+					aria-expanded={exportOpen}
+					disabled={!!busy || !status || status.blank}
+					onclick={() => (exportOpen = !exportOpen)}
+				>
+					{busy === 'exporting' ? 'Exporting…' : 'Export'}
+				</button>
+				{#if exportOpen}
+					<div class="menu" role="group" aria-label="Export as">
+						<button
+							type="button"
+							onclick={() => {
+								exportOpen = false;
+								void exportAs('png');
+							}}
+						>
+							<b>PNG picture</b><span>One flat image</span>
+						</button>
+						<button
+							type="button"
+							onclick={() => {
+								exportOpen = false;
+								void exportAs('psd');
+							}}
+						>
+							<b>Photoshop file (.psd)</b><span>Keeps layers, groups and masks</span>
+						</button>
+					</div>
+				{/if}
+			</div>
 			<button
 				type="button"
 				class="act"
@@ -301,6 +475,16 @@
 				<ColorPanel bind:color onclose={() => (tab = 'layers')} />
 			{/if}
 		{/snippet}
+		{#snippet after()}
+			{#if recoverable.length && !recoverLater}
+				<RecoverDialog
+					items={recoverable}
+					onrecover={recover}
+					ondiscard={discard}
+					onlater={() => (recoverLater = true)}
+				/>
+			{/if}
+		{/snippet}
 	</Studio>
 </div>
 
@@ -332,6 +516,41 @@
 	.act:disabled {
 		opacity: 0.4;
 		cursor: default;
+	}
+	.export {
+		position: relative;
+	}
+	.menu {
+		position: absolute;
+		z-index: 30;
+		top: calc(100% + 8px);
+		right: 0;
+		display: grid;
+		gap: 4px;
+		width: 260px;
+		padding: 8px;
+		border-radius: 18px;
+		background: var(--pp-surface);
+		box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+	}
+	.menu button {
+		display: grid;
+		gap: 2px;
+		padding: 10px 12px;
+		border: 0;
+		border-radius: 12px;
+		background: none;
+		color: var(--pp-ink);
+		text-align: left;
+		font: 14px var(--pp-font-body);
+		cursor: pointer;
+	}
+	.menu button:hover {
+		background: var(--pp-ground);
+	}
+	.menu span {
+		color: var(--pp-muted);
+		font-size: 13px;
 	}
 	.dot {
 		color: var(--pp-accent);

@@ -3,5 +3,12 @@
 	"identifier": "default",
 	"description": "What the main window may do",
 	"windows": ["main"],
-	"permissions": ["core:default", "dialog:allow-open", "dialog:allow-save", "dialog:allow-message"]
+	"permissions": [
+		"core:default",
+		"core:window:allow-destroy",
+		"dialog:allow-open",
+		"dialog:allow-save",
+		"dialog:allow-ask",
+		"dialog:allow-message"
+	]
 }

@@ -1,16 +1,33 @@
 import { expect, test, type Page } from '@playwright/test';
 
-// Saving and opening projects, through the window. Tauri's IPC is stubbed: "saving"
-// keeps the packet the window sends, "opening" hands it back, and the native dialogs
-// answer with a fixed path. (src-tauri/src/project.rs tests the files themselves.)
+// Projects through the window: save, open, autosave / recovery, versions, export.
+// Tauri's IPC is stubbed: the "file" the window saves is posted to /__keep (the test
+// keeps it), and opening, recovering or opening a version hands it back from /__packet.
+// The native dialogs answer with fixed paths. (src-tauri tests the files themselves.)
 
-async function stubTauri(page: Page) {
-	await page.addInitScript(() => {
+interface Stub {
+	/** what recovery_list / versions_list answer */
+	recovery?: unknown[];
+	versions?: unknown[];
+	/** the answer to "lose unsaved changes?" */
+	askAnswer?: boolean;
+}
+
+async function stubTauri(page: Page, stub: Stub = {}) {
+	let kept: Buffer | null = null;
+	await page.route('**/__keep', async (r) => {
+		kept = r.request().postDataBuffer();
+		await r.fulfill({ body: 'ok' });
+	});
+	await page.route('**/__packet', (r) =>
+		kept ? r.fulfill({ body: kept }) : r.fulfill({ status: 404 })
+	);
+	await page.addInitScript((stub: Stub) => {
 		const w = window as unknown as Record<string, unknown>;
-		let saved: Uint8Array | null = null;
-		const calls: string[] = [];
+		const calls: { cmd: string; path?: string; bytes?: number; head?: number[] }[] = [];
 		w.__calls = calls;
 		w.isTauri = true;
+		const packet = async () => (await fetch('/__packet')).arrayBuffer();
 		w.__TAURI_INTERNALS__ = {
 			transformCallback: () => 0,
 			unregisterCallback: () => {},
@@ -20,25 +37,55 @@ async function stubTauri(page: Page) {
 				args: unknown,
 				options?: { headers?: Record<string, string> }
 			) => {
-				calls.push(cmd);
-				if (cmd === 'plugin:dialog|save' || cmd === 'plugin:dialog|open')
-					return '/home/me/Walk cycle.ppstudio';
-				if (cmd === 'project_save') {
-					saved = new Uint8Array(args as Uint8Array);
-					return decodeURIComponent(options?.headers?.path ?? '');
+				const path = decodeURIComponent(options?.headers?.path ?? '');
+				const bytes = args instanceof Uint8Array ? args : null;
+				calls.push({
+					cmd,
+					path,
+					bytes: bytes?.length,
+					head: bytes ? [...bytes.subarray(0, 4)] : undefined
+				});
+				switch (cmd) {
+					case 'plugin:dialog|save': {
+						const json = JSON.stringify(args);
+						const ext = json.includes('"png"')
+							? 'png'
+							: json.includes('"psd"')
+								? 'psd'
+								: 'ppstudio';
+						return `/home/me/Walk cycle.${ext}`;
+					}
+					case 'plugin:dialog|open':
+						return '/home/me/Walk cycle.ppstudio';
+					case 'plugin:dialog|message':
+						// ask(): the label of the button pressed
+						return (stub.askAnswer ?? true) ? 'Lose changes' : 'Keep working';
+					case 'project_save':
+						await fetch('/__keep', { method: 'POST', body: bytes as BlobPart });
+						return path;
+					case 'project_open':
+					case 'recovery_open':
+					case 'version_open':
+						return packet();
+					case 'recovery_list':
+						return stub.recovery ?? [];
+					case 'versions_list':
+						return stub.versions ?? [];
+					case 'export_write':
+						return path;
+					default:
+						// recovery writes, events (window close) and anything else
+						return null;
 				}
-				if (cmd === 'project_open') {
-					if (!saved) throw new Error('nothing saved');
-					return saved.slice().buffer;
-				}
-				if (cmd === 'app_info') return { version: '0.1.0', os: 'linux', arch: 'x86_64' };
-				throw new Error(`unexpected command ${cmd}`);
 			}
 		};
-	});
+	}, stub);
 }
 
 const canvas = (page: Page) => page.getByLabel(/Drawing canvas/);
+type Call = { cmd: string; path?: string; head?: number[] };
+const calls = (page: Page) =>
+	page.evaluate(() => (window as unknown as { __calls: Call[] }).__calls);
 
 /** dark pixels in rows y0–y1 (fractions of the canvas) */
 async function ink(page: Page, y0 = 0, y1 = 1) {
@@ -55,6 +102,12 @@ async function ink(page: Page, y0 = 0, y1 = 1) {
 	);
 }
 
+async function ready(page: Page) {
+	await page.setViewportSize({ width: 1440, height: 960 });
+	await page.goto('/');
+	await expect(canvas(page)).toHaveAttribute('data-ready', 'true', { timeout: 15_000 });
+}
+
 async function scribble(page: Page, y: number) {
 	const b = (await canvas(page).boundingBox())!;
 	await page.mouse.move(b.x + b.width * 0.2, b.y + b.height * y);
@@ -63,43 +116,138 @@ async function scribble(page: Page, y: number) {
 	await page.mouse.up();
 }
 
-test('save a drawing, change it, open it again', async ({ page }) => {
-	await stubTauri(page);
-	await page.setViewportSize({ width: 1440, height: 960 });
-	await page.goto('/');
-	await expect(canvas(page)).toHaveAttribute('data-ready', 'true', { timeout: 15_000 });
-	await expect(page.getByTestId('project-name')).toHaveText('Untitled');
+/** draw two layers and save them as "Walk cycle"; returns the ink drawn */
+async function drawAndSave(page: Page) {
 	for (let i = 0; i < 4; i++) await page.keyboard.press(']');
 	await scribble(page, 0.3);
-	// a second layer with its own line
 	await page.getByRole('button', { name: 'New layer' }).click();
 	await scribble(page, 0.6);
 	await expect(page.getByLabel('not saved')).toBeVisible();
 	const drawn = await ink(page);
 	expect(drawn).toBeGreaterThan(200);
-
 	await page.keyboard.press('Control+s');
 	await expect(page.getByTestId('project-name')).toHaveText('Walk cycle');
 	await expect(page.getByLabel('not saved')).toHaveCount(0);
+	return drawn;
+}
 
-	// change it, then open the saved version: the change is gone, both layers are back
+/** the saved drawing is back (8-bit colour in files rounds faint edges a little) */
+async function expectSavedDrawing(page: Page, drawn: number) {
+	// (a fresh canvas is blank for a moment: wait for the drawing itself)
+	await expect.poll(async () => Math.abs((await ink(page)) - drawn) / drawn).toBeLessThan(0.02);
+	expect(await ink(page, 0.8, 1)).toBe(0);
+	await expect(page.getByRole('tab', { name: /Layers/ })).toContainText('2 layers');
+}
+
+test('save, change, open again (asking before losing the change)', async ({ page }) => {
+	await stubTauri(page);
+	await ready(page);
+	await expect(page.getByTestId('project-name')).toHaveText('Untitled');
+	const drawn = await drawAndSave(page);
 	await scribble(page, 0.85);
 	await expect(page.getByLabel('not saved')).toBeVisible();
 	await page.keyboard.press('Control+o');
 	await expect(page.getByLabel('not saved')).toHaveCount(0);
-	// the unsaved line is gone; the saved ones are back (8-bit colour in the file rounds
-	// faint edges a little, as in Photoshop / Krita 8-bit documents)
-	await expect.poll(() => ink(page, 0.8, 1)).toBe(0);
-	const back = await ink(page);
-	expect(Math.abs(back - drawn) / drawn).toBeLessThan(0.02);
-	await expect(page.getByRole('tab', { name: /Layers/ })).toContainText('2 layers');
-	const calls = await page.evaluate(() => (window as unknown as { __calls: string[] }).__calls);
-	expect(calls).toEqual(
+	await expectSavedDrawing(page, drawn);
+	expect((await calls(page)).map((c) => c.cmd)).toEqual(
 		expect.arrayContaining([
 			'plugin:dialog|save',
 			'project_save',
+			'recovery_discard',
+			'plugin:dialog|message',
 			'plugin:dialog|open',
 			'project_open'
 		])
 	);
+});
+
+test('keeping your changes stops the open', async ({ page }) => {
+	await stubTauri(page, { askAnswer: false });
+	await ready(page);
+	await scribble(page, 0.5);
+	await page.keyboard.press('Control+o');
+	await expect
+		.poll(async () => (await calls(page)).map((c) => c.cmd))
+		.toContain('plugin:dialog|message');
+	expect((await calls(page)).map((c) => c.cmd)).not.toContain('plugin:dialog|open');
+	await expect(page.getByLabel('not saved')).toBeVisible();
+});
+
+test('unsaved work is autosaved as a recovery copy every 20 seconds', async ({ page }) => {
+	await page.clock.install();
+	await stubTauri(page);
+	await ready(page);
+	await scribble(page, 0.5);
+	const writes = async () => (await calls(page)).filter((c) => c.cmd === 'recovery_write');
+	await page.clock.runFor(21_000);
+	await expect.poll(writes).toHaveLength(1);
+	expect((await writes())[0].head).toEqual([0x50, 0x50, 0x53, 0x31]); // a project packet
+	// nothing new since: no new copy
+	await page.clock.runFor(21_000);
+	expect(await writes()).toHaveLength(1);
+});
+
+test('work left behind is offered back at start-up', async ({ page }) => {
+	await stubTauri(page, {
+		recovery: [
+			{
+				id: 'doc-1',
+				path: '/home/me/Walk cycle.ppstudio',
+				savedAt: '2026-11-21T00:00:00Z',
+				width: 1920,
+				height: 1080,
+				thumbnail: null
+			}
+		]
+	});
+	await ready(page);
+	// the first start shows it too: leave it for later, draw and save the "file"
+	const dialog = page.getByRole('dialog', { name: 'Unsaved work was found' });
+	await expect(dialog).toBeVisible();
+	await dialog.getByRole('button', { name: 'Decide later' }).click();
+	const drawn = await drawAndSave(page);
+	// a new start: the copy is offered again, and recovering it brings the drawing back
+	await page.reload();
+	await expect(canvas(page)).toHaveAttribute('data-ready', 'true', { timeout: 15_000 });
+	await expect(dialog).toBeVisible();
+	await expect(dialog).toContainText('Walk cycle');
+	await dialog.getByRole('button', { name: 'Recover' }).click();
+	await expect(dialog).toBeHidden();
+	await expectSavedDrawing(page, drawn);
+	await expect(page.getByLabel('not saved')).toBeVisible();
+	await expect(page.getByTestId('project-name')).toHaveText('Walk cycle');
+});
+
+test('an earlier version can be opened', async ({ page }) => {
+	await stubTauri(page, {
+		versions: [{ id: 'v1', savedAt: new Date().toISOString(), bytes: 48_000, thumbnail: null }]
+	});
+	await ready(page);
+	const drawn = await drawAndSave(page);
+	await page.getByRole('button', { name: 'Versions' }).click();
+	const menu = page.getByRole('group', { name: 'Versions' });
+	await expect(menu).toContainText('just now');
+	await expect(menu).toContainText('47 KB');
+	await scribble(page, 0.85);
+	await menu.getByRole('button', { name: 'Open' }).click();
+	// opening a version over unsaved work asks first; it opens as unsaved work
+	await expect.poll(async () => (await calls(page)).map((c) => c.cmd)).toContain('version_open');
+	await expectSavedDrawing(page, drawn);
+	await expect(page.getByLabel('not saved')).toBeVisible();
+});
+
+test('export a PNG and a layered PSD', async ({ page }) => {
+	await stubTauri(page);
+	await ready(page);
+	await scribble(page, 0.5);
+	for (const [label, magic, ext] of [
+		['PNG picture', [0x89, 0x50, 0x4e, 0x47], 'png'],
+		['Photoshop file', [0x38, 0x42, 0x50, 0x53], 'psd']
+	] as const) {
+		await page.getByRole('button', { name: 'Export' }).click();
+		await page.getByRole('button', { name: new RegExp(label) }).click();
+		const last = async () => (await calls(page)).filter((c) => c.cmd === 'export_write').at(-1);
+		await expect.poll(async () => (await last())?.path).toBe(`/home/me/Walk cycle.${ext}`);
+		expect((await last())!.head).toEqual([...magic]);
+	}
 });
