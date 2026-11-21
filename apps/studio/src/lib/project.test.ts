@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { ago, pack, projectName, unpack, type ProjectDoc } from './project';
+import {
+	ago,
+	pack,
+	parseStart,
+	projectName,
+	studioQuery,
+	unpack,
+	type ProjectDoc
+} from './project';
 
 const doc = (): ProjectDoc => ({
 	width: 4,
@@ -80,5 +88,31 @@ describe('times', () => {
 		expect(ago('2026-11-21T11:45:00Z', now)).toBe('15 min ago');
 		expect(ago('2026-11-21T09:00:00Z', now)).toBe('3 h ago');
 		expect(ago('junk', now)).toBe('');
+	});
+});
+
+describe('the way into the studio', () => {
+	it('round-trips every kind of start', () => {
+		const starts = [
+			{ kind: 'new', width: 1280, height: 720, fps: 12 },
+			{ kind: 'open', path: '/home/me/A cat & a dog.ppstudio' },
+			{ kind: 'recover', id: 'doc-1', path: '/home/me/Fox.ppstudio' },
+			{ kind: 'recover', id: 'doc-2', path: null }
+		] as const;
+		for (const s of starts)
+			expect(parseStart(new URLSearchParams(studioQuery(s).slice(1)))).toEqual(s);
+	});
+
+	it('falls back to an HD canvas, and keeps sizes in range', () => {
+		const hd = { kind: 'new', width: 1920, height: 1080, fps: 24 };
+		expect(parseStart(new URLSearchParams(''))).toEqual(hd);
+		expect(parseStart(new URLSearchParams('new=junk'))).toEqual(hd);
+		expect(parseStart(new URLSearchParams('recover=../x'))).toEqual(hd);
+		expect(parseStart(new URLSearchParams('new=99999x2&fps=500'))).toEqual({
+			kind: 'new',
+			width: 8192,
+			height: 64,
+			fps: 24
+		});
 	});
 });

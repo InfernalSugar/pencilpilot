@@ -8,6 +8,8 @@
 //!   `versions/<key>/` (the key comes from the file's path). The newest
 //!   [`VERSIONS_KEPT`] stay.
 //!
+//! - **Recent projects:** `recent.json`, newest first (the home screen's list).
+//!
 //! Every function takes the data folder, so tests use a temporary one.
 
 use std::fs;
@@ -21,6 +23,8 @@ use crate::project;
 
 /// Versions kept per project.
 pub const VERSIONS_KEPT: usize = 20;
+/// Projects remembered on the home screen.
+pub const RECENT_KEPT: usize = 30;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -235,6 +239,88 @@ pub fn version_open(data: &Path, project_file: &Path, id: &str) -> Result<Vec<u8
     project::open(&versions_dir(data, project_file).join(format!("{id}.ppstudio")))
 }
 
+// ---- recent projects ----
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentItem {
+    pub path: String,
+    /// false when the file has gone (moved or deleted)
+    pub found: bool,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub layers: usize,
+    /// when it was last saved (RFC 3339)
+    pub modified: String,
+    pub thumbnail: Option<String>,
+}
+
+fn recent_file(data: &Path) -> PathBuf {
+    data.join("recent.json")
+}
+
+fn recent_paths(data: &Path) -> Vec<String> {
+    fs::read(recent_file(data))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+fn store_recent(data: &Path, list: &[String]) -> Result<(), String> {
+    fs::create_dir_all(data).map_err(|e| e.to_string())?;
+    fs::write(
+        recent_file(data),
+        serde_json::to_vec(list).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// A project was saved or opened: it goes to the top of the list.
+pub fn recent_add(data: &Path, project_file: &Path) -> Result<(), String> {
+    let p = project_file.to_string_lossy().into_owned();
+    let mut list = recent_paths(data);
+    list.retain(|x| *x != p);
+    list.insert(0, p);
+    list.truncate(RECENT_KEPT);
+    store_recent(data, &list)
+}
+
+pub fn recent_remove(data: &Path, project_file: &str) -> Result<(), String> {
+    let mut list = recent_paths(data);
+    list.retain(|x| x != project_file);
+    store_recent(data, &list)
+}
+
+/// The recent projects, newest first, with what the home screen shows of each.
+pub fn recent_list(data: &Path) -> Vec<RecentItem> {
+    recent_paths(data)
+        .into_iter()
+        .map(|path| match Project::peek(Path::new(&path)) {
+            Ok((m, thumb)) => RecentItem {
+                found: true,
+                width: m.canvas.width,
+                height: m.canvas.height,
+                fps: m.timeline.fps,
+                layers: m.layers.len(),
+                modified: m.modified,
+                thumbnail: thumb.as_deref().map(base64),
+                path,
+            },
+            Err(_) => RecentItem {
+                path,
+                found: false,
+                width: 0,
+                height: 0,
+                fps: 0,
+                layers: 0,
+                modified: String::new(),
+                thumbnail: None,
+            },
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,6 +448,32 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
         assert_eq!(versions_list(&data, &file).len(), VERSIONS_KEPT);
+        fs::remove_dir_all(&data).unwrap();
+    }
+
+    #[test]
+    fn recent_projects_are_newest_first_and_missing_ones_marked() {
+        let data = temp("recent");
+        let a = data.join("a.ppstudio");
+        let b = data.join("b.ppstudio");
+        project::save(&a, &packet(1), "t").unwrap();
+        project::save(&b, &packet(2), "t").unwrap();
+        recent_add(&data, &a).unwrap();
+        recent_add(&data, &b).unwrap();
+        recent_add(&data, &a).unwrap(); // again: back to the top, not twice
+        let list = recent_list(&data);
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].path, a.to_string_lossy());
+        assert!(list[0].found && list[0].width == 32 && list[0].layers == 1);
+        fs::remove_file(&b).unwrap();
+        let list = recent_list(&data);
+        assert!(!list[1].found);
+        recent_remove(&data, &b.to_string_lossy()).unwrap();
+        assert_eq!(recent_list(&data).len(), 1);
+        for i in 0..RECENT_KEPT + 5 {
+            recent_add(&data, &data.join(format!("{i}.ppstudio"))).unwrap();
+        }
+        assert_eq!(recent_paths(&data).len(), RECENT_KEPT);
         fs::remove_dir_all(&data).unwrap();
     }
 

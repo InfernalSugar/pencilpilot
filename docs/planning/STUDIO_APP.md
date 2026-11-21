@@ -104,6 +104,7 @@ colour flats and lip-sync are free (local).
 ## S1 — The app shell, same UI (≈3 weeks)
 - **S1-T01** Studio layout in the app: the same top bar, tool rail, options bar, dock and themes as the website `app` `design`
 - **S1-T02** Home: a project browser with thumbnails, recent files, templates (canvas sizes, frame rates) `app` `design`
+  ✅ Home is the first screen: New (HD, 4K, square, vertical, storyboard, A4 illustration, custom size and fps), Recent (thumbnails, size, layers, when; missing files marked, remove from list), Open…, and unsaved work to recover. Saves and opens add to Recent. The studio opens from here and its back button asks before losing changes.
 - **S1-T03** `.ppstudio` format v1 (zip: manifest, tiles, strokes, references, provenance) + a format spec doc `app` `anim`
   ✅ `crates/ppstudio` reads and writes it (spec: `crates/ppstudio/FORMAT.md`): 64×64 tiles, empty ones skipped, repeats stored once (a 1080p line drawing is under 64 KB); timeline-shaped for S2. The app saves (Ctrl+S / Ctrl+Shift+S) and opens (Ctrl+O) with native dialogs. References and provenance join with S4/S6.
 - **S1-T04** Autosave, crash recovery, version history (snapshots), native open / save / export dialogs `app`
