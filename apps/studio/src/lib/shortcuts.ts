@@ -19,10 +19,26 @@ export type ActionId =
 	| 'select-rect'
 	| 'select-lasso'
 	| 'select-wand'
+	| 'gradient'
+	| 'adjust'
 	| 'smaller'
 	| 'bigger'
 	| 'undo'
 	| 'redo'
+	| 'copy'
+	| 'cut'
+	| 'copy-to-layer'
+	| 'select-all'
+	| 'deselect'
+	| 'invert-selection'
+	| 'clear-selected'
+	| 'zoom-in'
+	| 'zoom-out'
+	| 'fit'
+	| 'rotate-left'
+	| 'rotate-right'
+	| 'rotate-reset'
+	| 'mirror'
 	| 'save'
 	| 'save-as'
 	| 'open';
@@ -30,7 +46,7 @@ export type ActionId =
 export interface Action {
 	id: ActionId;
 	label: string;
-	group: 'Tools' | 'Brush' | 'Edit' | 'File';
+	group: 'Tools' | 'Brush' | 'Edit' | 'Selection' | 'View' | 'File';
 	/** the key it starts with */
 	key: string;
 }
@@ -49,10 +65,31 @@ export const ACTIONS: Action[] = [
 	{ id: 'select-rect', label: 'Rectangle select', group: 'Tools', key: 'M' },
 	{ id: 'select-lasso', label: 'Lasso select', group: 'Tools', key: 'L' },
 	{ id: 'select-wand', label: 'Magic wand', group: 'Tools', key: 'W' },
+	{ id: 'gradient', label: 'Gradient', group: 'Tools', key: 'Shift+G' },
+	{ id: 'adjust', label: 'Adjust the layer', group: 'Tools', key: 'Ctrl+U' },
 	{ id: 'smaller', label: 'Smaller brush', group: 'Brush', key: '[' },
 	{ id: 'bigger', label: 'Bigger brush', group: 'Brush', key: ']' },
 	{ id: 'undo', label: 'Undo', group: 'Edit', key: 'Ctrl+Z' },
 	{ id: 'redo', label: 'Redo', group: 'Edit', key: 'Ctrl+Shift+Z' },
+	{ id: 'copy', label: 'Copy', group: 'Edit', key: 'Ctrl+C' },
+	{ id: 'cut', label: 'Cut', group: 'Edit', key: 'Ctrl+X' },
+	{ id: 'copy-to-layer', label: 'Copy to a new layer', group: 'Edit', key: 'Ctrl+J' },
+	{ id: 'select-all', label: 'Select all', group: 'Selection', key: 'Ctrl+A' },
+	{ id: 'deselect', label: 'Deselect', group: 'Selection', key: 'Ctrl+D' },
+	{
+		id: 'invert-selection',
+		label: 'Invert the selection',
+		group: 'Selection',
+		key: 'Ctrl+Shift+I'
+	},
+	{ id: 'clear-selected', label: 'Clear what’s selected', group: 'Selection', key: 'Delete' },
+	{ id: 'zoom-in', label: 'Zoom in', group: 'View', key: '=' },
+	{ id: 'zoom-out', label: 'Zoom out', group: 'View', key: '-' },
+	{ id: 'fit', label: 'Fit the canvas', group: 'View', key: '0' },
+	{ id: 'rotate-left', label: 'Rotate left', group: 'View', key: '4' },
+	{ id: 'rotate-right', label: 'Rotate right', group: 'View', key: '6' },
+	{ id: 'rotate-reset', label: 'Straighten the view', group: 'View', key: '5' },
+	{ id: 'mirror', label: 'Mirror the view', group: 'View', key: 'H' },
 	{ id: 'save', label: 'Save', group: 'File', key: 'Ctrl+S' },
 	{ id: 'save-as', label: 'Save as…', group: 'File', key: 'Ctrl+Shift+S' },
 	{ id: 'open', label: 'Open…', group: 'File', key: 'Ctrl+O' }

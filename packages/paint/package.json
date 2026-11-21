@@ -5,6 +5,7 @@
 	"type": "module",
 	"description": "PencilPilot studio: the canvas, tools, panels and their logic, shared by the website and the app",
 	"exports": {
+		"./*.svelte.js": "./src/*.svelte.ts",
 		"./*.svelte": "./src/*.svelte",
 		"./*": "./src/*.ts"
 	},
