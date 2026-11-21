@@ -63,17 +63,34 @@ fn path_header(request: &Request<'_>) -> Result<PathBuf, String> {
 fn project_save(app: AppHandle, request: Request<'_>) -> Result<String, String> {
     let path = path_header(&request)?;
     let packet = raw_body(&request)?;
-    store::keep_version(&data_dir(&app)?, &path)?;
+    let data = data_dir(&app)?;
+    store::keep_version(&data, &path)?;
     let name = format!("PencilPilot {}", env!("CARGO_PKG_VERSION"));
     project::save(&path, packet, &name)?;
+    // the home screen's list; a failure there mustn't fail the save
+    let _ = store::recent_add(&data, &path);
     Ok(path.to_string_lossy().into_owned())
 }
 
 /// Open the project at the `path` header: the packet the window restores from.
 #[tauri::command]
-fn project_open(request: Request<'_>) -> Result<Response, String> {
+fn project_open(app: AppHandle, request: Request<'_>) -> Result<Response, String> {
     let path = path_header(&request)?;
-    Ok(Response::new(project::open(&path)?))
+    let packet = project::open(&path)?;
+    if let Ok(data) = data_dir(&app) {
+        let _ = store::recent_add(&data, &path);
+    }
+    Ok(Response::new(packet))
+}
+
+#[tauri::command]
+fn recent_list(app: AppHandle) -> Result<Vec<store::RecentItem>, String> {
+    Ok(store::recent_list(&data_dir(&app)?))
+}
+
+#[tauri::command]
+fn recent_remove(app: AppHandle, path: String) -> Result<(), String> {
+    store::recent_remove(&data_dir(&app)?, &path)
 }
 
 /// Keep an unsaved document as recovery copy `id` (header), for the file `path` (header,
@@ -147,7 +164,9 @@ pub fn run() {
             recovery_discard,
             versions_list,
             version_open,
-            export_write
+            export_write,
+            recent_list,
+            recent_remove
         ])
         .run(tauri::generate_context!())
         .expect("error while running PencilPilot");

@@ -1,578 +1,463 @@
 <script lang="ts">
-	import { resolve } from '$app/paths';
 	/**
-	 * The drawing studio, in the app: the website's studio (same layout, tools and panels,
-	 * from @pencilpilot/paint) without the website's practice parts, plus projects:
-	 * Ctrl+S saves (.ppstudio), Ctrl+Shift+S saves as, Ctrl+O opens.
+	 * Home: start something new (templates, or any size), open a recent project or any
+	 * file, and recover work left unsaved when the app last closed.
 	 */
-	import Studio from '@pencilpilot/paint/Studio.svelte';
-	import ToolRail from '@pencilpilot/paint/ToolRail.svelte';
-	import PaintCanvas, { type CanvasStatus } from '@pencilpilot/paint/PaintCanvas.svelte';
-	import LayersPanel from '@pencilpilot/paint/LayersPanel.svelte';
-	import BrushPicker from '@pencilpilot/paint/BrushPicker.svelte';
-	import BrushTexturePanel from '@pencilpilot/paint/BrushTexturePanel.svelte';
-	import ColorPanel from '@pencilpilot/paint/ColorPanel.svelte';
-	import HistoryPanel from '@pencilpilot/paint/HistoryPanel.svelte';
-	import Swatches from '@pencilpilot/paint/Swatches.svelte';
-	import { brushTexture, onTextures, textureOn } from '@pencilpilot/paint/brush-textures';
-	import {
-		brushLabel,
-		DEFAULT_BRUSH,
-		loadManifest,
-		type BrushManifest
-	} from '@pencilpilot/paint/brushes';
-	import Logo from '@pencilpilot/ui/Logo.svelte';
-	import { onMount, tick, untrack } from 'svelte';
+	import { resolve } from '$app/paths';
+	import { goto } from '$app/navigation';
 	import { isTauri } from '@tauri-apps/api/core';
+	import Logo from '@pencilpilot/ui/Logo.svelte';
+	import { onMount } from 'svelte';
 	import {
-		askExportPath,
+		ago,
 		askOpenPath,
-		askSavePath,
 		discardRecovery,
+		forgetRecent,
+		listRecent,
 		listRecovery,
-		newDocId,
-		openProject,
-		openRecovery,
-		openVersion,
 		projectName,
-		saveProject,
-		writeExport,
-		writeRecovery,
-		type ProjectDoc,
-		type RecoveryItem
+		SIDE_MAX,
+		SIDE_MIN,
+		studioQuery,
+		TEMPLATES,
+		type RecentItem,
+		type RecoveryItem,
+		type StudioStart
 	} from '#lib/project.js';
-	import RecoverDialog from '#lib/RecoverDialog.svelte';
-	import VersionsMenu from '#lib/VersionsMenu.svelte';
 
-	let canvas = $state<PaintCanvas>();
-	let status = $state<CanvasStatus | null>(null);
-	let tool = $state<string>('brush');
-	let eraser = $state(false);
-	let size = $state(1);
-	let opacity = $state(1);
-	let color = $state('#16161a');
-	let brushId = $state(DEFAULT_BRUSH);
-	let manifest = $state<BrushManifest | null>(null);
-	let tab = $state('layers');
-	let dockOpen = $state(false);
-	let smoothing = $state(0.2);
-	/** the canvas size (a project brings its own) */
-	let canvasSize = $state({ width: 1920, height: 1080 });
-	let fps = $state(24);
-	/** bumps for a new, empty canvas (opening a project of another size remounts it) */
-	let canvasKey = $state(0);
-
-	// ---- the project file ----
-	let path = $state<string | null>(null);
-	let created = $state<string | undefined>(undefined);
-	/** this document's recovery copy (a new one for each opened or new document) */
-	let docId = newDocId();
-	/** the canvas version when last saved or opened (anything newer is unsaved; -1: all of it) */
-	let savedVersion = $state(1);
-	/** the canvas version in the recovery copy */
-	let recoveredVersion = 0;
-	let busy = $state<'' | 'saving' | 'opening' | 'exporting'>('');
-	let fileNote = $state('');
-	const unsaved = $derived(
-		!!status && (savedVersion === -1 || (!status.blank && status.version !== savedVersion))
+	let recent = $state<RecentItem[] | null>(null);
+	let recovery = $state<RecoveryItem[]>([]);
+	let customOpen = $state(false);
+	let custom = $state({ width: 1920, height: 1080, fps: 24 });
+	const customOk = $derived(
+		[custom.width, custom.height].every(
+			(v) => Number.isInteger(v) && v >= SIDE_MIN && v <= SIDE_MAX
+		) &&
+			custom.fps >= 1 &&
+			custom.fps <= 60
 	);
-	/** a document being loaded, waiting for its canvas (and whether it starts unsaved) */
-	let pending = $state.raw<{ doc: ProjectDoc; unsaved: boolean } | null>(null);
-	/** recovery copies found at start-up */
-	let recoverable = $state<RecoveryItem[]>([]);
-	let exportOpen = $state(false);
-	let recoverLater = $state(false);
 
-	/** Everything the window knows, as a project document. */
-	async function currentDoc(): Promise<ProjectDoc> {
-		if (!canvas) throw new Error('the canvas isn’t ready');
-		const snap = canvas.snapshotLayers();
-		if (!snap) throw new Error('the canvas isn’t ready');
-		return {
-			width: canvasSize.width,
-			height: canvasSize.height,
-			fps,
-			layers: snap.layers,
-			groups: snap.groups,
-			activeLayer: status?.active ?? 0,
-			strokes: snap.strokes,
-			extra: { brushId, color, size, opacity, smoothing },
-			created,
-			thumbnail: await canvas.thumbnail()
-		};
-	}
-
-	async function save(as = false) {
-		if (!canvas || busy) return;
-		const target = as || !path ? await askSavePath(projectName(path)) : path;
-		if (!target) return;
-		busy = 'saving';
-		fileNote = '';
-		try {
-			const versionAtSave = status?.version ?? 0;
-			path = await saveProject(target, await currentDoc());
-			created ??= new Date().toISOString();
-			savedVersion = versionAtSave;
-			// saved for real: the recovery copy has done its job
-			await discardRecovery(docId).catch(() => {});
-			recoveredVersion = 0;
-		} catch (e) {
-			fileNote = `Couldn’t save: ${e}`;
-		} finally {
-			busy = '';
+	onMount(() => {
+		if (!isTauri()) {
+			recent = [];
+			return;
 		}
+		listRecent()
+			.then((r) => (recent = r))
+			.catch(() => (recent = []));
+		listRecovery()
+			.then((r) => (recovery = r))
+			.catch(() => {});
+	});
+
+	const go = (s: StudioStart) => goto(resolve(`/studio${studioQuery(s)}`));
+
+	async function openFile() {
+		const path = await askOpenPath();
+		if (path) await go({ kind: 'open', path });
 	}
 
-	/** Unsaved changes would be lost: ask first. True to go ahead. */
-	async function okToDrop(): Promise<boolean> {
-		if (!unsaved) return true;
-		const { ask } = await import('@tauri-apps/plugin-dialog');
-		return ask(`“${projectName(path)}” has changes that aren’t saved. Lose them?`, {
-			title: 'Unsaved changes',
-			kind: 'warning',
-			okLabel: 'Lose changes',
-			cancelLabel: 'Keep working'
-		});
-	}
-
-	/** Put a document on a fresh canvas of its size. */
-	function load(doc: ProjectDoc, opts: { path: string | null; unsaved: boolean; id?: string }) {
-		path = opts.path;
-		created = doc.created;
-		fps = doc.fps;
-		docId = opts.id ?? newDocId();
-		recoveredVersion = 0;
-		const x = doc.extra;
-		if (typeof x.brushId === 'string') brushId = x.brushId;
-		if (typeof x.color === 'string') color = x.color;
-		if (typeof x.size === 'number') size = x.size;
-		if (typeof x.opacity === 'number') opacity = x.opacity;
-		if (typeof x.smoothing === 'number') smoothing = x.smoothing;
-		status = null;
-		canvasSize = { width: doc.width, height: doc.height };
-		canvasKey++;
-		pending = { doc, unsaved: opts.unsaved };
-	}
-
-	async function run(what: 'opening', job: () => Promise<void>) {
-		if (busy) return;
-		busy = what;
-		fileNote = '';
-		try {
-			await job();
-			await tick();
-		} catch (e) {
-			fileNote = `Couldn’t open: ${e}`;
-			busy = '';
-		}
-	}
-
-	async function open() {
-		if (busy || !(await okToDrop())) return;
-		const target = await askOpenPath();
-		if (!target) return;
-		const old = docId;
-		await run('opening', async () => {
-			load(await openProject(target), { path: target, unsaved: false });
-			await discardRecovery(old).catch(() => {});
-		});
-	}
-
-	async function openOldVersion(id: string) {
-		if (!path || busy || !(await okToDrop())) return;
-		const file = path;
-		await run('opening', async () =>
-			load(await openVersion(file, id), { path: file, unsaved: true })
-		);
-	}
-
-	async function recover(item: RecoveryItem) {
-		recoverable = recoverable.filter((r) => r.id !== item.id);
-		// keeps the same recovery copy, so more autosaves update it
-		await run('opening', async () =>
-			load(await openRecovery(item.id), { path: item.path, unsaved: true, id: item.id })
-		);
+	async function forget(item: RecentItem) {
+		recent = (recent ?? []).filter((r) => r.path !== item.path);
+		await forgetRecent(item.path).catch(() => {});
 	}
 
 	async function discard(item: RecoveryItem) {
-		recoverable = recoverable.filter((r) => r.id !== item.id);
+		recovery = recovery.filter((r) => r.id !== item.id);
 		await discardRecovery(item.id).catch(() => {});
 	}
 
-	async function exportAs(kind: 'png' | 'psd') {
-		if (!canvas || busy) return;
-		const target = await askExportPath(projectName(path), kind);
-		if (!target) return;
-		busy = 'exporting';
-		fileNote = '';
-		try {
-			let bytes: Uint8Array;
-			if (kind === 'png') {
-				const d = canvas.exportDrawing();
-				if (!d) throw new Error('nothing to export');
-				bytes = new Uint8Array(await (await fetch(d.png)).arrayBuffer());
-			} else {
-				const doc = canvas.exportLayered();
-				if (!doc) throw new Error('nothing to export');
-				const { writePsd } = await import('@pencilpilot/paint/psd');
-				bytes = writePsd(doc);
-			}
-			await writeExport(target, bytes);
-		} catch (e) {
-			fileNote = `Couldn’t export: ${e}`;
-		} finally {
-			busy = '';
-		}
-	}
-
-	// the new canvas is ready: put the document's layers on it
-	$effect(() => {
-		const p = pending;
-		if (!p || !canvas || !status) return;
-		pending = null;
-		canvas.restoreLayers(p.doc.layers, p.doc.groups, p.doc.strokes);
-		if (p.doc.activeLayer) canvas.selectLayer(p.doc.activeLayer);
-		// opened: nothing unsaved (the canvas reported its new state as it restored);
-		// recovered or an old version: all of it is unsaved
-		savedVersion = p.unsaved ? -1 : untrack(() => status?.version ?? 0);
-		busy = '';
-	});
-
-	// autosave: a recovery copy of unsaved work, every 20 seconds while it changes
-	const AUTOSAVE_MS = 20_000;
-	async function autosave() {
-		if (!unsaved || busy || !status || status.version === recoveredVersion) return;
-		const version = status.version;
-		try {
-			await writeRecovery(docId, path, await currentDoc());
-			recoveredVersion = version;
-		} catch {
-			// a failed autosave is retried next time; the work is still on screen
-		}
-	}
-
-	onMount(() => {
-		if (!isTauri()) return;
-		const timer = setInterval(autosave, AUTOSAVE_MS);
-		listRecovery()
-			.then((list) => (recoverable = list))
-			.catch(() => {});
-		// closing with unsaved work: ask; closing on purpose drops the recovery copy
-		let stop: (() => void) | undefined;
-		import('@tauri-apps/api/window').then(({ getCurrentWindow }) =>
-			getCurrentWindow()
-				.onCloseRequested(async (e) => {
-					if (unsaved && !(await okToDrop())) return e.preventDefault();
-					await discardRecovery(docId).catch(() => {});
-				})
-				.then((un) => (stop = un))
-		);
-		return () => {
-			clearInterval(timer);
-			stop?.();
-		};
-	});
-
-	onMount(() => {
-		loadManifest()
-			.then((m) => (manifest = m))
-			.catch(() => (manifest = null));
-	});
-
-	let texVersion = $state(0);
-	$effect(() => onTextures(() => texVersion++));
-	const texture = $derived.by(() => {
-		void texVersion;
-		const t = brushTexture(brushId);
-		return textureOn(t) ? t : null;
-	});
-
-	const TABS = $derived([
-		{ id: 'layers', label: 'Layers', meta: `${status?.layers.length ?? 1} layers` },
-		{ id: 'brushes', label: 'Brushes', meta: manifest ? brushLabel(manifest, brushId) : '…' },
-		{ id: 'colour', label: 'Colour' },
-		{ id: 'history', label: 'History' }
-	]);
-
-	const TOOL_KEYS: Record<string, string> = {
-		i: 'picker',
-		g: 'fill',
-		f: 'lasso-fill',
-		u: 'measure',
-		s: 'smudge',
-		p: 'pen',
-		v: 'transform',
-		k: 'liquify',
-		m: 'select-rect',
-		l: 'select-lasso',
-		w: 'select-wand'
+	/** a template's shape, scaled into a 44 px box */
+	const shape = (w: number, h: number) => {
+		const k = 44 / Math.max(w, h);
+		return `width: ${Math.round(w * k)}px; height: ${Math.round(h * k)}px`;
 	};
-
-	function onkey(e: KeyboardEvent) {
-		if ((e.target as HTMLElement).closest('input, textarea, select')) return;
-		const mod = e.ctrlKey || e.metaKey;
-		const k = e.key.toLowerCase();
-		if (mod && k === 's') {
-			e.preventDefault();
-			void save(e.shiftKey);
-		} else if (mod && k === 'o') {
-			e.preventDefault();
-			void open();
-		} else if (mod && k === 'z') {
-			e.preventDefault();
-			if (e.shiftKey) canvas?.redo();
-			else canvas?.undo();
-		} else if (mod && k === 'y') {
-			e.preventDefault();
-			canvas?.redo();
-		} else if (!mod && k === 'b') {
-			eraser = false;
-			tool = 'brush';
-		} else if (!mod && k === 'e') {
-			eraser = true;
-			tool = 'brush';
-		} else if (!mod && TOOL_KEYS[k]) tool = tool === TOOL_KEYS[k] ? 'brush' : TOOL_KEYS[k];
-		else if (!mod && e.key === '[') size = Math.max(0.25, +(size / 1.25).toFixed(2));
-		else if (!mod && e.key === ']') size = Math.min(6, +(size * 1.25).toFixed(2));
-		else if (tool === 'transform' && e.key === 'Enter') canvas?.transformCommit();
-		else if (tool === 'transform' && e.key === 'Escape') canvas?.transformCancel();
-		else if (tool === 'pen' && e.key === 'Enter') {
-			if (canvas?.penStroke(true)) canvas.penClear();
-		} else if (tool === 'pen' && e.key === 'Escape') canvas?.penClear();
-	}
 </script>
 
-<svelte:window onkeydown={onkey} />
+<main class="home">
+	<header>
+		<div class="brand">
+			<Logo size={36} />
+			<h1>PencilPilot</h1>
+		</div>
+		<div class="top-actions">
+			<a class="ghost" href={resolve('/pen-test')}>Pen test</a>
+			<button type="button" class="primary" onclick={openFile}>Open…</button>
+		</div>
+	</header>
 
-<div class="app">
-	<Studio tabs={TABS} bind:tab bind:dockOpen>
-		{#snippet title()}
-			<div class="brand">
-				<Logo /><span data-testid="project-name">{projectName(path)}</span>
-				{#if unsaved}<span class="dot" title="Not saved yet" aria-label="not saved">●</span>{/if}
-			</div>
-		{/snippet}
-		{#snippet actions()}
-			{#if fileNote}<span class="note" role="alert">{fileNote}</span>{/if}
-			<button
-				type="button"
-				class="act"
-				disabled={!!busy}
-				onclick={open}
-				title="Open a project (Ctrl+O)"
-			>
-				{busy === 'opening' ? 'Opening…' : 'Open'}
-			</button>
-			<button
-				type="button"
-				class="act"
-				disabled={!!busy}
-				onclick={() => save(false)}
-				title="Save (Ctrl+S); Save as: Ctrl+Shift+S"
-			>
-				{busy === 'saving' ? 'Saving…' : 'Save'}
-			</button>
-			<VersionsMenu {path} disabled={!!busy} onopen={openOldVersion} />
-			<div class="export">
+	{#if recovery.length}
+		<section class="recover" aria-labelledby="recover-h">
+			<h2 id="recover-h">Unsaved work was found</h2>
+			<p>PencilPilot closed before {recovery.length === 1 ? 'this was' : 'these were'} saved.</p>
+			<ul>
+				{#each recovery as item (item.id)}
+					<li>
+						{#if item.thumbnail}
+							<img src="data:image/png;base64,{item.thumbnail}" alt="" />
+						{:else}
+							<span class="blank" aria-hidden="true"></span>
+						{/if}
+						<div class="what">
+							<b>{projectName(item.path)}</b>
+							<span>{item.width} × {item.height} · {ago(item.savedAt)}</span>
+						</div>
+						<button
+							type="button"
+							class="primary"
+							onclick={() => go({ kind: 'recover', id: item.id, path: item.path })}
+						>
+							Recover
+						</button>
+						<button type="button" class="ghost" onclick={() => discard(item)}>Discard</button>
+					</li>
+				{/each}
+			</ul>
+		</section>
+	{/if}
+
+	<section aria-labelledby="new-h">
+		<h2 id="new-h">New</h2>
+		<div class="templates">
+			{#each TEMPLATES as t (t.id)}
 				<button
 					type="button"
-					class="act"
-					aria-expanded={exportOpen}
-					disabled={!!busy || !status || status.blank}
-					onclick={() => (exportOpen = !exportOpen)}
+					class="template"
+					onclick={() => go({ kind: 'new', width: t.width, height: t.height, fps: t.fps })}
 				>
-					{busy === 'exporting' ? 'Exporting…' : 'Export'}
+					<span class="frame"><span style={shape(t.width, t.height)}></span></span>
+					<b>{t.name}</b>
+					<small>{t.note}</small>
 				</button>
-				{#if exportOpen}
-					<div class="menu" role="group" aria-label="Export as">
+			{/each}
+			<button
+				type="button"
+				class="template"
+				aria-expanded={customOpen}
+				onclick={() => (customOpen = !customOpen)}
+			>
+				<span class="frame"><span class="custom">+</span></span>
+				<b>Custom</b>
+				<small>Any size and frame rate</small>
+			</button>
+		</div>
+		{#if customOpen}
+			<form
+				class="custom-form"
+				onsubmit={(e) => {
+					e.preventDefault();
+					if (customOk) void go({ kind: 'new', ...custom });
+				}}
+			>
+				<label>
+					Width <input type="number" min={SIDE_MIN} max={SIDE_MAX} bind:value={custom.width} />
+				</label>
+				<label>
+					Height <input type="number" min={SIDE_MIN} max={SIDE_MAX} bind:value={custom.height} />
+				</label>
+				<label>
+					Frames a second <input type="number" min="1" max="60" bind:value={custom.fps} />
+				</label>
+				<button type="submit" class="primary" disabled={!customOk}>Create</button>
+				{#if !customOk}
+					<span class="why" role="alert">
+						Sides {SIDE_MIN}–{SIDE_MAX} px, 1–60 frames a second.
+					</span>
+				{/if}
+			</form>
+		{/if}
+	</section>
+
+	<section aria-labelledby="recent-h">
+		<h2 id="recent-h">Recent</h2>
+		{#if recent === null}
+			<p class="muted">Loading…</p>
+		{:else if !recent.length}
+			<p class="muted">Projects you save or open show up here.</p>
+		{:else}
+			<ul class="recent">
+				{#each recent as item (item.path)}
+					<li class:gone={!item.found}>
 						<button
 							type="button"
-							onclick={() => {
-								exportOpen = false;
-								void exportAs('png');
-							}}
+							class="card"
+							disabled={!item.found}
+							title={item.path}
+							onclick={() => go({ kind: 'open', path: item.path })}
 						>
-							<b>PNG picture</b><span>One flat image</span>
+							{#if item.thumbnail}
+								<img src="data:image/png;base64,{item.thumbnail}" alt="" />
+							{:else}
+								<span class="blank" aria-hidden="true"></span>
+							{/if}
+							<b>{projectName(item.path)}</b>
+							<small>
+								{#if item.found}
+									{item.width} × {item.height} · {item.layers} layer{item.layers === 1 ? '' : 's'} · {ago(
+										item.modified
+									)}
+								{:else}
+									Moved or deleted
+								{/if}
+							</small>
 						</button>
 						<button
 							type="button"
-							onclick={() => {
-								exportOpen = false;
-								void exportAs('psd');
-							}}
+							class="forget"
+							aria-label="Remove {projectName(item.path)} from the list"
+							title="Remove from the list (the file stays)"
+							onclick={() => forget(item)}
 						>
-							<b>Photoshop file (.psd)</b><span>Keeps layers, groups and masks</span>
+							×
 						</button>
-					</div>
-				{/if}
-			</div>
-			<button
-				type="button"
-				class="act"
-				disabled={!status?.canUndo}
-				onclick={() => canvas?.undo()}
-				aria-label="Undo (Ctrl+Z)"
-			>
-				Undo
-			</button>
-			<button
-				type="button"
-				class="act"
-				disabled={!status?.canRedo}
-				onclick={() => canvas?.redo()}
-				aria-label="Redo (Ctrl+Shift+Z)"
-			>
-				Redo
-			</button>
-			<a class="act" href={resolve('/pen-test')}>Pen test</a>
-		{/snippet}
-		{#snippet rail()}
-			<ToolRail bind:tool bind:eraser bind:size bind:opacity />
-		{/snippet}
-		{#snippet options()}
-			<span class="brush-name">{manifest ? brushLabel(manifest, brushId) : ''}</span>
-			<Swatches bind:color onmore={() => ((tab = 'colour'), (dockOpen = true))} />
-			<label class="slider">
-				<span>Smoothing <b>{Math.round(smoothing * 100)}%</b></span>
-				<input type="range" min="0" max="1" step="0.05" bind:value={smoothing} />
-			</label>
-		{/snippet}
-		{#snippet stage()}
-			{#key canvasKey}
-				<PaintCanvas
-					bind:this={canvas}
-					fill
-					width={canvasSize.width}
-					height={canvasSize.height}
-					{brushId}
-					{eraser}
-					{size}
-					{opacity}
-					{color}
-					tool={tool as never}
-					{smoothing}
-					brushTexture={texture}
-					allowImport
-					onpick={(c) => (color = c)}
-					onsize={(v) => (size = v)}
-					onchange={(s) => (status = s)}
-				/>
-			{/key}
-		{/snippet}
-		{#snippet panel(t: string)}
-			{#if t === 'layers' && status}
-				<LayersPanel {status} controls={canvas} aspect={canvasSize.width / canvasSize.height} />
-			{:else if t === 'brushes'}
-				{#if manifest}
-					<BrushPicker {manifest} bind:selected={brushId} />
-					<BrushTexturePanel {brushId} onpick={(id) => (brushId = id)} />
-				{:else}
-					<p>Loading brushes…</p>
-				{/if}
-			{:else if t === 'history' && status}
-				<HistoryPanel history={status.history} ongo={(n) => canvas?.historyGo(n)} />
-			{:else if t === 'colour'}
-				<ColorPanel bind:color onclose={() => (tab = 'layers')} />
-			{/if}
-		{/snippet}
-		{#snippet after()}
-			{#if recoverable.length && !recoverLater}
-				<RecoverDialog
-					items={recoverable}
-					onrecover={recover}
-					ondiscard={discard}
-					onlater={() => (recoverLater = true)}
-				/>
-			{/if}
-		{/snippet}
-	</Studio>
-</div>
+					</li>
+				{/each}
+			</ul>
+		{/if}
+	</section>
+</main>
 
 <style>
-	.app {
+	.home {
 		height: 100vh;
-		padding: 8px;
+		overflow: auto;
 		box-sizing: border-box;
+		padding: 24px clamp(16px, 4vw, 48px) 48px;
+		-webkit-user-select: none;
+		user-select: none;
+	}
+	header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 16px;
+		margin-bottom: 24px;
 	}
 	.brand {
 		display: flex;
 		align-items: center;
-		gap: 10px;
-		font: 700 18px var(--pp-font-display);
+		gap: 12px;
 	}
-	.act {
-		min-height: 40px;
-		padding: 0 14px;
+	h1 {
+		margin: 0;
+		font: 800 28px var(--pp-font-display);
+	}
+	.top-actions {
+		display: flex;
+		gap: 8px;
+	}
+	h2 {
+		margin: 28px 0 12px;
+		font: 700 20px var(--pp-font-display);
+	}
+	.muted {
+		color: var(--pp-muted);
+	}
+	.primary,
+	.ghost {
+		min-height: 44px;
+		padding: 0 18px;
 		display: inline-grid;
 		place-items: center;
 		border: 0;
-		border-radius: 12px;
-		background: var(--pp-surface);
-		color: var(--pp-ink);
-		font: 600 14px var(--pp-font-body);
+		border-radius: 14px;
+		font: 600 15px var(--pp-font-body);
 		text-decoration: none;
 		cursor: pointer;
 	}
-	.act:disabled {
-		opacity: 0.4;
+	.primary {
+		background: var(--pp-accent-strong);
+		color: #fff;
+	}
+	.primary:disabled {
+		opacity: 0.45;
 		cursor: default;
 	}
-	.export {
-		position: relative;
+	.ghost {
+		background: var(--pp-surface);
+		color: var(--pp-ink);
 	}
-	.menu {
-		position: absolute;
-		z-index: 30;
-		top: calc(100% + 8px);
-		right: 0;
+	.templates {
 		display: grid;
+		grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+		gap: 12px;
+	}
+	.template {
+		display: grid;
+		justify-items: start;
 		gap: 4px;
-		width: 260px;
-		padding: 8px;
+		padding: 14px;
+		border: 2px solid transparent;
 		border-radius: 18px;
 		background: var(--pp-surface);
-		box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
-	}
-	.menu button {
-		display: grid;
-		gap: 2px;
-		padding: 10px 12px;
-		border: 0;
-		border-radius: 12px;
-		background: none;
 		color: var(--pp-ink);
 		text-align: left;
 		font: 14px var(--pp-font-body);
 		cursor: pointer;
 	}
-	.menu button:hover {
-		background: var(--pp-ground);
+	.template:hover,
+	.template:focus-visible {
+		border-color: var(--pp-accent);
+		outline: none;
 	}
-	.menu span {
+	.template small {
 		color: var(--pp-muted);
+	}
+	.frame {
+		display: grid;
+		place-items: center;
+		width: 52px;
+		height: 52px;
+		margin-bottom: 6px;
+	}
+	.frame > span {
+		border-radius: 4px;
+		background: var(--pp-lilac);
+		outline: 2px solid var(--pp-ink);
+	}
+	.frame .custom {
+		display: grid;
+		place-items: center;
+		width: 40px;
+		height: 40px;
+		font-size: 24px;
+		outline-style: dashed;
+		background: none;
+	}
+	.custom-form {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: end;
+		gap: 12px;
+		margin-top: 12px;
+		padding: 14px;
+		border-radius: 18px;
+		background: var(--pp-surface);
+	}
+	.custom-form label {
+		display: grid;
+		gap: 4px;
 		font-size: 13px;
+		color: var(--pp-muted);
 	}
-	.dot {
-		color: var(--pp-accent);
-		font-size: 12px;
+	.custom-form input {
+		width: 110px;
+		min-height: 40px;
+		padding: 0 10px;
+		border: 2px solid var(--pp-surface-sunk);
+		border-radius: 10px;
+		font: 15px var(--pp-font-body);
 	}
-	.note {
-		max-width: 320px;
+	.why {
 		color: var(--pp-accent-ink);
 		font-size: 13px;
 	}
-	.brush-name {
-		font-weight: 700;
-		white-space: nowrap;
-	}
-	.slider {
+	.recent {
 		display: grid;
-		gap: 2px;
-		width: 140px;
-		font-size: 13px;
-		color: var(--pp-on-ink-muted);
+		grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+		gap: 14px;
+		margin: 0;
+		padding: 0;
+		list-style: none;
 	}
-	.slider b {
-		color: var(--pp-on-ink);
+	.recent li {
+		position: relative;
+	}
+	.card {
+		display: grid;
+		gap: 4px;
+		width: 100%;
+		padding: 10px;
+		border: 2px solid transparent;
+		border-radius: 18px;
+		background: var(--pp-surface);
+		color: var(--pp-ink);
+		text-align: left;
+		font: 14px var(--pp-font-body);
+		cursor: pointer;
+	}
+	.card:hover:not(:disabled),
+	.card:focus-visible {
+		border-color: var(--pp-accent);
+		outline: none;
+	}
+	.card:disabled {
+		cursor: default;
+		opacity: 0.6;
+	}
+	.card img,
+	.card .blank {
+		width: 100%;
+		aspect-ratio: 16 / 10;
+		object-fit: contain;
+		border-radius: 12px;
+		background: #fff;
+		outline: 1px solid var(--pp-surface-sunk);
+	}
+	.card small {
+		color: var(--pp-muted);
+	}
+	.forget {
+		position: absolute;
+		top: 16px;
+		right: 16px;
+		width: 30px;
+		height: 30px;
+		border: 0;
+		border-radius: 50%;
+		background: rgba(22, 22, 26, 0.7);
+		color: #fff;
+		font-size: 18px;
+		cursor: pointer;
+		opacity: 0;
+	}
+	li:hover .forget,
+	.forget:focus-visible,
+	.gone .forget {
+		opacity: 1;
+	}
+	.recover {
+		margin-bottom: 8px;
+		padding: 16px 20px;
+		border-radius: 20px;
+		background: var(--pp-yellow);
+	}
+	.recover h2 {
+		margin-top: 0;
+	}
+	.recover p {
+		margin: -6px 0 12px;
+	}
+	.recover ul {
+		display: grid;
+		gap: 8px;
+		margin: 0;
+		padding: 0;
+		list-style: none;
+	}
+	.recover li {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		padding: 8px;
+		border-radius: 14px;
+		background: var(--pp-surface);
+	}
+	.recover img,
+	.recover .blank {
+		width: 72px;
+		height: 48px;
+		object-fit: contain;
+		border-radius: 8px;
+		background: #fff;
+	}
+	.what {
+		flex: 1;
+		display: grid;
+		min-width: 0;
+	}
+	.what span {
+		color: var(--pp-muted);
+		font-size: 13px;
 	}
 </style>
