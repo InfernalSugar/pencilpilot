@@ -98,6 +98,7 @@ colour flats and lip-sync are free (local).
 - **S0-T05** Native pen input spike: pressure, tilt and barrel button, latency budget (<16 ms), palm rejection on tablets `app`
   🟡 The app's **Pen test** page measures pressure levels, tilt, twist, buttons, sample rate (with coalesced events) and event delay; results per system to be recorded here.
 - **S0-T06** CI for the app: build matrix, Rust + UI tests, nightly artifacts `infra`
+  ✅ `.github/workflows/app.yml`: the shell's fmt / clippy / tests, then installers on Linux (deb, rpm, AppImage), Windows (msi, exe) and macOS (dmg) for every app change, nightly and on demand; the app's UI is linted and type-checked by the main CI.
 
 ## S1 — The app shell, same UI (≈3 weeks)
 - **S1-T01** Studio layout in the app: the same top bar, tool rail, options bar, dock and themes as the website `app` `design`
