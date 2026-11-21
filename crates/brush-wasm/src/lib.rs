@@ -820,6 +820,13 @@ impl PaintCanvas {
         self.inner.forget_drawing(drawing)
     }
 
+    /// An animation frame as it would look ((layer, drawing) pairs flattened), made
+    /// `shrink` times smaller; RGBA8. Changes nothing.
+    #[wasm_bindgen(js_name = renderFrame)]
+    pub fn render_frame(&self, pairs: &[u32], shrink: u32) -> Vec<u8> {
+        self.inner.render_frame(pairs, shrink)
+    }
+
     /// The drawing the next undo changes (0 = none).
     #[wasm_bindgen(js_name = undoDrawing)]
     pub fn undo_drawing(&self) -> u32 {

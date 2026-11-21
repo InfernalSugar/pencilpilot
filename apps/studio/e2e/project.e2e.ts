@@ -653,3 +653,83 @@ test('frame store: drawings leave the window and come back exactly', async ({ pa
 	await tl.getByRole('button', { name: 'Frame 2', exact: true }).click();
 	await expect.poll(async () => Math.abs((await ink(page)) - inks[1]) / inks[1]).toBeLessThan(0.02);
 });
+
+test('playback: plays the cut at its frame rate, loops a range, ping-pongs, scrubs', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	const tl = page.getByRole('region', { name: 'Timeline' });
+	const frameNo = tl.getByTestId('frame');
+	// three drawings, each further down
+	for (let i = 0; i < 3; i++) {
+		if (i) await tl.getByRole('button', { name: 'New drawing' }).click();
+		await scribble(page, 0.2 + i * 0.25);
+	}
+	await tl.getByRole('combobox', { name: 'Frames a second' }).selectOption('6');
+	// play once: the player shows each frame in turn, then the canvas is back
+	await tl.getByRole('radio', { name: 'Once' }).click();
+	await tl.getByRole('button', { name: 'Play' }).click();
+	const player = page.getByTestId('player');
+	await expect(player).toBeVisible();
+	const seen = new Set<string>();
+	await expect
+		.poll(
+			async () => {
+				const t = await frameNo.textContent();
+				if (t) seen.add(t);
+				return (await player.count()) === 0;
+			},
+			{ intervals: [50], timeout: 5_000 }
+		)
+		.toBe(true);
+	expect([...seen].sort()).toEqual(['1', '2', '3']);
+	await expect(frameNo).toHaveText('3');
+	// loop frames 2–3, back and forth, then stop with the key
+	await tl.getByRole('button', { name: 'Frame 2', exact: true }).click();
+	await tl.getByRole('button', { name: 'In', exact: true }).click();
+	await tl.getByRole('button', { name: 'Frame 3', exact: true }).click();
+	await tl.getByRole('button', { name: 'Out', exact: true }).click();
+	await expect(tl.getByRole('button', { name: 'Frames 2–3 ×' })).toBeVisible();
+	await tl.getByRole('radio', { name: 'Ping-pong' }).click();
+	await page.keyboard.press('Shift+Space');
+	await expect(player).toBeVisible();
+	const looped = new Set<string>();
+	for (let i = 0; i < 12; i++) {
+		looped.add((await frameNo.textContent()) ?? '');
+		await page.waitForTimeout(80);
+	}
+	expect([...looped].sort()).toEqual(['2', '3']);
+	await page.keyboard.press('Escape');
+	await expect(player).toHaveCount(0);
+	// the player's picture: a frame rendered small, the line where it belongs
+	await page.keyboard.press('Shift+Space');
+	await expect(player).toBeVisible();
+	// (once its frames are ready)
+	await expect
+		.poll(() =>
+			player.evaluate((el: HTMLCanvasElement) => {
+				if (!el.width || !el.height) return 0;
+				const d = el.getContext('2d')!.getImageData(0, 0, el.width, el.height).data;
+				let n = 0;
+				for (let i = 0; i < d.length; i += 4) if (d[i] < 150) n++;
+				return n;
+			})
+		)
+		.toBeGreaterThan(20);
+	await tl.getByRole('button', { name: 'Stop' }).click();
+	await expect(player).toHaveCount(0);
+
+	// scrub: drag along the frame numbers, the canvas follows
+	const ruler = tl.getByRole('group', { name: 'Frames' });
+	const r = (await ruler.boundingBox())!;
+	await page.mouse.move(r.x + 5, r.y + r.height / 2);
+	await page.mouse.down();
+	await page.mouse.move(r.x + 22 * 2 + 5, r.y + r.height / 2, { steps: 5 });
+	await expect(frameNo).toHaveText('3');
+	await page.mouse.move(r.x + 22 + 5, r.y + r.height / 2, { steps: 3 });
+	await page.mouse.up();
+	await expect(frameNo).toHaveText('2');
+	await expect.poll(() => ink(page, 0.4, 0.6)).toBeGreaterThan(50);
+	expect(await ink(page, 0, 0.35)).toBe(0);
+});

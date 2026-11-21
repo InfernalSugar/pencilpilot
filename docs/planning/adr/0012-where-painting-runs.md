@@ -44,6 +44,12 @@ window's timer has 1 ms resolution, so these are upper bounds.
    options then are WebAssembly threads (Tauri can send the COOP / COEP headers they
    need) or a native canvas behind an asynchronous PaintCanvas.
 
+## Update (S2-T05)
+Playback previews are rendered in the window by the same engine (`render_frame`), small
+(at most 960 px wide) and once per distinct frame, which takes about 16 ms a 1080p frame,
+so the window doesn't need the native compositor for playback. Full-size whole-canvas
+work (export, S3) is still the native engine's.
+
 ## Consequences
 - The engine's shared state is `Arc`, not `Rc`, so layers can be read from many threads.
 - The app and the website keep one canvas implementation, so tools land in both at once.
