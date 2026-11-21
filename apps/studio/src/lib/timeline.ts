@@ -38,6 +38,9 @@ export interface Cut {
 	tracks: Record<number, Track>;
 	/** the part of the canvas the cut shows (none: all of it) */
 	camera?: Camera;
+	/** exposure-sheet notes, frame → text: what happens (action) and what's said (dialogue) */
+	action?: Record<number, string>;
+	dialogue?: Record<number, string>;
 }
 
 export interface Scene {
@@ -205,11 +208,75 @@ const celTracks = (cut: Cut, statics: number[]) =>
 /** Every cel track in the cut: one more frame at `frame` (each holds what it shows). */
 export function insertFrameAll(cut: Cut, frame: number, statics: number[] = []) {
 	for (const t of celTracks(cut, statics)) insertFrame(t, frame);
+	shiftNotes(cut, frame, 1);
 }
 
 /** Every cel track in the cut: `frame` taken out. */
 export function deleteFrameAll(cut: Cut, frame: number, statics: number[] = []) {
 	for (const t of celTracks(cut, statics)) deleteFrame(t, frame);
+	shiftNotes(cut, frame, -1);
+}
+
+/** Notes from `frame` on move with the frames (a deleted frame's note goes). */
+function shiftNotes(cut: Cut, frame: number, by: 1 | -1) {
+	for (const key of ['action', 'dialogue'] as const) {
+		const notes = cut[key];
+		if (!notes) continue;
+		const moved: Record<number, string> = {};
+		for (const [f, text] of Object.entries(notes)) {
+			const n = +f;
+			if (n < frame) moved[n] = text;
+			else if (by > 0) moved[n + 1] = text;
+			else if (n > frame) moved[n - 1] = text;
+		}
+		cut[key] = moved;
+	}
+}
+
+/** Write (or, empty, clear) a note on a frame. */
+export function setNote(cut: Cut, key: 'action' | 'dialogue', frame: number, text: string) {
+	const notes = (cut[key] ??= {});
+	const t = text.trim();
+	if (t) notes[frame] = t;
+	else delete notes[frame];
+	if (!Object.keys(notes).length) delete cut[key];
+}
+
+/**
+ * Drawings numbered on a track as people read them: 1, 2, 3… in order of first
+ * appearance (a drawing exposed again keeps its number).
+ */
+export function drawingNumbers(t: Track): Map<number, number> {
+	const out = new Map<number, number>();
+	for (const e of t) if (e.drawing && !out.has(e.drawing)) out.set(e.drawing, out.size + 1);
+	return out;
+}
+
+/**
+ * Write a drawing on a frame as on an exposure sheet: it shows from that frame for the
+ * rest of the hold it falls in (0: an empty cel). Past the end, empty cels fill the gap.
+ */
+export function setKey(t: Track, frame: number, drawing: number) {
+	const frames: number[] = [];
+	for (const e of t) for (let i = 0; i < e.length; i++) frames.push(e.drawing);
+	if (frame >= frames.length) {
+		while (frames.length < frame) frames.push(0);
+		frames.push(drawing);
+	} else {
+		const old = frames[frame];
+		// (the rest of this exposure: frames after it that belonged to it)
+		const at = exposureAt(t, frame)!;
+		const end = at.start + t[at.index].length;
+		for (let k = frame; k < end && frames[k] === old; k++) frames[k] = drawing;
+	}
+	const out: Track = [];
+	for (const d of frames) {
+		const last = out.at(-1);
+		if (last && last.drawing === d) last.length++;
+		else out.push({ drawing: d, length: 1 });
+	}
+	while (out.length && out.at(-1)!.drawing === 0) out.pop();
+	t.splice(0, t.length, ...out);
 }
 
 /** What each layer shows on `frame`: [layer id, drawing id] pairs, for every layer given. */
@@ -348,6 +415,8 @@ export interface FileCut {
 	name: string;
 	tracks: Record<string, FileExposure[]>;
 	camera?: Camera;
+	action?: Record<string, string>;
+	dialogue?: Record<string, string>;
 }
 export interface FileScene {
 	name: string;
@@ -361,6 +430,8 @@ export function toFile(tl: Timeline, layers: number[]): FileScene[] {
 		cuts: s.cuts.map((c) => ({
 			name: c.name,
 			...(c.camera ? { camera: { ...c.camera } } : {}),
+			...(c.action && Object.keys(c.action).length ? { action: { ...c.action } } : {}),
+			...(c.dialogue && Object.keys(c.dialogue).length ? { dialogue: { ...c.dialogue } } : {}),
 			tracks: Object.fromEntries(
 				Object.entries(c.tracks)
 					.filter(([l]) => layers.includes(+l))
@@ -387,6 +458,12 @@ export function fromFile(
 		c && [c.x, c.y, c.width, c.height].every(Number.isFinite) && c.width > 0 && c.height > 0
 			? { camera: { x: c.x, y: c.y, width: c.width, height: c.height } }
 			: {};
+	const notes = (key: 'action' | 'dialogue', n: Record<string, string> | undefined) => {
+		const out: Record<number, string> = {};
+		for (const [f, text] of Object.entries(n ?? {}))
+			if (Number.isInteger(+f) && +f >= 0 && typeof text === 'string' && text) out[+f] = text;
+		return Object.keys(out).length ? { [key]: out } : {};
+	};
 	return {
 		statics: statics.flatMap((l) => {
 			const id = layerIds.get(l);
@@ -399,6 +476,8 @@ export function fromFile(
 				id: ci + 1,
 				name: c.name,
 				...camera(c.camera),
+				...notes('action', c.action),
+				...notes('dialogue', c.dialogue),
 				tracks: Object.fromEntries(
 					Object.entries(c.tracks).flatMap(([l, t]) => {
 						const id = layerIds.get(+l);

@@ -16,6 +16,7 @@
 		cameraOf,
 		cutLength,
 		deleteFrameAll,
+		drawingNumbers,
 		exposureAt,
 		insertExposure,
 		insertFrameAll,
@@ -138,16 +139,10 @@
 		onedit(true);
 	}
 
-	/** a drawing's number on its layer: 1, 2, 3… in order */
+	/** a drawing's number on its layer: 1, 2, 3… in order (exposed again, the same number) */
 	function numbers(t: Track): number[] {
-		// (a drawing exposed again keeps its number)
-		// eslint-disable-next-line svelte/prefer-svelte-reactivity -- a local lookup, not state
-		const seen = new Map<number, number>();
-		return t.map((e) => {
-			if (!e.drawing) return 0;
-			if (!seen.has(e.drawing)) seen.set(e.drawing, seen.size + 1);
-			return seen.get(e.drawing)!;
-		});
+		const n = drawingNumbers(t);
+		return t.map((e) => n.get(e.drawing) ?? 0);
 	}
 
 	// ---- buttons ----

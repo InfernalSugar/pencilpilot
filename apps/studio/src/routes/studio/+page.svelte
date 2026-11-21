@@ -53,6 +53,7 @@
 	import { actionFor, comboOf, showKey, type ActionId } from '#lib/shortcuts.js';
 	import { page } from '$app/state';
 	import VersionsMenu from '#lib/VersionsMenu.svelte';
+	import XSheet from '#lib/XSheet.svelte';
 	import TimelinePanel from '#lib/TimelinePanel.svelte';
 	import { FrameCache } from '#lib/frames.js';
 	import { cleanOnion, onionEntries, type OnionSettings } from '#lib/onion.js';
@@ -125,6 +126,9 @@
 	let quiet = false;
 	/** the frame the canvas shows (the timeline's frame can be ahead of it for a moment) */
 	let onCanvas = { scene: 0, cut: 0, frame: 0 };
+	/** the drawing the canvas was last given for each layer */
+	// eslint-disable-next-line svelte/prefer-svelte-reactivity -- bookkeeping, not state
+	const lastShown = new Map<number, number>();
 
 	/** drawings not showing live in the app's frame store (crates/anim) */
 	const cache = new FrameCache(() => canvas, isTauri());
@@ -147,6 +151,10 @@
 		const f = onCanvas.frame;
 		for (const l of s.layers) {
 			if (l.adjust || !l.drawing) continue;
+			// (only a drawing the canvas made itself: the timeline may have changed since it
+			// showed the others, and the canvas is about to catch up)
+			if (lastShown.get(l.id) === l.drawing) continue;
+			lastShown.set(l.id, l.drawing);
 			if (timeline.statics.includes(l.id)) {
 				if (staticDrawing(cut.tracks[l.id]) !== l.drawing)
 					setStaticDrawing(trackIn(cut, l.id), l.drawing);
@@ -194,6 +202,7 @@
 		quiet = false;
 		if (ok) {
 			onCanvas = { scene, cut: cutIndex, frame };
+			for (const [l, d] of now) lastShown.set(l, d);
 			cache.shown(now.map(([, d]) => d));
 			void updateOnion();
 			// what stopped showing goes to the store; the engine keeps a few
@@ -914,6 +923,7 @@
 		},
 		{ id: 'brushes', label: 'Brushes', meta: manifest ? brushLabel(manifest, brushId) : '…' },
 		{ id: 'colour', label: 'Colour' },
+		{ id: 'xsheet', label: 'X‑sheet', meta: theCut().name },
 		{ id: 'history', label: 'History', meta: status?.history.undo.at(-1) }
 	]);
 
@@ -1263,6 +1273,22 @@
 				{:else}
 					<p>Loading brushes…</p>
 				{/if}
+			{:else if t === 'xsheet' && status}
+				<XSheet
+					{timeline}
+					{scene}
+					cut={cutIndex}
+					bind:frame
+					{fps}
+					layers={status.layers}
+					active={status.active}
+					newDrawing={() => canvas?.newDrawing() ?? 0}
+					onlayer={(id) => canvas?.selectLayer(id)}
+					onedit={(changed) => {
+						if (playing) stopPlay();
+						timelineEdited(changed);
+					}}
+				/>
 			{:else if t === 'history' && status}
 				<HistoryPanel history={status.history} ongo={historyGo} />
 			{:else if t === 'colour'}

@@ -938,3 +938,65 @@ test('frame tools: cycle, reverse, duplicate, copy and paste, boil', async ({ pa
 	expect(Math.abs(inkBoiled - inkStill) / inkStill).toBeLessThan(0.3);
 	expect(await top()).toBe(0);
 });
+
+test('X-sheet: drawings written down the page, empty cels, dialogue kept in the file', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	const tl = page.getByRole('region', { name: 'Timeline' });
+	await scribble(page, 0.25);
+	await tl.getByRole('button', { name: 'New drawing' }).click();
+	await scribble(page, 0.75);
+	await page.getByRole('tab', { name: /X.sheet/ }).click();
+	const xs = page.getByRole('region', { name: 'Exposure sheet' });
+	const cellAt = (f: number) =>
+		xs.getByRole('gridcell', { name: new RegExp(`^Layer 1, frame ${f}:`) });
+	await expect(cellAt(1)).toHaveAccessibleName('Layer 1, frame 1: drawing 1');
+	await expect(cellAt(2)).toHaveAccessibleName('Layer 1, frame 2: drawing 2');
+	// write drawing 1 on frame 3: Enter goes on to frame 4
+	await cellAt(3).click();
+	await page.keyboard.type('1');
+	await page.keyboard.press('Enter');
+	await expect(cellAt(3)).toHaveAccessibleName('Layer 1, frame 3: drawing 1');
+	await expect(tl.getByTestId('frame')).toHaveText('4');
+	await expect(tl.getByRole('button', { name: /drawing 1, frame 3$/ })).toBeVisible();
+	await expect.poll(() => ink(page, 0, 0.45)).toBe(0);
+	// a number that doesn't exist yet is refused, the next one is a new drawing
+	await page.keyboard.type('5');
+	await page.keyboard.press('Enter');
+	await expect(xs.getByRole('status')).toContainText('Type 3 for a new one');
+	await page.keyboard.press('Escape');
+	await page.keyboard.type('3');
+	await page.keyboard.press('Enter');
+	await expect(cellAt(4)).toHaveAccessibleName('Layer 1, frame 4: drawing 3');
+	// X: an empty cel on frame 2
+	await cellAt(2).click();
+	await page.keyboard.press('x');
+	await expect(cellAt(2)).toHaveAccessibleName('Layer 1, frame 2: empty cel');
+	await cellAt(2).click();
+	await expect.poll(() => ink(page)).toBe(0);
+	// dialogue, typed straight in (the studio's keys don't fire meanwhile)
+	await xs.getByRole('gridcell', { name: 'Dialogue, frame 1', exact: true }).click();
+	await page.keyboard.type('hello');
+	await page.keyboard.press('Enter');
+	await expect(xs.getByRole('gridcell', { name: 'Dialogue, frame 1', exact: true })).toHaveText(
+		'hello'
+	);
+	await expect(page.getByLabel(/Drawing canvas/)).toBeVisible();
+
+	// saved and opened again: the notes and the sheet come back
+	await page.keyboard.press('Control+s');
+	await expect(page.getByTestId('project-name')).toHaveText('Walk cycle', { timeout: 20_000 });
+	await page.keyboard.press('Control+o');
+	await page.getByRole('tab', { name: /X.sheet/ }).click();
+	await expect(xs.getByRole('gridcell', { name: 'Dialogue, frame 1', exact: true })).toHaveText(
+		'hello',
+		{
+			timeout: 20_000
+		}
+	);
+	// (numbered in order of appearance: with drawing 2 gone, the new one is now 2)
+	await expect(cellAt(4)).toHaveAccessibleName('Layer 1, frame 4: drawing 2');
+	await expect(cellAt(2)).toHaveAccessibleName('Layer 1, frame 2: empty cel');
+});
