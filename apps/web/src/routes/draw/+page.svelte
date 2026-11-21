@@ -12,22 +12,13 @@
 	import Button from '@pencilpilot/ui/Button.svelte';
 	import PaintCanvas, {
 		BLANK_STATUS,
-		type CanvasStatus,
-		type ImportResult
+		type CanvasStatus
 	} from '@pencilpilot/paint/PaintCanvas.svelte';
 	import LayersPanel from '@pencilpilot/paint/LayersPanel.svelte';
-	import ToneEditor from '@pencilpilot/paint/ToneEditor.svelte';
 	import BrushTexturePanel from '@pencilpilot/paint/BrushTexturePanel.svelte';
 	import QuickMenu, { type QuickAction } from '@pencilpilot/paint/QuickMenu.svelte';
 	import TimelapsePlayer from '@pencilpilot/paint/TimelapsePlayer.svelte';
 	import { brushTexture, onTextures, textureOn } from '@pencilpilot/paint/brush-textures';
-	import {
-		MAP_PRESETS,
-		NO_SPEC,
-		parseSpec,
-		specName,
-		type AdjustSpec
-	} from '@pencilpilot/paint/tone';
 	import CanvasSizePicker from '@pencilpilot/paint/CanvasSizePicker.svelte';
 	import RefViewer from '@pencilpilot/paint/RefViewer.svelte';
 	import HistoryPanel from '@pencilpilot/paint/HistoryPanel.svelte';
@@ -38,8 +29,6 @@
 		anyGuide,
 		defaultGuides,
 		gridLines as canvasGridLines,
-		SYMMETRY_MODES,
-		symmetryOn,
 		type GuideSettings
 	} from '@pencilpilot/paint/guides';
 	import TracePanel, {
