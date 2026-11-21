@@ -128,7 +128,15 @@
 	import { toGray } from './pixels';
 	import { boxToQuad, usableQuad, type Quad } from './homography';
 	import { meshLines, meshNodes, WARP_N } from './warp';
-	import { editable, moveHandle, shapeHandles, shapePath, type EditShape } from './shape-edit';
+	import {
+		editable,
+		moveHandle,
+		perfect,
+		shapeHandles,
+		shapeName,
+		shapePath,
+		type EditShape
+	} from './shape-edit';
 	import { smudgeSource } from './smudge';
 	import { textureById, type BrushTexture } from './brush-textures';
 	import { Timelapse } from './timelapse';
@@ -356,6 +364,8 @@
 	const log = new StrokeLog();
 	const t0 = performance.now();
 	let current: Stroke | null = null;
+	/** the pointer drawing `current` */
+	let strokePointer = -1;
 	let lastT = 0;
 	let raf = 0;
 
@@ -1134,6 +1144,59 @@
 		snapped = true;
 		schedule();
 		onshape?.(shape.kind);
+	}
+
+	/**
+	 * Still holding after a snap: another finger's tap (or Shift) makes it perfect, as
+	 * in Procreate: a circle, a square, an even triangle, a line at a 15° step.
+	 */
+	function perfectSnapped() {
+		if (!paint || !brush || !current || !snapped || !snappedShape) return;
+		const sh = perfect(snappedShape);
+		snappedShape = sh;
+		paint.cancelStroke();
+		if (sendLive()) {
+			flushLive();
+			onlive?.({ type: 'cancel', k: liveK });
+			liveK++;
+			onlive?.({
+				type: 'begin',
+				k: liveK,
+				style: { brushId: sharedBrushId(brushId), color, size, opacity, eraser }
+			});
+		}
+		if (!paint.beginStroke()) return;
+		const t = current.points.at(-1)?.t ?? 0;
+		current.points = [];
+		for (const [x, y] of resample(shapePath(sh), 3)) {
+			paint.strokeTo(brush, x, y, sh.pressure, 0, 0, 0.008);
+			current.points.push({
+				x: Math.round(x * 10) / 10,
+				y: Math.round(y * 10) / 10,
+				pressure: sh.pressure,
+				t
+			});
+			if (sendLive())
+				livePts.push(
+					Math.round(x * 10) / 10,
+					Math.round(y * 10) / 10,
+					Math.round(sh.pressure * 1000) / 1000,
+					8
+				);
+		}
+		schedule();
+		onshape?.(shapeName(sh));
+	}
+
+	/** Edit Shape after the pen lifts: make the snapped shape perfect (or loose again). */
+	export function setShapeForm(form: 'perfect' | 'free') {
+		const sh = editShape;
+		if (!sh) return;
+		if (form === 'perfect') editShape = perfect(sh);
+		else if (sh.kind === 'ellipse') editShape = { ...sh, circle: false };
+		else return;
+		if (editShape !== sh) redrawShape(editShape);
+		notify();
 	}
 
 	// ---- selections ----
@@ -2300,8 +2363,13 @@
 		if ((e.target as HTMLElement).closest('.drop-tol')) return;
 		dropFill = null;
 		// the view toolbar sits on top of the canvas area: its buttons aren't strokes
-		if ((e.target as HTMLElement).closest('.view')) return;
+		if ((e.target as HTMLElement).closest('.view, .shape-bar')) return;
 		if (e.pointerType === 'pen') penSeen = true;
+		// holding a snapped shape: another finger's tap makes it perfect (not a pinch)
+		if (current && snapped && snappedShape && e.pointerId !== strokePointer) {
+			perfectSnapped();
+			return;
+		}
 		if (e.pointerType === 'touch') {
 			touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
 			if (!tap)
@@ -2470,6 +2538,7 @@
 		}
 		capture(e);
 		editShape = null;
+		strokePointer = e.pointerId;
 		current = { brushId, eraser, layer: paint.activeLayer, color, size, opacity, points: [] };
 		lastT = e.timeStamp;
 		smooth = null;
@@ -2753,6 +2822,7 @@
 	}
 	function keydown(e: KeyboardEvent) {
 		if (e.key === 'Shift') shiftHeld = true;
+		if (e.key === 'Shift' && !e.repeat && current && snapped) perfectSnapped();
 		if (poly && !typing(e.target) && (e.key === 'Enter' || e.key === 'Escape')) {
 			if (e.key === 'Enter') closePoly();
 			else poly = null;
@@ -3786,6 +3856,43 @@
 			<button type="button" aria-label="Done" onclick={() => (dropFill = null)}>✓</button>
 		</div>
 	{/if}
+	{#if editShape && tool === 'brush' && ready}
+		{@const name = shapeName(editShape)}
+		{@const pair = (
+			{
+				circle: ['Ellipse', 'Circle'],
+				ellipse: ['Ellipse', 'Circle'],
+				rectangle: ['Rectangle', 'Square'],
+				square: ['Rectangle', 'Square'],
+				triangle: ['Triangle', 'Even triangle'],
+				line: ['Line', 'Line at 15°']
+			} as Record<string, [string, string]>
+		)[name]}
+		{#if pair}
+			<div class="shape-bar" role="toolbar" aria-label="Edit shape">
+				<span>Edit shape</span>
+				<button
+					type="button"
+					aria-pressed={!(name === 'circle' || name === 'square')}
+					disabled={editShape.kind !== 'ellipse'}
+					title={editShape.kind === 'ellipse'
+						? 'Free: each axis drags on its own'
+						: 'Drag the corners to change it'}
+					onclick={() => setShapeForm('free')}
+				>
+					{pair[0]}
+				</button>
+				<button
+					type="button"
+					aria-pressed={name === 'circle' || name === 'square'}
+					title="Perfect (tap with another finger, or press Shift, while holding)"
+					onclick={() => setShapeForm('perfect')}
+				>
+					{pair[1]}
+				</button>
+			</div>
+		{/if}
+	{/if}
 	{#if viewControls && ready}
 		<div class="view" role="toolbar" aria-label="View">
 			<button type="button" aria-label="Zoom out" title="Zoom out (−)" onclick={zoomOut}>
@@ -3936,6 +4043,44 @@
 	/* an overlay: it must never hide the drawing (the plain canvas rule paints paper white) */
 	canvas.ants {
 		background: transparent;
+	}
+	.shape-bar {
+		position: absolute;
+		top: 12px;
+		left: 50%;
+		z-index: 6;
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		padding: 4px 4px 4px 12px;
+		border-radius: 14px;
+		background: var(--pp-ink, #16161a);
+		color: var(--pp-on-ink, #fff);
+		font: 600 13px var(--pp-font-body);
+		transform: translateX(-50%);
+		box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+	}
+	.shape-bar span {
+		margin-right: 6px;
+		color: var(--pp-on-ink-muted, #b9b9c2);
+	}
+	.shape-bar button {
+		height: 30px;
+		padding: 0 12px;
+		border: 0;
+		border-radius: 10px;
+		background: #2a2a30;
+		color: inherit;
+		font: inherit;
+		cursor: pointer;
+	}
+	.shape-bar button[aria-pressed='true'] {
+		background: var(--pp-accent-strong, #e8492f);
+		color: #fff;
+	}
+	.shape-bar button:disabled {
+		opacity: 0.45;
+		cursor: default;
 	}
 	.marquee .first {
 		fill: #fff;

@@ -346,7 +346,7 @@
 		shapeTimer = setTimeout(() => (shapeNote = ''), 2200);
 	}
 	function onShape(kind: string) {
-		shapeNote = `Snapped to a ${kind}`;
+		shapeNote = `Snapped to ${/^[aeiou]/.test(kind) ? 'an' : 'a'} ${kind}`;
 		clearTimeout(shapeTimer);
 		shapeTimer = setTimeout(() => (shapeNote = ''), 1800);
 	}

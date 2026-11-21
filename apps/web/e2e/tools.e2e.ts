@@ -258,7 +258,7 @@ test('QuickShape: hold at the end of a wobbly line or loop to snap it', async ({
 	}
 	await page.waitForTimeout(800);
 	await expect(
-		page.getByRole('status').filter({ hasText: /Snapped to a (circle|ellipse)/ })
+		page.getByRole('status').filter({ hasText: /Snapped to an? (circle|ellipse)/ })
 	).toBeVisible();
 	await page.mouse.up();
 	await expect(page.getByRole('button', { name: /Undo/ })).toBeEnabled();
@@ -492,6 +492,89 @@ test('close and fill: a stroke that ends where it began fills inside, in one und
 	// an open stroke doesn't fill
 	await zigzag(page, 0.8);
 	expect(await inside(0.5, 0.65)).toBe(false);
+});
+
+test('QuickShape: a second finger (or Shift, or Edit shape) makes a perfect circle', async ({
+	page
+}) => {
+	await ready(page);
+	/** the ink's width / height in canvas pixels */
+	const aspect = () =>
+		canvas(page).evaluate((c: HTMLCanvasElement) => {
+			const d = c.getContext('2d')!.getImageData(0, 0, c.width, c.height).data;
+			let [x0, y0, x1, y1] = [c.width, c.height, 0, 0];
+			for (let i = 0; i < d.length; i += 4)
+				if (d[i] < 225) {
+					const [x, y] = [(i / 4) % c.width, Math.floor(i / 4 / c.width)];
+					[x0, y0, x1, y1] = [Math.min(x0, x), Math.min(y0, y), Math.max(x1, x), Math.max(y1, y)];
+				}
+			return (x1 - x0) / Math.max(1, y1 - y0);
+		});
+	/** a rough oval, twice as wide as it is tall, held at the end */
+	const oval = async () => {
+		const b = await box(page);
+		const [cx, cy, ry] = [b.x + b.width * 0.5, b.y + b.height * 0.5, b.height * 0.15];
+		const rx = ry * 2;
+		await page.mouse.move(cx + rx, cy);
+		await page.mouse.down();
+		for (let i = 1; i <= 48; i++) {
+			const t = (i / 46) * Math.PI * 2;
+			await page.mouse.move(cx + rx * Math.cos(t) * (1 + (i % 3) * 0.015), cy + ry * Math.sin(t));
+		}
+		await page.waitForTimeout(800);
+		await expect(
+			page.getByRole('status').filter({ hasText: 'Snapped to an ellipse' })
+		).toBeVisible();
+		expect(await aspect()).toBeGreaterThan(1.6);
+		return { cx, cy };
+	};
+
+	// holding: another finger taps the canvas → a circle (not a pinch)
+	const at = await oval();
+	await page.locator('.viewport').evaluate(
+		(el, [x, y]) => {
+			for (const type of ['pointerdown', 'pointerup'])
+				el.dispatchEvent(
+					new PointerEvent(type, {
+						pointerId: 77,
+						pointerType: 'touch',
+						isPrimary: false,
+						clientX: x,
+						clientY: y,
+						bubbles: true
+					})
+				);
+		},
+		[at.cx - 100, at.cy]
+	);
+	await expect.poll(aspect).toBeLessThan(1.1);
+	expect(await aspect()).toBeGreaterThan(0.9);
+	await page.mouse.up();
+	const bar = page.getByRole('toolbar', { name: 'Edit shape' });
+	await expect(bar.getByRole('button', { name: 'Circle' })).toHaveAttribute('aria-pressed', 'true');
+	// one undo takes the circle away
+	await page.keyboard.press('Control+z');
+	await expect.poll(aspect).toBeLessThan(0.01);
+
+	// holding: Shift does the same
+	await oval();
+	await page.keyboard.down('Shift');
+	await page.keyboard.up('Shift');
+	await expect.poll(aspect).toBeLessThan(1.1);
+	await page.mouse.up();
+	await page.keyboard.press('Control+z');
+	await expect.poll(aspect).toBeLessThan(0.01);
+
+	// let go as an ellipse, then Edit shape → Circle
+	await oval();
+	await page.mouse.up();
+	await expect(bar.getByRole('button', { name: 'Ellipse' })).toHaveAttribute(
+		'aria-pressed',
+		'true'
+	);
+	await bar.getByRole('button', { name: 'Circle' }).click();
+	await expect.poll(aspect).toBeLessThan(1.1);
+	expect(await aspect()).toBeGreaterThan(0.9);
 });
 
 /** the ink's bounding box as fractions of the canvas */
