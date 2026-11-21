@@ -54,6 +54,7 @@
 	import { page } from '$app/state';
 	import VersionsMenu from '#lib/VersionsMenu.svelte';
 	import TimelinePanel from '#lib/TimelinePanel.svelte';
+	import { FrameCache } from '#lib/frames.js';
 	import {
 		drawingAt,
 		drawingsIn,
@@ -111,10 +112,19 @@
 	/** the frame the canvas shows (the timeline's frame can be ahead of it for a moment) */
 	let onCanvas = { scene: 0, cut: 0, frame: 0 };
 
+	/** drawings not showing live in the app's frame store (crates/anim) */
+	const cache = new FrameCache(() => canvas, isTauri());
+
 	function canvasChanged(s: CanvasStatus) {
 		status = s;
 		if (quiet) return;
 		docVersion++;
+		// what changed: the drawings showing, or one undo / redo just changed
+		cache.touch([
+			...s.layers.map((l) => l.drawing),
+			canvas?.undoDrawing() ?? 0,
+			canvas?.redoDrawing() ?? 0
+		]);
 		// drawing on an empty cel started a drawing (or a pasted picture got one): it's
 		// on this frame now
 		if (timelineFor !== canvasKey) return;
@@ -126,17 +136,49 @@
 				setDrawing(trackIn(cut, l.id), f, l.drawing);
 	}
 
-	/** Show what the timeline has on the current frame. */
-	function showFrame() {
+	/** frame changes, one after another (fetching drawings takes a moment) */
+	let showQueue: Promise<void> = Promise.resolve();
+	/** waiting for the store: the canvas takes no strokes meanwhile */
+	let switching = $state(false);
+
+	/** Show what the timeline has on the current frame (once the store sends its drawings). */
+	function showFrame(): Promise<void> {
+		showQueue = showQueue.then(showNow).catch((e) => note(`Couldn’t show that frame: ${e}`));
+		return showQueue;
+	}
+
+	async function showNow() {
 		if (!canvas || !status) return;
 		// pictures pasted or imported here get drawings first, so they're kept
 		canvas.ensureDrawings();
-		const layers = status.layers.filter((l) => !l.adjust).map((l) => l.id);
+		const pairs = () =>
+			showing(
+				theCut(),
+				(status?.layers ?? []).filter((l) => !l.adjust).map((l) => l.id),
+				frame
+			);
+		if (cache.needs(pairs().map(([, d]) => d))) {
+			switching = true;
+			try {
+				await cache.ensure(pairs().map(([, d]) => d));
+			} finally {
+				switching = false;
+			}
+		}
+		const c = canvas;
+		if (!c) return;
+		const leaving = (status?.layers ?? []).map((l) => l.drawing);
+		const now = pairs();
 		quiet = true;
-		const ok = canvas.showDrawings(showing(theCut(), layers, frame));
+		const ok = c.showDrawings(now);
 		quiet = false;
-		if (ok) onCanvas = { scene, cut: cutIndex, frame };
-		else {
+		if (ok) {
+			onCanvas = { scene, cut: cutIndex, frame };
+			cache.shown(now.map(([, d]) => d));
+			// what stopped showing goes to the store; the engine keeps a few
+			const gone = leaving.filter((d) => d && !now.some(([, n]) => n === d));
+			void cache.push(gone).then(() => cache.trim());
+		} else {
 			// stay where the canvas is
 			[scene, cutIndex, frame] = [onCanvas.scene, onCanvas.cut, onCanvas.frame];
 			note('Finish what you’re doing first (a transform, an adjustment or a mask).');
@@ -150,12 +192,16 @@
 	}
 
 	/** Undo / redo a stroke from another frame: go there first, so it's seen. */
-	function reveal(drawing: number) {
+	async function reveal(drawing: number) {
 		if (!drawing || !status || status.layers.some((l) => l.drawing === drawing)) return;
 		const at = findDrawing(timeline, drawing, { scene, cut: cutIndex });
-		if (!at) return;
+		if (!at) {
+			// not on the timeline any more: still bring it back, so undo has it
+			await cache.ensure([drawing]);
+			return;
+		}
 		[scene, cutIndex, frame] = [at.scene, at.cut, at.frame];
-		showFrame();
+		await showFrame();
 	}
 
 	// a new, empty canvas: a new timeline
@@ -166,6 +212,7 @@
 			timelineFor = canvasKey;
 			[scene, cutIndex, frame] = [0, 0, 0];
 			onCanvas = { scene: 0, cut: 0, frame: 0 };
+			void cache.clear().catch(() => {});
 		});
 	});
 
@@ -277,14 +324,22 @@
 		];
 	}
 	/** undo also cancels an open Adjust panel */
-	function undo() {
+	async function undo() {
+		// (a frame still coming from the store: let it arrive first)
+		await showQueue;
 		if (toolOpts.adjustOpen) toolOpts.closeAdjust(false);
-		reveal(canvas?.undoDrawing() ?? 0);
+		await reveal(canvas?.undoDrawing() ?? 0);
 		canvas?.undo();
 	}
-	function redo() {
+	/** The History panel: several steps, each with its drawing brought back first. */
+	async function historyGo(steps: number) {
+		for (let i = 0; i < Math.abs(steps); i++) await (steps < 0 ? undo() : redo());
+	}
+	async function redo() {
+		// (a frame still coming from the store: let it arrive first)
+		await showQueue;
 		if (toolOpts.adjustOpen) toolOpts.closeAdjust(false);
-		reveal(canvas?.redoDrawing() ?? 0);
+		await reveal(canvas?.redoDrawing() ?? 0);
 		canvas?.redo();
 	}
 	// paste a picture (or what was copied) as a new layer
@@ -337,6 +392,8 @@
 	async function currentDoc(): Promise<ProjectDoc> {
 		if (!canvas) throw new Error('the canvas isn’t ready');
 		canvas.ensureDrawings();
+		// the store gets what changed; then the file is made from it, no pixels sent
+		await cache.push();
 		const snap = canvas.snapshotLayers();
 		if (!snap) throw new Error('the canvas isn’t ready');
 		const layerIds = snap.layers.filter((l) => !l.adjust).map((l) => l.id);
@@ -344,10 +401,13 @@
 		const drawings = drawingsIn(timeline).flatMap((id) => {
 			const layer = layerOfDrawing(timeline, id);
 			if (layer === null || !layerIds.includes(layer)) return [];
-			// an empty drawing goes as no bytes
+			if (cache.native) return [{ id, layer }];
+			// (no store: the pixels go in the packet; an empty drawing as no bytes)
 			const rgba = c.drawingEmpty(id) ? new Uint8Array(0) : c.drawingRgba(id);
 			return [{ id, layer, rgba }];
 		});
+		// an animation's layer pixels are its drawings: not needed twice
+		if (cache.native) for (const l of snap.layers) if (!l.adjust) l.rgba = new Uint8Array(0);
 		return {
 			width: canvasSize.width,
 			height: canvasSize.height,
@@ -486,7 +546,9 @@
 		untrack(() => {
 			// an animation's layers start empty: their drawings come next
 			c.restoreLayers(
-				anim ? doc.layers.map((l) => ({ ...l, rgba: new Uint8Array(l.rgba.length) })) : doc.layers,
+				anim
+					? doc.layers.map((l) => ({ ...l, rgba: new Uint8Array(doc.width * doc.height * 4) }))
+					: doc.layers,
 				doc.groups,
 				doc.strokes
 			);
@@ -495,7 +557,9 @@
 			const ids = new Map(doc.layers.map((l, i) => [l.id, now[i]?.id ?? 0] as [number, number]));
 			const at = (v: unknown) => (typeof v === 'number' && v >= 0 ? Math.floor(v) : 0);
 			if (anim) {
-				for (const d of doc.drawings ?? []) c.putDrawing(d.id, d.rgba);
+				// (drawings in the frame store come when their frames show)
+				for (const d of doc.drawings ?? []) if (d.rgba) c.putDrawing(d.id, d.rgba);
+				cache.stored((doc.drawings ?? []).filter((d) => !d.rgba).map((d) => d.id));
 				timeline = fromFile(doc.scenes!, ids);
 				scene = Math.min(at(doc.extra.scene), timeline.scenes.length - 1);
 				cutIndex = Math.min(at(doc.extra.cut), timeline.scenes[scene].cuts.length - 1);
@@ -887,6 +951,7 @@
 						)}
 					onquickmenu={(x, y) => (quickMenu = { x, y })}
 					onchange={canvasChanged}
+					locked={switching}
 				/>
 			{/key}
 			{#if canvasNote}<p class="canvas-note" role="status">{canvasNote}</p>{/if}
@@ -924,7 +989,7 @@
 					<p>Loading brushes…</p>
 				{/if}
 			{:else if t === 'history' && status}
-				<HistoryPanel history={status.history} ongo={(n) => canvas?.historyGo(n)} />
+				<HistoryPanel history={status.history} ongo={historyGo} />
 			{:else if t === 'colour'}
 				<ColorPanel bind:color onclose={() => (tab = 'layers')} />
 			{/if}

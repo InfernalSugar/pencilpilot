@@ -2334,6 +2334,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "pencilpilot-anim"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "pencilpilot-ppstudio",
+]
+
+[[package]]
 name = "pencilpilot-ppstudio"
 version = "0.1.0"
 dependencies = [
@@ -2348,6 +2356,7 @@ name = "pencilpilot-studio"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "pencilpilot-anim",
  "pencilpilot-ppstudio",
  "serde",
  "serde_json",

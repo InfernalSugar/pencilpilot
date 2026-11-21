@@ -785,6 +785,41 @@ impl PaintCanvas {
         self.inner.drop_drawings_except(keep);
     }
 
+    /// A drawing as packed file tiles (u32 count; per tile i32 x, i32 y, 64×64 RGBA8).
+    #[wasm_bindgen(js_name = drawingTilesPacked)]
+    pub fn drawing_tiles_packed(&self, drawing: u32) -> Vec<u8> {
+        self.inner.drawing_tiles_packed(drawing)
+    }
+
+    /// Load a drawing from packed file tiles. Not an undo step.
+    #[wasm_bindgen(js_name = putDrawingTiles)]
+    pub fn put_drawing_tiles(&mut self, drawing: u32, packed: &[u8]) -> bool {
+        self.inner.put_drawing_tiles(drawing, packed)
+    }
+
+    #[wasm_bindgen(js_name = hasDrawing)]
+    pub fn has_drawing(&self, drawing: u32) -> bool {
+        self.inner.has_drawing(drawing)
+    }
+
+    /// Drawings kept here that aren't showing.
+    #[wasm_bindgen(js_name = keptDrawings)]
+    pub fn kept_drawings(&self) -> Vec<u32> {
+        self.inner.kept_drawings()
+    }
+
+    /// Drawings the undo history needs.
+    #[wasm_bindgen(js_name = historyDrawings)]
+    pub fn history_drawings(&self) -> Vec<u32> {
+        self.inner.history_drawings()
+    }
+
+    /// Let go of a kept drawing (the frame store has it).
+    #[wasm_bindgen(js_name = forgetDrawing)]
+    pub fn forget_drawing(&mut self, drawing: u32) -> bool {
+        self.inner.forget_drawing(drawing)
+    }
+
     /// The drawing the next undo changes (0 = none).
     #[wasm_bindgen(js_name = undoDrawing)]
     pub fn undo_drawing(&self) -> u32 {
