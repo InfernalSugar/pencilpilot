@@ -53,6 +53,7 @@
 	import type { OnionSettings } from './onion';
 	import type { AudioBank } from './audio';
 	import { AUDIO_TYPES } from './audio';
+	import { TRANSITIONS } from './exporting';
 
 	let {
 		timeline,
@@ -553,6 +554,21 @@
 				{#each theScene.cuts as c, i (c.id)}<option value={i}>{c.name}</option>{/each}
 			</select>
 		</label>
+		<select
+			aria-label="Into the next cut"
+			title={TRANSITIONS.find((t) => t.id === (theCut.transition ?? ''))?.note}
+			value={theCut.transition ?? ''}
+			onchange={(e) => {
+				const v = e.currentTarget.value;
+				if (v === 'flash' || v === 'dissolve') theCut.transition = v;
+				else delete theCut.transition;
+				edited();
+			}}
+		>
+			{#each TRANSITIONS as t (t.id)}
+				<option value={t.id}>→ {t.label}</option>
+			{/each}
+		</select>
 		<button type="button" class="b" title="A new cut after this one" onclick={newCut}>+ Cut</button>
 		<button type="button" class="b" title="A new scene after this one" onclick={newScene}>
 			+ Scene

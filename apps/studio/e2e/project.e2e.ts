@@ -1701,3 +1701,50 @@ test('colour: colour layers under the lines, a fill carried through the frames',
 	await tl.getByRole('button', { name: 'Frame 1', exact: true }).click();
 	await expect.poll(() => dark(0.32, 0.45)).toBe(false);
 });
+
+test('transitions: a white flash and a dissolve between cuts, in the export', async ({ page }) => {
+	await stubTauri(page);
+	await ready(page);
+	const tl = page.getByRole('region', { name: 'Timeline' });
+	// two cuts of 8 frames, a line high in the first and low in the second
+	await scribble(page, 0.3);
+	for (let i = 0; i < 7; i++) await tl.getByRole('button', { name: 'Hold longer' }).click();
+	await tl.getByRole('button', { name: '+ Cut' }).click();
+	await scribble(page, 0.7);
+	for (let i = 0; i < 7; i++) await tl.getByRole('button', { name: 'Hold longer' }).click();
+	await tl.getByLabel('Cut', { exact: true }).selectOption({ index: 0 });
+	await tl.getByLabel('Into the next cut').selectOption('flash');
+
+	const exportAll = async () => {
+		await page.getByRole('button', { name: 'Export', exact: true }).click();
+		await page.getByRole('button', { name: /^Animation…/ }).click();
+		const dlg = page.getByRole('dialog', { name: 'Export the animation' });
+		await dlg.getByRole('radio', { name: /^GIF/ }).click();
+		await dlg.getByLabel('Frames').selectOption('all');
+		await dlg.getByRole('button', { name: 'Export…' }).click();
+		await expect(dlg).toHaveCount(0, { timeout: 20_000 });
+		const all = await calls(page);
+		const begin = all.findLastIndex((c) => c.cmd === 'export_begin');
+		const frames = all.slice(begin).filter((c) => c.cmd === 'export_frame');
+		// every output frame's ink (frames sent once and held are repeated)
+		return frames.flatMap((c) => Array(Number(c.repeat)).fill(c.ink!) as number[]);
+	};
+	const ink = await exportAll();
+	expect(ink.length).toBe(16);
+	// cut 1's last 3 frames darken (the paper too), one white frame, then cut 2 lands
+	const lines = ink[0];
+	expect(ink[4]).toBe(lines);
+	for (const i of [5, 6, 7]) expect(ink[i]).toBeGreaterThan(lines * 5);
+	expect(ink[8]).toBe(0);
+	expect(ink[15]).toBeGreaterThan(0);
+	expect(ink[9]).toBeLessThanOrEqual(ink[15]);
+
+	// a dissolve instead: both lines show while it blends, the length stays
+	await tl.getByLabel('Into the next cut').selectOption('dissolve');
+	const d = await exportAll();
+	expect(d.length).toBe(16);
+	expect(d[0]).toBe(lines);
+	// (mid-dissolve: some of each line)
+	expect(d[8]).toBeGreaterThan(0);
+	expect(new Set(d.slice(2, 14)).size).toBeGreaterThan(4);
+});

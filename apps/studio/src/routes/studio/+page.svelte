@@ -87,6 +87,8 @@
 		placeCamera,
 		plan,
 		frameFile,
+		joinFrames,
+		outputFrames,
 		type ExportFormat,
 		type Run,
 		type ExportSettings
@@ -1766,7 +1768,13 @@
 					height: out.height,
 					fps: outFps,
 					transparent,
-					frames: runs.length,
+					frames: joinFrames(
+						outputFrames(
+							runs,
+							(src) => timeline.scenes[src.scene]?.cuts[src.cut]?.transition,
+							outFps
+						)
+					).length,
 					total: runs.reduce((n, r) => n + r.repeat, 0),
 					once: s.once
 				}
@@ -1774,24 +1782,31 @@
 			const off = new OffscreenCanvas(out.width, out.height);
 			const g = off.getContext('2d', { willReadFrequently: true })!;
 			g.imageSmoothingQuality = 'high';
-			for (const [i, run] of runs.entries()) {
-				if (exportStop) throw new Error('cancelled');
+			/** a run's picture at the output size (the last few kept: a dissolve needs two) */
+			// eslint-disable-next-line svelte/prefer-svelte-reactivity -- a local cache, not state
+			const pictures = new Map<number, ImageBitmap>();
+			const picture = async (i: number) => {
+				const have = pictures.get(i);
+				if (have) return have;
+				const run = runs[i];
 				const cut = timeline.scenes[run.source.scene].cuts[run.source.cut];
 				const cam = cameraOf(cut, canvasSize);
 				const at = placeCamera(cam, out);
 				// (render smaller first when the output is much smaller: faster, and smoother)
 				const k = Math.max(1, Math.floor(1 / at.k));
 				await cache.ensure(run.pairs.map(([, d]) => d));
-				const r = canvas.renderFrame(run.pairs, k, transparent);
+				const r = canvas!.renderFrame(run.pairs, k, transparent);
 				if (!r) throw new Error('the canvas went away');
-				const bmp = await createImageBitmap(new ImageData(r.rgba, r.width, r.height));
-				g.clearRect(0, 0, out.width, out.height);
+				const src = await createImageBitmap(new ImageData(r.rgba, r.width, r.height));
+				const pic = new OffscreenCanvas(out.width, out.height);
+				const pg = pic.getContext('2d')!;
+				pg.imageSmoothingQuality = 'high';
 				if (!transparent) {
-					g.fillStyle = '#fff';
-					g.fillRect(0, 0, out.width, out.height);
+					pg.fillStyle = '#fff';
+					pg.fillRect(0, 0, out.width, out.height);
 				}
-				g.drawImage(
-					bmp,
+				pg.drawImage(
+					src,
 					cam.x / k,
 					cam.y / k,
 					cam.width / k,
@@ -1801,14 +1816,50 @@
 					at.width,
 					at.height
 				);
-				bmp.close();
+				src.close();
+				const bmp = pic.transferToImageBitmap();
+				pictures.set(i, bmp);
+				for (const [key, old] of pictures)
+					if (key < i - 6) {
+						old.close();
+						pictures.delete(key);
+					}
+				cache.trim();
+				return bmp;
+			};
+			// the frames, with the transitions between cuts laid over them
+			const frames = joinFrames(
+				outputFrames(runs, (src) => timeline.scenes[src.scene]?.cuts[src.cut]?.transition, outFps)
+			);
+			animExport.progress = { done: 0, total: frames.length };
+			for (const [i, [fr, repeat]] of frames.entries()) {
+				if (exportStop) throw new Error('cancelled');
+				g.globalAlpha = 1;
+				g.clearRect(0, 0, out.width, out.height);
+				g.drawImage(await picture(fr.run), 0, 0);
+				if (fr.over) {
+					g.globalAlpha = fr.over.alpha;
+					g.drawImage(await picture(fr.over.run), 0, 0);
+					g.globalAlpha = 1;
+				}
+				if (fr.dim !== undefined) {
+					// darker, where there's picture
+					g.globalCompositeOperation = 'source-atop';
+					g.fillStyle = `rgba(0, 0, 0, ${1 - fr.dim})`;
+					g.fillRect(0, 0, out.width, out.height);
+					g.globalCompositeOperation = 'source-over';
+				}
+				if (fr.white) {
+					g.fillStyle = `rgba(255, 255, 255, ${fr.white})`;
+					g.fillRect(0, 0, out.width, out.height);
+				}
 				const px = g.getImageData(0, 0, out.width, out.height).data;
 				await invoke('export_frame', new Uint8Array(px.buffer, px.byteOffset, px.byteLength), {
-					headers: { repeat: String(run.repeat) }
+					headers: { repeat: String(repeat) }
 				});
-				cache.trim();
-				if (animExport) animExport.progress = { done: i + 1, total: runs.length };
+				if (animExport) animExport.progress = { done: i + 1, total: frames.length };
 			}
+			for (const b of pictures.values()) b.close();
 			const where = await invoke<string>('export_end');
 			fileNote = `Exported to ${where}`;
 			animExport = null;

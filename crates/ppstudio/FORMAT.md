@@ -47,6 +47,7 @@ This crate (`pencilpilot-ppstudio`) reads and writes it.
             "camera": { "x": 0, "y": 0, "width": 1920, "height": 1080 },  // optional
             "action": { "0": "turns to the window" },   // optional notes, frame → text
             "dialogue": { "4": "hel-", "6": "lo" },      // optional: what's said, by frame
+            "transition": "flash",                       // optional: into the next cut ("flash" or "dissolve")
             "tracks": {          // layer id → its exposures, in order
               "1": [ { "drawing": "D1", "length": 2 },     // held for 2 frames ("on twos")
                      { "drawing": null, "length": 1 },     // an empty cel
@@ -107,6 +108,10 @@ This crate (`pencilpilot-ppstudio`) reads and writes it.
   shape used in lip-sync: `A`–`F` (closed for M B P; slightly open, teeth together; open;
   wide open; rounded; puckered) and the optional `G` (F V), `H` (L) and `X` (rest), as
   Rhubarb Lip Sync names them. Its drawings are stored even when no frame shows them.
+- A cut's **transition** is how it goes into the next cut in exports: none
+  is a hard cut; `flash` darkens the cut's last 3 frames (to 88%, 76%, 65%), shows one
+  white frame and lands the next cut over 2 (white at 55%, 20%); `dissolve` blends the
+  two over half a second with an S-curve, centred on the cut. The film keeps its length.
 - **Drawing marks** (`drawingKinds`) say what a drawing is in the animation: `key`,
   `breakdown` or `inbetween`. Apps show them on the timeline and the exposure sheet (keys
   circled, breakdowns boxed) and use them for flipping and a keys-only onion skin.

@@ -109,3 +109,38 @@ describe('frame files', () => {
 		);
 	});
 });
+
+describe('transitions between cuts', () => {
+	it('lay a flash and a dissolve over the frames, keeping the length', async () => {
+		const { outputFrames, joinFrames } = await import('./exporting');
+		const run = (cut: number, repeat: number) => ({
+			source: { scene: 0, cut, frame: 0 },
+			pairs: [] as [number, number][],
+			repeat
+		});
+		// cut 0: 6 frames (two runs), cut 1: 14 frames, cut 2: 24 frames
+		const runs = [run(0, 3), run(0, 3), run(1, 14), run(2, 24)];
+		const kinds = ['flash', 'dissolve', undefined] as const;
+		const out = outputFrames(runs, (s) => kinds[s.cut], 24);
+		expect(out.length).toBe(44);
+		// the flash: the last 3 of cut 0 darken, then white landing on cut 1
+		expect(out.slice(3, 6).map((f) => f.dim)).toEqual([0.88, 0.76, 0.65]);
+		expect(out.slice(6, 9).map((f) => f.white)).toEqual([1, 0.55, 0.2]);
+		expect(out[9]).toEqual({ run: 2 });
+		// the dissolve: 12 frames around the cut at frame 20, cut 1's last frame held under
+		// cut 2's first, eased
+		expect(out.filter((f) => f.over).length).toBe(12);
+		expect(out[13].over).toBeUndefined();
+		expect(out[14]).toMatchObject({ run: 2, over: { run: 3 } });
+		expect(out[25]).toMatchObject({ run: 2, over: { run: 3 } });
+		expect(out[26]).toEqual({ run: 3 });
+		const alphas = out.slice(14, 26).map((f) => f.over!.alpha);
+		expect(alphas.every((a, i) => i === 0 || a > alphas[i - 1])).toBe(true);
+		expect(alphas[0]).toBeLessThan(0.05);
+		expect(alphas[11]).toBeGreaterThan(0.95);
+		// joined back into runs
+		const j = joinFrames(out);
+		expect(j.reduce((n, [, r]) => n + r, 0)).toBe(44);
+		expect(j.at(-1)).toEqual([{ run: 3 }, 18]);
+	});
+});
