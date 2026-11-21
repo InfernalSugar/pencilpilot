@@ -30,6 +30,8 @@ export interface ProjectDoc {
 	scenes?: FileScene[];
 	/** every drawing the scenes show, with the layer it's on */
 	drawings?: ProjectDrawing[];
+	/** static layers (one drawing all cut long) */
+	statics?: number[];
 }
 
 export interface ProjectDrawing {
@@ -66,6 +68,7 @@ interface Header {
 	created?: string | null;
 	thumbnail?: [number, number] | null;
 	scenes?: FileScene[];
+	staticLayers?: number[];
 	drawings?: { id: number; layer: number; rgba?: [number, number] | null }[];
 }
 
@@ -108,6 +111,7 @@ export function pack(doc: ProjectDoc): Uint8Array {
 		...(doc.scenes?.length
 			? {
 					scenes: doc.scenes,
+					staticLayers: doc.statics ?? [],
 					drawings: (doc.drawings ?? []).map((d) => ({
 						id: d.id,
 						layer: d.layer,
@@ -168,6 +172,7 @@ export function unpack(packet: ArrayBuffer | Uint8Array): ProjectDoc {
 		created: h.created ?? undefined,
 		thumbnail: h.thumbnail ? get(h.thumbnail) : null,
 		scenes: h.scenes ?? [],
+		...(h.staticLayers?.length ? { statics: h.staticLayers } : {}),
 		drawings: (h.drawings ?? []).map((d) => ({
 			id: d.id,
 			layer: d.layer,
