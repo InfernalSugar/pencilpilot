@@ -464,6 +464,30 @@
 				{/each}
 			</select>
 		</label>
+		{#if opts.animated}
+			<button
+				type="button"
+				class="tool"
+				aria-pressed={opts.fillAcross}
+				disabled={!opts.fillReference}
+				title={opts.fillReference
+					? 'Each fill carries on through the next frames: the same shape in each line drawing gets the colour'
+					: 'Pick the line layer under “Lines from” first'}
+				onclick={() => (opts.fillAcross = !opts.fillAcross)}
+			>
+				Carry to next frames
+			</button>
+			{#if opts.setupColour}
+				<button
+					type="button"
+					class="tool"
+					title="A Colour layer under this line layer (fills take its lines) and a Shadow layer clipped to it"
+					onclick={() => opts.setupColour?.()}
+				>
+					Set up colour layers
+				</button>
+			{/if}
+		{/if}
 	</div>
 {/if}
 {#if tool === 'smudge'}

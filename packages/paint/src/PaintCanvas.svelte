@@ -212,7 +212,8 @@
 		wandContiguous = true,
 		oncanvassize,
 		onquickmenu,
-		onpenpath
+		onpenpath,
+		onfill
 	}: {
 		width?: number;
 		height?: number;
@@ -351,6 +352,8 @@
 		onquickmenu?: (x: number, y: number) => void;
 		/** the pen tool's path changed: how many points, and whether it's closed */
 		onpenpath?: (s: { points: number; closed: boolean }) => void;
+		/** a fill was made with the fill tool, at canvas point x, y (for carrying it on) */
+		onfill?: (f: { x: number; y: number; hex: string; tolerance: number }) => void;
 	} = $props();
 
 	let el: HTMLCanvasElement;
@@ -1034,7 +1037,21 @@
 	/** Fill at a client position with `hex` (default: the current colour). */
 	function fillAt(clientX: number, clientY: number, hex = color) {
 		const [cx, cy] = toCanvas(clientX, clientY);
-		return fillAtCanvas(cx, cy, hex, fillTolerance);
+		const done = fillAtCanvas(cx, cy, hex, fillTolerance);
+		if (done) onfill?.({ x: Math.floor(cx), y: Math.floor(cy), hex, tolerance: fillTolerance });
+		return done;
+	}
+
+	/** Fill at canvas point x, y on the active layer, as the fill tool does (an undo step). */
+	export const fillPoint = (x: number, y: number, hex: string, tolerance = fillTolerance) =>
+		fillAtCanvas(x, y, hex, tolerance);
+
+	/** Make the last two undo steps one (a fill carried across frames, say). */
+	export function joinLastSteps() {
+		if (!paint?.joinLastEdits()) return false;
+		log.joinLast();
+		notify();
+		return true;
 	}
 
 	function fillAtCanvas(cx: number, cy: number, hex: string, tolerance: number): boolean {

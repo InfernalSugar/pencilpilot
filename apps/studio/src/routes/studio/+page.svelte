@@ -94,6 +94,15 @@
 	import TimelinePanel from '#lib/TimelinePanel.svelte';
 	import { fitInside, naturalOrder, placeFrames, sequenceName } from '#lib/rotoscope.js';
 	import { FLIP_FPS, drawingStarts, flipIndex, keyFrames, rollFrames } from '#lib/flip.js';
+	import {
+		bestMatch,
+		colourFor,
+		lineStartsAfter,
+		pixelsOf,
+		regions,
+		seedIn,
+		walls
+	} from '#lib/colour.js';
 	import { FrameCache } from '#lib/frames.js';
 	import { cleanOnion, onionEntries, type OnionSettings } from '#lib/onion.js';
 	import {
@@ -230,7 +239,7 @@
 
 	/** If the timeline changed since its last step, make the change a step. */
 	function recordTimeline() {
-		if (!canvas || timelineFor !== canvasKey) return;
+		if (!canvas || timelineFor !== canvasKey || carrying) return;
 		const now = JSON.stringify(timeline);
 		if (tlFor !== canvasKey) {
 			// a new document: its timeline is where history starts
@@ -492,6 +501,123 @@
 		} finally {
 			await invoke('video_in_close').catch(() => {});
 		}
+	}
+
+	// ---- colouring (flats on a colour layer, lines from a line layer) ----
+	/** a fill is being carried through frames (its timeline changes make one step with it) */
+	let carrying = false;
+
+	/** The shapes a line drawing's lines close off. */
+	async function shapesOf(drawing: number) {
+		await cache.ensure([drawing]);
+		const { width: w, height: h } = canvasSize;
+		const rgba = canvas!.drawingRgba(drawing);
+		return regions(walls(rgba, w, h), w, h);
+	}
+
+	/**
+	 * After a fill with its lines from a line layer: the colour drawing is held as long as
+	 * the line drawing; with "Carry to next frames", the same shape in each following
+	 * line drawing (to the loop range's end, or the cut's) gets the colour too. All of it
+	 * is one undo step.
+	 */
+	async function carryFill(f: { x: number; y: number; hex: string; tolerance: number }) {
+		const ref = toolOpts.fillReference;
+		if (!canvas || !status || !ref || timelineFor !== canvasKey) return;
+		const C = status.active;
+		const cut = theCut();
+		const line = cut.tracks[ref];
+		if (C === ref || !line || timeline.statics.includes(C) || timeline.statics.includes(ref))
+			return;
+		const c = canvas;
+		const f0 = frame;
+		const make = (from: number) => {
+			const id = from ? c.copyDrawing(from) : c.newDrawing();
+			cache.touch([id]);
+			return id;
+		};
+		carrying = true;
+		let done = 0;
+		try {
+			// the drawing just filled: held as long as its line drawing
+			colourFor(trackIn(cut, C), line, f0, make);
+			if (!toolOpts.fillAcross) return;
+			const d0 = drawingAt(line, f0);
+			if (!d0) return;
+			const first = await shapesOf(d0);
+			const w = canvasSize.width;
+			const at = first.labels[f.y * w + f.x];
+			if (!at) return;
+			let prev = pixelsOf(first.labels, at);
+			const last =
+				playRange && f0 <= playRange.to ? playRange.to : cutLength(cut, timeline.statics) - 1;
+			const starts = lineStartsAfter(line, f0, last);
+			let skipped = 0;
+			for (const s of starts) {
+				note(`Carrying the fill… frame ${s + 1}`, 4000);
+				const shapes = await shapesOf(drawingAt(line, s));
+				const m = bestMatch(shapes.labels, shapes.sizes, prev);
+				const seed = m.score >= 0.25 ? seedIn(shapes.labels, m.label, prev, w) : null;
+				if (!seed) {
+					skipped++;
+					continue;
+				}
+				// (a colour drawing held over from before gets copied: it must be here)
+				await cache.ensure([drawingAt(cut.tracks[C], s)]);
+				colourFor(trackIn(cut, C), line, s, make);
+				frame = s;
+				await showFrame();
+				if (canvas?.fillPoint(seed.x, seed.y, f.hex, f.tolerance)) {
+					canvas.joinLastSteps();
+					done++;
+				}
+				prev = pixelsOf(shapes.labels, m.label);
+			}
+			note(
+				`Filled on ${done + 1} drawing${done ? 's' : ''}` +
+					(skipped ? ` (${skipped} without a matching shape)` : '') +
+					'.',
+				3000
+			);
+		} finally {
+			carrying = false;
+			if (frame !== f0) {
+				frame = f0;
+				await showFrame();
+			}
+			// the colour drawings' timing goes in the same undo step as the fills
+			tlJoin = true;
+			tlLabel = done ? 'Fill across frames' : 'Fill';
+			recordTimeline();
+		}
+	}
+
+	/** A Colour layer under the line layer picked (fills take its lines), a Shadow clipped to it. */
+	async function setupColour() {
+		if (!canvas || !status) return;
+		const lineLayer = status.layers.find((l) => l.id === status!.active);
+		if (!lineLayer || lineLayer.adjust) return;
+		const c = canvas;
+		const newLayer = async (name: string) => {
+			const before = new Set((status?.layers ?? []).map((l) => l.id));
+			c.addLayer(name);
+			await tick();
+			return status?.layers.find((l) => !before.has(l.id))?.id ?? 0;
+		};
+		const colour = await newLayer(`Colour (${lineLayer.name})`);
+		if (!colour) return;
+		// under the lines
+		c.moveLayer(
+			colour,
+			status.layers.findIndex((l) => l.id === lineLayer.id)
+		);
+		await tick();
+		const shadow = await newLayer(`Shadow (${lineLayer.name})`);
+		if (shadow) c.setLayer(shadow, { clip: true, blend: 'multiply' });
+		c.selectLayer(colour);
+		toolOpts.fillRefLayer = lineLayer.id;
+		tool = 'fill';
+		note('Fill on the Colour layer; the Shadow layer stays inside the colour.', 3500);
 	}
 
 	// ---- lip-sync (S3-T02): Rhubarb in src-tauri/src/lipsync.rs ----
@@ -1043,6 +1169,8 @@
 	});
 	toolOpts.quickShape = readLocal('pp.app.quickShape', true);
 	toolOpts.closeFill = readLocal('pp.app.closeFill', false);
+	toolOpts.animated = true;
+	toolOpts.setupColour = () => void setupColour();
 
 	/** a short note over the canvas (a snapped shape, a locked layer…) */
 	let canvasNote = $state('');
@@ -2275,6 +2403,7 @@
 			{#key canvasKey}
 				<PaintCanvas
 					bind:this={canvas}
+					onfill={(f) => void carryFill(f)}
 					fill
 					width={canvasSize.width}
 					height={canvasSize.height}
