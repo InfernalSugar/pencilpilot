@@ -32,6 +32,8 @@ export interface ProjectDoc {
 	drawings?: ProjectDrawing[];
 	/** static layers (one drawing all cut long) */
 	statics?: number[];
+	/** the sound files the scenes play (the key they use, the file as imported) */
+	audio?: { file: string; bytes: Uint8Array }[];
 }
 
 export interface ProjectDrawing {
@@ -69,6 +71,7 @@ interface Header {
 	thumbnail?: [number, number] | null;
 	scenes?: FileScene[];
 	staticLayers?: number[];
+	audio?: { file: string; bytes: [number, number] }[];
 	drawings?: { id: number; layer: number; rgba?: [number, number] | null }[];
 }
 
@@ -112,6 +115,7 @@ export function pack(doc: ProjectDoc): Uint8Array {
 			? {
 					scenes: doc.scenes,
 					staticLayers: doc.statics ?? [],
+					audio: (doc.audio ?? []).map((a) => ({ file: a.file, bytes: put(a.bytes) })),
 					drawings: (doc.drawings ?? []).map((d) => ({
 						id: d.id,
 						layer: d.layer,
@@ -173,6 +177,9 @@ export function unpack(packet: ArrayBuffer | Uint8Array): ProjectDoc {
 		thumbnail: h.thumbnail ? get(h.thumbnail) : null,
 		scenes: h.scenes ?? [],
 		...(h.staticLayers?.length ? { statics: h.staticLayers } : {}),
+		...(h.audio?.length
+			? { audio: h.audio.map((a) => ({ file: a.file, bytes: get(a.bytes) })) }
+			: {}),
 		drawings: (h.drawings ?? []).map((d) => ({
 			id: d.id,
 			layer: d.layer,

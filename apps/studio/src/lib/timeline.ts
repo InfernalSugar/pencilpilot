@@ -47,6 +47,52 @@ export interface Scene {
 	id: number;
 	name: string;
 	cuts: Cut[];
+	/** sound clips along the scene (its cuts one after another) */
+	audio?: AudioClip[];
+	/** sync markers on scene frames */
+	markers?: Marker[];
+}
+
+/** A sound file placed in a scene. */
+export interface AudioClip {
+	id: number;
+	name: string;
+	/** the sound file's key (the studio keeps the bytes) */
+	file: string;
+	/** the scene frame it starts on (negative: it started before the scene) */
+	start: number;
+	/** loudness (1 = as recorded) */
+	gain: number;
+	muted: boolean;
+}
+
+/** A marker on a scene frame (a beat, an accent, a line). */
+export interface Marker {
+	frame: number;
+	label: string;
+}
+
+/** The scene frame a cut starts on (its cuts one after another). */
+export function cutStart(scene: Scene, cut: number, statics: number[] = []): number {
+	let n = 0;
+	for (let i = 0; i < cut && i < scene.cuts.length; i++) n += cutLength(scene.cuts[i], statics);
+	return n;
+}
+
+/** Add a marker (or, on a frame that has one, take it away). Returns whether it was added. */
+export function toggleMarker(scene: Scene, frame: number, label = ''): boolean {
+	// (read back after making it: with `$state`, the stored list is a reactive copy)
+	if (!scene.markers) scene.markers = [];
+	const m = scene.markers;
+	const i = m.findIndex((x) => x.frame === frame);
+	if (i >= 0) {
+		m.splice(i, 1);
+		if (!m.length) delete scene.markers;
+		return false;
+	}
+	m.push({ frame, label });
+	m.sort((a, b) => a.frame - b.frame);
+	return true;
 }
 
 export interface Timeline {
@@ -235,7 +281,8 @@ function shiftNotes(cut: Cut, frame: number, by: 1 | -1) {
 
 /** Write (or, empty, clear) a note on a frame. */
 export function setNote(cut: Cut, key: 'action' | 'dialogue', frame: number, text: string) {
-	const notes = (cut[key] ??= {});
+	if (!cut[key]) cut[key] = {};
+	const notes = cut[key];
 	const t = text.trim();
 	if (t) notes[frame] = t;
 	else delete notes[frame];
@@ -421,12 +468,26 @@ export interface FileCut {
 export interface FileScene {
 	name: string;
 	cuts: FileCut[];
+	audio?: { name: string; file: string; start: number; gain: number; muted: boolean }[];
+	markers?: Marker[];
 }
 
 /** The timeline as the file keeps it, for the layers that exist. */
 export function toFile(tl: Timeline, layers: number[]): FileScene[] {
 	return tl.scenes.map((s) => ({
 		name: s.name,
+		...(s.audio?.length
+			? {
+					audio: s.audio.map((a) => ({
+						name: a.name,
+						file: a.file,
+						start: a.start,
+						gain: a.gain,
+						muted: a.muted
+					}))
+				}
+			: {}),
+		...(s.markers?.length ? { markers: s.markers.map((m) => ({ ...m })) } : {}),
 		cuts: s.cuts.map((c) => ({
 			name: c.name,
 			...(c.camera ? { camera: { ...c.camera } } : {}),
@@ -472,6 +533,27 @@ export function fromFile(
 		scenes: scenes.map((s, si) => ({
 			id: si + 1,
 			name: s.name,
+			...(s.audio?.length
+				? {
+						audio: s.audio
+							.filter((a) => typeof a.file === 'string')
+							.map((a, i) => ({
+								id: i + 1,
+								name: String(a.name ?? 'Sound'),
+								file: a.file,
+								start: Number.isFinite(a.start) ? Math.round(a.start) : 0,
+								gain: Number.isFinite(a.gain) ? Math.min(16, Math.max(0, a.gain)) : 1,
+								muted: !!a.muted
+							}))
+					}
+				: {}),
+			...(s.markers?.length
+				? {
+						markers: s.markers
+							.filter((m) => Number.isInteger(m.frame) && m.frame >= 0)
+							.map((m) => ({ frame: m.frame, label: String(m.label ?? '') }))
+					}
+				: {}),
 			cuts: s.cuts.map((c, ci) => ({
 				id: ci + 1,
 				name: c.name,

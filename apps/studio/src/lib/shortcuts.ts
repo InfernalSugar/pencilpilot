@@ -42,6 +42,7 @@ export type ActionId =
 	| 'prev-frame'
 	| 'next-frame'
 	| 'new-drawing'
+	| 'add-marker'
 	| 'copy-frames'
 	| 'paste-frames'
 	| 'duplicate-frames'
@@ -104,6 +105,12 @@ export const ACTIONS: Action[] = [
 	{ id: 'prev-frame', label: 'Previous frame', group: 'Animation', key: ',' },
 	{ id: 'next-frame', label: 'Next frame', group: 'Animation', key: '.' },
 	{ id: 'new-drawing', label: 'New drawing after this one', group: 'Animation', key: 'N' },
+	{
+		id: 'add-marker',
+		label: 'Marker on this frame (tap while playing)',
+		group: 'Animation',
+		key: 'Shift+M'
+	},
 	{ id: 'copy-frames', label: 'Copy frames', group: 'Animation', key: 'Alt+C' },
 	{ id: 'paste-frames', label: 'Paste frames', group: 'Animation', key: 'Alt+V' },
 	{

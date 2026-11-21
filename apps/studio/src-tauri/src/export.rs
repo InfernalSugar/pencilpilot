@@ -56,6 +56,9 @@ pub struct Spec {
     /// play once instead of looping (GIF, APNG)
     #[serde(default)]
     pub once: bool,
+    /// the sound (a WAV file) to put in a video, if any
+    #[serde(skip)]
+    pub audio: Option<PathBuf>,
 }
 
 enum Writer {
@@ -169,6 +172,23 @@ fn ffmpeg_args(spec: &Spec, out: &Path) -> Vec<String> {
     .collect();
     a.push(format!("{}x{}", spec.width, spec.height));
     a.extend(["-r".into(), spec.fps.to_string(), "-i".into(), "-".into()]);
+    if let Some(wav) = &spec.audio {
+        a.extend([
+            "-i".into(),
+            wav.to_string_lossy().into_owned(),
+            "-map".into(),
+            "0:v".into(),
+            "-map".into(),
+            "1:a".into(),
+            "-shortest".into(),
+        ]);
+        let sound: &[&str] = match spec.format {
+            Format::Mp4 => &["-c:a", "aac", "-b:a", "192k"],
+            Format::Prores => &["-c:a", "pcm_s16le"],
+            _ => &["-c:a", "libopus", "-b:a", "160k"],
+        };
+        a.extend(sound.iter().map(|s| s.to_string()));
+    }
     let enc: &[&str] = match (spec.format, spec.transparent) {
         (Format::Mp4, _) => &[
             "-c:v",
@@ -407,6 +427,17 @@ impl Job {
 
     /// Finish the file; returns where it went (a PNG sequence: its first file).
     pub fn end(self) -> Result<String, String> {
+        if let Some(wav) = &self.spec.audio {
+            // (ffmpeg has read it by the end; it goes either way)
+            let wav = wav.clone();
+            let r = self.finish();
+            let _ = std::fs::remove_file(wav);
+            return r;
+        }
+        self.finish()
+    }
+
+    fn finish(self) -> Result<String, String> {
         if self.sent != self.spec.frames {
             return Err(format!("{} of {} frames came", self.sent, self.spec.frames));
         }
@@ -442,6 +473,9 @@ impl Job {
 
     /// Stop, and take away what was written.
     pub fn cancel(self) {
+        if let Some(wav) = &self.spec.audio {
+            let _ = std::fs::remove_file(wav);
+        }
         match self.writer {
             Writer::Png { written, .. } => {
                 for p in written {
@@ -506,6 +540,7 @@ mod tests {
             frames,
             total: 0,
             once: false,
+            audio: None,
         }
     }
 
@@ -590,8 +625,34 @@ mod tests {
         };
         let formats = video_formats(&ff);
         let d = tmp();
+        // a second of silence-ish sound to go with them
+        let wav = d.join("sound.wav");
+        let mut w = Vec::new();
+        let n: u32 = 48000;
+        for (tag, v) in [(b"RIFF", 36 + n * 4), (b"WAVE", 0)] {
+            w.extend_from_slice(tag);
+            if tag == b"RIFF" {
+                w.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        w.extend_from_slice(b"fmt ");
+        w.extend_from_slice(&16u32.to_le_bytes());
+        for v in [1u16, 2] {
+            w.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in [48000u32, 48000 * 4] {
+            w.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in [4u16, 16] {
+            w.extend_from_slice(&v.to_le_bytes());
+        }
+        w.extend_from_slice(b"data");
+        w.extend_from_slice(&(n * 4).to_le_bytes());
+        w.extend(std::iter::repeat_n(0u8, (n * 4) as usize));
         for f in formats {
+            std::fs::write(&wav, &w).unwrap();
             let mut s = spec(f, &d, "clip", 2);
+            s.audio = Some(wav.clone());
             s.width = 16;
             s.height = 16;
             s.transparent = f != Format::Mp4;

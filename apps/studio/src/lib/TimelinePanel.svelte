@@ -15,6 +15,7 @@
 		addScene,
 		cameraOf,
 		cutLength,
+		cutStart,
 		deleteFrameAll,
 		drawingNumbers,
 		exposureAt,
@@ -48,6 +49,8 @@
 		type FrameRange
 	} from './frametools';
 	import type { OnionSettings } from './onion';
+	import type { AudioBank } from './audio';
+	import { AUDIO_TYPES } from './audio';
 
 	let {
 		timeline,
@@ -70,6 +73,10 @@
 		newDrawing,
 		drawings,
 		onlayer,
+		audio,
+		soundTick = 0,
+		onsound,
+		onmarker,
 		onedit
 	}: {
 		timeline: Timeline;
@@ -106,6 +113,14 @@
 			boil: (drawing: number, amount: number, seed: number) => number;
 		};
 		onlayer: (id: number) => void;
+		/** the project's sounds (decoded, with waveforms) */
+		audio?: AudioBank;
+		/** changes when sounds are added or loaded (to draw them again) */
+		soundTick?: number;
+		/** sound files picked to add at this frame */
+		onsound?: (files: File[]) => void;
+		/** add or take away a marker on this frame */
+		onmarker?: () => void;
 		/** the timeline changed (or the frame did): show it */
 		onedit: (changed: boolean) => void;
 	} = $props();
@@ -288,6 +303,74 @@
 		to = Math.max(0, Math.min(t.length - 1, to));
 		moveExposure(t, d.index, to);
 		frame = startOf(t, Math.min(to, t.length - 1));
+		edited();
+	}
+
+	// ---- sound and markers: placed along the scene, shown for this cut ----
+	/** the scene frame this cut starts on */
+	const sceneAt = $derived(cutStart(theScene, cut, statics));
+	const clips = $derived(theScene.audio ?? []);
+	const markersHere = $derived(
+		(theScene.markers ?? [])
+			.map((m) => ({ ...m, f: m.frame - sceneAt }))
+			.filter((m) => m.f >= 0 && m.f < shown)
+	);
+	let fileInput = $state<HTMLInputElement>();
+	let markersOpen = $state(false);
+
+	/** Draw a clip's waveform for the frames it covers in this cut. */
+	function waveform(
+		el: HTMLCanvasElement,
+		args: { file: string; from: number; frames: number; fps: number; tick: number }
+	) {
+		const draw = (a: typeof args) => {
+			if (!audio) return;
+			const peaks = audio.peaks(a.file, a.fps);
+			const dpr = window.devicePixelRatio || 1;
+			const [w, h] = [Math.max(1, a.frames * CELL), 24];
+			el.width = Math.round(w * dpr);
+			el.height = Math.round(h * dpr);
+			el.style.width = `${w}px`;
+			const g = el.getContext('2d');
+			if (!g) return;
+			g.scale(dpr, dpr);
+			g.clearRect(0, 0, w, h);
+			g.fillStyle = '#9fd3b6';
+			for (let f = 0; f < a.frames; f++) {
+				const p = peaks[a.from + f] ?? 0;
+				// (silence: no bar)
+				if (p < 0.004) continue;
+				const bar = Math.max(1, p * (h - 2));
+				g.fillRect(f * CELL + 1, (h - bar) / 2, CELL - 2, bar);
+			}
+		};
+		draw(args);
+		return { update: draw };
+	}
+
+	/** Slide a clip along the scene (dragging it). */
+	let clipDrag = $state<{ id: number; x0: number; start0: number } | null>(null);
+	function clipDown(e: PointerEvent, id: number) {
+		if (e.button !== 0) return;
+		e.stopPropagation();
+		(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+		const c = clips.find((x) => x.id === id);
+		if (c) clipDrag = { id, x0: e.clientX, start0: c.start };
+	}
+	function clipMove(e: PointerEvent) {
+		if (!clipDrag) return;
+		const c = clips.find((x) => x.id === clipDrag!.id);
+		const start = clipDrag.start0 + Math.round((e.clientX - clipDrag.x0) / CELL);
+		if (c && c.start !== start) {
+			c.start = start;
+			edited();
+		}
+	}
+	function removeClip(id: number) {
+		const list = theScene.audio ?? [];
+		const i = list.findIndex((c) => c.id === id);
+		if (i >= 0) list.splice(i, 1);
+		if (!list.length) delete theScene.audio;
 		edited();
 	}
 
@@ -570,6 +653,90 @@
 				{pinned.length} pinned ×
 			</button>
 		{/if}
+		<span class="sep"></span>
+		<button
+			type="button"
+			class="b"
+			title="Add sound (WAV, MP3, OGG, M4A, FLAC) starting on this frame"
+			onclick={() => fileInput?.click()}
+		>
+			+ Sound
+		</button>
+		<input
+			bind:this={fileInput}
+			class="sr"
+			type="file"
+			accept={AUDIO_TYPES}
+			multiple
+			aria-label="Sound files"
+			tabindex="-1"
+			onchange={(e) => {
+				const files = [...(e.currentTarget.files ?? [])];
+				e.currentTarget.value = '';
+				if (files.length) onsound?.(files);
+			}}
+		/>
+		<div class="onion">
+			<button
+				type="button"
+				class="b"
+				aria-pressed={markersHere.some((m) => m.f === frame)}
+				title="A marker on this frame, for syncing to a beat or a line (Shift+M, even while playing)"
+				onclick={() => onmarker?.()}
+			>
+				Marker
+			</button>
+			<button
+				type="button"
+				class="b caret"
+				aria-label="Markers"
+				aria-expanded={markersOpen}
+				onclick={() => (markersOpen = !markersOpen)}
+			>
+				▾
+			</button>
+			{#if markersOpen}
+				<div class="pop" role="group" aria-label="Markers in this scene">
+					{#if !theScene.markers?.length}
+						<p class="hint">No markers yet. Press Shift+M on a frame, or tap it while playing.</p>
+					{/if}
+					{#each theScene.markers ?? [] as m, i (m.frame)}
+						<div class="line">
+							<button
+								type="button"
+								class="b"
+								title="Go to it"
+								onclick={() => {
+									const at = m.frame - sceneAt;
+									if (at >= 0) go(at);
+								}}
+							>
+								{m.frame + 1}
+							</button>
+							<input
+								class="mark-label"
+								aria-label="Marker {m.frame + 1} label"
+								placeholder="label"
+								bind:value={m.label}
+								onchange={edited}
+							/>
+							<button
+								type="button"
+								class="b"
+								aria-label="Remove marker {m.frame + 1}"
+								onclick={() => {
+									theScene.markers?.splice(i, 1);
+									if (!theScene.markers?.length) delete theScene.markers;
+									edited();
+								}}
+							>
+								×
+							</button>
+						</div>
+					{/each}
+				</div>
+			{/if}
+		</div>
 		<div class="onion">
 			<button
 				type="button"
@@ -900,7 +1067,9 @@
 					class:ranged={inRange(f)}
 					class:pinned={pinned.includes(f)}
 					class:chosen={inSel(sel, f)}
-					aria-label="Frame {f + 1}"
+					class:marked={markersHere.some((m) => m.f === f)}
+					title={markersHere.find((m) => m.f === f)?.label || undefined}
+					aria-label="Frame {f + 1}{markersHere.some((m) => m.f === f) ? ', marker' : ''}"
 					aria-current={f === frame ? 'true' : undefined}
 					onclick={(e) => pick(e, f)}
 				>
@@ -990,6 +1159,58 @@
 							</button>
 						{/if}
 					{/each}
+				{/if}
+			</div>
+		{/each}
+		{#each clips as c (c.id)}
+			{@const len = audio?.frames(c.file, fps) ?? 0}
+			{@const from = Math.max(0, sceneAt - c.start)}
+			{@const left = Math.max(0, c.start - sceneAt)}
+			{@const frames = Math.max(0, Math.min(len - from, shown - left))}
+			<div class="name sound" class:muted={c.muted}>
+				<span class="label" title={c.name}>♪ {c.name}</span>
+				<button
+					type="button"
+					class="kind"
+					aria-pressed={!c.muted}
+					aria-label="Sound on: {c.name}"
+					title={c.muted ? 'Muted: click to hear it' : 'Click to mute'}
+					onclick={() => {
+						c.muted = !c.muted;
+						edited();
+					}}
+				>
+					{c.muted ? '×' : '♪'}
+				</button>
+				<button
+					type="button"
+					class="kind"
+					aria-label="Remove sound: {c.name}"
+					title="Take this sound out"
+					onclick={() => removeClip(c.id)}
+				>
+					−
+				</button>
+			</div>
+			<div class="row sound" role="presentation" data-sound={c.id}>
+				<div class="playhead" style="left: {frame * CELL}px"></div>
+				{#if frames > 0}
+					<div
+						class="clip"
+						class:dragging={clipDrag?.id === c.id}
+						role="slider"
+						tabindex="-1"
+						aria-label="{c.name}: starts on scene frame {c.start + 1}"
+						aria-valuenow={c.start + 1}
+						title="Drag to move it along the scene"
+						style="left: {left * CELL}px; width: {frames * CELL}px"
+						onpointerdown={(e) => clipDown(e, c.id)}
+						onpointermove={clipMove}
+						onpointerup={() => (clipDrag = null)}
+						onpointercancel={() => (clipDrag = null)}
+					>
+						<canvas use:waveform={{ file: c.file, from, frames, fps, tick: soundTick }}></canvas>
+					</div>
 				{/if}
 			</div>
 		{/each}
@@ -1142,6 +1363,55 @@
 	}
 	.tick.past {
 		opacity: 0.45;
+	}
+	.tick.marked {
+		background-image: linear-gradient(135deg, #ffd650 0 6px, transparent 6px);
+	}
+	.name.sound .label {
+		flex: 1;
+		min-width: 0;
+		padding: 0 4px 0 8px;
+		font: 600 12px var(--pp-font-body);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.name.sound.muted {
+		opacity: 0.55;
+	}
+	.row.sound {
+		overflow: hidden;
+		background: #1f1f24;
+		cursor: default;
+	}
+	.clip {
+		position: absolute;
+		top: 2px;
+		bottom: 2px;
+		border-radius: 6px;
+		background: #2c4a3b;
+		cursor: grab;
+		touch-action: none;
+		overflow: hidden;
+	}
+	.clip.dragging {
+		cursor: grabbing;
+		outline: 2px solid #9fd3b6;
+	}
+	.clip canvas {
+		display: block;
+		height: 24px;
+		pointer-events: none;
+	}
+	.mark-label {
+		flex: 1;
+		min-width: 0;
+		height: 28px;
+		border: 0;
+		border-radius: 8px;
+		background: #2a2a30;
+		color: var(--pp-on-ink);
+		padding: 0 8px;
 	}
 	.tick.pinned {
 		box-shadow: inset 0 -3px 0 #3d6bff;
