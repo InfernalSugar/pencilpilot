@@ -362,6 +362,13 @@
 	let error = $state('');
 
 	const log = new StrokeLog();
+	// (each stroke notes the drawing its layer showed: an animation's frame, for replays)
+	log.tag = (st) => {
+		if (paint && st.layer !== undefined && st.drawing === undefined) {
+			const d = paint.layerDrawing(st.layer);
+			if (d) st.drawing = d;
+		}
+	};
 	const t0 = performance.now();
 	let current: Stroke | null = null;
 	/** the pointer drawing `current` */
@@ -656,6 +663,56 @@
 		runRemote(r);
 	}
 
+	/**
+	 * "Drawn live" films: logged strokes drawn again, a piece at a time, on silent layers
+	 * of this canvas (one per original layer, made bottom → top in the order given; no
+	 * undo). Use it on a canvas made for the film, not the document.
+	 */
+	export async function strokePlayer(strokes: Stroke[], layers: { id: number; name: string }[]) {
+		if (!paint) return null;
+		const engine = paint;
+		// eslint-disable-next-line svelte/prefer-svelte-reactivity -- engine bookkeeping, never rendered
+		const ids = new Map<number, number>();
+		for (const l of layers) ids.set(l.id, engine.addLayerSilent(l.name));
+		const fallback = layers.length ? ids.get(layers[0].id)! : engine.activeLayer;
+		const brushes = await Promise.all(strokes.map((st) => remoteBrush(st.brushId)));
+		// eslint-disable-next-line svelte/prefer-svelte-reactivity -- engine bookkeeping, never rendered
+		const keys = new Map<number, number>();
+		/** how far each stroke has been drawn (points) */
+		const done = strokes.map(() => 0);
+		const style = (st: Stroke): Style => ({
+			brushId: st.brushId,
+			color: st.color ?? '#16161a',
+			size: st.size ?? 1,
+			opacity: st.opacity ?? 1,
+			eraser: st.eraser
+		});
+		return {
+			/** Draw stroke `i` up to (not including) point `n`; `n` past its end finishes it. */
+			drawTo(i: number, n: number) {
+				const st = strokes[i];
+				if (!st || done[i] < 0) return;
+				const b = styled(brushes[i], style(st));
+				let key = keys.get(i);
+				if (key === undefined) {
+					key = ++remoteKeys;
+					keys.set(i, key);
+					engine.remoteBegin(key, ids.get(st.layer ?? -1) ?? fallback);
+				}
+				const to = Math.min(n, st.points.length);
+				for (let j = done[i]; j < to; j++) {
+					const p = st.points[j];
+					engine.remoteTo(key, b, p.x, p.y, p.pressure, p.t / 1000);
+				}
+				done[i] = to;
+				if (n >= st.points.length) {
+					engine.remoteEnd(key, b);
+					done[i] = -1;
+				}
+			}
+		};
+	}
+
 	/** Redraw someone's whole layer from their strokes (after their undo / clear, or on joining). */
 	export async function remoteRedraw(
 		playerId: string,
@@ -727,6 +784,8 @@
 	export function timelapse(): Timelapse {
 		return film;
 	}
+	/** Every stroke the drawing has now (a copy), oldest first. */
+	export const loggedStrokes = (): Stroke[] => structuredClone([...log.strokes]);
 	onMount(() => () => film.clear());
 
 	// the canvas got its new size: draw all of it again

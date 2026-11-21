@@ -6,11 +6,17 @@
 
 /** frames are at most this many px on the long side */
 export const FRAME_MAX = 720;
+/** frames kept in a project file are at most this many px on the long side */
+export const SAVED_MAX = 540;
 /** past this, every other frame is dropped (the film keeps its whole length) */
 export const FRAME_CAP = 1200;
 
 export class Timelapse {
 	frames: ImageBitmap[] = [];
+	/** when each frame was taken (ms since 1970) */
+	times: number[] = [];
+	/** frames as JPEG files, once made (frames brought back from a file come with theirs) */
+	#jpeg = new WeakMap<ImageBitmap, Uint8Array>();
 	#busy: Promise<void> = Promise.resolve();
 	#listeners = new Set<() => void>();
 
@@ -31,7 +37,8 @@ export class Timelapse {
 			)
 			.then((bmp) => {
 				this.frames.push(bmp);
-				if (this.frames.length > FRAME_CAP) this.frames = thin(this.frames);
+				this.times.push(Date.now());
+				if (this.frames.length > FRAME_CAP) this.#thin();
 				for (const l of this.#listeners) l();
 			})
 			.catch(() => {
@@ -44,16 +51,94 @@ export class Timelapse {
 		return this.#busy;
 	}
 
+	#thin() {
+		const keep = thinIndices(this.frames.length);
+		const kept = new Set(keep);
+		this.frames.forEach((f, i) => kept.has(i) || f.close());
+		this.frames = keep.map((i) => this.frames[i]);
+		this.times = keep.map((i) => this.times[i]);
+	}
+
 	clear() {
 		for (const f of this.frames) f.close();
 		this.frames = [];
+		this.times = [];
 		for (const l of this.#listeners) l();
+	}
+
+	/**
+	 * Put back frames kept in a file (JPEG files and when each was taken), before any
+	 * taken since. Pictures that can't be read are skipped.
+	 */
+	async load(saved: { jpeg: Uint8Array; t: number }[]) {
+		const back: { bmp: ImageBitmap; t: number }[] = [];
+		for (const s of saved) {
+			try {
+				const bmp = await createImageBitmap(new Blob([s.jpeg as BlobPart], { type: 'image/jpeg' }));
+				this.#jpeg.set(bmp, s.jpeg);
+				back.push({ bmp, t: s.t });
+			} catch {
+				/* skipped */
+			}
+		}
+		this.frames = [...back.map((b) => b.bmp), ...this.frames];
+		this.times = [...back.map((b) => b.t), ...this.times];
+		while (this.frames.length > FRAME_CAP) this.#thin();
+		for (const l of this.#listeners) l();
+	}
+
+	/** Every frame as a JPEG file (made once each), with when it was taken: to keep in a file. */
+	async saved(): Promise<{ jpeg: Uint8Array; t: number }[]> {
+		await this.#busy;
+		const out: { jpeg: Uint8Array; t: number }[] = [];
+		for (const [i, f] of this.frames.entries()) {
+			let j = this.#jpeg.get(f);
+			if (!j) {
+				const k = Math.min(1, SAVED_MAX / Math.max(f.width, f.height));
+				const [w, h] = [
+					Math.max(1, Math.round(f.width * k)),
+					Math.max(1, Math.round(f.height * k))
+				];
+				const c = new OffscreenCanvas(w, h);
+				const g = c.getContext('2d')!;
+				g.fillStyle = '#fff';
+				g.fillRect(0, 0, w, h);
+				g.imageSmoothingQuality = 'high';
+				g.drawImage(f, 0, 0, w, h);
+				const blob = await c.convertToBlob({ type: 'image/jpeg', quality: 0.75 });
+				j = new Uint8Array(await blob.arrayBuffer());
+				this.#jpeg.set(f, j);
+			}
+			out.push({ jpeg: j, t: this.times[i] ?? 0 });
+		}
+		return out;
 	}
 
 	onchange(f: () => void) {
 		this.#listeners.add(f);
 		return () => this.#listeners.delete(f);
 	}
+}
+
+/** Which of `n` frames thinning keeps: every other one, and the last. */
+export function thinIndices(n: number): number[] {
+	const out: number[] = [];
+	for (let i = 0; i < n; i++) if (i % 2 === 0 || i === n - 1) out.push(i);
+	return out;
+}
+
+/**
+ * The film's frames at `fps` for about `seconds` (each source frame held for a whole
+ * number of output frames, or skipped when there are too many), then the finished
+ * picture held for `hold` seconds: which source frame each output frame shows.
+ */
+export function filmPlan(frames: number, fps: number, seconds: number, hold = 1.5): number[] {
+	if (!frames) return [];
+	const n = Math.max(1, Math.round(seconds * fps));
+	const out: number[] = [];
+	for (let i = 0; i < n; i++) out.push(Math.min(frames - 1, Math.floor((i * frames) / n)));
+	for (let i = 0; i < Math.round(hold * fps); i++) out.push(frames - 1);
+	return out;
 }
 
 /** Every other frame (closing the dropped ones), keeping the last. */

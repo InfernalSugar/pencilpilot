@@ -36,6 +36,8 @@ export interface ProjectDoc {
 	mouths?: FileMouthChart[];
 	/** the sound files the scenes play (the key they use, the file as imported) */
 	audio?: { file: string; bytes: Uint8Array }[];
+	/** the timelapse: JPEG pictures and when each was taken (ms since 1970) */
+	timelapse?: { jpeg: Uint8Array; t: number }[];
 }
 
 export interface ProjectDrawing {
@@ -76,6 +78,7 @@ interface Header {
 	mouthCharts?: FileMouthChart[];
 	audio?: { file: string; bytes: [number, number] }[];
 	drawings?: { id: number; layer: number; rgba?: [number, number] | null }[];
+	timelapse?: { t: number; bytes: [number, number] }[];
 }
 
 const MAGIC = [0x50, 0x50, 0x53, 0x31]; // "PPS1"
@@ -114,6 +117,9 @@ export function pack(doc: ProjectDoc): Uint8Array {
 		extra: doc.extra,
 		created: doc.created ?? null,
 		thumbnail: doc.thumbnail ? put(doc.thumbnail) : null,
+		...(doc.timelapse?.length
+			? { timelapse: doc.timelapse.map((f) => ({ t: Math.round(f.t), bytes: put(f.jpeg) })) }
+			: {}),
 		...(doc.scenes?.length
 			? {
 					scenes: doc.scenes,
@@ -184,6 +190,9 @@ export function unpack(packet: ArrayBuffer | Uint8Array): ProjectDoc {
 		...(h.mouthCharts?.length ? { mouths: h.mouthCharts } : {}),
 		...(h.audio?.length
 			? { audio: h.audio.map((a) => ({ file: a.file, bytes: get(a.bytes) })) }
+			: {}),
+		...(h.timelapse?.length
+			? { timelapse: h.timelapse.map((f) => ({ t: f.t, jpeg: get(f.bytes) })) }
 			: {}),
 		drawings: (h.drawings ?? []).map((d) => ({
 			id: d.id,
