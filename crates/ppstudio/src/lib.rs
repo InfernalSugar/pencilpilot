@@ -9,6 +9,7 @@
 //! | `strokes.json` | the app's stroke log (kept as given) |
 //! | `thumbnail.png` | a small picture for the project browser (optional) |
 //! | `audio/<hash>.<ext>` | a sound file a scene plays (as imported: WAV, MP3, OGG…) |
+//! | `timelapse/<n>.jpg` | the timelapse: a small picture after each change (optional) |
 //!
 //! Pixels are cut into 64×64 tiles. Empty tiles (fully transparent, or a mask that
 //! shows everything) are left out, and identical tiles are stored once, under the
@@ -331,7 +332,14 @@ pub struct Manifest {
     /// the app's own settings (current brush, colour, view…), kept as given
     #[serde(default)]
     pub extra: serde_json::Value,
+    /// when each timelapse picture was taken (ms since 1970), in order: `timelapse/<n>.jpg`
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub timelapse: Vec<u64>,
 }
+
+/// The most timelapse pictures a project keeps, and the most bytes each may have.
+pub const TIMELAPSE_MAX: usize = 4000;
+pub const TIMELAPSE_FRAME_MAX: usize = 8 << 20;
 
 /// A project in memory: the manifest, the tiles it uses, the stroke log and thumbnail.
 #[derive(Debug, Clone, PartialEq)]
@@ -345,6 +353,8 @@ pub struct Project {
     pub thumbnail: Option<Vec<u8>>,
     /// sound files: name (`<hash>.<ext>`) → bytes
     pub audio: HashMap<String, Vec<u8>>,
+    /// the timelapse pictures (JPEG), in order; `manifest.timelapse` says when each was taken
+    pub timelapse: Vec<Vec<u8>>,
 }
 
 /// Sound files may be this big (each).
@@ -388,11 +398,13 @@ impl Project {
                 },
                 drawings: BTreeMap::new(),
                 extra: serde_json::Value::Null,
+                timelapse: Vec::new(),
             },
             tiles: HashMap::new(),
             strokes: b"[]".to_vec(),
             thumbnail: None,
             audio: HashMap::new(),
+            timelapse: Vec::new(),
         }
     }
 
@@ -555,6 +567,12 @@ impl Project {
                 }
             }
         }
+        if m.timelapse.len() != self.timelapse.len()
+            || self.timelapse.len() > TIMELAPSE_MAX
+            || self.timelapse.iter().any(|j| j.len() > TIMELAPSE_FRAME_MAX)
+        {
+            return Err(Error::Invalid("the timelapse".into()));
+        }
         for layer in &m.timeline.static_layers {
             if !m.layers.iter().any(|l| l.id == *layer) {
                 return Err(Error::Invalid(format!("static layer {layer} isn't there")));
@@ -674,6 +692,11 @@ impl Project {
             z.start_file(format!("audio/{name}"), stored)?;
             z.write_all(bytes)?;
         }
+        // the timelapse (JPEG: stored)
+        for (i, jpeg) in self.timelapse.iter().enumerate() {
+            z.start_file(format!("timelapse/{i:06}.jpg"), stored)?;
+            z.write_all(jpeg)?;
+        }
         z.finish()?;
         Ok(())
     }
@@ -705,8 +728,24 @@ impl Project {
         let thumbnail = read_all("thumbnail.png", 16 << 20)?;
         let mut tiles = HashMap::new();
         let mut audio = HashMap::new();
+        let mut timelapse: BTreeMap<usize, Vec<u8>> = BTreeMap::new();
         for i in 0..z.len() {
             let mut f = z.by_index(i)?;
+            if let Some(n) = f
+                .name()?
+                .strip_prefix("timelapse/")
+                .and_then(|n| n.strip_suffix(".jpg"))
+                .and_then(|n| n.parse::<usize>().ok())
+            {
+                let mut v = Vec::new();
+                (&mut f)
+                    .take(TIMELAPSE_FRAME_MAX as u64 + 1)
+                    .read_to_end(&mut v)?;
+                if n < TIMELAPSE_MAX && v.len() <= TIMELAPSE_FRAME_MAX {
+                    timelapse.insert(n, v);
+                }
+                continue;
+            }
             if let Some(name) = f.name()?.strip_prefix("audio/").map(str::to_owned) {
                 let mut v = Vec::new();
                 (&mut f).take(AUDIO_MAX as u64 + 1).read_to_end(&mut v)?;
@@ -726,12 +765,28 @@ impl Project {
             }
             tiles.insert(h, v);
         }
+        // (the timelapse is a nicety: pictures that don't line up with their times are
+        // dropped rather than refusing the project)
+        let mut manifest = manifest;
+        let mut pictures = Vec::new();
+        let mut times = Vec::new();
+        for (i, t) in manifest.timelapse.iter().enumerate().take(TIMELAPSE_MAX) {
+            match timelapse.remove(&i) {
+                Some(v) => {
+                    pictures.push(v);
+                    times.push(*t);
+                }
+                None => break,
+            }
+        }
+        manifest.timelapse = times;
         let p = Project {
             manifest,
             tiles,
             strokes,
             thumbnail,
             audio,
+            timelapse: pictures,
         };
         p.validate()?;
         Ok(p)
@@ -1055,11 +1110,24 @@ mod tests {
                 .into_iter()
                 .collect(),
         });
+        // a timelapse of two pictures
+        p.timelapse = vec![b"\xff\xd8one".to_vec(), b"\xff\xd8two".to_vec()];
+        p.manifest.timelapse = vec![1_700_000_000_000, 1_700_000_005_000];
         let mut buf = std::io::Cursor::new(Vec::new());
         p.write(&mut buf).unwrap();
         let back = Project::read(std::io::Cursor::new(buf.into_inner())).unwrap();
         assert_eq!(back.manifest.timeline, p.manifest.timeline);
         assert_eq!(back.audio.get(&file).unwrap(), b"RIFF fake wav");
+        assert_eq!(back.timelapse, p.timelapse);
+        assert_eq!(back.manifest.timelapse, p.manifest.timelapse);
+        // more times than pictures: the timelapse is cut short, the project still opens
+        let mut q = p.clone();
+        q.manifest.timelapse.push(1_700_000_009_000);
+        assert!(q.validate().is_err());
+        let mut buf = std::io::Cursor::new(Vec::new());
+        q.write(&mut buf).unwrap();
+        let back = Project::read(std::io::Cursor::new(buf.into_inner())).unwrap();
+        assert_eq!(back.manifest.timelapse.len(), 2);
 
         // a static layer that isn't there, a camera with no size, a sound file that isn't
         // in the archive, or a mouth chart naming an unknown shape, layer or drawing is

@@ -44,6 +44,8 @@ async function stubTauri(page: Page, stub: Stub = {}) {
 			head?: number[];
 			json?: string;
 			repeat?: string;
+			/** export frames: how many pixels are dark */
+			ink?: number;
 		}[] = [];
 		w.__calls = calls;
 		w.isTauri = true;
@@ -69,7 +71,11 @@ async function stubTauri(page: Page, stub: Stub = {}) {
 					bytes: bytes?.length,
 					head: bytes ? [...bytes.subarray(0, 4)] : undefined,
 					json: bytes ? undefined : JSON.stringify(args ?? null),
-					repeat: options?.headers?.repeat
+					repeat: options?.headers?.repeat,
+					ink:
+						cmd === 'export_frame' && bytes
+							? bytes.filter((v, i) => i % 4 === 0 && v < 230).length
+							: undefined
 				});
 				switch (cmd) {
 					case 'plugin:dialog|save': {
@@ -178,7 +184,15 @@ async function stubTauri(page: Page, stub: Stub = {}) {
 }
 
 const canvas = (page: Page) => page.getByLabel(/Drawing canvas/);
-type Call = { cmd: string; path?: string; head?: number[]; json?: string };
+type Call = {
+	cmd: string;
+	path?: string;
+	bytes?: number;
+	head?: number[];
+	json?: string;
+	repeat?: string;
+	ink?: number;
+};
 const calls = (page: Page) =>
 	page.evaluate(() => (window as unknown as { __calls: Call[] }).__calls);
 
@@ -1403,4 +1417,79 @@ test('export a PSD per frame and a PNG sequence per layer', async ({ page }) => 
 		'/home/me/Walk cycle_Layer 1_0003.png'
 	]);
 	for (const c of w) expect(c.head).toEqual([0x89, 0x50, 0x4e, 0x47]);
+});
+
+test('films: the timelapse (kept in the file) and this frame drawn live', async ({ page }) => {
+	await stubTauri(page);
+	await ready(page);
+	for (const y of [0.2, 0.4, 0.6]) await scribble(page, y);
+	const openFilm = async () => {
+		await page.getByRole('button', { name: 'Export', exact: true }).click();
+		await page.getByRole('button', { name: /^Film of the drawing…/ }).click();
+		return page.getByRole('dialog', { name: 'Export a film of the drawing' });
+	};
+	const pictures = async (dlg: ReturnType<Page['getByRole']>) =>
+		Number(
+			(await dlg.getByRole('radio', { name: /^Timelapse/ }).textContent())!.match(
+				/\((\d+) so far/
+			)![1]
+		);
+
+	// the timelapse: 10 seconds and the finished picture held 1.5 s, at 24 fps
+	let dlg = await openFilm();
+	await expect.poll(() => pictures(dlg)).toBeGreaterThanOrEqual(3);
+	await dlg.getByRole('radio', { name: /^Timelapse/ }).click();
+	await dlg.getByLabel('Format').selectOption('mp4');
+	await dlg.getByLabel('Length').selectOption('10');
+	await dlg.getByRole('button', { name: 'Export…' }).click();
+	await expect(page.getByText(/Exported to/)).toBeVisible({ timeout: 20_000 });
+	let all = await calls(page);
+	const tl = JSON.parse(all.filter((c) => c.cmd === 'export_begin').at(-1)!.json!).spec;
+	expect(tl).toMatchObject({ format: 'mp4', fps: 24, total: 240 + 36, transparent: false });
+	let frames = all.filter((c) => c.cmd === 'export_frame');
+	expect(frames.length).toBe(tl.frames);
+	expect(frames.reduce((n, c) => n + Number(c.repeat), 0)).toBe(tl.total);
+
+	// drawn live, 8× faster: lines draw on from an empty page, then the finished frame
+	dlg = await openFilm();
+	await dlg.getByRole('radio', { name: /^Drawn live/ }).click();
+	await expect(dlg.getByRole('radio', { name: /^Drawn live/ })).toContainText('(3 strokes)');
+	await dlg.getByLabel('Format').selectOption('gif');
+	await dlg.getByLabel('Speed').selectOption('8');
+	await dlg.getByLabel('Size').selectOption('0.5');
+	await dlg.getByRole('button', { name: 'Export…' }).click();
+	await expect(dlg).toHaveCount(0, { timeout: 30_000 });
+	await expect(page.getByText(/Exported to/)).toBeVisible();
+	all = await calls(page);
+	const live = JSON.parse(all.filter((c) => c.cmd === 'export_begin').at(-1)!.json!).spec;
+	expect(live).toMatchObject({ format: 'gif', fps: 24 });
+	frames = all.filter((c) => c.cmd === 'export_frame').slice(tl.frames);
+	// (12 frames of pause, 14 of dissolve, 36 of the finished frame after the drawing)
+	expect(frames.reduce((n, c) => n + Number(c.repeat), 0)).toBe(live.total);
+	expect(live.total).toBeGreaterThan(12 + 14 + 36);
+	expect(frames.length).toBeGreaterThan(14 + 3);
+	// the first frame starts on paper; the lines grow; the finished frame has them all
+	expect(frames[0].head).toEqual([255, 255, 255, 255]);
+	const ink = frames.map((c) => c.ink!);
+	expect(ink[0]).toBeLessThan(ink.at(-1)!);
+	const drawing = ink.slice(0, ink.length - 16);
+	expect(drawing.every((n, i) => i === 0 || n >= drawing[i - 1] - 5)).toBe(true);
+	expect(new Set(drawing).size).toBeGreaterThan(3);
+	expect(frames[0].bytes).toBe(live.width * live.height * 4);
+
+	// the timelapse is kept in the file: opened again, it's still there
+	const before = await (async () => {
+		const d = await openFilm();
+		const n = await pictures(d);
+		await d.getByRole('button', { name: 'Close' }).click();
+		return n;
+	})();
+	await page.keyboard.press('Control+s');
+	await expect(page.getByTestId('project-name')).toHaveText('Walk cycle', { timeout: 20_000 });
+	await page.keyboard.press('Control+o');
+	await expect(page.getByRole('button', { name: 'Export', exact: true })).toBeEnabled({
+		timeout: 20_000
+	});
+	dlg = await openFilm();
+	await expect.poll(() => pictures(dlg)).toBeGreaterThanOrEqual(before);
 });

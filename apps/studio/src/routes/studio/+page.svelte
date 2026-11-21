@@ -57,6 +57,18 @@
 	import { AudioBank, wav } from '#lib/audio.js';
 	import ExportDialog from '#lib/ExportDialog.svelte';
 	import LipSyncDialog from '#lib/LipSyncDialog.svelte';
+	import FilmDialog from '#lib/FilmDialog.svelte';
+	import {
+		FILM_DEFAULTS,
+		FILM_FPS,
+		ease,
+		liveSchedule,
+		runs as runsOf,
+		strokesOfFrame,
+		type FilmSettings
+	} from '#lib/film.js';
+	import { filmPlan } from '@pencilpilot/paint/timelapse';
+	import type { Stroke } from '@pencilpilot/paint/strokes';
 	import {
 		LIPSYNC_DEFAULTS,
 		autoChart,
@@ -1018,7 +1030,8 @@
 	let exportOpen = $state(false);
 
 	/** Everything the window knows, as a project document. */
-	async function currentDoc(): Promise<ProjectDoc> {
+	/** (with `timelapse`: its pictures too; recovery copies leave them out, to stay light) */
+	async function currentDoc(timelapse = false): Promise<ProjectDoc> {
 		if (!canvas) throw new Error('the canvas isn’t ready');
 		canvas.ensureDrawings();
 		// the store gets what changed; then the file is made from it, no pixels sent
@@ -1057,6 +1070,7 @@
 				const snd = sounds.get(file);
 				return snd ? [{ file, bytes: snd.bytes }] : [];
 			}),
+			...(timelapse ? { timelapse: await c.timelapse().saved() } : {}),
 			drawings
 		};
 	}
@@ -1070,7 +1084,7 @@
 		fileNote = '';
 		try {
 			const versionAtSave = docVersion;
-			path = await saveProject(target, await currentDoc());
+			path = await saveProject(target, await currentDoc(true));
 			created ??= new Date().toISOString();
 			savedVersion = versionAtSave;
 			// saved for real: the recovery copy has done its job
@@ -1168,6 +1182,237 @@
 		} catch (e) {
 			fileNote = `Couldn’t export: ${e}`;
 		} finally {
+			busy = '';
+		}
+	}
+
+	// ---- films of the drawing (S3-T05): the timelapse, or this frame drawn live ----
+	let film = $state<{
+		video: string[];
+		pictures: number;
+		strokes: Stroke[];
+		drawnSeconds: number;
+		progress: { done: number; total: number } | null;
+	} | null>(null);
+	let filmSettings = $state<FilmSettings>({
+		...FILM_DEFAULTS,
+		...readLocal<Partial<FilmSettings>>('pp.app.film', {})
+	});
+	$effect(() => keepLocal('pp.app.film', $state.snapshot(filmSettings)));
+	/** a canvas made for drawing a film on (not the document's) */
+	let filmStage = $state<PaintCanvas>();
+	let staging = $state(false);
+	let filmStop = false;
+
+	/** The layers and drawings showing on this frame. */
+	const framePairs = () =>
+		showing(
+			theCut(),
+			(status?.layers ?? []).filter((l) => !l.adjust && l.visible).map((l) => l.id),
+			frame,
+			timeline.statics
+		);
+
+	async function openFilm() {
+		exportOpen = false;
+		if (!canvas || !status) return;
+		if (playing) stopPlay();
+		const { invoke } = await import('@tauri-apps/api/core');
+		const tools = await invoke<{ video: string[] }>('export_tools').catch(() => ({ video: [] }));
+		await canvas.timelapse().settled();
+		const drawingsOn = (layer: number) =>
+			drawingsIn(timeline).filter((d) => layerOfDrawing(timeline, d) === layer).length;
+		const strokes = strokesOfFrame(canvas.loggedStrokes(), framePairs(), drawingsOn);
+		film = {
+			video: tools.video,
+			pictures: canvas.timelapse().length,
+			strokes,
+			drawnSeconds: liveSchedule(strokes).duration,
+			progress: null
+		};
+	}
+
+	/** The film's size: the timelapse's pictures, or the cut's camera at the scale. */
+	function filmSize(): { width: number; height: number } {
+		const video = filmSettings.format !== 'gif';
+		if (filmSettings.kind === 'live')
+			return outputSize(cameraOf(theCut(), canvasSize), filmSettings.scale, video);
+		const last = canvas?.timelapse().frames.at(-1);
+		return outputSize({ x: 0, y: 0, width: last?.width ?? 2, height: last?.height ?? 2 }, 1, video);
+	}
+
+	async function runFilm() {
+		const f = film;
+		if (!f || !canvas || busy) return;
+		const s = $state.snapshot(filmSettings) as FilmSettings;
+		const target = await askExportPath(
+			`${projectName(path)} ${s.kind === 'live' ? 'drawn live' : 'timelapse'}`,
+			s.format,
+			settings.projectFolder
+		);
+		if (!target) return;
+		const { invoke } = await import('@tauri-apps/api/core');
+		const out = filmSize();
+		busy = 'exporting';
+		fileNote = '';
+		filmStop = false;
+		const off = new OffscreenCanvas(out.width, out.height);
+		const g = off.getContext('2d', { willReadFrequently: true })!;
+		g.imageSmoothingQuality = 'high';
+		/** pictures as [bitmap or null (the last one again), frames held] */
+		let sent = 0;
+		let total = 0;
+		const send = async (repeat: number) => {
+			const px = g.getImageData(0, 0, out.width, out.height).data;
+			await invoke('export_frame', new Uint8Array(px.buffer, px.byteOffset, px.byteLength), {
+				headers: { repeat: String(repeat) }
+			});
+			sent += repeat;
+			if (film) film.progress = { done: sent, total };
+			if (filmStop) throw new Error('cancelled');
+		};
+		const paper = () => {
+			g.globalCompositeOperation = 'source-over';
+			g.globalAlpha = 1;
+			g.fillStyle = '#fff';
+			g.fillRect(0, 0, out.width, out.height);
+		};
+		try {
+			if (s.kind === 'timelapse') {
+				const pics = canvas.timelapse().frames.slice();
+				const plan = runsOf(filmPlan(pics.length, FILM_FPS, s.seconds));
+				total = plan.reduce((n, [, r]) => n + r, 0);
+				await invoke('export_begin', {
+					spec: {
+						format: s.format,
+						path: target,
+						width: out.width,
+						height: out.height,
+						fps: FILM_FPS,
+						transparent: false,
+						frames: plan.length,
+						total,
+						once: false
+					}
+				});
+				for (const [i, repeat] of plan) {
+					const b = pics[i];
+					const at = placeCamera({ x: 0, y: 0, width: b.width, height: b.height }, out);
+					paper();
+					g.drawImage(b, at.x, at.y, at.width, at.height);
+					await send(repeat);
+				}
+			} else {
+				const cam = cameraOf(theCut(), canvasSize);
+				const at = placeCamera(cam, out);
+				const k = Math.max(1, Math.floor(1 / at.k));
+				const draw = async (
+					r: { rgba: Uint8ClampedArray<ArrayBuffer>; width: number; height: number },
+					alpha = 1
+				) => {
+					const bmp = await createImageBitmap(new ImageData(r.rgba, r.width, r.height));
+					g.globalAlpha = alpha;
+					g.drawImage(
+						bmp,
+						cam.x / k,
+						cam.y / k,
+						cam.width / k,
+						cam.height / k,
+						at.x,
+						at.y,
+						at.width,
+						at.height
+					);
+					g.globalAlpha = 1;
+					bmp.close();
+				};
+				// the finished frame, as the document shows it
+				const pairs = framePairs();
+				await cache.ensure(pairs.map(([, d]) => d));
+				const done = canvas.renderFrame(pairs, k);
+				if (!done) throw new Error('the canvas went away');
+				const finished = { rgba: done.rgba.slice(), width: done.width, height: done.height };
+				// a canvas of the same size to draw the strokes on again
+				staging = true;
+				let player: Awaited<ReturnType<PaintCanvas['strokePlayer']>> = null;
+				for (let tries = 0; tries < 200 && !player; tries++) {
+					await new Promise((r) => setTimeout(r, 50));
+					const layers = (status?.layers ?? []).filter((l) => pairs.some(([id]) => id === l.id));
+					player =
+						(await filmStage?.strokePlayer(
+							f.strokes,
+							layers.map((l) => ({ id: l.id, name: l.name }))
+						)) ?? null;
+				}
+				if (!player || !filmStage) throw new Error('the film canvas didn’t start');
+				const { events, duration } = liveSchedule(f.strokes, s.speed);
+				const drawFrames = Math.max(1, Math.ceil(duration * FILM_FPS));
+				const pause = Math.round(0.5 * FILM_FPS);
+				const fade = Math.round(0.6 * FILM_FPS);
+				const hold = Math.round(1.5 * FILM_FPS);
+				total = drawFrames + pause + fade + hold;
+				// (frames where nothing new is drawn are sent once, held)
+				let pending = 0;
+				let e = 0;
+				await invoke('export_begin', {
+					spec: {
+						format: s.format,
+						path: target,
+						width: out.width,
+						height: out.height,
+						fps: FILM_FPS,
+						transparent: false,
+						frames: total,
+						total,
+						once: false
+					}
+				});
+				for (let i = 0; i < drawFrames; i++) {
+					const t = (i + 1) / FILM_FPS;
+					let moved = false;
+					while (e < events.length && events[e].t <= t) {
+						player.drawTo(events[e].stroke, events[e].points);
+						e++;
+						moved = true;
+					}
+					if (!moved && pending) {
+						pending++;
+						continue;
+					}
+					if (pending) await send(pending);
+					const r = filmStage.renderFrame([], k);
+					if (!r) throw new Error('the film canvas went away');
+					paper();
+					await draw(r);
+					pending = 1;
+				}
+				while (e < events.length) player.drawTo(events[e].stroke, events[e++].points);
+				const r = filmStage.renderFrame([], k);
+				if (!r) throw new Error('the film canvas went away');
+				const lines = { rgba: r.rgba.slice(), width: r.width, height: r.height };
+				if (pending) await send(pending);
+				paper();
+				await draw(lines);
+				await send(pause);
+				for (let i = 1; i <= fade; i++) {
+					paper();
+					await draw(lines);
+					await draw(finished, ease(i / fade));
+					await send(1);
+				}
+				paper();
+				await draw(finished);
+				await send(hold);
+			}
+			const where = await invoke<string>('export_end');
+			fileNote = `Exported to ${where}`;
+			film = null;
+		} catch (e) {
+			await invoke('export_cancel').catch(() => {});
+			fileNote = String(e).includes('cancelled') ? 'Export cancelled.' : `Couldn’t export: ${e}`;
+			if (film) film.progress = null;
+		} finally {
+			staging = false;
 			busy = '';
 		}
 	}
@@ -1454,6 +1699,8 @@
 			}
 			const active = ids.get(doc.activeLayer);
 			if (active) c.selectLayer(active);
+			// the timelapse so far (this session's frames follow it)
+			if (doc.timelapse?.length) void c.timelapse().load(doc.timelapse);
 			// opened: nothing unsaved; recovered or an old version: all of it is unsaved
 			savedVersion = p.unsaved ? -1 : docVersion;
 		});
@@ -1757,6 +2004,9 @@
 						<button type="button" onclick={() => void openAnimExport()}>
 							<b>Animation…</b><span>MP4, ProRes, WebM, GIF, animated PNG, PNG sequence</span>
 						</button>
+						<button type="button" onclick={() => void openFilm()}>
+							<b>Film of the drawing…</b><span>Timelapse, or this frame drawn live</span>
+						</button>
 					</div>
 				{/if}
 			</div>
@@ -2025,6 +2275,31 @@
 					onclose={() => (animExport = null)}
 				/>
 			{/if}
+			{#if film}
+				<FilmDialog
+					bind:settings={filmSettings}
+					video={film.video}
+					pictures={film.pictures}
+					strokes={film.strokes.length}
+					drawnSeconds={film.drawnSeconds}
+					size={filmSize()}
+					progress={film.progress}
+					onstart={() => void runFilm()}
+					oncancel={() => (filmStop = true)}
+					onclose={() => (film = null)}
+				/>
+			{/if}
+			{#if staging}
+				<div class="stage" aria-hidden="true">
+					<PaintCanvas
+						bind:this={filmStage}
+						width={canvasSize.width}
+						height={canvasSize.height}
+						brushId={DEFAULT_BRUSH}
+						viewControls={false}
+					/>
+				</div>
+			{/if}
 			{#if lipSync}
 				{@const ls = lipSync}
 				{@const r = lipRange(ls.clip, ls.toEnd)}
@@ -2103,6 +2378,16 @@
 	}
 	.export {
 		position: relative;
+	}
+	/* the canvas a "drawn live" film is drawn on: out of sight */
+	.stage {
+		position: fixed;
+		top: 0;
+		left: -100000px;
+		width: 640px;
+		height: 480px;
+		overflow: hidden;
+		pointer-events: none;
 	}
 	.menu {
 		position: absolute;

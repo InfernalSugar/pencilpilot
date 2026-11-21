@@ -429,6 +429,7 @@ mod tests {
             static_layers: vec![],
             audio: vec![],
             mouth_charts: vec![],
+            timelapse: vec![],
         };
         encode(&header, &rgba).unwrap()
     }

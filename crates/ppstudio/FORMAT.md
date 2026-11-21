@@ -9,6 +9,8 @@ This crate (`pencilpilot-ppstudio`) reads and writes it.
 | `strokes.json` | deflate | the stroke log: a JSON array the app writes and reads back as is |
 | `thumbnail.png` | stored | optional; at most 512 px on its long side, for the project browser |
 | `tiles/<hash>` | deflate | one tile of pixels (below) |
+| `audio/<hash>.<ext>` | stored | a sound file a scene plays, as imported (below) |
+| `timelapse/<n>.jpg` | stored | optional; the timelapse, a JPEG after each change (`000000.jpg` first) |
 
 ## manifest.json
 
@@ -60,7 +62,8 @@ This crate (`pencilpilot-ppstudio`) reads and writes it.
       "mask":  [ { "x": 0, "y": 0, "hash": "51ab…" } ]   // only when the layer has a mask
     }
   },
-  "extra": { }                   // the app's own settings (brush, colour…), kept as given
+  "extra": { },                  // the app's own settings (brush, colour…), kept as given
+  "timelapse": [ 1795279000000, 1795279004200 ]  // optional: when each timelapse picture was taken (ms since 1970)
 }
 ```
 
@@ -103,6 +106,12 @@ This crate (`pencilpilot-ppstudio`) reads and writes it.
   shape used in lip-sync: `A`–`F` (closed for M B P; slightly open, teeth together; open;
   wide open; rounded; puckered) and the optional `G` (F V), `H` (L) and `X` (rest), as
   Rhubarb Lip Sync names them. Its drawings are stored even when no frame shows them.
+- The **timelapse** is a small picture of the canvas (at most 540 px on its long side)
+  taken after each change, across every session: `timelapse/000000.jpg`, `000001.jpg`…
+  in order, with `timelapse` in the manifest saying when each was taken. A reader may
+  drop pictures that don't line up with their times. Each stroke in `strokes.json` may
+  say the `drawing` its layer showed (an animation frame's), so a frame can be drawn
+  again stroke by stroke.
 - Without `scenes`, `frames` is the whole timeline (a single picture has one frame).
 - The app names drawings `D<number>`; a drawing belongs to one layer. Every drawing a
   frame or exposure names must be in `drawings`.
