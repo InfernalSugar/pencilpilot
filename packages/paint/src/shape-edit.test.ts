@@ -66,3 +66,64 @@ describe('editable shapes', () => {
 		expect(t.kind === 'ellipse' && t.a === t.b).toBe(true);
 	});
 });
+
+describe('perfect shapes', () => {
+	it('make an ellipse a circle, a rectangle a square, a line a 15° step', async () => {
+		const { perfect, shapeName } = await import('./shape-edit');
+		const oval = perfect({
+			kind: 'ellipse',
+			c: [50, 50],
+			a: 40,
+			b: 20,
+			theta: 0.3,
+			circle: false,
+			pressure: 0.5
+		});
+		expect(oval).toMatchObject({ c: [50, 50], a: 30, b: 30, circle: true });
+		expect(shapeName(oval)).toBe('circle');
+		const rect = perfect({
+			kind: 'poly',
+			pts: [
+				[0, 0],
+				[40, 0],
+				[40, 20],
+				[0, 20]
+			],
+			closed: true,
+			pressure: 0.5
+		});
+		expect(shapeName(rect)).toBe('square');
+		if (rect.kind !== 'poly') throw new Error('poly');
+		const c = rect.pts.reduce((t, p) => [t[0] + p[0] / 4, t[1] + p[1] / 4], [0, 0]);
+		expect(c[0]).toBeCloseTo(20);
+		expect(c[1]).toBeCloseTo(10);
+		const line = perfect({
+			kind: 'poly',
+			pts: [
+				[0, 0],
+				[100, 9]
+			],
+			closed: false,
+			pressure: 0.5
+		});
+		if (line.kind !== 'poly') throw new Error('poly');
+		// 5.1° → 0°, the same length
+		expect(line.pts[1][1]).toBeCloseTo(0);
+		expect(line.pts[1][0]).toBeCloseTo(Math.hypot(100, 9));
+		const tri = perfect({
+			kind: 'poly',
+			pts: [
+				[0, 0],
+				[50, 5],
+				[10, 40]
+			],
+			closed: true,
+			pressure: 0.5
+		});
+		if (tri.kind !== 'poly') throw new Error('poly');
+		const sides = tri.pts.map((p, i) =>
+			Math.hypot(p[0] - tri.pts[(i + 1) % 3][0], p[1] - tri.pts[(i + 1) % 3][1])
+		);
+		expect(Math.max(...sides) - Math.min(...sides)).toBeLessThan(1e-6);
+	});
+});

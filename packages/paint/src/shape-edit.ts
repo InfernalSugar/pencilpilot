@@ -82,3 +82,49 @@ export function moveHandle(s: EditShape, i: number, p: Pt): EditShape {
 	}
 	return { ...s, b: r, a: s.circle ? r : s.a };
 }
+
+/** What a shape is, in words (for its Edit Shape buttons). */
+export function shapeName(
+	s: EditShape
+): 'circle' | 'ellipse' | 'square' | 'rectangle' | 'triangle' | 'line' | 'polyline' {
+	if (s.kind === 'ellipse') return s.circle ? 'circle' : 'ellipse';
+	if (!s.closed) return s.pts.length === 2 ? 'line' : 'polyline';
+	if (s.pts.length === 3) return 'triangle';
+	if (s.pts.length === 4) {
+		const e = s.pts.map((p, i) => dist(p, s.pts[(i + 1) % 4]));
+		return Math.max(...e) - Math.min(...e) < 0.5 ? 'square' : 'rectangle';
+	}
+	return 'polyline';
+}
+
+/**
+ * The perfect form of a snapped shape (Procreate: tap with another finger while
+ * holding): an ellipse becomes a circle, a rectangle a square, a triangle an
+ * equilateral one, and a line snaps to the nearest 15°. Centres stay where they are.
+ */
+export function perfect(s: EditShape): EditShape {
+	if (s.kind === 'ellipse') {
+		const r = (s.a + s.b) / 2;
+		return { ...s, a: r, b: r, circle: true };
+	}
+	const n = s.pts.length;
+	if (!s.closed && n === 2) {
+		const [p, q] = s.pts;
+		const len = dist(p, q);
+		const step = Math.PI / 12;
+		const ang = Math.round(Math.atan2(q[1] - p[1], q[0] - p[0]) / step) * step;
+		return { ...s, pts: [p, [p[0] + len * Math.cos(ang), p[1] + len * Math.sin(ang)]] };
+	}
+	if (!s.closed || (n !== 3 && n !== 4)) return s;
+	// a regular shape on the same centre, as big on average, turned like the first corner
+	const c: Pt = [s.pts.reduce((t, p) => t + p[0], 0) / n, s.pts.reduce((t, p) => t + p[1], 0) / n];
+	const r = s.pts.reduce((t, p) => t + dist(c, p), 0) / n;
+	const a0 = Math.atan2(s.pts[0][1] - c[1], s.pts[0][0] - c[0]);
+	return {
+		...s,
+		pts: Array.from({ length: n }, (_, i) => {
+			const a = a0 + (i * 2 * Math.PI) / n;
+			return [c[0] + r * Math.cos(a), c[1] + r * Math.sin(a)] as Pt;
+		})
+	};
+}
