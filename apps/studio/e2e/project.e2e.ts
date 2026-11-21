@@ -360,12 +360,13 @@ test('settings: change a key (a taken key swaps), and it works in the studio', a
 	await page.getByRole('button', { name: /HD video/ }).click();
 	await expect(canvas(page)).toHaveAttribute('data-ready', 'true', { timeout: 15_000 });
 	await page.keyboard.press('b');
-	await expect(page.getByRole('button', { name: 'Pen path (P)' })).toHaveAttribute(
+	// (the tool buttons show the keys chosen)
+	await expect(page.getByRole('button', { name: 'Pen path (B)' })).toHaveAttribute(
 		'aria-pressed',
 		'true'
 	);
 	await page.keyboard.press('p');
-	await expect(page.getByRole('button', { name: 'Brush (B)' })).toHaveAttribute(
+	await expect(page.getByRole('button', { name: 'Brush (P)' })).toHaveAttribute(
 		'aria-pressed',
 		'true'
 	);
@@ -395,4 +396,68 @@ test('settings: touch and file choices are kept', async ({ page }) => {
 		.toMatchObject({ fingers: 'move', tapGestures: false, autosaveSeconds: 60, versionsKept: 5 });
 	await page.getByRole('button', { name: 'Reset all' }).click();
 	await expect(page.getByLabel('Draws until you use a pen, then moves the view')).toBeChecked();
+});
+
+test('studio layout: each tool shows its options, as on the website', async ({ page }) => {
+	await stubTauri(page);
+	await ready(page);
+	const opts = (name: string) => page.getByRole('group', { name });
+	// fill: tolerance and where it looks
+	await page.keyboard.press('g');
+	await expect(opts('Fill options')).toBeVisible();
+	await expect(opts('Fill options').getByText(/Tolerance/)).toBeVisible();
+	// gradient (its own key), transform, liquify, a selection tool
+	await page.keyboard.press('Shift+g');
+	await expect(opts('Gradient')).toBeVisible();
+	await expect(opts('Fill options')).toHaveCount(0);
+	await page.getByRole('button', { name: /^Liquify/ }).click();
+	await expect(opts('Liquify')).toBeVisible();
+	await page.keyboard.press('m');
+	await expect(opts('Selection')).toBeVisible();
+	await page.keyboard.press('Control+a');
+	await expect(opts('Selection').getByRole('button', { name: 'Invert' })).toBeVisible();
+	await page.keyboard.press('Escape');
+	await page.keyboard.press('m');
+	await expect(opts('Selection')).toHaveCount(0);
+
+	// guides: a grid, kept for next time
+	await page.getByRole('button', { name: 'Guides' }).click();
+	await opts('Guides').getByRole('radio', { name: 'Square' }).click();
+	await expect(page.getByRole('button', { name: 'Guides' })).toHaveAttribute(
+		'aria-pressed',
+		'true'
+	);
+	await ready(page);
+	await expect(page.getByRole('button', { name: 'Guides' })).toHaveAttribute(
+		'aria-pressed',
+		'true'
+	);
+
+	// adjust the layer: a scribble turned light, then Cancel puts it back
+	await scribble(page, 0.5);
+	// (wait for the stroke's last bit to show)
+	let drawn = -1;
+	await expect
+		.poll(async () => {
+			const before = drawn;
+			drawn = await ink(page);
+			return drawn === before && drawn > 0;
+		})
+		.toBe(true);
+	await page.keyboard.press('Control+u');
+	const adjust = opts('Adjust layer');
+	await expect(adjust).toBeVisible();
+	await adjust.getByRole('slider', { name: /Brightness/ }).fill('100');
+	await expect.poll(() => ink(page)).toBeLessThan(drawn / 2);
+	await adjust.getByRole('button', { name: 'Cancel' }).click();
+	await expect.poll(() => ink(page)).toBe(drawn);
+
+	// right-click: the quick menu
+	const b = (await canvas(page).boundingBox())!;
+	await page.mouse.click(b.x + b.width / 2, b.y + b.height / 2, { button: 'right' });
+	await page.getByRole('menuitem', { name: 'Eraser' }).click();
+	await expect(page.getByRole('button', { name: 'Eraser (E)' })).toHaveAttribute(
+		'aria-pressed',
+		'true'
+	);
 });

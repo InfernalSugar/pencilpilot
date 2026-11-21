@@ -59,7 +59,8 @@
 		opacity = $bindable(1),
 		adjustOpen = false,
 		onadjust,
-		showOpacity = true
+		showOpacity = true,
+		keys = {}
 	}: {
 		tools?: ToolId[];
 		/** the active tool (the canvas's tool name; 'brush' covers the eraser too) */
@@ -71,9 +72,14 @@
 		onadjust?: () => void;
 		/** some screens (drills) always draw at full opacity */
 		showOpacity?: boolean;
+		/** the keys people chose for the tools (tooltips show them; missing: the usual key) */
+		keys?: Partial<Record<ToolId, string>>;
 	} = $props();
 
 	const has = (t: ToolId) => tools.includes(t);
+	const key = (id: ToolId, usual: string) => keys[id] ?? usual;
+	const selectLabel = (t: (typeof SELECT_TOOLS)[number]) =>
+		t.label.replace(/\([A-Z]\)$/, `(${key(t.id, t.key.toUpperCase())})`);
 </script>
 
 <div class="rail-inner" role="toolbar" aria-label="Drawing tools">
@@ -83,8 +89,8 @@
 				type="button"
 				class="tool"
 				aria-pressed={!eraser && tool === 'brush'}
-				aria-label="Brush (B)"
-				title="Brush (B)"
+				aria-label="Brush ({key('brush', 'B')})"
+				title="Brush ({key('brush', 'B')})"
 				onclick={() => {
 					eraser = false;
 					tool = 'brush';
@@ -110,8 +116,8 @@
 				type="button"
 				class="tool"
 				aria-pressed={eraser && tool === 'brush'}
-				aria-label="Eraser (E)"
-				title="Eraser (E) — uses the current brush shape"
+				aria-label="Eraser ({key('eraser', 'E')})"
+				title="Eraser ({key('eraser', 'E')}) — uses the current brush shape"
 				onclick={() => {
 					eraser = true;
 					tool = 'brush';
@@ -137,8 +143,11 @@
 				type="button"
 				class="tool"
 				aria-pressed={tool === 'picker'}
-				aria-label="Eyedropper (I)"
-				title="Eyedropper (I): pick a colour from the canvas. Alt+click works too."
+				aria-label="Eyedropper ({key('picker', 'I')})"
+				title="Eyedropper ({key(
+					'picker',
+					'I'
+				)}): pick a colour from the canvas. Alt+click works too."
 				onclick={() => (tool = tool === 'picker' ? 'brush' : 'picker')}
 			>
 				<svg
@@ -163,8 +172,11 @@
 				type="button"
 				class="tool"
 				aria-pressed={tool === 'fill'}
-				aria-label="Fill (G)"
-				title="Fill (G): fill an area with the colour. Or drag a colour swatch onto the canvas."
+				aria-label="Fill ({key('fill', 'G')})"
+				title="Fill ({key(
+					'fill',
+					'G'
+				)}): fill an area with the colour. Or drag a colour swatch onto the canvas."
 				onclick={() => (tool = tool === 'fill' ? 'brush' : 'fill')}
 			>
 				<svg
@@ -189,8 +201,11 @@
 				type="button"
 				class="tool"
 				aria-pressed={tool === 'lasso-fill'}
-				aria-label="Lasso fill (F)"
-				title="Lasso fill (F): draw a shape and it fills solid with the colour"
+				aria-label="Lasso fill ({key('lasso-fill', 'F')})"
+				title="Lasso fill ({key(
+					'lasso-fill',
+					'F'
+				)}): draw a shape and it fills solid with the colour"
 				onclick={() => (tool = tool === 'lasso-fill' ? 'brush' : 'lasso-fill')}
 			>
 				<svg
@@ -217,8 +232,8 @@
 				type="button"
 				class="tool"
 				aria-pressed={tool === 'smudge'}
-				aria-label="Smudge (S)"
-				title="Smudge (S): push and blend the paint with the current brush"
+				aria-label="Smudge ({key('smudge', 'S')})"
+				title="Smudge ({key('smudge', 'S')}): push and blend the paint with the current brush"
 				onclick={() => (tool = tool === 'smudge' ? 'brush' : 'smudge')}
 			>
 				<svg
@@ -243,8 +258,11 @@
 				type="button"
 				class="tool"
 				aria-pressed={tool === 'pen'}
-				aria-label="Pen path (P)"
-				title="Pen path (P): click for corners, drag for curves, then draw along it or fill it"
+				aria-label="Pen path ({key('pen', 'P')})"
+				title="Pen path ({key(
+					'pen',
+					'P'
+				)}): click for corners, drag for curves, then draw along it or fill it"
 				onclick={() => (tool = tool === 'pen' ? 'brush' : 'pen')}
 			>
 				<svg
@@ -267,8 +285,11 @@
 				type="button"
 				class="tool"
 				aria-pressed={tool === 'measure'}
-				aria-label="Measure (U)"
-				title="Measure (U): drag to measure lengths and angles, in the unit you marked on the reference"
+				aria-label="Measure ({key('measure', 'U')})"
+				title="Measure ({key(
+					'measure',
+					'U'
+				)}): drag to measure lengths and angles, in the unit you marked on the reference"
 				onclick={() => (tool = tool === 'measure' ? 'brush' : 'measure')}
 			>
 				<svg
@@ -292,8 +313,8 @@
 					type="button"
 					class="tool"
 					aria-pressed={tool === t.id}
-					aria-label={t.label}
-					title="{t.label}. Shift adds, Alt subtracts."
+					aria-label={selectLabel(t)}
+					title="{selectLabel(t)}. Shift adds, Alt subtracts."
 					onclick={() => (tool = tool === t.id ? 'brush' : t.id)}
 				>
 					<svg
@@ -318,8 +339,11 @@
 				type="button"
 				class="tool"
 				aria-pressed={tool === 'transform'}
-				aria-label="Transform (V)"
-				title="Transform (V): move, scale, rotate or flip the selection (or the whole layer)"
+				aria-label="Transform ({key('transform', 'V')})"
+				title="Transform ({key(
+					'transform',
+					'V'
+				)}): move, scale, rotate or flip the selection (or the whole layer)"
 				onclick={() => (tool = tool === 'transform' ? 'brush' : 'transform')}
 			>
 				<svg
@@ -344,8 +368,8 @@
 				type="button"
 				class="tool"
 				aria-pressed={tool === 'liquify'}
-				aria-label="Liquify (K)"
-				title="Liquify (K): push parts of the layer into place"
+				aria-label="Liquify ({key('liquify', 'K')})"
+				title="Liquify ({key('liquify', 'K')}): push parts of the layer into place"
 				onclick={() => (tool = tool === 'liquify' ? 'brush' : 'liquify')}
 			>
 				<svg

@@ -6,8 +6,16 @@
 	 * Ctrl+S saves (.ppstudio), Ctrl+Shift+S saves as, Ctrl+O opens.
 	 */
 	import Studio from '@pencilpilot/paint/Studio.svelte';
-	import ToolRail from '@pencilpilot/paint/ToolRail.svelte';
-	import PaintCanvas, { type CanvasStatus } from '@pencilpilot/paint/PaintCanvas.svelte';
+	import ToolRail, { type ToolId } from '@pencilpilot/paint/ToolRail.svelte';
+	import ToolOptionsBar from '@pencilpilot/paint/ToolOptionsBar.svelte';
+	import QuickMenu, { type QuickAction } from '@pencilpilot/paint/QuickMenu.svelte';
+	import TimelapsePlayer from '@pencilpilot/paint/TimelapsePlayer.svelte';
+	import { ToolOptions } from '@pencilpilot/paint/tool-options.svelte.js';
+	import { anyGuide, defaultGuides, type GuideSettings } from '@pencilpilot/paint/guides';
+	import PaintCanvas, {
+		BLANK_STATUS,
+		type CanvasStatus
+	} from '@pencilpilot/paint/PaintCanvas.svelte';
 	import LayersPanel from '@pencilpilot/paint/LayersPanel.svelte';
 	import BrushPicker from '@pencilpilot/paint/BrushPicker.svelte';
 	import BrushTexturePanel from '@pencilpilot/paint/BrushTexturePanel.svelte';
@@ -42,7 +50,7 @@
 	} from '#lib/project.js';
 	import { beforeNavigate, goto } from '$app/navigation';
 	import { loadSettings, settings } from '#lib/settings.svelte.js';
-	import { actionFor, comboOf, type ActionId } from '#lib/shortcuts.js';
+	import { actionFor, comboOf, showKey, type ActionId } from '#lib/shortcuts.js';
 	import { page } from '$app/state';
 	import VersionsMenu from '#lib/VersionsMenu.svelte';
 
@@ -69,6 +77,144 @@
 	let fps = $state(start.kind === 'new' ? start.fps : 24);
 	/** bumps for a new, empty canvas (opening a project of another size remounts it) */
 	let canvasKey = $state(0);
+
+	// ---- the tools' own options (the same as the website's studio) ----
+	const toolOpts = new ToolOptions({
+		canvas: () => canvas,
+		status: () => status ?? BLANK_STATUS,
+		color: () => color,
+		setTool: (t) => (tool = t),
+		onguides: (g) => keepLocal('pp.app.guides', { w: canvasSize.width, h: canvasSize.height, g })
+	});
+	function keepLocal(key: string, value: unknown) {
+		try {
+			localStorage.setItem(key, JSON.stringify(value));
+		} catch {
+			/* storage blocked */
+		}
+	}
+	function readLocal<T>(key: string, fallback: T): T {
+		try {
+			return (JSON.parse(localStorage.getItem(key) ?? 'null') as T) ?? fallback;
+		} catch {
+			return fallback;
+		}
+	}
+	/** guides kept for another canvas size are scaled to this one */
+	function loadGuides(w: number, h: number) {
+		const saved = readLocal<{ w: number; h: number; g: GuideSettings } | null>(
+			'pp.app.guides',
+			null
+		);
+		if (!saved?.g) {
+			toolOpts.guides = defaultGuides(w, h);
+			return;
+		}
+		const [kx, ky] = [w / saved.w, h / saved.h];
+		const sc = (p: [number, number]): [number, number] => [p[0] * kx, p[1] * ky];
+		const g = saved.g;
+		toolOpts.guides = {
+			grid: { ...g.grid, size: Math.round(g.grid.size * Math.min(kx, ky)) },
+			perspective: { ...g.perspective, vps: g.perspective.vps.map(sc) },
+			ruler: { ...g.ruler, a: sc(g.ruler.a), b: sc(g.ruler.b) },
+			symmetry: g.symmetry ? { ...g.symmetry, c: sc(g.symmetry.c) } : defaultGuides(w, h).symmetry
+		};
+	}
+	$effect(() => {
+		const { width, height } = canvasSize;
+		untrack(() => loadGuides(width, height));
+	});
+	toolOpts.quickShape = readLocal('pp.app.quickShape', true);
+
+	/** a short note over the canvas (a snapped shape, a locked layer…) */
+	let canvasNote = $state('');
+	let noteTimer: ReturnType<typeof setTimeout> | undefined;
+	function note(text: string, ms = 2200) {
+		canvasNote = text;
+		clearTimeout(noteTimer);
+		noteTimer = setTimeout(() => (canvasNote = ''), ms);
+	}
+	/** the quick menu (right-click / long-press), at screen x, y */
+	let quickMenu = $state<{ x: number; y: number } | null>(null);
+	let timelapseOpen = $state(false);
+	function quickActions(): QuickAction[] {
+		return [
+			{
+				id: 'undo',
+				label: 'Undo',
+				icon: 'M9 14 4 9l5-5M4 9h11a5 5 0 0 1 0 10h-3',
+				disabled: !status?.canUndo,
+				run: () => undo()
+			},
+			{
+				id: 'redo',
+				label: 'Redo',
+				icon: 'm15 14 5-5-5-5M20 9H9a5 5 0 0 0 0 10h3',
+				disabled: !status?.canRedo,
+				run: () => canvas?.redo()
+			},
+			{
+				id: 'picker',
+				label: 'Eyedropper',
+				icon: 'm3 21 3-1 10-10-2-2L4 18Zm11-13 3-3a2 2 0 0 1 3 3l-3 3',
+				run: () => (tool = 'picker')
+			},
+			{
+				id: 'eraser',
+				label: eraser ? 'Brush' : 'Eraser',
+				icon: eraser
+					? 'M4 20c3 0 4-2 4-4l9-11 3 3-11 9c-2 0-4 1-4 4Z'
+					: 'M8 20h12M5 16l9-9 5 5-6 6H8Z',
+				run: () => {
+					eraser = !eraser;
+					tool = 'brush';
+				}
+			},
+			{
+				id: 'mirror',
+				label: 'Mirror view',
+				icon: 'M12 3v18M8 7 3 12l5 5ZM16 7l5 5-5 5Z',
+				run: () => canvas?.toggleMirror()
+			},
+			{
+				id: 'deselect',
+				label: 'Deselect',
+				icon: 'M4 4h4M4 4v4M20 4h-4M20 4v4M4 20h4M4 20v-4M20 20h-4M20 20v-4M9 9l6 6M15 9l-6 6',
+				disabled: !status?.selection,
+				run: () => canvas?.deselect()
+			}
+		];
+	}
+	/** undo also cancels an open Adjust panel */
+	function undo() {
+		if (toolOpts.adjustOpen) toolOpts.closeAdjust(false);
+		canvas?.undo();
+	}
+	// paste a picture (or what was copied) as a new layer
+	$effect(() => {
+		const onPaste = (e: ClipboardEvent) => {
+			if ((e.target as HTMLElement | null)?.closest('input, textarea, [contenteditable]')) return;
+			const file = [...(e.clipboardData?.files ?? [])].find((f) => f.type.startsWith('image/'));
+			if (!file && canvas?.hasClip()) {
+				e.preventDefault();
+				return toolOpts.pasteCopied();
+			}
+			if (!file || !canvas) return;
+			e.preventDefault();
+			void canvas.importImage(file, 'Pasted picture').then((r) => toolOpts.imported(r));
+		};
+		window.addEventListener('paste', onPaste);
+		return () => window.removeEventListener('paste', onPaste);
+	});
+	const mac = typeof navigator !== 'undefined' && /Mac|iPad/.test(navigator.platform);
+	/** the rail's tooltips show the keys chosen in Settings */
+	const railKeys = $derived(
+		Object.fromEntries(
+			(Object.keys(settings.keys) as ActionId[]).map((id) => [id, showKey(settings.keys[id], mac)])
+		) as Partial<Record<ToolId, string>>
+	);
+	/** a key's label for a tooltip ("Ctrl+S", "⌘S") */
+	const keyOf = (id: ActionId) => showKey(settings.keys[id], mac);
 
 	// ---- the project file ----
 	let path = $state<string | null>(null);
@@ -314,10 +460,19 @@
 	});
 
 	const TABS = $derived([
-		{ id: 'layers', label: 'Layers', meta: `${status?.layers.length ?? 1} layers` },
+		{
+			id: 'layers',
+			label: 'Layers',
+			meta: [
+				status?.layers.find((l) => l.id === status?.active)?.name,
+				`${status?.layers.length ?? 1} layers`
+			]
+				.filter(Boolean)
+				.join(' · ')
+		},
 		{ id: 'brushes', label: 'Brushes', meta: manifest ? brushLabel(manifest, brushId) : '…' },
 		{ id: 'colour', label: 'Colour' },
-		{ id: 'history', label: 'History' }
+		{ id: 'history', label: 'History', meta: status?.history.undo.at(-1) }
 	]);
 
 	/** tools whose key switches to them (and back to the brush) */
@@ -332,7 +487,8 @@
 		liquify: 'liquify',
 		'select-rect': 'select-rect',
 		'select-lasso': 'select-lasso',
-		'select-wand': 'select-wand'
+		'select-wand': 'select-wand',
+		gradient: 'gradient'
 	};
 
 	function onkey(e: KeyboardEvent) {
@@ -341,10 +497,16 @@
 		if (tool === 'transform' && e.key === 'Enter') return canvas?.transformCommit();
 		if (tool === 'transform' && e.key === 'Escape') return canvas?.transformCancel();
 		if (tool === 'pen' && e.key === 'Enter') {
-			if (canvas?.penStroke(true)) canvas.penClear();
+			if (canvas?.penStroke(toolOpts.penTaper)) canvas.penClear();
 			return;
 		}
 		if (tool === 'pen' && e.key === 'Escape') return canvas?.penClear();
+		if (tool === 'pen' && e.key === 'Backspace') {
+			e.preventDefault();
+			return canvas?.penBack();
+		}
+		if (e.key === 'Escape' && toolOpts.adjustOpen) return toolOpts.closeAdjust(false);
+		if (e.key === 'Escape' && status?.selection) return canvas?.deselect();
 		const combo = comboOf(e);
 		const action = combo ? actionFor(settings.keys, combo) : null;
 		if (!action) return;
@@ -356,8 +518,26 @@
 			tool = 'brush';
 		} else if (action === 'smaller') size = Math.max(0.25, +(size / 1.25).toFixed(2));
 		else if (action === 'bigger') size = Math.min(6, +(size * 1.25).toFixed(2));
-		else if (action === 'undo') canvas?.undo();
-		else if (action === 'redo') canvas?.redo();
+		else if (action === 'undo') undo();
+		else if (action === 'redo') {
+			if (toolOpts.adjustOpen) toolOpts.closeAdjust(false);
+			canvas?.redo();
+		} else if (action === 'adjust') toolOpts.openAdjust();
+		else if (action === 'copy' || action === 'cut') toolOpts.copyCut(action === 'cut');
+		else if (action === 'copy-to-layer') {
+			if (canvas?.copySelection(false)) toolOpts.pasteCopied();
+		} else if (action === 'select-all') canvas?.selectAll();
+		else if (action === 'deselect') canvas?.deselect();
+		else if (action === 'invert-selection') canvas?.invertSelection();
+		else if (action === 'clear-selected') {
+			if (status?.selection) canvas?.clear();
+		} else if (action === 'zoom-in') canvas?.zoomIn();
+		else if (action === 'zoom-out') canvas?.zoomOut();
+		else if (action === 'fit') canvas?.resetView();
+		else if (action === 'rotate-left') canvas?.rotateBy(-15);
+		else if (action === 'rotate-right') canvas?.rotateBy(15);
+		else if (action === 'rotate-reset') canvas?.resetRotation();
+		else if (action === 'mirror') canvas?.toggleMirror();
 		else if (action === 'save') void save(false);
 		else if (action === 'save-as') void save(true);
 		else if (action === 'open') void open();
@@ -381,7 +561,7 @@
 				class="act"
 				disabled={!!busy}
 				onclick={open}
-				title="Open a project (Ctrl+O)"
+				title="Open a project ({keyOf('open')})"
 			>
 				{busy === 'opening' ? 'Opening…' : 'Open'}
 			</button>
@@ -390,7 +570,7 @@
 				class="act"
 				disabled={!!busy}
 				onclick={() => save(false)}
-				title="Save (Ctrl+S); Save as: Ctrl+Shift+S"
+				title="Save ({keyOf('save')}); Save as: {keyOf('save-as')}"
 			>
 				{busy === 'saving' ? 'Saving…' : 'Save'}
 			</button>
@@ -432,8 +612,8 @@
 				type="button"
 				class="act"
 				disabled={!status?.canUndo}
-				onclick={() => canvas?.undo()}
-				aria-label="Undo (Ctrl+Z)"
+				onclick={undo}
+				title="Undo ({keyOf('undo')})"
 			>
 				Undo
 			</button>
@@ -442,22 +622,73 @@
 				class="act"
 				disabled={!status?.canRedo}
 				onclick={() => canvas?.redo()}
-				aria-label="Redo (Ctrl+Shift+Z)"
+				title="Redo ({keyOf('redo')})"
 			>
 				Redo
 			</button>
 			<a class="act" href={resolve('/settings')}>Settings</a>
 		{/snippet}
 		{#snippet rail()}
-			<ToolRail bind:tool bind:eraser bind:size bind:opacity />
+			<ToolRail
+				bind:tool
+				bind:eraser
+				bind:size
+				bind:opacity
+				keys={railKeys}
+				adjustOpen={toolOpts.adjustOpen}
+				onadjust={() => toolOpts.openAdjust()}
+			/>
 		{/snippet}
 		{#snippet options()}
 			<span class="brush-name">{manifest ? brushLabel(manifest, brushId) : ''}</span>
 			<Swatches bind:color onmore={() => ((tab = 'colour'), (dockOpen = true))} />
 			<label class="slider">
 				<span>Smoothing <b>{Math.round(smoothing * 100)}%</b></span>
-				<input type="range" min="0" max="1" step="0.05" bind:value={smoothing} />
+				<input
+					type="range"
+					min="0"
+					max="1"
+					step="0.05"
+					bind:value={smoothing}
+					title="Steadies wobbly lines (like StreamLine)"
+				/>
 			</label>
+			<button
+				type="button"
+				class="opt"
+				aria-pressed={anyGuide(toolOpts.guides)}
+				aria-expanded={toolOpts.guidesOpen}
+				title="Guides: grid, perspective, ruler and symmetry"
+				onclick={() => (toolOpts.guidesOpen = !toolOpts.guidesOpen)}
+			>
+				Guides
+			</button>
+			<button
+				type="button"
+				class="opt"
+				aria-pressed={toolOpts.quickShape}
+				title="QuickShape: hold at the end of a stroke to snap it to a line, circle or rectangle"
+				onclick={() => {
+					toolOpts.quickShape = !toolOpts.quickShape;
+					keepLocal('pp.app.quickShape', toolOpts.quickShape);
+				}}
+			>
+				QuickShape
+			</button>
+			<button
+				type="button"
+				class="opt"
+				disabled={!status || status.blank}
+				title="Watch the drawing being made, stroke by stroke"
+				onclick={() => (timelapseOpen = true)}
+			>
+				Timelapse
+			</button>
+		{/snippet}
+		{#snippet context()}
+			{#if status}
+				<ToolOptionsBar opts={toolOpts} bind:tool {status} {canvas} />
+			{/if}
 		{/snippet}
 		{#snippet stage()}
 			{#key canvasKey}
@@ -480,13 +711,49 @@
 					allowImport
 					onpick={(c) => (color = c)}
 					onsize={(v) => (size = v)}
+					fillTolerance={toolOpts.fillTolerance}
+					fillAllLayers={toolOpts.fillAllLayers}
+					fillReference={toolOpts.fillReference}
+					distort={toolOpts.distort}
+					warp={toolOpts.warp}
+					quickShape={toolOpts.quickShape}
+					selectMode={toolOpts.selectMode}
+					wandTolerance={toolOpts.wandTolerance}
+					wandContiguous={toolOpts.wandContiguous}
+					liquifySize={toolOpts.liquifySize}
+					liquifyStrength={toolOpts.liquifyStrength}
+					smudgeStrength={toolOpts.smudgeStrength}
+					gradientKind={toolOpts.gradientKind}
+					gradientEnd={toolOpts.gradientEndValue}
+					guides={toolOpts.guides}
+					onguides={toolOpts.onguides}
+					onpenpath={toolOpts.onpenpath}
+					onimport={toolOpts.onimport}
+					onshape={(kind) => note(`Snapped to a ${kind}`, 1800)}
+					ontransformend={(r) => {
+						tool = 'brush';
+						if (r === 'empty') note('Nothing to move on this layer (or it’s locked).');
+					}}
+					onblocked={(why) =>
+						note(
+							why === 'hidden'
+								? 'This layer is hidden. Show it or pick another layer to draw.'
+								: 'This layer is locked. Unlock it or pick another layer to draw.'
+						)}
+					onquickmenu={(x, y) => (quickMenu = { x, y })}
 					onchange={(s) => (status = s)}
 				/>
 			{/key}
+			{#if canvasNote}<p class="canvas-note" role="status">{canvasNote}</p>{/if}
 		{/snippet}
 		{#snippet panel(t: string)}
 			{#if t === 'layers' && status}
-				<LayersPanel {status} controls={canvas} aspect={canvasSize.width / canvasSize.height} />
+				<LayersPanel
+					{status}
+					controls={canvas}
+					aspect={canvasSize.width / canvasSize.height}
+					onadjustment={(id) => toolOpts.adjustmentLayer(id)}
+				/>
 			{:else if t === 'brushes'}
 				{#if manifest}
 					<BrushPicker {manifest} bind:selected={brushId} />
@@ -498,6 +765,19 @@
 				<HistoryPanel history={status.history} ongo={(n) => canvas?.historyGo(n)} />
 			{:else if t === 'colour'}
 				<ColorPanel bind:color onclose={() => (tab = 'layers')} />
+			{/if}
+		{/snippet}
+		{#snippet after()}
+			{#if quickMenu}
+				<QuickMenu
+					x={quickMenu.x}
+					y={quickMenu.y}
+					actions={quickActions()}
+					onclose={() => (quickMenu = null)}
+				/>
+			{/if}
+			{#if timelapseOpen && canvas}
+				<TimelapsePlayer film={canvas.timelapse()} onclose={() => (timelapseOpen = false)} />
 			{/if}
 		{/snippet}
 	</Studio>
@@ -589,5 +869,39 @@
 	}
 	.slider b {
 		color: var(--pp-on-ink);
+	}
+	.slider input {
+		accent-color: var(--pp-yellow);
+	}
+	.opt {
+		height: 38px;
+		padding: 0 12px;
+		border: 0;
+		border-radius: 12px;
+		background: #2a2a30;
+		color: var(--pp-on-ink);
+		font: 600 14px var(--pp-font-body);
+		cursor: pointer;
+	}
+	.opt[aria-pressed='true'] {
+		background: var(--pp-accent-strong);
+		color: #fff;
+	}
+	.opt:disabled {
+		opacity: 0.35;
+		cursor: not-allowed;
+	}
+	.canvas-note {
+		position: absolute;
+		left: 50%;
+		bottom: 16px;
+		z-index: 20;
+		transform: translateX(-50%);
+		margin: 0;
+		padding: 8px 14px;
+		border-radius: 12px;
+		background: var(--pp-ink);
+		color: var(--pp-on-ink);
+		font-size: 14px;
 	}
 </style>

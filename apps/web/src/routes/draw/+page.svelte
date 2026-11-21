@@ -1,6 +1,8 @@
 <script lang="ts">
 	import Studio from '@pencilpilot/paint/Studio.svelte';
 	import ToolRail, { SELECT_TOOLS } from '@pencilpilot/paint/ToolRail.svelte';
+	import ToolOptionsBar from '@pencilpilot/paint/ToolOptionsBar.svelte';
+	import { ToolOptions } from '@pencilpilot/paint/tool-options.svelte.js';
 	import Swatches from '@pencilpilot/paint/Swatches.svelte';
 	import { onMount } from 'svelte';
 	import { warmGrader } from '#lib/grader.js';
@@ -10,22 +12,13 @@
 	import Button from '@pencilpilot/ui/Button.svelte';
 	import PaintCanvas, {
 		BLANK_STATUS,
-		type CanvasStatus,
-		type ImportResult
+		type CanvasStatus
 	} from '@pencilpilot/paint/PaintCanvas.svelte';
 	import LayersPanel from '@pencilpilot/paint/LayersPanel.svelte';
-	import ToneEditor from '@pencilpilot/paint/ToneEditor.svelte';
 	import BrushTexturePanel from '@pencilpilot/paint/BrushTexturePanel.svelte';
 	import QuickMenu, { type QuickAction } from '@pencilpilot/paint/QuickMenu.svelte';
 	import TimelapsePlayer from '@pencilpilot/paint/TimelapsePlayer.svelte';
 	import { brushTexture, onTextures, textureOn } from '@pencilpilot/paint/brush-textures';
-	import {
-		MAP_PRESETS,
-		NO_SPEC,
-		parseSpec,
-		specName,
-		type AdjustSpec
-	} from '@pencilpilot/paint/tone';
 	import CanvasSizePicker from '@pencilpilot/paint/CanvasSizePicker.svelte';
 	import RefViewer from '@pencilpilot/paint/RefViewer.svelte';
 	import HistoryPanel from '@pencilpilot/paint/HistoryPanel.svelte';
@@ -36,8 +29,6 @@
 		anyGuide,
 		defaultGuides,
 		gridLines as canvasGridLines,
-		SYMMETRY_MODES,
-		symmetryOn,
 		type GuideSettings
 	} from '@pencilpilot/paint/guides';
 	import TracePanel, {
@@ -153,21 +144,6 @@
 		| 'smudge'
 		| 'pen';
 	let tool = $state<Tool>('brush');
-	let gradientKind = $state<'linear' | 'radial'>('linear');
-	let importNote = $state('');
-	const importText = (r: ImportResult) =>
-		({
-			ok: '',
-			'too-many': 'You’ve reached the layer limit (32).',
-			unreadable: 'That file couldn’t be opened as a picture.',
-			busy: 'Finish what you’re doing first, then import again.',
-			'too-big': 'That picture is too big (30 MB at most).'
-		})[r];
-	/** a picture came in: place it right away (move / resize), as Procreate does */
-	function onImported(r: ImportResult) {
-		importNote = importText(r);
-		if (r === 'ok' && !timeUp) tool = 'transform';
-	}
 	// paste a picture (Ctrl+V) to import it as a layer
 	$effect(() => {
 		const onPaste = (e: ClipboardEvent) => {
@@ -176,24 +152,16 @@
 			const file = [...(e.clipboardData?.files ?? [])].find((f) => f.type.startsWith('image/'));
 			if (!file && canvas?.hasClip()) {
 				e.preventDefault();
-				return pasteCopied();
+				return toolOpts.pasteCopied();
 			}
 			if (!file || !canvas) return;
 			e.preventDefault();
-			void canvas.importImage(file, 'Pasted picture').then(onImported);
+			void canvas.importImage(file, 'Pasted picture').then((r) => toolOpts.imported(r));
 		};
 		window.addEventListener('paste', onPaste);
 		return () => window.removeEventListener('paste', onPaste);
 	});
-	let gradientEnd = $state<string>('transparent');
-	let gradientEndColor = $state('#3d6bff');
 
-	// ---- Adjust panel: live preview on the active layer, Apply or Cancel ----
-	const NO_ADJUST = { hue: 0, saturation: 0, brightness: 0, contrast: 0, blur: 0 };
-	let adjustOpen = $state(false);
-	let adjust = $state({ ...NO_ADJUST });
-	let recolour = $state(false);
-	let adjustMsg = $state('');
 	/** the quick menu's actions */
 	function quickActions(): QuickAction[] {
 		return [
@@ -244,139 +212,18 @@
 		];
 	}
 
-	/** From the Layers panel: change an adjustment layer (its id), or make a new one (0). */
-	function adjustmentLayer(id: number) {
-		if (adjustOpen) closeAdjust(false);
-		if (id) canvas?.selectLayer(id);
-		// the Adjust panel reads the active layer from the status: let it catch up
-		queueMicrotask(() => {
-			openAdjust();
-			if (!id && adjustOpen && !adjustLayer) setKeepEditable(true);
-		});
-	}
-
-	/** which part of the Adjust panel shows */
-	let adjustKind = $state<'colour' | 'curves' | 'levels' | 'map'>('colour');
-	/** curves, levels and gradient map (and, for adjustment layers, everything) */
-	let tone = $state<AdjustSpec>({ ...NO_SPEC });
-	/** an adjustment layer being made or changed (0: adjusting the layer's pixels) */
-	let adjustLayer = $state(0);
-	/** that layer is new (Cancel removes it) */
-	let adjustLayerNew = $state(false);
-	/** the layer's settings when the panel opened (Cancel goes back to them) */
-	let adjustLayerWas: AdjustSpec | null = null;
-	/** everything in the panel as one adjustment */
-	const specNow = (): AdjustSpec => ({
-		...tone,
-		hue: adjust.hue,
-		saturation: adjust.saturation,
-		brightness: adjust.brightness,
-		contrast: adjust.contrast
-	});
-	function openAdjust() {
-		if (adjustOpen) return closeAdjust(false);
-		adjust = { ...NO_ADJUST };
-		recolour = false;
-		tone = { ...NO_SPEC };
-		adjustMsg = '';
-		// an adjustment layer: change its settings
-		const activeLayer = status.layers.find((l) => l.id === status.active);
-		if (activeLayer?.adjust) {
-			const s = parseSpec(activeLayer.adjust);
-			tone = s;
-			adjust = {
-				...NO_ADJUST,
-				hue: s.hue,
-				saturation: s.saturation,
-				brightness: s.brightness,
-				contrast: s.contrast
-			};
-			adjustLayer = activeLayer.id;
-			adjustLayerNew = false;
-			adjustLayerWas = s;
-			adjustKind = s.map ? 'map' : s.curves ? 'curves' : s.levels ? 'levels' : 'colour';
-			tool = 'brush';
-			adjustOpen = true;
-			return;
-		}
-		adjustLayer = 0;
-		if (!canvas?.adjustBegin()) {
-			adjustMsg = 'This layer is locked or hidden, so it can’t be adjusted.';
-			return;
-		}
-		tool = 'brush';
-		adjustOpen = true;
-	}
-	function previewAdjust() {
-		if (adjustLayer) canvas?.adjustmentPreview(adjustLayer, specNow());
-		else
-			canvas?.adjustPreview({
-				...adjust,
-				recolour: recolour ? color : null,
-				curves: tone.curves,
-				levels: tone.levels,
-				map: tone.map
-			});
-	}
-	/** Switch between changing the pixels and a separate adjustment layer. */
-	function setKeepEditable(on: boolean) {
-		if (!canvas || on === !!adjustLayer) return;
-		if (on) {
-			canvas.adjustCancel();
-			const id = canvas.addAdjustmentLayer(specNow(), specName(specNow()));
-			if (!id) {
-				adjustMsg = 'There’s no room for another layer.';
-				canvas.adjustBegin();
-				return previewAdjust();
-			}
-			adjustLayer = id;
-			adjustLayerNew = true;
-			adjustLayerWas = null;
-		} else {
-			if (adjustLayerNew) canvas.undo();
-			adjustLayer = 0;
-			if (!canvas.adjustBegin()) {
-				adjustMsg = 'This layer is locked or hidden, so it can’t be adjusted.';
-				adjustOpen = false;
-				return;
-			}
-		}
-		previewAdjust();
-	}
-	function closeAdjust(keep: boolean) {
-		adjustOpen = false;
-		if (adjustLayer) {
-			const id = adjustLayer;
-			adjustLayer = 0;
-			if (adjustLayerNew) {
-				// one undo step for the finished layer: made again with its final settings
-				canvas?.undo();
-				if (keep) canvas?.addAdjustmentLayer(specNow(), specName(specNow()));
-			} else if (keep) canvas?.adjustmentCommit();
-			else if (adjustLayerWas) {
-				canvas?.adjustmentPreview(id, adjustLayerWas);
-				canvas?.adjustmentCommit();
-			}
-			return;
-		}
-		if (keep) canvas?.adjustCommit();
-		else canvas?.adjustCancel();
-	}
-	let guides = $state<GuideSettings>(defaultGuides(800, 600));
-	let guidesOpen = $state(false);
-	function setGuides(g: GuideSettings) {
-		guides = g;
-		remember('pp.guides', { w: canvasSize.width, h: canvasSize.height, g });
-	}
 	/** guides saved for another canvas size are scaled to this one */
 	function loadGuides() {
 		const saved = recall<{ w: number; h: number; g: GuideSettings } | null>('pp.guides', null);
 		const { width: w, height: h } = canvasSize;
-		if (!saved?.g) return void (guides = defaultGuides(w, h));
+		if (!saved?.g) {
+			toolOpts.guides = defaultGuides(w, h);
+			return;
+		}
 		const [kx, ky] = [w / saved.w, h / saved.h];
 		const sc = (p: [number, number]): [number, number] => [p[0] * kx, p[1] * ky];
 		const g = saved.g;
-		guides = {
+		toolOpts.guides = {
 			grid: { ...g.grid, size: Math.round(g.grid.size * Math.min(kx, ky)) },
 			perspective: { ...g.perspective, vps: g.perspective.vps.map(sc) },
 			ruler: { ...g.ruler, a: sc(g.ruler.a), b: sc(g.ruler.b) },
@@ -385,15 +232,6 @@
 	}
 	/** pen pressure and tilt on/off (remembered) */
 	let penPressure = $state(true);
-	let liquifySize = $state(60);
-	let liquifyStrength = $state(0.6);
-	let selectMode = $state<'replace' | 'add' | 'subtract' | 'intersect'>('replace');
-	/** magic wand: joined-up area only, or every similar colour (Color Range) */
-	let wandContiguous = $state(true);
-	let smudgeStrength = $state(0.6);
-	/** the pen tool's path: points and whether it's closed */
-	let penInfo = $state({ points: 0, closed: false });
-	let penTaper = $state(true);
 	/** a new, empty canvas (a new size from the picker, or a saved drawing): remounts it */
 	let canvasEpoch = $state(0);
 	/** the quick menu (right-click / long-press), at screen x, y */
@@ -407,23 +245,19 @@
 		const t = brushTexture(brushId);
 		return textureOn(t) ? t : null;
 	});
-	let wandTolerance = $state(0.15);
-	let fillTolerance = $state(0.12);
-	let fillAllLayers = $state(true);
-	/** fill: find shapes on this layer (a line-art "reference" layer); 0 = per fillAllLayers */
-	let fillRefLayer = $state(0);
 	/**
 	 * The canvas grid on the reference (the grid method): the same lines, placed
 	 * where the reference sits when it's fitted inside the canvas (as the grader
 	 * fits it), in fractions of the picture.
 	 */
 	const refGrid = $derived.by((): [number, number, number, number][] | null => {
-		if (!reference || !guides.grid.on || !reference.width || !reference.height) return null;
+		if (!reference || !toolOpts.guides.grid.on || !reference.width || !reference.height)
+			return null;
 		const { width: W, height: H } = canvasSize;
 		const k = Math.min(W / reference.width, H / reference.height);
 		const [w, h] = [reference.width * k, reference.height * k];
 		const [x0, y0] = [(W - w) / 2, (H - h) / 2];
-		return canvasGridLines(guides, W, H).map(([a, b, c, d]) => [
+		return canvasGridLines(toolOpts.guides, W, H).map(([a, b, c, d]) => [
 			(a - x0) / w,
 			(b - y0) / h,
 			(c - x0) / w,
@@ -432,15 +266,9 @@
 	});
 	/** grayscale view of the canvas and the reference (values only) */
 	let grayView = $state(false);
-	/** transform: corners move on their own (distort / perspective) */
-	let distort = $state(false);
-	/** transform: bend with a 4×4 grid (warp) */
-	let warp = $state(false);
 	/** notan (2 or 3 flat tones) and squint (blur) views, on the canvas and the reference */
 	let notan = $state<0 | 2 | 3>(0);
 	let squint = $state(false);
-	/** feathering the selection: how soft its edge gets (canvas px) */
-	let featherPx = $state(16);
 	/** a unit and an angle marked on the reference (fractions of the picture) */
 	type Mark = [[number, number], [number, number]];
 	let refUnit = $state<Mark | null>(null);
@@ -506,14 +334,6 @@
 		}
 	}
 
-	/** Ctrl+C / Ctrl+X / Ctrl+J: copy, cut, or copy to a new layer, then move it with Transform */
-	function copyCut(cut: boolean) {
-		if (canvas?.copySelection(cut)) importNote = '';
-	}
-	function pasteCopied() {
-		if (canvas?.paste()) tool = 'transform';
-	}
-	let quickShape = $state(true);
 	let shapeNote = $state('');
 	let shapeTimer: ReturnType<typeof setTimeout> | undefined;
 	function onTransformEnd(r: 'done' | 'cancelled' | 'empty') {
@@ -661,10 +481,6 @@
 	let opacity = $state(1);
 	let color = $state('#16161a');
 	let status = $state<CanvasStatus>(BLANK_STATUS);
-	/** a fill reference layer that was deleted stops counting */
-	const fillReference = $derived(
-		status.layers.some((l) => l.id === fillRefLayer) ? fillRefLayer : 0
-	);
 	let canvasSize = $state<CanvasSize>({ width: 800, height: 600 });
 	function pickSize(next: CanvasSize) {
 		canvasEpoch++;
@@ -779,6 +595,17 @@
 	}
 	const activeLayerName = $derived(status.layers.find((l) => l.id === status.active)?.name ?? '');
 	let canvas: ReturnType<typeof PaintCanvas> | undefined = $state();
+	/** the tools' own settings and the Adjust panel (shared with the app) */
+	const toolOpts = new ToolOptions({
+		canvas: () => canvas,
+		status: () => status,
+		color: () => color,
+		setTool: (t: string) => {
+			if (!timeUp) tool = t as Tool;
+		},
+		onguides: (g: GuideSettings) =>
+			remember('pp.guides', { w: canvasSize.width, h: canvasSize.height, g })
+	});
 	let seconds = $state(0);
 	let timerOn = $state(true);
 
@@ -882,7 +709,7 @@
 		setSplit(Number(recall('pp.refSplit', 0.4)) || 0.4);
 		floatBox = recall('pp.refFloat', floatBox);
 		smoothing = recall('pp.smoothing', 0);
-		quickShape = recall('pp.quickShape', true);
+		toolOpts.quickShape = recall('pp.quickShape', true);
 		penPressure = recall('pp.penPressure', true);
 		loadGuides();
 		loadManifest().then((m) => (manifest = m));
@@ -916,12 +743,12 @@
 			e.preventDefault();
 			if (e.shiftKey) canvas?.redo();
 			else {
-				if (adjustOpen) closeAdjust(false);
+				if (toolOpts.adjustOpen) toolOpts.closeAdjust(false);
 				canvas?.undo();
 			}
 		} else if (mod && k === 'y') {
 			e.preventDefault();
-			if (adjustOpen) closeAdjust(false);
+			if (toolOpts.adjustOpen) toolOpts.closeAdjust(false);
 			canvas?.redo();
 		} else if (!mod && k === 'b') {
 			eraser = false;
@@ -936,17 +763,17 @@
 		else if (!mod && k === 's') tool = tool === 'smudge' ? 'brush' : 'smudge';
 		else if (!mod && k === 'p') tool = tool === 'pen' ? 'brush' : 'pen';
 		else if (tool === 'pen' && e.key === 'Enter') {
-			if (canvas?.penStroke(penTaper)) canvas.penClear();
+			if (canvas?.penStroke(toolOpts.penTaper)) canvas.penClear();
 		} else if (tool === 'pen' && e.key === 'Escape') canvas?.penClear();
 		else if (tool === 'pen' && !mod && e.key === 'Backspace') {
 			e.preventDefault();
 			canvas?.penBack();
 		} else if (mod && (k === 'c' || k === 'x') && !e.shiftKey) {
 			e.preventDefault();
-			copyCut(k === 'x');
+			toolOpts.copyCut(k === 'x');
 		} else if (mod && k === 'j') {
 			e.preventDefault();
-			if (canvas?.copySelection(false)) pasteCopied();
+			if (canvas?.copySelection(false)) toolOpts.pasteCopied();
 		} else if (!mod && k === 'v') tool = tool === 'transform' ? 'brush' : 'transform';
 		else if (!mod && k === 'k') tool = tool === 'liquify' ? 'brush' : 'liquify';
 		else if (tool === 'transform' && e.key === 'Enter') canvas?.transformCommit();
@@ -1294,7 +1121,7 @@
 				title="Undo (Ctrl+Z)"
 				disabled={!status.canUndo}
 				onclick={() => {
-					if (adjustOpen) closeAdjust(false);
+					if (toolOpts.adjustOpen) toolOpts.closeAdjust(false);
 					canvas?.undo();
 				}}
 			>
@@ -1449,7 +1276,14 @@
 		{/if}
 	{/snippet}
 	{#snippet rail()}
-		<ToolRail bind:tool bind:eraser bind:size bind:opacity {adjustOpen} onadjust={openAdjust} />
+		<ToolRail
+			bind:tool
+			bind:eraser
+			bind:size
+			bind:opacity
+			adjustOpen={toolOpts.adjustOpen}
+			onadjust={() => toolOpts.openAdjust()}
+		/>
 	{/snippet}
 	{#snippet options()}
 		<span class="brush-name">{brushName}</span>
@@ -1473,10 +1307,10 @@
 		<button
 			type="button"
 			class="tool"
-			aria-pressed={anyGuide(guides)}
-			aria-expanded={guidesOpen}
+			aria-pressed={anyGuide(toolOpts.guides)}
+			aria-expanded={toolOpts.guidesOpen}
 			title="Guides: grid, perspective and ruler"
-			onclick={() => (guidesOpen = !guidesOpen)}
+			onclick={() => (toolOpts.guidesOpen = !toolOpts.guidesOpen)}
 		>
 			Guides
 		</button>
@@ -1495,11 +1329,11 @@
 		<button
 			type="button"
 			class="tool"
-			aria-pressed={quickShape}
+			aria-pressed={toolOpts.quickShape}
 			title="QuickShape: hold at the end of a stroke to snap it to a line, circle or rectangle"
 			onclick={() => {
-				quickShape = !quickShape;
-				remember('pp.quickShape', quickShape);
+				toolOpts.quickShape = !toolOpts.quickShape;
+				remember('pp.quickShape', toolOpts.quickShape);
 			}}
 		>
 			QuickShape
@@ -1522,492 +1356,7 @@
 		</button>
 	{/snippet}
 	{#snippet context()}
-		{#if guidesOpen}
-			<div class="fill-opts guides-opts" role="group" aria-label="Guides">
-				<span class="opt-label">Grid</span>
-				<div class="seg" role="radiogroup" aria-label="Grid">
-					{#each [['off', 'Off'], ['square', 'Square'], ['isometric', 'Isometric']] as [id, label] (id)}
-						<button
-							type="button"
-							class="tool"
-							role="radio"
-							aria-checked={id === 'off'
-								? !guides.grid.on
-								: guides.grid.on && guides.grid.kind === id}
-							onclick={() =>
-								setGuides({
-									...guides,
-									grid:
-										id === 'off'
-											? { ...guides.grid, on: false }
-											: { ...guides.grid, on: true, kind: id as 'square' | 'isometric' }
-								})}
-						>
-							{label}
-						</button>
-					{/each}
-				</div>
-				{#if guides.grid.on}
-					<label class="slider">
-						<span>Grid size <b>{guides.grid.size}</b></span>
-						<input
-							type="range"
-							min="10"
-							max="300"
-							step="2"
-							value={guides.grid.size}
-							oninput={(e) =>
-								setGuides({
-									...guides,
-									grid: { ...guides.grid, size: +e.currentTarget.value }
-								})}
-						/>
-					</label>
-				{/if}
-				<span class="opt-label">Perspective</span>
-				<div class="seg" role="radiogroup" aria-label="Perspective">
-					{#each [0, 1, 2, 3] as n (n)}
-						<button
-							type="button"
-							class="tool"
-							role="radio"
-							aria-checked={guides.perspective.points === n}
-							onclick={() =>
-								setGuides({
-									...guides,
-									perspective: { ...guides.perspective, points: n as 0 | 1 | 2 | 3 }
-								})}
-						>
-							{n ? `${n}-point` : 'Off'}
-						</button>
-					{/each}
-				</div>
-				{#if guides.perspective.points}
-					<button
-						type="button"
-						class="tool"
-						aria-pressed={guides.perspective.assist}
-						title="Assist: lines snap to the perspective directions"
-						onclick={() =>
-							setGuides({
-								...guides,
-								perspective: { ...guides.perspective, assist: !guides.perspective.assist }
-							})}
-					>
-						Assist
-					</button>
-				{/if}
-				<button
-					type="button"
-					class="tool"
-					aria-pressed={guides.ruler.on}
-					title="Ruler: strokes started next to it run straight along it"
-					onclick={() => setGuides({ ...guides, ruler: { ...guides.ruler, on: !guides.ruler.on } })}
-				>
-					Ruler
-				</button>
-				<span class="opt-label">Symmetry</span>
-				<div class="seg" role="radiogroup" aria-label="Symmetry">
-					{#each SYMMETRY_MODES as m (m)}
-						<button
-							type="button"
-							class="tool"
-							role="radio"
-							aria-checked={guides.symmetry.mode === m}
-							onclick={() => setGuides({ ...guides, symmetry: { ...guides.symmetry, mode: m } })}
-						>
-							{m === 'off' ? 'Off' : m[0].toUpperCase() + m.slice(1)}
-						</button>
-					{/each}
-				</div>
-				{#if guides.symmetry.mode === 'radial'}
-					<label class="slider">
-						<span>Copies <b>{guides.symmetry.n}</b></span>
-						<input
-							type="range"
-							min="2"
-							max="24"
-							step="1"
-							value={guides.symmetry.n}
-							oninput={(e) =>
-								setGuides({
-									...guides,
-									symmetry: { ...guides.symmetry, n: +e.currentTarget.value }
-								})}
-						/>
-					</label>
-				{/if}
-				{#if guides.perspective.points || guides.ruler.on || symmetryOn(guides)}
-					<button
-						type="button"
-						class="tool"
-						aria-pressed={tool === 'guides'}
-						title="Drag vanishing points and the ruler"
-						onclick={() => (tool = tool === 'guides' ? 'brush' : 'guides')}
-					>
-						Move guides
-					</button>
-				{/if}
-			</div>
-		{/if}
-		{#if adjustMsg}<p class="adjust-msg" role="alert">{adjustMsg}</p>{/if}
-		{#if importNote}<p class="adjust-msg" role="alert">{importNote}</p>{/if}
-		{#if adjustOpen}
-			<div class="fill-opts adjust-opts" role="group" aria-label="Adjust layer">
-				<div class="seg" role="radiogroup" aria-label="Adjustment">
-					{#each [['colour', 'Colour'], ['curves', 'Curves'], ['levels', 'Levels'], ['map', 'Gradient map']] as [id, label] (id)}
-						<button
-							type="button"
-							class="tool"
-							role="radio"
-							aria-checked={adjustKind === id}
-							onclick={() => {
-								adjustKind = id as typeof adjustKind;
-								if (id === 'map' && !tone.map) {
-									tone = { ...tone, map: MAP_PRESETS[0].stops };
-									previewAdjust();
-								}
-							}}
-						>
-							{label}
-						</button>
-					{/each}
-				</div>
-				{#if adjustKind === 'colour'}
-					{#each [['hue', 'Hue', -180, 180, 1, '°'], ['saturation', 'Saturation', -100, 100, 1, '%'], ['brightness', 'Brightness', -100, 100, 1, '%'], ['contrast', 'Contrast', -100, 100, 1, '%'], ['blur', 'Blur', 0, 40, 1, ' px']] as [key, label, min, max, st, u] (key)}
-						{@const k = key as keyof typeof adjust}
-						{@const scale = k === 'hue' || k === 'blur' ? 1 : 100}
-						{#if !(k === 'blur' && adjustLayer)}
-							<label class="slider">
-								<span>{label} <b>{Math.round(adjust[k] * scale)}{u}</b></span>
-								<input
-									type="range"
-									{min}
-									{max}
-									step={st}
-									value={Math.round(adjust[k] * scale)}
-									oninput={(e) => {
-										adjust = { ...adjust, [k]: +e.currentTarget.value / scale };
-										previewAdjust();
-									}}
-								/>
-							</label>
-						{/if}
-					{/each}
-					{#if !adjustLayer}
-						<button
-							type="button"
-							class="tool"
-							aria-pressed={recolour}
-							title="Paint the whole layer in the current colour (keeps its shading by transparency)"
-							onclick={() => {
-								recolour = !recolour;
-								previewAdjust();
-							}}
-						>
-							Recolour
-						</button>
-					{/if}
-				{:else}
-					<ToneEditor kind={adjustKind} bind:spec={tone} onchange={previewAdjust} />
-				{/if}
-				{#if adjustLayerNew || !adjustLayer}
-					<button
-						type="button"
-						class="tool"
-						aria-pressed={!!adjustLayer}
-						title="Keep editable: put the change on its own adjustment layer, which changes everything below it and can be changed or hidden later"
-						onclick={() => setKeepEditable(!adjustLayer)}
-					>
-						Keep editable
-					</button>
-				{/if}
-				<button type="button" class="tool done" onclick={() => closeAdjust(true)}>Apply</button>
-				<button type="button" class="tool" onclick={() => closeAdjust(false)}>Cancel</button>
-			</div>
-		{/if}
-		{#if tool === 'gradient'}
-			<div class="fill-opts" role="group" aria-label="Gradient">
-				<div class="seg" role="radiogroup" aria-label="Gradient shape">
-					{#each [['linear', 'Straight'], ['radial', 'Round']] as [id, label] (id)}
-						<button
-							type="button"
-							class="tool"
-							role="radio"
-							aria-checked={gradientKind === id}
-							onclick={() => (gradientKind = id as 'linear' | 'radial')}
-						>
-							{label}
-						</button>
-					{/each}
-				</div>
-				<div class="seg" role="radiogroup" aria-label="Gradient end">
-					<button
-						type="button"
-						class="tool"
-						role="radio"
-						aria-checked={gradientEnd === 'transparent'}
-						onclick={() => (gradientEnd = 'transparent')}
-					>
-						To transparent
-					</button>
-					<button
-						type="button"
-						class="tool"
-						role="radio"
-						aria-checked={gradientEnd !== 'transparent'}
-						onclick={() => (gradientEnd = 'colour')}
-					>
-						To a colour
-					</button>
-				</div>
-				{#if gradientEnd !== 'transparent'}
-					<label class="end-colour">
-						<input type="color" bind:value={gradientEndColor} aria-label="End colour" />
-					</label>
-				{/if}
-				<span class="opt-label">Drag across the canvas</span>
-			</div>
-		{/if}
-		{#if tool === 'liquify'}
-			<div class="fill-opts" role="group" aria-label="Liquify">
-				<label class="slider">
-					<span>Size <b>{liquifySize}</b></span>
-					<input type="range" min="10" max="200" step="2" bind:value={liquifySize} />
-				</label>
-				<label class="slider">
-					<span>Strength <b>{Math.round(liquifyStrength * 100)}%</b></span>
-					<input type="range" min="0.1" max="1" step="0.05" bind:value={liquifyStrength} />
-				</label>
-			</div>
-		{/if}
-		{#if tool === 'transform'}
-			<div class="fill-opts" role="group" aria-label="Transform">
-				<button
-					type="button"
-					class="tool"
-					aria-pressed={distort}
-					title="Distort: drag each corner on its own (perspective, skew). Or hold Ctrl and drag a corner."
-					onclick={() => {
-						distort = !distort;
-						if (distort) warp = false;
-					}}
-				>
-					Distort
-				</button>
-				<button
-					type="button"
-					class="tool"
-					aria-pressed={warp}
-					title="Warp: bend it with a grid of 16 points"
-					onclick={() => {
-						warp = !warp;
-						if (warp) distort = false;
-					}}
-				>
-					Warp
-				</button>
-				<button type="button" class="tool" onclick={() => canvas?.transformFlip('x')}>
-					Flip ↔
-				</button>
-				<button type="button" class="tool" onclick={() => canvas?.transformFlip('y')}>
-					Flip ↕
-				</button>
-				<button type="button" class="tool" onclick={() => canvas?.transformRotate(90)}>
-					Rotate 90°
-				</button>
-				<button type="button" class="tool" onclick={() => canvas?.transformReset()}> Reset </button>
-				<button type="button" class="tool done" onclick={() => canvas?.transformCommit()}>
-					Done
-				</button>
-				<button type="button" class="tool" onclick={() => canvas?.transformCancel()}>
-					Cancel
-				</button>
-			</div>
-		{/if}
-		{#if tool.startsWith('select') || status.selection}
-			<div class="fill-opts" role="group" aria-label="Selection">
-				{#if tool.startsWith('select')}
-					<div class="seg" role="radiogroup" aria-label="Selection mode">
-						{#each [['replace', 'New'], ['add', 'Add'], ['subtract', 'Subtract'], ['intersect', 'Intersect']] as [id, label] (id)}
-							<button
-								type="button"
-								class="tool"
-								role="radio"
-								aria-checked={selectMode === id}
-								onclick={() => (selectMode = id as typeof selectMode)}
-							>
-								{label}
-							</button>
-						{/each}
-					</div>
-				{/if}
-				{#if tool === 'select-wand'}
-					<label class="slider">
-						<span>Tolerance <b>{Math.round(wandTolerance * 100)}%</b></span>
-						<input type="range" min="0" max="0.6" step="0.02" bind:value={wandTolerance} />
-					</label>
-					<button
-						type="button"
-						class="tool"
-						aria-pressed={!wandContiguous}
-						title="Colour range: every pixel of a similar colour, joined up or not"
-						onclick={() => (wandContiguous = !wandContiguous)}
-					>
-						Colour range
-					</button>
-				{/if}
-				<button type="button" class="tool" onclick={() => canvas?.selectAll()}>All</button>
-				<button type="button" class="tool" title="Copy (Ctrl+C)" onclick={() => copyCut(false)}>
-					Copy
-				</button>
-				<button type="button" class="tool" title="Cut (Ctrl+X)" onclick={() => copyCut(true)}>
-					Cut
-				</button>
-				<button
-					type="button"
-					class="tool"
-					title="Paste as a new layer, then move it (Ctrl+V)"
-					onclick={pasteCopied}
-				>
-					Paste
-				</button>
-				{#if status.selection}
-					<label class="slider">
-						<span>Feather <b>{featherPx}px</b></span>
-						<input type="range" min="2" max="80" step="1" bind:value={featherPx} />
-					</label>
-					<button
-						type="button"
-						class="tool"
-						title="Soften the selection's edge, for gentle shading inside it"
-						onclick={() => canvas?.featherSelection(featherPx)}
-					>
-						Feather
-					</button>
-					<button type="button" class="tool" onclick={() => canvas?.deselect()}>None</button>
-					<button type="button" class="tool" onclick={() => canvas?.invertSelection()}>
-						Invert
-					</button>
-					<button type="button" class="tool" onclick={() => canvas?.clear()}>
-						Clear selected
-					</button>
-				{/if}
-			</div>
-		{/if}
-		{#if tool === 'fill'}
-			<div class="fill-opts" role="group" aria-label="Fill options">
-				<label class="slider">
-					<span>Tolerance <b>{Math.round(fillTolerance * 100)}%</b></span>
-					<input type="range" min="0" max="0.6" step="0.02" bind:value={fillTolerance} />
-				</label>
-				<button
-					type="button"
-					class="tool"
-					aria-pressed={fillAllLayers}
-					title="Fill what you see (all layers) or only this layer's own pixels"
-					onclick={() => (fillAllLayers = !fillAllLayers)}
-					disabled={!!fillReference}
-				>
-					{fillAllLayers ? 'Sample: all layers' : 'Sample: this layer'}
-				</button>
-				<label class="ref-layer">
-					<span>Lines from</span>
-					<select
-						bind:value={fillRefLayer}
-						title="Fill inside the lines of a line-art layer while you colour on another layer"
-					>
-						<option value={0}>{fillAllLayers ? 'What you see' : 'This layer'}</option>
-						{#each [...status.layers].reverse() as l (l.id)}
-							<option value={l.id}>Reference: {l.name}</option>
-						{/each}
-					</select>
-				</label>
-			</div>
-		{/if}
-		{#if tool === 'smudge'}
-			<div class="fill-opts" role="group" aria-label="Smudge">
-				<label class="slider">
-					<span>Strength <b>{Math.round(smudgeStrength * 100)}%</b></span>
-					<input type="range" min="0" max="1" step="0.05" bind:value={smudgeStrength} />
-				</label>
-				<span class="adjust-msg plain">Smudges with the shape of the brush you picked.</span>
-			</div>
-		{/if}
-		{#if tool === 'pen'}
-			<div class="fill-opts" role="group" aria-label="Pen path">
-				<span class="adjust-msg plain">
-					{penInfo.points === 0
-						? 'Click for corners, drag for curves. Click the first point to close the shape.'
-						: `${penInfo.points} point${penInfo.points === 1 ? '' : 's'}${penInfo.closed ? ', closed' : ''}. Drag points or handles to change it (Alt breaks a handle).`}
-				</span>
-				<button
-					type="button"
-					class="tool"
-					aria-pressed={penTaper}
-					title="Thinner at the ends, like a hand-drawn line"
-					onclick={() => (penTaper = !penTaper)}
-				>
-					Taper
-				</button>
-				<button
-					type="button"
-					class="tool done"
-					disabled={penInfo.points < 2}
-					title="Draw along the path with the current brush (Enter)"
-					onclick={() => {
-						if (canvas?.penStroke(penTaper)) canvas.penClear();
-					}}
-				>
-					Draw line
-				</button>
-				<button
-					type="button"
-					class="tool"
-					disabled={penInfo.points < 3}
-					title="Fill inside the path with the colour"
-					onclick={() => {
-						if (canvas?.penFill()) canvas.penClear();
-					}}
-				>
-					Fill
-				</button>
-				<button
-					type="button"
-					class="tool"
-					disabled={!penInfo.points}
-					title="Take back the last point (Backspace)"
-					onclick={() => canvas?.penBack()}
-				>
-					Back
-				</button>
-				<button
-					type="button"
-					class="tool"
-					disabled={!penInfo.points}
-					onclick={() => canvas?.penClear()}
-				>
-					Clear
-				</button>
-			</div>
-		{/if}
-		{#if tool === 'measure'}
-			<div class="fill-opts" role="group" aria-label="Measure">
-				<span class="adjust-msg plain">
-					{measureUnit
-						? 'Drag across your drawing: the ticks are your unit from the reference.'
-						: 'Drag to measure in pixels. Mark a unit on the reference (the ruler button under it) to measure in units.'}
-				</span>
-			</div>
-		{/if}
-		{#if tool === 'lasso-fill'}
-			<div class="fill-opts" role="group" aria-label="Lasso fill">
-				<span class="adjust-msg plain">
-					Draw a shape: it fills with the colour when you let go. Great for blocking in big shapes
-					and shadows.
-				</span>
-			</div>
-		{/if}
+		<ToolOptionsBar opts={toolOpts} bind:tool {status} {canvas} {measureUnit} />
 		{#if tracing && traceBarOpen}
 			<TracePanel
 				bind:trace
@@ -2103,45 +1452,45 @@
 						{tool}
 						{smoothing}
 						onpick={picked}
-						{fillTolerance}
-						{fillAllLayers}
-						{fillReference}
 						bind:grayView
-						{distort}
-						{warp}
 						bind:notan
 						bind:squint
 						{measureUnit}
 						{angleGuide}
 						onsize={(v) => (size = v)}
-						{quickShape}
 						onshape={onShape}
-						{selectMode}
-						{wandTolerance}
 						ontransformend={onTransformEnd}
-						{liquifySize}
-						{liquifyStrength}
 						allowImport
-						onimport={onImported}
-						{smudgeStrength}
 						brushTexture={currentTexture}
-						{wandContiguous}
 						oncanvassize={(s) => {
 							canvasSize = s;
 							saveSize(s);
 						}}
 						onquickmenu={(x, y) => (quickMenu = { x, y })}
-						onpenpath={(p) => (penInfo = p)}
-						{gradientKind}
-						gradientEnd={gradientEnd === 'transparent' ? 'transparent' : gradientEndColor}
 						{penPressure}
-						{guides}
-						onguides={setGuides}
 						overlaySrc={traceSrc}
 						overlayOpacity={trace.opacity}
 						overlayTransform={trace}
 						adjustOverlay={trace.adjusting}
 						onoverlaymove={(dx, dy) => (trace = { ...trace, x: trace.x + dx, y: trace.y + dy })}
+						fillTolerance={toolOpts.fillTolerance}
+						fillAllLayers={toolOpts.fillAllLayers}
+						fillReference={toolOpts.fillReference}
+						distort={toolOpts.distort}
+						warp={toolOpts.warp}
+						quickShape={toolOpts.quickShape}
+						selectMode={toolOpts.selectMode}
+						wandTolerance={toolOpts.wandTolerance}
+						wandContiguous={toolOpts.wandContiguous}
+						liquifySize={toolOpts.liquifySize}
+						liquifyStrength={toolOpts.liquifyStrength}
+						smudgeStrength={toolOpts.smudgeStrength}
+						gradientKind={toolOpts.gradientKind}
+						gradientEnd={toolOpts.gradientEndValue}
+						guides={toolOpts.guides}
+						onguides={toolOpts.onguides}
+						onpenpath={toolOpts.onpenpath}
+						onimport={toolOpts.onimport}
 						onchange={(s) => (status = s)}
 						onblocked={onBlocked}
 						locked={timeUp}
@@ -2310,7 +1659,11 @@
 	{#snippet panel(t: string)}
 		{#if t === 'layers'}
 			<section aria-label="Layers">
-				<LayersPanel {status} controls={canvas} onadjustment={adjustmentLayer} />
+				<LayersPanel
+					{status}
+					controls={canvas}
+					onadjustment={(id) => toolOpts.adjustmentLayer(id)}
+				/>
 			</section>
 		{:else if t === 'brushes'}
 			<section aria-label="Brushes">
@@ -2553,18 +1906,6 @@
 		font-weight: 600;
 		color: var(--pp-ink-2);
 	}
-	.tool.done {
-		background: var(--pp-accent-strong);
-		color: #fff;
-	}
-	.seg {
-		display: flex;
-		gap: 2px;
-	}
-	.tool[role='radio'][aria-checked='true'] {
-		background: var(--pp-accent-strong);
-		color: #fff;
-	}
 	.check-wrap {
 		position: relative;
 	}
@@ -2612,66 +1953,7 @@
 		font: 600 13px var(--pp-font-body);
 		cursor: pointer;
 	}
-	.ref-layer {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		font-size: 13px;
-		font-weight: 600;
-		color: var(--pp-on-ink);
-	}
-	.ref-layer select {
-		height: 38px;
-		max-width: 220px;
-		padding: 0 10px;
-		border: 0;
-		border-radius: 12px;
-		background: #2a2a30;
-		color: var(--pp-on-ink);
-		font: 600 14px var(--pp-font-body);
-	}
-	.adjust-msg.plain {
-		color: var(--pp-on-ink);
-		font-weight: 500;
-	}
-	.adjust-msg {
-		margin: 0;
-		color: #ffd6cc;
-		font-weight: 600;
-		font-size: 14px;
-	}
-	.end-colour input {
-		width: 44px;
-		height: 36px;
-		padding: 0;
-		border: 0;
-		border-radius: 10px;
-		background: transparent;
-		cursor: pointer;
-	}
-	.opt-label {
-		font-size: 13px;
-		font-weight: 600;
-		color: rgba(255, 255, 255, 0.75);
-	}
-	/* tool options: always one compact row (scrolls sideways when the window is narrow) */
-	.fill-opts {
-		display: flex;
-		flex-wrap: nowrap;
-		align-items: center;
-		gap: 8px 12px;
-		min-width: 0;
-		overflow-x: auto;
-		scrollbar-width: thin;
-	}
-	.fill-opts > * {
-		flex: none;
-	}
-	.fill-opts .slider {
-		flex: none;
-		width: 130px;
-		min-width: 0;
-	}
+
 	.sketch-note {
 		flex: none;
 		margin: 0;
