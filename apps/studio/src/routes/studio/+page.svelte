@@ -272,6 +272,22 @@
 		pinned = pinned.includes(frame) ? pinned.filter((f) => f !== frame) : [...pinned, frame];
 	}
 
+	// ---- frame tools: drawings copied and boiled are new, so the store gets them ----
+	const frameDrawings = {
+		ensure: (ids: number[]) => cache.ensure(ids),
+		copy: (d: number) => {
+			const id = canvas?.copyDrawing(d) ?? 0;
+			cache.touch([id]);
+			return id;
+		},
+		// (the strength is for a 1080-pixel-high canvas: bigger canvases move further)
+		boil: (d: number, amount: number, seed: number) => {
+			const id = canvas?.boilDrawing(d, (amount * canvasSize.height) / 1080, seed) ?? 0;
+			cache.touch([id]);
+			return id;
+		}
+	};
+
 	// ---- the cut's camera: what the cut shows of the canvas ----
 	/** show the camera frame over the canvas, and its safe areas */
 	let cameraView = $state(cleanCameraView(readLocal('pp.app.camera', null)));
@@ -951,6 +967,9 @@
 		else if (action === 'prev-frame') timelinePanel?.step(-1);
 		else if (action === 'next-frame') timelinePanel?.step(1);
 		else if (action === 'new-drawing') timelinePanel?.addDrawing();
+		else if (action === 'copy-frames') timelinePanel?.copyRange();
+		else if (action === 'paste-frames') timelinePanel?.pasteRange();
+		else if (action === 'duplicate-frames') void timelinePanel?.duplicateRange();
 		else if (action === 'play') void togglePlay();
 		else if (action === 'set-in') setRange('from');
 		else if (action === 'set-out') setRange('to');
@@ -1218,6 +1237,7 @@
 					layers={status.layers}
 					active={status.active}
 					newDrawing={() => canvas?.newDrawing() ?? 0}
+					drawings={frameDrawings}
 					onlayer={(id) => canvas?.selectLayer(id)}
 					onedit={(changed) => {
 						if (playing) stopPlay();
