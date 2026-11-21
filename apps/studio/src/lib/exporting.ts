@@ -212,3 +212,103 @@ export function placeCamera(cam: Camera, out: { width: number; height: number })
 /** The camera of each cut a plan uses. */
 export const cameraFor = (cut: Cut, canvas: { width: number; height: number }) =>
 	cameraOf(cut, canvas);
+
+// ---- transitions between cuts (the house style: hard cuts, one white flash, a dissolve) ----
+
+/** How a cut goes into the next one (none: a hard cut). */
+export type Transition = 'flash' | 'dissolve';
+export const TRANSITIONS: { id: Transition | ''; label: string; note: string }[] = [
+	{ id: '', label: 'Cut', note: 'A hard cut' },
+	{
+		id: 'flash',
+		label: 'White flash',
+		note: 'The shot darkens over 3 frames, one white frame, the next settles in over 2'
+	},
+	{ id: 'dissolve', label: 'Dissolve', note: 'An eased half-second blend into the next shot' }
+];
+
+/** The flash: the outgoing shot's brightness on its last 3 frames, then white landing on the next. */
+export const FLASH_DIM = [0.88, 0.76, 0.65];
+export const FLASH_WHITE = [1, 0.55, 0.2];
+/** The dissolve's length (seconds). */
+export const DISSOLVE_SECONDS = 0.5;
+
+/** An output frame: a run's picture, maybe darkened, whitened or blended with another's. */
+export interface OutFrame {
+	run: number;
+	/** brightness (1: as drawn) */
+	dim?: number;
+	/** white over it (0–1) */
+	white?: number;
+	/** another run's picture over it, at `alpha` */
+	over?: { run: number; alpha: number };
+}
+
+/** Smooth in and out (0 → 1). */
+const sCurve = (x: number) => {
+	const t = Math.min(1, Math.max(0, x));
+	return t * t * (3 - 2 * t);
+};
+
+/**
+ * Every output frame of a plan, with the transitions between its cuts laid over them
+ * (in place: the film keeps its length and its cuts stay where they are). `transitionOf`
+ * says how a cut goes into the next.
+ */
+export function outputFrames(
+	runs: Run[],
+	transitionOf: (s: Source) => Transition | undefined,
+	outFps: number
+): OutFrame[] {
+	const out: OutFrame[] = [];
+	const cutStarts: number[] = [];
+	runs.forEach((r, i) => {
+		const prev = runs[i - 1];
+		if (prev && (prev.source.scene !== r.source.scene || prev.source.cut !== r.source.cut))
+			cutStarts.push(out.length);
+		for (let k = 0; k < r.repeat; k++) out.push({ run: i });
+	});
+	for (const b of cutStarts) {
+		const kind = transitionOf(runs[out[b - 1].run].source);
+		if (kind === 'flash') {
+			FLASH_DIM.forEach((d, k) => {
+				const f = out[b - FLASH_DIM.length + k];
+				if (f && b - FLASH_DIM.length + k >= 0) f.dim = d;
+			});
+			FLASH_WHITE.forEach((w, k) => {
+				const f = out[b + k];
+				if (f) f.white = w;
+			});
+		} else if (kind === 'dissolve') {
+			const n = Math.max(2, Math.round(DISSOLVE_SECONDS * outFps));
+			const from = b - Math.floor(n / 2);
+			const lastA = out[b - 1].run;
+			const firstB = out[b].run;
+			for (let t = Math.max(0, from); t < Math.min(out.length, from + n); t++) {
+				const alpha = sCurve((t - from + 0.5) / n);
+				out[t] = {
+					run: t < b ? out[t].run : lastA,
+					over: { run: t >= b ? out[t].run : firstB, alpha }
+				};
+			}
+		}
+	}
+	return out;
+}
+
+/** Output frames with their neighbours that are the same joined: [frame, repeat]. */
+export function joinFrames(frames: OutFrame[]): [OutFrame, number][] {
+	const out: [OutFrame, number][] = [];
+	const same = (a: OutFrame, b: OutFrame) =>
+		a.run === b.run &&
+		a.dim === b.dim &&
+		a.white === b.white &&
+		a.over?.run === b.over?.run &&
+		a.over?.alpha === b.over?.alpha;
+	for (const f of frames) {
+		const last = out.at(-1);
+		if (last && same(last[0], f)) last[1]++;
+		else out.push([f, 1]);
+	}
+	return out;
+}

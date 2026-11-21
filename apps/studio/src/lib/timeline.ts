@@ -41,6 +41,8 @@ export interface Cut {
 	/** exposure-sheet notes, frame → text: what happens (action) and what's said (dialogue) */
 	action?: Record<number, string>;
 	dialogue?: Record<number, string>;
+	/** how it goes into the next cut (none: a hard cut) */
+	transition?: 'flash' | 'dissolve';
 }
 
 export interface Scene {
@@ -501,6 +503,7 @@ export interface FileCut {
 	camera?: Camera;
 	action?: Record<string, string>;
 	dialogue?: Record<string, string>;
+	transition?: string;
 }
 export interface FileScene {
 	name: string;
@@ -530,6 +533,7 @@ export function toFile(tl: Timeline, layers: number[]): FileScene[] {
 			...(c.camera ? { camera: { ...c.camera } } : {}),
 			...(c.action && Object.keys(c.action).length ? { action: { ...c.action } } : {}),
 			...(c.dialogue && Object.keys(c.dialogue).length ? { dialogue: { ...c.dialogue } } : {}),
+			...(c.transition ? { transition: c.transition } : {}),
 			tracks: Object.fromEntries(
 				Object.entries(c.tracks)
 					.filter(([l]) => layers.includes(+l))
@@ -649,6 +653,9 @@ export function fromFile(
 				...camera(c.camera),
 				...notes('action', c.action),
 				...notes('dialogue', c.dialogue),
+				...(c.transition === 'flash' || c.transition === 'dissolve'
+					? { transition: c.transition as 'flash' | 'dissolve' }
+					: {}),
 				tracks: Object.fromEntries(
 					Object.entries(c.tracks).flatMap(([l, t]) => {
 						const id = layerIds.get(+l);
