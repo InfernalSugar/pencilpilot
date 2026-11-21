@@ -73,6 +73,10 @@
 		layerOfDrawing,
 		newTimeline,
 		setDrawing,
+		setStaticDrawing,
+		staticDrawing,
+		staticsToFile,
+		cameraOf,
 		showing,
 		trackIn,
 		toFile,
@@ -141,9 +145,14 @@
 		const cut = timeline.scenes[onCanvas.scene]?.cuts[onCanvas.cut];
 		if (!cut) return;
 		const f = onCanvas.frame;
-		for (const l of s.layers)
-			if (!l.adjust && l.drawing && drawingAt(cut.tracks[l.id], f) !== l.drawing)
+		for (const l of s.layers) {
+			if (l.adjust || !l.drawing) continue;
+			if (timeline.statics.includes(l.id)) {
+				if (staticDrawing(cut.tracks[l.id]) !== l.drawing)
+					setStaticDrawing(trackIn(cut, l.id), l.drawing);
+			} else if (drawingAt(cut.tracks[l.id], f) !== l.drawing)
 				setDrawing(trackIn(cut, l.id), f, l.drawing);
+		}
 	}
 
 	/** frame changes, one after another (fetching drawings takes a moment) */
@@ -165,7 +174,8 @@
 			showing(
 				theCut(),
 				(status?.layers ?? []).filter((l) => !l.adjust).map((l) => l.id),
-				frame
+				frame,
+				timeline.statics
 			);
 		if (cache.needs(pairs().map(([, d]) => d))) {
 			switching = true;
@@ -230,7 +240,10 @@
 		if (!c || !status || timelineFor !== canvasKey) return;
 		const cut = timeline.scenes[onCanvas.scene]?.cuts[onCanvas.cut];
 		if (!cut) return;
-		const layers = status.layers.filter((l) => !l.adjust).map((l) => l.id);
+		// (static layers show the same drawing on every frame: nothing to onion)
+		const layers = status.layers
+			.filter((l) => !l.adjust && !timeline.statics.includes(l.id))
+			.map((l) => l.id);
 		const entries = onionEntries(cut, layers, status.active, onCanvas.frame, onion, pinned);
 		let bmp: ImageBitmap | null = null;
 		if (entries.length) {
@@ -258,6 +271,22 @@
 	function pinFrame() {
 		pinned = pinned.includes(frame) ? pinned.filter((f) => f !== frame) : [...pinned, frame];
 	}
+
+	// ---- the cut's camera: what the cut shows of the canvas ----
+	/** show the camera frame over the canvas, and its safe areas */
+	let cameraView = $state(cleanCameraView(readLocal('pp.app.camera', null)));
+	$effect(() => keepLocal('pp.app.camera', $state.snapshot(cameraView)));
+	function cleanCameraView(raw: unknown): { show: boolean; safe: boolean } {
+		const o = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+		return { show: o.show !== false, safe: o.safe === true };
+	}
+	/** the camera drawn over the canvas (none: no camera set, or it's hidden) */
+	const cameraOverlay = $derived.by(() => {
+		if (!cameraView.show || playing || timelineFor !== canvasKey) return null;
+		const cut = theCut();
+		if (!cut.camera && !cameraView.safe) return null;
+		return { ...cameraOf(cut, canvasSize), safe: cameraView.safe };
+	});
 
 	// ---- playback: frames rendered small, once each, then played at the frame rate ----
 	let playing = $state(false);
@@ -294,6 +323,7 @@
 		]);
 	}
 
+	/** Draw a rendered frame: what the cut's camera sees, as big as fits. */
 	function drawPlayer(bmp: ImageBitmap | undefined) {
 		const el = playerEl;
 		if (!el || !bmp) return;
@@ -302,12 +332,16 @@
 		if (el.width !== w || el.height !== h) [el.width, el.height] = [w, h];
 		const g = el.getContext('2d');
 		if (!g) return;
-		const k = Math.min(w / bmp.width, h / bmp.height);
-		const [dw, dh] = [bmp.width * k, bmp.height * k];
+		// the camera, in the rendered frame's pixels
+		const cam = cameraOf(theCut(), canvasSize);
+		const s = bmp.width / canvasSize.width;
+		const [sx, sy, sw, sh] = [cam.x * s, cam.y * s, cam.width * s, cam.height * s];
+		const k = Math.min(w / sw, h / sh);
+		const [dw, dh] = [sw * k, sh * k];
 		g.fillStyle = getComputedStyle(el).backgroundColor || '#e8e4da';
 		g.fillRect(0, 0, w, h);
 		g.imageSmoothingQuality = 'high';
-		g.drawImage(bmp, (w - dw) / 2, (h - dh) / 2, dw, dh);
+		g.drawImage(bmp, sx, sy, sw, sh, (w - dw) / 2, (h - dh) / 2, dw, dh);
 	}
 
 	/** Play the range (or the cut) from the start of it, or stop. */
@@ -316,7 +350,8 @@
 		if (!canvas || !status) return;
 		await showQueue;
 		const cut = theCut();
-		const range = clampRange(playRange ?? { from: 0, to: cutLength(cut) - 1 }, cutLength(cut));
+		const len = cutLength(cut, timeline.statics);
+		const range = clampRange(playRange ?? { from: 0, to: len - 1 }, len);
 		const shrink = previewShrink(canvasSize.width);
 		const layerIds = status.layers.filter((l) => !l.adjust).map((l) => l.id);
 		if (renderedFor !== canvasKey) {
@@ -332,7 +367,7 @@
 		try {
 			for (const f of todo) {
 				if (!playing || !canvas) return;
-				const pairs = showing(cut, layerIds, f);
+				const pairs = showing(cut, layerIds, f, timeline.statics);
 				const key = frameKey(pairs, shrink);
 				keys.set(f, key);
 				if (!rendered.has(key)) {
@@ -380,7 +415,7 @@
 
 	/** Loop from (or to) the current frame. */
 	function setRange(end: 'from' | 'to') {
-		const len = cutLength(theCut());
+		const len = cutLength(theCut(), timeline.statics);
 		const r = playRange ?? { from: 0, to: len - 1 };
 		playRange = clampRange(end === 'from' ? { ...r, from: frame } : { ...r, to: frame }, len);
 		if (end === 'from' && playRange.to < frame) playRange = { from: frame, to: len - 1 };
@@ -602,6 +637,7 @@
 			created,
 			thumbnail: await canvas.thumbnail(),
 			scenes: toFile(timeline, layerIds),
+			statics: staticsToFile(timeline, layerIds),
 			drawings
 		};
 	}
@@ -742,7 +778,7 @@
 				// (drawings in the frame store come when their frames show)
 				for (const d of doc.drawings ?? []) if (d.rgba) c.putDrawing(d.id, d.rgba);
 				cache.stored((doc.drawings ?? []).filter((d) => !d.rgba).map((d) => d.id));
-				timeline = fromFile(doc.scenes!, ids);
+				timeline = fromFile(doc.scenes!, ids, doc.statics);
 				scene = Math.min(at(doc.extra.scene), timeline.scenes.length - 1);
 				cutIndex = Math.min(at(doc.extra.cut), timeline.scenes[scene].cuts.length - 1);
 				frame = at(doc.extra.frame);
@@ -1142,6 +1178,7 @@
 					onchange={canvasChanged}
 					locked={switching}
 					onionImage={playing ? null : onionImage}
+					camera={cameraOverlay}
 				/>
 			{/key}
 			{#if playing}
@@ -1172,6 +1209,8 @@
 					bind:playMode
 					bind:playRange
 					{onion}
+					bind:cameraView
+					{canvasSize}
 					bind:pinned
 					onpin={pinFrame}
 					onplay={togglePlay}

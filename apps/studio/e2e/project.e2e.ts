@@ -794,3 +794,68 @@ test('onion skin: red before, green after; the light table pins frames in blue',
 	await tl.getByRole('button', { name: '1 pinned ×' }).click();
 	await expect(onion).toHaveCount(0);
 });
+
+test('static layers hold one drawing all cut long; each cut has a camera', async ({ page }) => {
+	await stubTauri(page);
+	await ready(page);
+	const tl = page.getByRole('region', { name: 'Timeline' });
+	const frameNo = tl.getByTestId('frame');
+	const top = () => ink(page, 0, 0.3);
+	const bottom = () => ink(page, 0.6, 1);
+	// a background on the first layer, made static
+	await scribble(page, 0.15);
+	await tl.getByRole('button', { name: /^Static layer:/ }).click();
+	await expect(tl.getByRole('button', { name: /^Static layer:/ })).toHaveAttribute(
+		'aria-pressed',
+		'true'
+	);
+	await expect(tl.getByLabel(/: static, all cut long/)).toBeVisible();
+	await expect(tl.getByRole('button', { name: 'New drawing' })).toBeDisabled();
+	// a character on a new cel layer, two drawings
+	await page.getByRole('button', { name: 'New layer' }).click();
+	await scribble(page, 0.7);
+	await tl.getByRole('button', { name: 'New drawing' }).click();
+	await expect(frameNo).toHaveText('2');
+	await expect(tl.getByText('of 2')).toBeVisible();
+	// frame 2: the background still shows, the character's first drawing doesn't
+	await expect.poll(bottom).toBe(0);
+	const bg = await top();
+	expect(bg).toBeGreaterThan(50);
+	// inserting a frame doesn't stretch the background (it has none to stretch)
+	await tl.getByRole('button', { name: 'Insert frame' }).click();
+	await expect(tl.getByText('of 3')).toBeVisible();
+	await tl.getByRole('button', { name: 'Delete frame' }).click();
+	await expect(tl.getByText('of 2')).toBeVisible();
+
+	// the camera: a square in the middle, with safe areas
+	await tl.getByRole('button', { name: 'Camera settings' }).click();
+	const cam = tl.getByRole('group', { name: 'Camera' });
+	await cam.getByRole('button', { name: '1:1' }).click();
+	const size = await page
+		.getByLabel(/Drawing canvas/)
+		.evaluate((el: HTMLCanvasElement) => [el.width, el.height]);
+	await expect(cam.getByLabel('Camera width')).toHaveValue(String(size[1]));
+	await expect(cam.getByLabel('Camera x')).toHaveValue(String((size[0] - size[1]) / 2));
+	await expect(page.getByTestId('camera')).toBeVisible();
+	await expect(page.getByTestId('camera').locator('rect.safe')).toHaveCount(0);
+	await cam.getByLabel(/Safe areas/).check();
+	await expect(page.getByTestId('camera').locator('rect.safe')).toHaveCount(2);
+	// the player shows only the camera: square
+	await tl.getByRole('radio', { name: 'Once' }).click();
+	await tl.getByRole('button', { name: 'Play' }).click();
+	const player = page.getByTestId('player');
+	await expect(page.getByTestId('camera')).toHaveCount(0);
+	await expect(player).toHaveCount(0, { timeout: 5_000 });
+	await expect(page.getByTestId('camera')).toBeVisible();
+
+	// saved and opened again: still static, still framed
+	await page.keyboard.press('Control+s');
+	await expect(page.getByTestId('project-name')).toHaveText('Walk cycle', { timeout: 20_000 });
+	await page.keyboard.press('Control+o');
+	await expect(tl.getByLabel(/: static, all cut long/)).toBeVisible({ timeout: 20_000 });
+	await expect(page.getByTestId('camera')).toBeVisible();
+	await expect.poll(top).toBeGreaterThan(bg * 0.9);
+	await tl.getByRole('button', { name: 'Frame 1', exact: true }).click();
+	await expect.poll(bottom).toBeGreaterThan(50);
+	await expect.poll(top).toBeGreaterThan(bg * 0.9);
+});

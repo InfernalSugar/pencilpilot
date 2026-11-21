@@ -144,6 +144,14 @@ pub struct Timeline {
     /// present, `frames` is its flattening ([`Timeline::flatten`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scenes: Vec<Scene>,
+    /// static layers (backgrounds, overlays): each shows its first drawing in a cut all
+    /// cut long, and doesn't count towards the cut's length
+    #[serde(
+        default,
+        rename = "staticLayers",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub static_layers: Vec<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -158,6 +166,18 @@ pub struct Cut {
     pub name: String,
     /// layer id → its exposures in order; a layer missing here is empty all cut long
     pub tracks: BTreeMap<u32, Vec<Exposure>>,
+    /// the part of the canvas the cut shows; none: all of it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera: Option<Camera>,
+}
+
+/// A rectangle of the canvas, in canvas pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct Camera {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
 }
 
 /// One drawing held for some frames (2 = "on twos").
@@ -169,11 +189,12 @@ pub struct Exposure {
 }
 
 impl Cut {
-    /// Frames long: its longest track (at least one frame).
-    pub fn length(&self) -> u32 {
+    /// Frames long: its longest track, static layers' aside (at least one frame).
+    pub fn length(&self, statics: &[u32]) -> u32 {
         self.tracks
-            .values()
-            .map(|t| t.iter().map(|e| e.length).sum::<u32>())
+            .iter()
+            .filter(|(l, _)| !statics.contains(l))
+            .map(|(_, t)| t.iter().map(|e| e.length).sum::<u32>())
             .max()
             .unwrap_or(0)
             .max(1)
@@ -183,12 +204,19 @@ impl Cut {
 impl Timeline {
     /// The scenes as plain frames: one per frame, with runs of identical frames
     /// joined into holds.
-    pub fn flatten(scenes: &[Scene]) -> Vec<Frame> {
+    /// A static layer shows its first drawing on every frame of a cut.
+    pub fn flatten(scenes: &[Scene], statics: &[u32]) -> Vec<Frame> {
         let mut frames: Vec<Frame> = Vec::new();
         for cut in scenes.iter().flat_map(|s| &s.cuts) {
-            for f in 0..cut.length() {
+            for f in 0..cut.length(statics) {
                 let mut cels = BTreeMap::new();
                 for (&layer, track) in &cut.tracks {
+                    if statics.contains(&layer) {
+                        if let Some(d) = track.iter().find_map(|e| e.drawing.as_ref()) {
+                            cels.insert(layer, d.clone());
+                        }
+                        continue;
+                    }
                     let mut at = 0;
                     for e in track {
                         if f < at + e.length {
@@ -284,6 +312,7 @@ impl Project {
                     fps,
                     frames: vec![Frame::default()],
                     scenes: Vec::new(),
+                    static_layers: Vec::new(),
                 },
                 drawings: BTreeMap::new(),
                 extra: serde_json::Value::Null,
@@ -418,7 +447,19 @@ impl Project {
         if m.timeline.frames.is_empty() || m.timeline.fps == 0 || m.timeline.fps > 120 {
             return Err(Error::Invalid("timeline".into()));
         }
+        for layer in &m.timeline.static_layers {
+            if !m.layers.iter().any(|l| l.id == *layer) {
+                return Err(Error::Invalid(format!("static layer {layer} isn't there")));
+            }
+        }
         for cut in m.timeline.scenes.iter().flat_map(|s| &s.cuts) {
+            if let Some(c) = cut.camera
+                && !([c.x, c.y, c.width, c.height].iter().all(|v| v.is_finite())
+                    && c.width > 0.0
+                    && c.height > 0.0)
+            {
+                return Err(Error::Invalid("a cut's camera".into()));
+            }
             for (layer, track) in &cut.tracks {
                 if !m.layers.iter().any(|l| l.id == *layer) {
                     return Err(Error::Invalid(format!("a cut names layer {layer}")));
@@ -740,6 +781,7 @@ mod tests {
         let cut = |tracks: Vec<(u32, Vec<Exposure>)>| Cut {
             name: "C".into(),
             tracks: tracks.into_iter().collect(),
+            camera: None,
         };
         // cut 1: layer 1 on twos (A A B B), layer 2 held all along; cut 2: one frame
         let scenes = vec![Scene {
@@ -752,7 +794,7 @@ mod tests {
                 cut(vec![(1, vec![e(None, 1)])]),
             ],
         }];
-        let frames = Timeline::flatten(&scenes);
+        let frames = Timeline::flatten(&scenes, &[]);
         assert_eq!(frames.len(), 3);
         assert_eq!(
             (frames[0].cels.get(&1).unwrap().as_str(), frames[0].hold),
@@ -782,5 +824,71 @@ mod tests {
         let mut buf = std::io::Cursor::new(Vec::new());
         p.write(&mut buf).unwrap();
         assert!(Project::read(std::io::Cursor::new(buf.into_inner())).is_err());
+    }
+
+    #[test]
+    fn static_layers_hold_one_drawing_and_cuts_keep_their_camera() {
+        let e = |d: Option<&str>, length| Exposure {
+            drawing: d.map(String::from),
+            length,
+        };
+        // layer 1 animates A B C; layer 2 is a static background (its later drawings
+        // and lengths don't matter)
+        let scenes = vec![Scene {
+            name: "S1".into(),
+            cuts: vec![Cut {
+                name: "C1".into(),
+                tracks: [
+                    (1, vec![e(Some("A"), 1), e(Some("B"), 1), e(Some("C"), 1)]),
+                    (2, vec![e(None, 1), e(Some("BG"), 9), e(Some("X"), 1)]),
+                ]
+                .into_iter()
+                .collect(),
+                camera: Some(Camera {
+                    x: 8.0,
+                    y: 4.0,
+                    width: 48.0,
+                    height: 27.0,
+                }),
+            }],
+        }];
+        assert_eq!(scenes[0].cuts[0].length(&[]), 11);
+        assert_eq!(scenes[0].cuts[0].length(&[2]), 3);
+        let frames = Timeline::flatten(&scenes, &[2]);
+        assert_eq!(frames.len(), 3);
+        for (f, d) in frames.iter().zip(["A", "B", "C"]) {
+            assert_eq!(f.cels.get(&1).unwrap(), d);
+            assert_eq!(f.cels.get(&2).unwrap(), "BG");
+        }
+
+        let mut p = Project::new("test", "2026-11-21T00:00:00Z", 64, 64, 24);
+        p.manifest.layers = vec![layer(1), layer(2)];
+        for d in ["A", "B", "C", "BG", "X"] {
+            p.put_drawing(d, &vec![0u8; 64 * 64 * 4], None).unwrap();
+        }
+        p.manifest.timeline.frames = frames;
+        p.manifest.timeline.scenes = scenes;
+        p.manifest.timeline.static_layers = vec![2];
+        let mut buf = std::io::Cursor::new(Vec::new());
+        p.write(&mut buf).unwrap();
+        let back = Project::read(std::io::Cursor::new(buf.into_inner())).unwrap();
+        assert_eq!(back.manifest.timeline, p.manifest.timeline);
+
+        // a static layer that isn't there, or a camera with no size, is damage
+        for bad in 0..2 {
+            let mut q = p.clone();
+            if bad == 0 {
+                q.manifest.timeline.static_layers = vec![9];
+            } else {
+                q.manifest.timeline.scenes[0].cuts[0]
+                    .camera
+                    .as_mut()
+                    .unwrap()
+                    .width = 0.0;
+            }
+            let mut buf = std::io::Cursor::new(Vec::new());
+            q.write(&mut buf).unwrap();
+            assert!(Project::read(std::io::Cursor::new(buf.into_inner())).is_err());
+        }
     }
 }

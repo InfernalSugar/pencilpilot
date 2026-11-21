@@ -126,6 +126,7 @@ colour flats and lip-sync are free (local).
 - **S2-T05** Playback: fixed fps, loop a range, ping-pong, scrub, frame-step keys, playback cache `anim`
   ✅ Play / stop (Shift+Space, Esc stops), 6–60 fps, once / loop / ping-pong, a loop range (In / Out, Alt+I / Alt+O), scrubbing along the frame numbers, `,` / `.` frame steps. Frames are rendered once each, small (at most 960 px wide), by the engine without touching the canvas, and kept by what's on them, so playing again is instant and only changed frames render again (24 frames at 1080p get ready in about 0.4 s in the window).
 - **S2-T06** Cel layers (one drawing per exposure) vs static layers (backgrounds, overlays), and per-cut camera frame (safe areas) `anim`
+  ✅ Each timeline row has a C / S switch: a static layer (a background, an overlay) shows its first drawing in the cut on every frame, draws as one bar across the cut, doesn't make the cut longer, and is left alone by insert / delete frame, timing and the onion skin. Its other drawings are kept, so making it a cel layer again animates it as before. Each cut has a camera (whole canvas, 16:9, 4:3, 1:1, 2.39:1, 9:16, exact numbers, zoom in / out; a new cut starts with the last one's): outside it is dimmed on the canvas, safe areas (action 90%, title 80%) can be shown, and playback shows only what's inside. Both are kept in the file (`staticLayers`, a cut's `camera`; FORMAT.md).
 - **S2-T07** Frame tools: copy / paste / duplicate / reverse frames, cycles, "boil" (redraw-looking jitter on held frames) `anim`
 
 ## S3 — Sound and export (≈2–3 weeks)

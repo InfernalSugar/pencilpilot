@@ -56,6 +56,7 @@ const doc = (): ProjectDoc => ({
 			cuts: [
 				{
 					name: 'Cut 1',
+					camera: { x: 0, y: 0, width: 4, height: 2 },
 					tracks: {
 						1: [
 							{ drawing: 'D3', length: 2 },
@@ -70,7 +71,8 @@ const doc = (): ProjectDoc => ({
 	drawings: [
 		{ id: 3, layer: 1, rgba: Uint8Array.from({ length: 32 }, (_, i) => i) },
 		{ id: 4, layer: 1, rgba: Uint8Array.from({ length: 32 }, (_, i) => 31 - i) }
-	]
+	],
+	statics: [5]
 });
 
 describe('project packets', () => {

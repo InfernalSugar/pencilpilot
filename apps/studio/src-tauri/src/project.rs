@@ -69,6 +69,9 @@ pub struct Header {
     /// every drawing the scenes show
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub drawings: Vec<PacketDrawing>,
+    /// static layers (one drawing all cut long)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub static_layers: Vec<u32>,
 }
 
 pub fn encode(header: &Header, blobs: &[u8]) -> Result<Vec<u8>, String> {
@@ -180,8 +183,9 @@ pub fn to_project(
             p.put_drawing(&name, rgba, mask)
                 .map_err(|e| e.to_string())?;
         }
-        p.manifest.timeline.frames = Timeline::flatten(&h.scenes);
+        p.manifest.timeline.frames = Timeline::flatten(&h.scenes, &h.static_layers);
         p.manifest.timeline.scenes = h.scenes;
+        p.manifest.timeline.static_layers = h.static_layers;
     }
     p.manifest.layers = h.layers.iter().map(|l| l.layer.clone()).collect();
     p.manifest.groups = h.groups;
@@ -268,6 +272,7 @@ pub fn from_project(p: &Project, mut frames: Option<&mut FrameStore>) -> Result<
         thumbnail,
         scenes: m.timeline.scenes.clone(),
         drawings,
+        static_layers: m.timeline.static_layers.clone(),
     };
     encode(&header, &blobs)
 }
@@ -392,6 +397,7 @@ mod tests {
             thumbnail: Some([n * 5, thumb.len()]),
             scenes: vec![],
             drawings: vec![],
+            static_layers: vec![],
         };
         (encode(&header, &blobs).unwrap(), rgba, mask)
     }
@@ -428,6 +434,12 @@ mod tests {
             cuts: vec![Cut {
                 name: "Cut 1".into(),
                 tracks: [(3, vec![ex(7, 2), ex(9, 3)])].into_iter().collect(),
+                camera: Some(ppstudio::Camera {
+                    x: 10.0,
+                    y: 5.0,
+                    width: 80.0,
+                    height: 45.0,
+                }),
             }],
         }];
         let pk = encode(&h, &blobs).unwrap();
@@ -437,12 +449,22 @@ mod tests {
         let back = from_project(&p, None).unwrap();
         let (h2, b2) = decode(&back).unwrap();
         assert_eq!(h2.scenes, h.scenes);
+        assert!(h2.static_layers.is_empty());
         assert_eq!(h2.drawings.len(), 2);
         let d9 = h2.drawings.iter().find(|d| d.id == 9).unwrap();
         assert_eq!(d9.layer, 3);
         assert_eq!(slice(b2, d9.rgba.unwrap()).unwrap(), &second[..]);
         // the layer shows the first frame's drawing
         assert_eq!(slice(b2, h2.layers[0].rgba).unwrap(), &rgba[..]);
+
+        // a static layer: one drawing all cut long, so one frame; kept through the file
+        let mut hs = h.clone();
+        hs.static_layers = vec![3];
+        let ps = to_project(&encode(&hs, &blobs).unwrap(), "test", "now", None).unwrap();
+        assert_eq!(ps.manifest.timeline.frames.len(), 1);
+        assert_eq!(ps.manifest.timeline.static_layers, vec![3]);
+        let (hs2, _) = decode(&from_project(&ps, None).unwrap()).unwrap();
+        assert_eq!(hs2.static_layers, vec![3]);
 
         // with the frame store: opening puts the drawings in it, the packet carries none
         let mut store = FrameStore::new(usize::MAX, None).unwrap();

@@ -2,13 +2,16 @@ import { describe, expect, it } from 'vitest';
 import {
 	addCut,
 	addScene,
+	cameraOf,
 	cutLength,
 	deleteFrame,
 	deleteFrameAll,
 	drawingAt,
 	drawingsIn,
 	findDrawing,
+	fitCamera,
 	fromFile,
+	inset,
 	insertExposure,
 	insertFrame,
 	insertFrameAll,
@@ -17,8 +20,12 @@ import {
 	removeExposure,
 	setDrawing,
 	setLength,
+	setStatic,
+	setStaticDrawing,
 	setTiming,
 	showing,
+	staticDrawing,
+	staticsToFile,
 	toFile,
 	type Cut,
 	type Track
@@ -135,5 +142,100 @@ describe('timeline', () => {
 		// reopened, the layer has a new id on the canvas
 		const back = fromFile(file, new Map([[3, 12]]));
 		expect(back.scenes[0].cuts[0].tracks[12]).toEqual(tl.scenes[0].cuts[0].tracks[3]);
+	});
+
+	it('static layers show one drawing all cut long', () => {
+		const tl = newTimeline([
+			{ id: 1, drawing: 1 },
+			{ id: 2, drawing: 0 }
+		]);
+		const cut = tl.scenes[0].cuts[0];
+		cut.tracks[1].push({ drawing: 2, length: 1 }, { drawing: 3, length: 1 });
+		cut.tracks[2] = [
+			{ drawing: 0, length: 1 },
+			{ drawing: 7, length: 9 },
+			{ drawing: 8, length: 1 }
+		];
+		expect(cutLength(cut)).toBe(11);
+		setStatic(tl, 2, true);
+		setStatic(tl, 2, true); // (once)
+		expect(tl.statics).toEqual([2]);
+		// its first drawing on every frame; it doesn't make the cut longer
+		expect(cutLength(cut, tl.statics)).toBe(3);
+		expect([0, 1, 2].map((f) => showing(cut, [1, 2], f, tl.statics))).toEqual([
+			[
+				[1, 1],
+				[2, 7]
+			],
+			[
+				[1, 2],
+				[2, 7]
+			],
+			[
+				[1, 3],
+				[2, 7]
+			]
+		]);
+		// frames go in and out of the cel layers only
+		insertFrameAll(cut, 0, tl.statics);
+		expect(cut.tracks[2][1].length).toBe(9);
+		deleteFrameAll(cut, 0, tl.statics);
+		// drawing on it changes its one drawing; an empty one gets one
+		setStaticDrawing(cut.tracks[2], 9);
+		expect(staticDrawing(cut.tracks[2])).toBe(9);
+		const empty: Track = [];
+		setStaticDrawing(empty, 4);
+		expect(empty).toEqual([{ drawing: 4, length: 1 }]);
+		// a cel layer again: it animates as before
+		setStatic(tl, 2, false);
+		expect(tl.statics).toEqual([]);
+		expect(drawingAt(cut.tracks[2], 10)).toBe(8);
+	});
+
+	it('frames each cut with a camera', () => {
+		const canvas = { width: 1920, height: 1080 };
+		const cut: Cut = { id: 1, name: 'Cut 1', tracks: {} };
+		expect(cameraOf(cut, canvas)).toEqual({ x: 0, y: 0, width: 1920, height: 1080 });
+		expect(fitCamera(1, canvas)).toEqual({ x: 420, y: 0, width: 1080, height: 1080 });
+		expect(fitCamera(2.39, canvas)).toEqual({ x: 0, y: 139, width: 1920, height: 803 });
+		// kept on the canvas
+		cut.camera = { x: 1800, y: -50, width: 400, height: 300 };
+		expect(cameraOf(cut, canvas)).toEqual({ x: 1520, y: 0, width: 400, height: 300 });
+		expect(inset({ x: 0, y: 0, width: 100, height: 50 }, 0.8)).toEqual({
+			x: 10,
+			y: 5,
+			width: 80,
+			height: 40
+		});
+		// a new cut is framed like the one before it
+		const tl = newTimeline([]);
+		tl.scenes[0].cuts[0].camera = { x: 1, y: 2, width: 3, height: 4 };
+		addCut(tl.scenes[0], 0);
+		expect(tl.scenes[0].cuts[1].camera).toEqual({ x: 1, y: 2, width: 3, height: 4 });
+	});
+
+	it('keeps static layers and cameras in the file', () => {
+		const tl = newTimeline([
+			{ id: 3, drawing: 8 },
+			{ id: 4, drawing: 9 }
+		]);
+		tl.scenes[0].cuts[0].camera = { x: 0, y: 0, width: 800, height: 600 };
+		setStatic(tl, 4, true);
+		setStatic(tl, 6, true); // a deleted layer
+		const file = toFile(tl, [3, 4]);
+		expect(staticsToFile(tl, [3, 4])).toEqual([4]);
+		const back = fromFile(
+			file,
+			new Map([
+				[3, 12],
+				[4, 13]
+			]),
+			[4]
+		);
+		expect(back.statics).toEqual([13]);
+		expect(back.scenes[0].cuts[0].camera).toEqual({ x: 0, y: 0, width: 800, height: 600 });
+		// a broken camera is dropped
+		file[0].cuts[0].camera = { x: 0, y: 0, width: 0, height: 5 };
+		expect(fromFile(file, new Map()).scenes[0].cuts[0].camera).toBeUndefined();
 	});
 });
