@@ -710,6 +710,7 @@
 		floatBox = recall('pp.refFloat', floatBox);
 		smoothing = recall('pp.smoothing', 0);
 		toolOpts.quickShape = recall('pp.quickShape', true);
+		toolOpts.closeFill = recall('pp.closeFill', false);
 		penPressure = recall('pp.penPressure', true);
 		loadGuides();
 		loadManifest().then((m) => (manifest = m));
@@ -1341,6 +1342,18 @@
 		<button
 			type="button"
 			class="tool"
+			aria-pressed={toolOpts.closeFill}
+			title="Close and fill: a stroke that ends where it began fills inside with its colour"
+			onclick={() => {
+				toolOpts.closeFill = !toolOpts.closeFill;
+				remember('pp.closeFill', toolOpts.closeFill);
+			}}
+		>
+			Close &amp; fill
+		</button>
+		<button
+			type="button"
+			class="tool"
 			aria-pressed={tracing}
 			aria-expanded={tracing ? traceBarOpen : undefined}
 			title={tracing
@@ -1479,6 +1492,7 @@
 						distort={toolOpts.distort}
 						warp={toolOpts.warp}
 						quickShape={toolOpts.quickShape}
+						closeFill={toolOpts.closeFill}
 						selectMode={toolOpts.selectMode}
 						selectFill={toolOpts.selectFill}
 						selectShape={toolOpts.selectShape}
