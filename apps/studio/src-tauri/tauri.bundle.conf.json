@@ -3,7 +3,8 @@
 		"externalBin": ["binaries/pencilpilot-ffmpeg"],
 		"resources": {
 			"ffmpeg/NOTICE.md": "ffmpeg/NOTICE.md",
-			"ffmpeg/GPL-3.0.txt": "ffmpeg/GPL-3.0.txt"
+			"ffmpeg/GPL-3.0.txt": "ffmpeg/GPL-3.0.txt",
+			"rhubarb/": "rhubarb/"
 		}
 	}
 }

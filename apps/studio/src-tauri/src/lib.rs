@@ -6,6 +6,7 @@
 //! animation core (crates/anim).
 
 mod export;
+mod lipsync;
 mod project;
 mod store;
 
@@ -23,6 +24,10 @@ struct Frames(Mutex<FrameStore>);
 /// The export being written, if any (one at a time), and the sound for the next one.
 #[derive(Default)]
 struct Exporting(Mutex<Option<export::Job>>, Mutex<Option<PathBuf>>);
+
+/// Lip-sync: the recording to listen to next, and the run going.
+#[derive(Default)]
+struct LipSync(Mutex<Option<PathBuf>>, lipsync::Running);
 
 /// Bytes of drawing tiles kept in memory before the oldest go to disk.
 const FRAMES_IN_MEMORY: usize = 1 << 30;
@@ -290,6 +295,61 @@ fn export_audio(request: Request<'_>, state: State<'_, Exporting>) -> Result<(),
     Ok(())
 }
 
+/// Where Rhubarb (lip-sync) is, if it's here.
+#[tauri::command]
+fn lipsync_tools(app: AppHandle) -> Option<String> {
+    let res = app.path().resource_dir().ok();
+    lipsync::find(res.as_deref()).map(|p| p.to_string_lossy().into_owned())
+}
+
+/// The recording to listen to (a WAV file, as bytes).
+#[tauri::command]
+fn lipsync_audio(request: Request<'_>, state: State<'_, LipSync>) -> Result<(), String> {
+    let bytes = raw_body(&request)?;
+    if bytes.len() < 44 || &bytes[..4] != b"RIFF" {
+        return Err("not a WAV file".into());
+    }
+    let path = std::env::temp_dir().join(format!("pencilpilot-lipsync-{}.wav", std::process::id()));
+    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    *state.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(path);
+    Ok(())
+}
+
+/// Listen to the recording sent: the mouth shapes, in time. Sends "lipsync-progress"
+/// (0–1) while it works.
+#[tauri::command]
+async fn lipsync_run(app: AppHandle, opts: lipsync::Options) -> Result<Vec<lipsync::Cue>, String> {
+    use tauri::Emitter;
+    let res = app.path().resource_dir().ok();
+    let exe = lipsync::find(res.as_deref()).ok_or("Rhubarb (lip-sync) isn’t installed")?;
+    let cache = app.path().app_cache_dir().map_err(|e| e.to_string())?;
+    let exe = lipsync::runnable(&exe, &cache).map_err(|e| e.to_string())?;
+    let wav = app
+        .state::<LipSync>()
+        .0
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+        .ok_or("no recording sent")?;
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = handle.state::<LipSync>();
+        let r = lipsync::run(&exe, &wav, &opts, &state.1, |v| {
+            let _ = handle.emit("lipsync-progress", v);
+        });
+        let _ = std::fs::remove_file(&wav);
+        r
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Stop listening.
+#[tauri::command]
+fn lipsync_cancel(state: State<'_, LipSync>) {
+    lipsync::cancel(&state.1);
+}
+
 /// Start an export (one going already is cancelled). A video takes the sound sent
 /// with `export_audio` just before.
 #[tauri::command]
@@ -370,6 +430,7 @@ fn bench_report(app: AppHandle, report: String) {
 pub fn run() {
     tauri::Builder::default()
         .manage(Exporting::default())
+        .manage(LipSync::default())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // PP_BENCH=1: open the engine benchmark straight away
@@ -404,6 +465,10 @@ pub fn run() {
             export_frame,
             export_end,
             export_cancel,
+            lipsync_tools,
+            lipsync_audio,
+            lipsync_run,
+            lipsync_cancel,
             recent_list,
             recent_remove,
             settings_get,

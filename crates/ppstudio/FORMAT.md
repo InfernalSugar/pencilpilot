@@ -50,7 +50,9 @@ This crate (`pencilpilot-ppstudio`) reads and writes it.
                      { "drawing": null, "length": 1 },     // an empty cel
                      { "drawing": "D2", "length": 2 } ] } } ] }
     ],
-    "staticLayers": [ 2 ]        // optional: layers that show one drawing all cut long
+    "staticLayers": [ 2 ],       // optional: layers that show one drawing all cut long
+    "mouthCharts": [             // optional: lip-sync, which drawing is each mouth shape
+      { "layer": 3, "shapes": { "A": "D7", "B": "D8", "X": "D9" } } ]
   },
   "drawings": {
     "D1": {
@@ -97,6 +99,10 @@ This crate (`pencilpilot-ppstudio`) reads and writes it.
   recorded. A scene's **markers** are `{ "frame", "label" }` on scene frames.
 - A cut's **action** and **dialogue** are exposure-sheet notes: frame (from 0, in the
   cut) → text. They don't change what shows.
+- A **mouth chart** (`mouthCharts`) names, for a layer, the drawing drawn for each mouth
+  shape used in lip-sync: `A`–`F` (closed for M B P; slightly open, teeth together; open;
+  wide open; rounded; puckered) and the optional `G` (F V), `H` (L) and `X` (rest), as
+  Rhubarb Lip Sync names them. Its drawings are stored even when no frame shows them.
 - Without `scenes`, `frames` is the whole timeline (a single picture has one frame).
 - The app names drawings `D<number>`; a drawing belongs to one layer. Every drawing a
   frame or exposure names must be in `drawings`.
