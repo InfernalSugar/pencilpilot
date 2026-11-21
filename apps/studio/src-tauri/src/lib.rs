@@ -28,3 +28,15 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running PencilPilot");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn app_info_names_this_build() {
+        let a = app_info();
+        assert_eq!(a.version, env!("CARGO_PKG_VERSION"));
+        assert!(!a.os.is_empty() && !a.arch.is_empty());
+    }
+}
