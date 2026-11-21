@@ -433,6 +433,67 @@ test('colour fill: selections fill as they are made, change together, one undo',
 	await expect.poll(() => blue(0.75, 0.2)).toBe(true);
 });
 
+test('close and fill: a stroke that ends where it began fills inside, in one undo', async ({
+	page
+}) => {
+	await ready(page);
+	const loop = async (cx: number, cy: number) => {
+		const b = await box(page);
+		const at = (t: number) => [
+			b.x + b.width * (cx + 0.1 * Math.cos(t)),
+			b.y + b.height * (cy + 0.14 * Math.sin(t))
+		];
+		const [x0, y0] = at(0);
+		await page.mouse.move(x0, y0);
+		await page.mouse.down();
+		for (let i = 1; i <= 40; i++) {
+			const [x, y] = at((i / 40) * Math.PI * 2);
+			await page.mouse.move(x, y);
+		}
+		await page.mouse.up();
+	};
+	const inside = async (x: number, y: number) => (await pixel(page, x, y))[0] < 120;
+	/** ink in a small square around (x, y) */
+	const near = (x: number, y: number) =>
+		canvas(page).evaluate(
+			(c: HTMLCanvasElement, [x, y]) => {
+				const r = Math.round(c.width * 0.02);
+				const d = c
+					.getContext('2d')!
+					.getImageData(
+						Math.round(c.width * x) - r,
+						Math.round(c.height * y) - r,
+						2 * r,
+						2 * r
+					).data;
+				let n = 0;
+				for (let i = 0; i < d.length; i += 4) if (d[i] < 200) n++;
+				return n;
+			},
+			[x, y]
+		);
+	await page.getByRole('radio', { name: 'Colour #3d6bff' }).click();
+	// off (the default): just the line
+	await loop(0.25, 0.4);
+	await expect.poll(() => near(0.35, 0.4)).toBeGreaterThan(3);
+	expect(await inside(0.25, 0.4)).toBe(false);
+	// on: the inside fills too, and one undo takes both away
+	await page.getByRole('button', { name: 'Close & fill' }).click();
+	await loop(0.65, 0.4);
+	await expect.poll(() => inside(0.65, 0.4)).toBe(true);
+	await expect(page.getByRole('button', { name: 'Close & fill' })).toHaveAttribute(
+		'aria-pressed',
+		'true'
+	);
+	await page.keyboard.press('Control+z');
+	await expect.poll(() => inside(0.65, 0.4)).toBe(false);
+	expect(await near(0.75, 0.4)).toBe(0);
+	expect(await near(0.35, 0.4)).toBeGreaterThan(3);
+	// an open stroke doesn't fill
+	await zigzag(page, 0.8);
+	expect(await inside(0.5, 0.65)).toBe(false);
+});
+
 /** the ink's bounding box as fractions of the canvas */
 const inkFrac = (page: Page) =>
 	canvas(page).evaluate((c: HTMLCanvasElement) => {

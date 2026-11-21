@@ -62,6 +62,8 @@ export class ToolOptions {
 	featherPx = $state(16);
 	/** hold at the end of a stroke to snap it to a shape */
 	quickShape = $state(true);
+	/** close and fill: a stroke that ends where it began fills inside */
+	closeFill = $state(false);
 	guides = $state<GuideSettings>(defaultGuides(800, 600));
 	guidesOpen = $state(false);
 	/** a note about the last import or paste */
