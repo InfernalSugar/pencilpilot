@@ -26,6 +26,7 @@
 		type Track
 	} from './timeline';
 	import type { PlayMode, PlayRange } from './playback';
+	import type { OnionSettings } from './onion';
 
 	let {
 		timeline,
@@ -38,6 +39,9 @@
 		playRange = $bindable<PlayRange | null>(null),
 		onplay,
 		onrange,
+		onion,
+		pinned = $bindable<number[]>([]),
+		onpin,
 		layers,
 		active,
 		newDrawing,
@@ -54,6 +58,12 @@
 		/** the frames played (none: the whole cut) */
 		playRange?: PlayRange | null;
 		onplay: () => void;
+		/** onion skin settings (changed in place) */
+		onion: OnionSettings;
+		/** frames on the light table */
+		pinned?: number[];
+		/** pin or unpin the current frame */
+		onpin: () => void;
 		/** loop from / to the current frame */
 		onrange: (end: 'from' | 'to') => void;
 		/** bottom → top, as the canvas lists them */
@@ -221,6 +231,7 @@
 		if (f !== frame) go(Math.max(0, Math.min(shown - 1, f)));
 	}
 	const inRange = (f: number) => !!playRange && f >= playRange.from && f <= playRange.to;
+	let onionOpen = $state(false);
 </script>
 
 <section class="timeline" aria-label="Timeline">
@@ -305,6 +316,70 @@
 		{#if playRange}
 			<button type="button" class="b" title="Play the whole cut" onclick={() => (playRange = null)}>
 				Frames {playRange.from + 1}–{playRange.to + 1} ×
+			</button>
+		{/if}
+		<span class="sep"></span>
+		<div class="onion">
+			<button
+				type="button"
+				class="b"
+				aria-pressed={onion.on}
+				title="Onion skin: the drawings before (red) and after (green), faintly"
+				onclick={() => (onion.on = !onion.on)}
+			>
+				Onion
+			</button>
+			<button
+				type="button"
+				class="b caret"
+				aria-label="Onion skin settings"
+				aria-expanded={onionOpen}
+				onclick={() => (onionOpen = !onionOpen)}
+			>
+				▾
+			</button>
+			{#if onionOpen}
+				<div class="pop" role="group" aria-label="Onion skin">
+					<label>
+						Before <input type="number" min="0" max="5" bind:value={onion.before} />
+						<input type="color" aria-label="Colour before" bind:value={onion.beforeColour} />
+					</label>
+					<label>
+						After <input type="number" min="0" max="5" bind:value={onion.after} />
+						<input type="color" aria-label="Colour after" bind:value={onion.afterColour} />
+					</label>
+					<label>
+						Opacity <b>{Math.round(onion.opacity * 100)}%</b>
+						<input type="range" min="0.05" max="1" step="0.05" bind:value={onion.opacity} />
+					</label>
+					<div class="seg" role="radiogroup" aria-label="Onion skin layers">
+						{#each [['active', 'This layer'], ['all', 'All layers']] as [id, label] (id)}
+							<button
+								type="button"
+								class="b"
+								role="radio"
+								aria-checked={onion.layers === id}
+								onclick={() => (onion.layers = id as 'active' | 'all')}
+							>
+								{label}
+							</button>
+						{/each}
+					</div>
+				</div>
+			{/if}
+		</div>
+		<button
+			type="button"
+			class="b"
+			aria-pressed={pinned.includes(frame)}
+			title="Light table: pin this frame to show it (blue) while you draw others"
+			onclick={onpin}
+		>
+			Pin frame
+		</button>
+		{#if pinned.length}
+			<button type="button" class="b" title="Unpin every frame" onclick={() => (pinned = [])}>
+				{pinned.length} pinned ×
 			</button>
 		{/if}
 		<span class="sep"></span>
@@ -430,6 +505,7 @@
 					class:now={f === frame}
 					class:past={f >= length}
 					class:ranged={inRange(f)}
+					class:pinned={pinned.includes(f)}
 					aria-label="Frame {f + 1}"
 					aria-current={f === frame ? 'true' : undefined}
 					onclick={() => go(f)}
@@ -542,6 +618,51 @@
 		display: flex;
 		gap: 2px;
 	}
+	.onion {
+		position: relative;
+		display: flex;
+		gap: 2px;
+	}
+	.caret {
+		padding: 0 6px;
+	}
+	.pop {
+		position: absolute;
+		bottom: calc(100% + 8px);
+		left: 0;
+		z-index: 30;
+		display: grid;
+		gap: 8px;
+		width: 230px;
+		padding: 12px;
+		border-radius: 14px;
+		background: #1f1f24;
+		box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+	}
+	.pop label {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+	.pop input[type='number'] {
+		width: 48px;
+		height: 28px;
+		border: 0;
+		border-radius: 8px;
+		background: #2a2a30;
+		color: var(--pp-on-ink);
+	}
+	.pop input[type='color'] {
+		width: 34px;
+		height: 26px;
+		padding: 0;
+		border: 0;
+		background: none;
+	}
+	.pop input[type='range'] {
+		flex: 1;
+		accent-color: var(--pp-yellow);
+	}
 	.sep {
 		width: 1px;
 		height: 22px;
@@ -598,6 +719,9 @@
 	}
 	.tick.past {
 		opacity: 0.45;
+	}
+	.tick.pinned {
+		box-shadow: inset 0 -3px 0 #3d6bff;
 	}
 	.tick.ranged {
 		background: rgba(255, 214, 80, 0.22);
