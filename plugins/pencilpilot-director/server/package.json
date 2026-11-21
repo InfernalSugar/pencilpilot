@@ -1,0 +1,15 @@
+{
+  "name": "@pencilpilot/director-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The PencilPilot director plugin's MCP server: ComfyUI stills, Seedance clips, PencilPilot projects",
+  "type": "module",
+  "main": "index.mjs",
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "^4.6.7"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "pencilpilot-director": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/server/index.mjs"],
+      "env": {
+        "OPENROUTER_API_KEY": "${OPENROUTER_API_KEY:-}",
+        "PENCILPILOT_COMFY_URL": "${PENCILPILOT_COMFY_URL:-http://127.0.0.1:8188}"
+      }
+    }
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "pencilpilot",
+  "owner": {
+    "name": "InfernalSugar"
+  },
+  "metadata": {
+    "description": "PencilPilot's plugins for Claude Code"
+  },
+  "plugins": [
+    {
+      "name": "pencilpilot-director",
+      "source": "./plugins/pencilpilot-director",
+      "description": "An animation director for PencilPilot: idea → storyboard → animatic → keys → motion → clean-up → colour → edit"
+    }
+  ]
+}
