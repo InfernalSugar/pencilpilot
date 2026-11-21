@@ -24,6 +24,13 @@ Linux needs the WebKitGTK 4.1 and GTK 3 development packages (see Tauri's
 Ctrl+S saves a `.ppstudio` file (Ctrl+Shift+S: save as), Ctrl+O opens one. The format is
 described in [crates/ppstudio/FORMAT.md](../../crates/ppstudio/FORMAT.md).
 
+- **Autosave:** while there are unsaved changes, a recovery copy is written every 20 s to
+  the app's data folder (`recovery/`), never over your file. A save, or closing without
+  saving on purpose, removes it; after a crash the next start offers it back.
+- **Versions:** each save keeps the file it replaces (`versions/`, the last 20 per
+  project); the Versions menu opens any of them.
+- **Export:** a flat PNG, or a layered Photoshop file.
+
 ## Tests
 
 ```sh

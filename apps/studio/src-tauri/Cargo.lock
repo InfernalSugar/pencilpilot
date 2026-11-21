@@ -2347,6 +2347,7 @@ dependencies = [
 name = "pencilpilot-studio"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "pencilpilot-ppstudio",
  "serde",
  "serde_json",
