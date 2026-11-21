@@ -315,6 +315,9 @@
 			.map((m) => ({ ...m, f: m.frame - sceneAt }))
 			.filter((m) => m.f >= 0 && m.f < shown)
 	);
+	/** a sound's length in frames (`tick`: sounds decoded since, so this runs again) */
+	// eslint-disable-next-line @typescript-eslint/no-unused-vars -- `tick` is the dependency
+	const soundFrames = (file: string, f: number, tick: number) => audio?.frames(file, f) ?? 0;
 	let fileInput = $state<HTMLInputElement>();
 	let markersOpen = $state(false);
 
@@ -1163,7 +1166,7 @@
 			</div>
 		{/each}
 		{#each clips as c (c.id)}
-			{@const len = audio?.frames(c.file, fps) ?? 0}
+			{@const len = soundFrames(c.file, fps, soundTick)}
 			{@const from = Math.max(0, sceneAt - c.start)}
 			{@const left = Math.max(0, c.start - sceneAt)}
 			{@const frames = Math.max(0, Math.min(len - from, shown - left))}
