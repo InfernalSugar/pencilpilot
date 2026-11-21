@@ -300,7 +300,9 @@ const EXPORT_KINDS = {
 	webm: { name: 'WebM video', ext: 'webm' },
 	gif: { name: 'GIF animation', ext: 'gif' },
 	apng: { name: 'Animated PNG', ext: 'png' },
-	'png-seq': { name: 'PNG sequence (numbered from this name)', ext: 'png' }
+	'png-seq': { name: 'PNG sequence (numbered from this name)', ext: 'png' },
+	'psd-seq': { name: 'PSD per frame (numbered from this name)', ext: 'psd' },
+	layers: { name: 'PNG per layer (named from this name)', ext: 'png' }
 };
 
 export async function askExportPath(

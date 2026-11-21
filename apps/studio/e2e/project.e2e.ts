@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { deflateSync } from 'node:zlib';
 
 // Projects through the window: save, open, autosave / recovery, versions, export.
 // Tauri's IPC is stubbed: the "file" the window saves is posted to /__keep (the test
@@ -76,7 +77,25 @@ async function stubTauri(page: Page, stub: Stub = {}) {
 						return `/home/me/Walk cycle.${ext}`;
 					}
 					case 'plugin:dialog|open':
-						return '/home/me/Walk cycle.ppstudio';
+						return JSON.stringify(args).includes('"mp4"')
+							? '/home/me/dance take 2.mp4'
+							: '/home/me/Walk cycle.ppstudio';
+					case 'video_in_open': {
+						// a made-up video: a red frame, then a blue one
+						const a = args as { width: number; height: number };
+						const colours = [
+							[255, 0, 0],
+							[0, 0, 255]
+						];
+						w.__video = colours.map((c) => {
+							const f = new Uint8Array(a.width * a.height * 4);
+							for (let i = 0; i < f.length; i += 4) f.set([...c, 255], i);
+							return f.buffer;
+						});
+						return { seconds: 0.08, width: 64, height: 36 };
+					}
+					case 'video_in_frame':
+						return (w.__video as ArrayBuffer[]).shift() ?? new ArrayBuffer(0);
 					case 'plugin:dialog|message':
 						// ask(): the label of the button pressed
 						return (stub.askAnswer ?? true) ? 'Lose changes' : 'Keep working';
@@ -1069,6 +1088,46 @@ test('export the animation: held frames sent once, the camera, a smaller size, t
 	expect(all.some((c) => c.cmd === 'export_end')).toBe(true);
 });
 
+/** a PNG file of one colour */
+function solidPng(width: number, height: number, rgba: number[]): Buffer {
+	const crcTable = Array.from({ length: 256 }, (_, n) => {
+		let c = n;
+		for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+		return c >>> 0;
+	});
+	const crc = (b: Buffer) => {
+		let c = 0xffffffff;
+		for (const x of b) c = crcTable[(c ^ x) & 0xff] ^ (c >>> 8);
+		return (c ^ 0xffffffff) >>> 0;
+	};
+	const chunk = (type: string, data: Buffer) => {
+		const t = Buffer.concat([Buffer.from(type, 'ascii'), data]);
+		const len = Buffer.alloc(4);
+		len.writeUInt32BE(data.length);
+		const sum = Buffer.alloc(4);
+		sum.writeUInt32BE(crc(t));
+		return Buffer.concat([len, t, sum]);
+	};
+	const ihdr = Buffer.alloc(13);
+	ihdr.writeUInt32BE(width, 0);
+	ihdr.writeUInt32BE(height, 4);
+	ihdr.set([8, 6, 0, 0, 0], 8);
+	const row = Buffer.concat([Buffer.from([0]), Buffer.from(Array(width).fill(rgba).flat())]);
+	const raw = Buffer.concat(Array(height).fill(row));
+	return Buffer.concat([
+		Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+		chunk('IHDR', ihdr),
+		chunk('IDAT', deflateSync(raw)),
+		chunk('IEND', Buffer.alloc(0))
+	]);
+}
+
+/** the colour in the middle of the canvas */
+const middle = (page: Page) =>
+	canvas(page).evaluate((el: HTMLCanvasElement) => [
+		...el.getContext('2d')!.getImageData(el.width >> 1, el.height >> 1, 1, 1).data
+	]);
+
 /** a WAV file: a tone for the first `on` seconds, then silence (`total` seconds) */
 function toneWav(on: number, total: number): Buffer {
 	const rate = 8000;
@@ -1236,4 +1295,112 @@ test('lip-sync: a mouth chart, Rhubarb’s shapes on twos, kept in the file', as
 		/another cut|Drawing/
 	);
 	await expect(dlg.locator('.shape.set img')).toHaveCount(4);
+});
+
+test('rotoscoping: an image sequence and a video’s frames come in as drawings on a layer', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	const tl = page.getByRole('region', { name: 'Timeline' });
+	// three pictures, picked out of order: they go in number order
+	await page.getByRole('button', { name: 'Import', exact: true }).click();
+	const chooser = page.waitForEvent('filechooser');
+	await page.getByRole('button', { name: /^Image sequence…/ }).click();
+	await expect(page.getByRole('group', { name: 'Import' })).toHaveCount(0);
+	await (
+		await chooser
+	).setFiles(
+		[
+			['walk_10.png', [0, 0, 255, 255]],
+			['walk_2.png', [0, 160, 0, 255]],
+			['walk_1.png', [255, 0, 0, 255]]
+		].map(([name, c]) => ({
+			name: name as string,
+			mimeType: 'image/png',
+			buffer: solidPng(16, 9, c as number[])
+		}))
+	);
+	await expect(page.getByText('Imported 3 frames onto “walk”.')).toBeVisible({ timeout: 15_000 });
+	await expect(tl.getByTestId('frame').locator('..')).toContainText('of 3');
+	// half see-through over the paper: red, green, blue
+	const tint = async () => {
+		const [r, g, b] = await middle(page);
+		return r > 200 && g < 160 && b < 160
+			? 'red'
+			: g > 150 && r < 160 && b < 160
+				? 'green'
+				: b > 200 && r < 160
+					? 'blue'
+					: `${r},${g},${b}`;
+	};
+	await expect.poll(tint).toBe('red');
+	await tl.getByRole('button', { name: 'Frame 2', exact: true }).click();
+	await expect.poll(tint).toBe('green');
+	await tl.getByRole('button', { name: 'Frame 3', exact: true }).click();
+	await expect.poll(tint).toBe('blue');
+	await page.getByRole('tab', { name: /X.sheet/ }).click();
+	const xs = page.getByRole('region', { name: 'Exposure sheet' });
+	await expect(xs.getByRole('gridcell', { name: 'walk, frame 3: drawing 3' })).toBeVisible();
+
+	// a video: its frames from this frame on (the 4th), at the project's frame rate
+	await page.keyboard.press('.');
+	await expect(tl.getByTestId('frame')).toHaveText('4');
+	await page.getByRole('button', { name: 'Import', exact: true }).click();
+	await page.getByRole('button', { name: /^Video frames…/ }).click();
+	await expect(page.getByText('Imported 2 frames onto “dance take”.')).toBeVisible({
+		timeout: 15_000
+	});
+	const open = JSON.parse((await calls(page)).find((c) => c.cmd === 'video_in_open')!.json!);
+	expect(open).toMatchObject({ path: '/home/me/dance take 2.mp4', fps: 24 });
+	expect(open.width).toBeGreaterThan(100);
+	await expect(xs.getByRole('gridcell', { name: 'dance take, frame 4: drawing 1' })).toBeVisible();
+	await expect(xs.getByRole('gridcell', { name: 'dance take, frame 5: drawing 2' })).toBeVisible();
+	// (the sequence ended on frame 3: the video's red frame shows alone, then its blue one)
+	await expect.poll(tint).toBe('red');
+	await page.keyboard.press('.');
+	await expect.poll(tint).toBe('blue');
+	expect((await calls(page)).some((c) => c.cmd === 'video_in_close')).toBe(true);
+});
+
+test('export a PSD per frame and a PNG sequence per layer', async ({ page }) => {
+	await stubTauri(page);
+	await ready(page);
+	const tl = page.getByRole('region', { name: 'Timeline' });
+	await scribble(page, 0.3);
+	await tl.getByRole('button', { name: '2s' }).click();
+	await tl.getByRole('button', { name: 'New drawing' }).click();
+	await scribble(page, 0.6);
+	await tl.getByRole('button', { name: '1s' }).click();
+	const exportAs = async (format: RegExp) => {
+		await page.getByRole('button', { name: 'Export', exact: true }).click();
+		await page.getByRole('button', { name: /^Animation…/ }).click();
+		const dlg = page.getByRole('dialog', { name: 'Export the animation' });
+		await dlg.getByRole('radio', { name: format }).click();
+		await dlg.getByRole('button', { name: 'Export…' }).click();
+		await expect(dlg).toHaveCount(0, { timeout: 15_000 });
+	};
+	const writes = async () => (await calls(page)).filter((c) => c.cmd === 'export_write');
+
+	await exportAs(/^PSD per frame/);
+	await expect(page.getByText(/Exported 3 frames/)).toBeVisible();
+	let w = await writes();
+	expect(w.map((c) => c.path)).toEqual([
+		'/home/me/Walk cycle_0001.psd',
+		'/home/me/Walk cycle_0002.psd',
+		'/home/me/Walk cycle_0003.psd'
+	]);
+	for (const c of w) expect(c.head).toEqual([0x38, 0x42, 0x50, 0x53]); // 8BPS
+	// a held frame is the same file twice; the next frame differs
+	expect(w[0].bytes).toBe(w[1].bytes);
+
+	await exportAs(/^PNG per layer/);
+	await expect(page.getByText(/Exported 3 frames/)).toBeVisible();
+	w = (await writes()).slice(3);
+	expect(w.map((c) => c.path)).toEqual([
+		'/home/me/Walk cycle_Layer 1_0001.png',
+		'/home/me/Walk cycle_Layer 1_0002.png',
+		'/home/me/Walk cycle_Layer 1_0003.png'
+	]);
+	for (const c of w) expect(c.head).toEqual([0x89, 0x50, 0x4e, 0x47]);
 });

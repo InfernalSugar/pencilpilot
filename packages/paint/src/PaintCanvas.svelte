@@ -3315,12 +3315,28 @@
 		return true;
 	}
 
-	export function exportLayered(): PsdDoc | null {
+	/**
+	 * The picture as a layered document (PSD). With `frame`, an animation frame: each
+	 * layer shows the drawing the pairs give it (none: empty), and the flat picture is
+	 * that frame (on transparency if asked); masks aren't included then.
+	 */
+	export function exportLayered(
+		frame?: { pairs: [number, number][]; transparent?: boolean }
+	): PsdDoc | null {
 		if (!paint || !ctx) return null;
 		render();
 		const groups = new Map(groupList().map((g) => [g.id, g]));
+		const shown = frame ? new Map(frame.pairs) : null;
+		const pixels = (l: LayerInfo) => {
+			if (!shown) return paint!.layerRgba(l.id);
+			const d = shown.get(l.id) ?? 0;
+			const rgba = d ? paint!.drawingRgba(d) : null;
+			return rgba && rgba.length === width * height * 4
+				? rgba
+				: new Uint8Array(width * height * 4);
+		};
 		const toLayer = (l: LayerInfo): PsdLayer => {
-			const maskRgba = l.mask ? paint!.maskThumbnail(l.id, width, height) : null;
+			const maskRgba = l.mask && !frame ? paint!.maskThumbnail(l.id, width, height) : null;
 			let mask: Uint8Array | undefined;
 			if (maskRgba && maskRgba.length) {
 				mask = new Uint8Array(width * height);
@@ -3342,7 +3358,7 @@
 			return {
 				kind: 'layer',
 				name: l.name,
-				rgba: paint!.layerRgba(l.id),
+				rgba: pixels(l),
 				opacity: l.opacity,
 				blend: l.blend,
 				visible: l.visible,
@@ -3371,10 +3387,11 @@
 				items.push(folder);
 			}
 		}
+		const flat = frame ? renderFrame(frame.pairs, 1, frame.transparent)?.rgba : null;
 		return {
 			width,
 			height,
-			composite: ctx.getImageData(0, 0, width, height).data,
+			composite: flat ?? ctx.getImageData(0, 0, width, height).data,
 			items
 		};
 	}
