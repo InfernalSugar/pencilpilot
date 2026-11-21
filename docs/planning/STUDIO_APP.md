@@ -103,6 +103,7 @@ colour flats and lip-sync are free (local).
 
 ## S1 — The app shell, same UI (≈3 weeks)
 - **S1-T01** Studio layout in the app: the same top bar, tool rail, options bar, dock and themes as the website `app` `design`
+  ✅ The app's studio is the website's: every tool's options (fill, gradient, transform / distort / warp, liquify, selections, smudge, pen path, measure, lasso fill), Guides (grid, perspective, ruler, symmetry), QuickShape, Adjust (colour, curves, levels, gradient map, adjustment layers), the quick menu, paste / import, Timelapse. The tool options and Adjust live once in `@pencilpilot/paint` (`ToolOptionsBar`, `tool-options.svelte.ts`) for both. Tooltips show the keys chosen in Settings; more actions can have keys (gradient, adjust, copy / cut, selection, view). One theme, as on the website.
 - **S1-T02** Home: a project browser with thumbnails, recent files, templates (canvas sizes, frame rates) `app` `design`
   ✅ Home is the first screen: New (HD, 4K, square, vertical, storyboard, A4 illustration, custom size and fps), Recent (thumbnails, size, layers, when; missing files marked, remove from list), Open…, and unsaved work to recover. Saves and opens add to Recent. The studio opens from here and its back button asks before losing changes.
 - **S1-T03** `.ppstudio` format v1 (zip: manifest, tiles, strokes, references, provenance) + a format spec doc `app` `anim`
@@ -112,7 +113,7 @@ colour flats and lip-sync are free (local).
 - **S1-T05** The native engine behind PaintCanvas (same API as WASM), with multi-threaded compositing `brush` `app`
   ✅ Re-scoped by measurement (ADR-0012): live painting stays in the window (0.1 ms a sample for pencils and inks); the native engine composites on every core (whole-canvas recomposite 149 → 23 ms, 8× the window) for playback, export and thumbnails in S2/S3. Benchmarks: `cargo run --release -p pencilpilot-brush --example bench`, the app's `/dev/bench`, `PP_BENCH=1`.
 - **S1-T06** Settings: keyboard shortcuts editor, pen curve, tablet gestures, storage location `app`
-  ✅ A Settings screen (from home and the studio): every shortcut can be changed (a taken key swaps), pen pressure on / off and the pressure curve, what one finger does and the tap gestures, the projects folder (dialogs start there), how often unsaved work is copied, and how many versions are kept. Kept in the app's data folder. (The tool buttons' tooltips still show the default keys: S1-T01.)
+  ✅ A Settings screen (from home and the studio): every shortcut can be changed (a taken key swaps), pen pressure on / off and the pressure curve, what one finger does and the tap gestures, the projects folder (dialogs start there), how often unsaved work is copied, and how many versions are kept. Kept in the app's data folder.
 
 ## S2 — Animation core (≈4–5 weeks)
 - **S2-T01** `crates/anim` frame store: sparse tiles, hash dedup, memory / disk tiers, tests at 1080p and 4K `anim`
