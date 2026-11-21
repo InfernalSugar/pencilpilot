@@ -25,7 +25,8 @@ async function stubTauri(page: Page, stub: Stub = {}) {
 	);
 	await page.addInitScript((stub: Stub) => {
 		const w = window as unknown as Record<string, unknown>;
-		const calls: { cmd: string; path?: string; bytes?: number; head?: number[] }[] = [];
+		const calls: { cmd: string; path?: string; bytes?: number; head?: number[]; json?: string }[] =
+			[];
 		w.__calls = calls;
 		w.isTauri = true;
 		const packet = async () => (await fetch('/__packet')).arrayBuffer();
@@ -44,7 +45,8 @@ async function stubTauri(page: Page, stub: Stub = {}) {
 					cmd,
 					path,
 					bytes: bytes?.length,
-					head: bytes ? [...bytes.subarray(0, 4)] : undefined
+					head: bytes ? [...bytes.subarray(0, 4)] : undefined,
+					json: bytes ? undefined : JSON.stringify(args ?? null)
 				});
 				switch (cmd) {
 					case 'plugin:dialog|save': {
@@ -86,7 +88,7 @@ async function stubTauri(page: Page, stub: Stub = {}) {
 }
 
 const canvas = (page: Page) => page.getByLabel(/Drawing canvas/);
-type Call = { cmd: string; path?: string; head?: number[] };
+type Call = { cmd: string; path?: string; head?: number[]; json?: string };
 const calls = (page: Page) =>
 	page.evaluate(() => (window as unknown as { __calls: Call[] }).__calls);
 
@@ -324,4 +326,73 @@ test('leaving the studio with unsaved work asks first', async ({ page }) => {
 		.toContain('plugin:dialog|message');
 	await expect(page).toHaveURL(/\/studio/);
 	await expect(page.getByLabel('not saved')).toBeVisible();
+});
+
+test('settings: change a key (a taken key swaps), and it works in the studio', async ({ page }) => {
+	await stubTauri(page);
+	await page.setViewportSize({ width: 1440, height: 960 });
+	await page.goto('/');
+	await page.getByRole('link', { name: 'Settings' }).click();
+	const brush = page.locator('li[data-action="brush"]');
+	const pen = page.locator('li[data-action="pen"]');
+	await expect(brush.locator('kbd')).toHaveText('B');
+	// Pen takes B: Brush gets Pen's old key, P
+	await page.getByRole('button', { name: 'Change the key for Pen path' }).click();
+	await expect(pen.locator('kbd')).toHaveText('Press a key…');
+	await page.keyboard.press('b');
+	await expect(pen.locator('kbd')).toHaveText('B');
+	await expect(brush.locator('kbd')).toHaveText('P');
+	await expect(page.getByRole('status').filter({ hasText: 'Brush now uses P.' })).toBeVisible();
+	// and Undo on its own key
+	await page.getByRole('button', { name: 'Change the key for Undo' }).click();
+	await page.keyboard.press('Control+Alt+u');
+	await expect(page.locator('li[data-action="undo"] kbd')).toHaveText('Ctrl+Alt+U');
+	// kept through the app's settings file
+	await expect
+		.poll(async () => {
+			const last = (await calls(page)).filter((c) => c.cmd === 'settings_set').at(-1);
+			return last ? JSON.parse(last.json!).settings.keys : null;
+		})
+		.toMatchObject({ pen: 'B', brush: 'P', undo: 'Ctrl+Alt+U' });
+
+	// in the studio: B is the pen path, P is the brush, Ctrl+Alt+U undoes
+	await page.getByRole('link', { name: 'Back to home' }).click();
+	await page.getByRole('button', { name: /HD video/ }).click();
+	await expect(canvas(page)).toHaveAttribute('data-ready', 'true', { timeout: 15_000 });
+	await page.keyboard.press('b');
+	await expect(page.getByRole('button', { name: 'Pen path (P)' })).toHaveAttribute(
+		'aria-pressed',
+		'true'
+	);
+	await page.keyboard.press('p');
+	await expect(page.getByRole('button', { name: 'Brush (B)' })).toHaveAttribute(
+		'aria-pressed',
+		'true'
+	);
+	await scribble(page, 0.5);
+	await expect.poll(() => ink(page)).toBeGreaterThan(50);
+	await page.keyboard.press('Control+Alt+u');
+	await expect.poll(() => ink(page)).toBe(0);
+	// the old undo key does nothing now
+	await scribble(page, 0.5);
+	await page.keyboard.press('Control+z');
+	await expect.poll(() => ink(page)).toBeGreaterThan(50);
+});
+
+test('settings: touch and file choices are kept', async ({ page }) => {
+	await stubTauri(page);
+	await page.setViewportSize({ width: 1440, height: 960 });
+	await page.goto('/settings');
+	await page.getByLabel('Always moves the view (pen only for drawing)').check();
+	await page.getByLabel('Two-finger tap undoes, three-finger tap redoes').uncheck();
+	await page.getByLabel('Keep a recovery copy of unsaved work').selectOption('60');
+	await page.getByLabel('Earlier versions kept per project').fill('5');
+	await expect
+		.poll(async () => {
+			const last = (await calls(page)).filter((c) => c.cmd === 'settings_set').at(-1);
+			return last ? JSON.parse(last.json!).settings : null;
+		})
+		.toMatchObject({ fingers: 'move', tapGestures: false, autosaveSeconds: 60, versionsKept: 5 });
+	await page.getByRole('button', { name: 'Reset all' }).click();
+	await expect(page.getByLabel('Draws until you use a pen, then moves the view')).toBeChecked();
 });

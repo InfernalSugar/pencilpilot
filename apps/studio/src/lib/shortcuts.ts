@@ -1,0 +1,117 @@
+/**
+ * Keyboard shortcuts: what each key does, and the keys people can change.
+ *
+ * A key is written like "Ctrl+Shift+Z": modifiers in a fixed order (Ctrl, Alt, Shift),
+ * then the key itself. "Ctrl" also means ⌘ on a Mac.
+ */
+
+export type ActionId =
+	| 'brush'
+	| 'eraser'
+	| 'picker'
+	| 'fill'
+	| 'lasso-fill'
+	| 'measure'
+	| 'smudge'
+	| 'pen'
+	| 'transform'
+	| 'liquify'
+	| 'select-rect'
+	| 'select-lasso'
+	| 'select-wand'
+	| 'smaller'
+	| 'bigger'
+	| 'undo'
+	| 'redo'
+	| 'save'
+	| 'save-as'
+	| 'open';
+
+export interface Action {
+	id: ActionId;
+	label: string;
+	group: 'Tools' | 'Brush' | 'Edit' | 'File';
+	/** the key it starts with */
+	key: string;
+}
+
+export const ACTIONS: Action[] = [
+	{ id: 'brush', label: 'Brush', group: 'Tools', key: 'B' },
+	{ id: 'eraser', label: 'Eraser', group: 'Tools', key: 'E' },
+	{ id: 'picker', label: 'Eyedropper', group: 'Tools', key: 'I' },
+	{ id: 'fill', label: 'Fill', group: 'Tools', key: 'G' },
+	{ id: 'lasso-fill', label: 'Lasso fill', group: 'Tools', key: 'F' },
+	{ id: 'measure', label: 'Measure', group: 'Tools', key: 'U' },
+	{ id: 'smudge', label: 'Smudge', group: 'Tools', key: 'S' },
+	{ id: 'pen', label: 'Pen path', group: 'Tools', key: 'P' },
+	{ id: 'transform', label: 'Transform', group: 'Tools', key: 'V' },
+	{ id: 'liquify', label: 'Liquify', group: 'Tools', key: 'K' },
+	{ id: 'select-rect', label: 'Rectangle select', group: 'Tools', key: 'M' },
+	{ id: 'select-lasso', label: 'Lasso select', group: 'Tools', key: 'L' },
+	{ id: 'select-wand', label: 'Magic wand', group: 'Tools', key: 'W' },
+	{ id: 'smaller', label: 'Smaller brush', group: 'Brush', key: '[' },
+	{ id: 'bigger', label: 'Bigger brush', group: 'Brush', key: ']' },
+	{ id: 'undo', label: 'Undo', group: 'Edit', key: 'Ctrl+Z' },
+	{ id: 'redo', label: 'Redo', group: 'Edit', key: 'Ctrl+Shift+Z' },
+	{ id: 'save', label: 'Save', group: 'File', key: 'Ctrl+S' },
+	{ id: 'save-as', label: 'Save as…', group: 'File', key: 'Ctrl+Shift+S' },
+	{ id: 'open', label: 'Open…', group: 'File', key: 'Ctrl+O' }
+];
+
+export type Keymap = Record<ActionId, string>;
+
+export const DEFAULT_KEYS: Keymap = Object.fromEntries(ACTIONS.map((a) => [a.id, a.key])) as Keymap;
+
+/** Keys that never become shortcuts on their own (they're modifiers, or the app needs them). */
+const RESERVED = new Set(['Control', 'Shift', 'Alt', 'Meta', 'Escape', 'Enter', 'Tab', ' ']);
+
+/** The key a keyboard event stands for ("Ctrl+Shift+Z"), or null for a modifier alone. */
+export function comboOf(e: {
+	key: string;
+	ctrlKey: boolean;
+	metaKey: boolean;
+	altKey: boolean;
+	shiftKey: boolean;
+}): string | null {
+	if (RESERVED.has(e.key)) return null;
+	let key = e.key.length === 1 ? e.key.toUpperCase() : e.key;
+	// Shift changes the character on some keys; keep the plain one ("Shift+[", not "{")
+	const shifted: Record<string, string> = { '{': '[', '}': ']', '?': '/', '+': '=', _: '-' };
+	if (e.shiftKey && shifted[key]) key = shifted[key];
+	return [
+		e.ctrlKey || e.metaKey ? 'Ctrl' : '',
+		e.altKey ? 'Alt' : '',
+		e.shiftKey ? 'Shift' : '',
+		key
+	]
+		.filter(Boolean)
+		.join('+');
+}
+
+/** Which action a key runs, if any. */
+export function actionFor(map: Keymap, combo: string): ActionId | null {
+	for (const a of ACTIONS) if (map[a.id] === combo) return a.id;
+	return null;
+}
+
+/** The actions another action's key would clash with. */
+export function clashes(map: Keymap, id: ActionId, combo: string): ActionId[] {
+	return ACTIONS.filter((a) => a.id !== id && map[a.id] === combo).map((a) => a.id);
+}
+
+/** A saved keymap, filled in with defaults for anything missing or broken. */
+export function loadKeymap(saved: unknown): Keymap {
+	const out = { ...DEFAULT_KEYS };
+	if (saved && typeof saved === 'object')
+		for (const a of ACTIONS) {
+			const v = (saved as Record<string, unknown>)[a.id];
+			if (typeof v === 'string' && v.length > 0 && v.length < 40) out[a.id] = v;
+		}
+	return out;
+}
+
+/** How a key shows on screen ("⌘⇧Z" on a Mac). */
+export function showKey(combo: string, mac = false): string {
+	if (!mac) return combo;
+	return combo.replace('Ctrl+', '⌘').replace('Alt+', '⌥').replace('Shift+', '⇧');
+}

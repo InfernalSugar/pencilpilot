@@ -41,6 +41,8 @@
 		type ProjectDoc
 	} from '#lib/project.js';
 	import { beforeNavigate, goto } from '$app/navigation';
+	import { loadSettings, settings } from '#lib/settings.svelte.js';
+	import { actionFor, comboOf, type ActionId } from '#lib/shortcuts.js';
 	import { page } from '$app/state';
 	import VersionsMenu from '#lib/VersionsMenu.svelte';
 
@@ -107,7 +109,8 @@
 
 	async function save(as = false) {
 		if (!canvas || busy) return;
-		const target = as || !path ? await askSavePath(projectName(path)) : path;
+		const target =
+			as || !path ? await askSavePath(projectName(path), settings.projectFolder) : path;
 		if (!target) return;
 		busy = 'saving';
 		fileNote = '';
@@ -172,7 +175,7 @@
 
 	async function open() {
 		if (busy || !(await okToDrop())) return;
-		const target = await askOpenPath();
+		const target = await askOpenPath(settings.projectFolder);
 		if (!target) return;
 		const old = docId;
 		await run('opening', async () => {
@@ -191,7 +194,7 @@
 
 	async function exportAs(kind: 'png' | 'psd') {
 		if (!canvas || busy) return;
-		const target = await askExportPath(projectName(path), kind);
+		const target = await askExportPath(projectName(path), kind, settings.projectFolder);
 		if (!target) return;
 		busy = 'exporting';
 		fileNote = '';
@@ -248,8 +251,7 @@
 		});
 	});
 
-	// autosave: a recovery copy of unsaved work, every 20 seconds while it changes
-	const AUTOSAVE_MS = 20_000;
+	// autosave: a recovery copy of unsaved work, as often as Settings says, while it changes
 	async function autosave() {
 		if (!unsaved || busy || !status || status.version === recoveredVersion) return;
 		const version = status.version;
@@ -261,9 +263,16 @@
 		}
 	}
 
+	$effect(() => {
+		const secs = settings.autosaveSeconds;
+		if (!secs || !isTauri()) return;
+		const timer = setInterval(autosave, secs * 1000);
+		return () => clearInterval(timer);
+	});
+
 	onMount(() => {
+		void loadSettings();
 		if (!isTauri()) return;
-		const timer = setInterval(autosave, AUTOSAVE_MS);
 		// what home asked for
 		if (start.kind === 'open') {
 			const file = start.path;
@@ -287,10 +296,7 @@
 				})
 				.then((un) => (stop = un))
 		);
-		return () => {
-			clearInterval(timer);
-			stop?.();
-		};
+		return () => stop?.();
 	});
 
 	onMount(() => {
@@ -314,51 +320,47 @@
 		{ id: 'history', label: 'History' }
 	]);
 
-	const TOOL_KEYS: Record<string, string> = {
-		i: 'picker',
-		g: 'fill',
-		f: 'lasso-fill',
-		u: 'measure',
-		s: 'smudge',
-		p: 'pen',
-		v: 'transform',
-		k: 'liquify',
-		m: 'select-rect',
-		l: 'select-lasso',
-		w: 'select-wand'
+	/** tools whose key switches to them (and back to the brush) */
+	const TOOL_ACTIONS: Partial<Record<ActionId, string>> = {
+		picker: 'picker',
+		fill: 'fill',
+		'lasso-fill': 'lasso-fill',
+		measure: 'measure',
+		smudge: 'smudge',
+		pen: 'pen',
+		transform: 'transform',
+		liquify: 'liquify',
+		'select-rect': 'select-rect',
+		'select-lasso': 'select-lasso',
+		'select-wand': 'select-wand'
 	};
 
 	function onkey(e: KeyboardEvent) {
 		if ((e.target as HTMLElement).closest('input, textarea, select')) return;
-		const mod = e.ctrlKey || e.metaKey;
-		const k = e.key.toLowerCase();
-		if (mod && k === 's') {
-			e.preventDefault();
-			void save(e.shiftKey);
-		} else if (mod && k === 'o') {
-			e.preventDefault();
-			void open();
-		} else if (mod && k === 'z') {
-			e.preventDefault();
-			if (e.shiftKey) canvas?.redo();
-			else canvas?.undo();
-		} else if (mod && k === 'y') {
-			e.preventDefault();
-			canvas?.redo();
-		} else if (!mod && k === 'b') {
-			eraser = false;
-			tool = 'brush';
-		} else if (!mod && k === 'e') {
-			eraser = true;
-			tool = 'brush';
-		} else if (!mod && TOOL_KEYS[k]) tool = tool === TOOL_KEYS[k] ? 'brush' : TOOL_KEYS[k];
-		else if (!mod && e.key === '[') size = Math.max(0.25, +(size / 1.25).toFixed(2));
-		else if (!mod && e.key === ']') size = Math.min(6, +(size * 1.25).toFixed(2));
-		else if (tool === 'transform' && e.key === 'Enter') canvas?.transformCommit();
-		else if (tool === 'transform' && e.key === 'Escape') canvas?.transformCancel();
-		else if (tool === 'pen' && e.key === 'Enter') {
+		// keys that belong to the tool in use
+		if (tool === 'transform' && e.key === 'Enter') return canvas?.transformCommit();
+		if (tool === 'transform' && e.key === 'Escape') return canvas?.transformCancel();
+		if (tool === 'pen' && e.key === 'Enter') {
 			if (canvas?.penStroke(true)) canvas.penClear();
-		} else if (tool === 'pen' && e.key === 'Escape') canvas?.penClear();
+			return;
+		}
+		if (tool === 'pen' && e.key === 'Escape') return canvas?.penClear();
+		const combo = comboOf(e);
+		const action = combo ? actionFor(settings.keys, combo) : null;
+		if (!action) return;
+		e.preventDefault();
+		const toolFor = TOOL_ACTIONS[action];
+		if (toolFor) tool = tool === toolFor ? 'brush' : toolFor;
+		else if (action === 'brush' || action === 'eraser') {
+			eraser = action === 'eraser';
+			tool = 'brush';
+		} else if (action === 'smaller') size = Math.max(0.25, +(size / 1.25).toFixed(2));
+		else if (action === 'bigger') size = Math.min(6, +(size * 1.25).toFixed(2));
+		else if (action === 'undo') canvas?.undo();
+		else if (action === 'redo') canvas?.redo();
+		else if (action === 'save') void save(false);
+		else if (action === 'save-as') void save(true);
+		else if (action === 'open') void open();
 	}
 </script>
 
@@ -444,7 +446,7 @@
 			>
 				Redo
 			</button>
-			<a class="act" href={resolve('/pen-test')}>Pen test</a>
+			<a class="act" href={resolve('/settings')}>Settings</a>
 		{/snippet}
 		{#snippet rail()}
 			<ToolRail bind:tool bind:eraser bind:size bind:opacity />
@@ -471,6 +473,9 @@
 					{color}
 					tool={tool as never}
 					{smoothing}
+					penPressure={settings.penPressure}
+					fingers={settings.fingers}
+					tapGestures={settings.tapGestures}
 					brushTexture={texture}
 					allowImport
 					onpick={(c) => (color = c)}
