@@ -846,6 +846,7 @@ test('static layers hold one drawing all cut long; each cut has a camera', async
 	await expect(page.getByTestId('camera').locator('rect.safe')).toHaveCount(0);
 	await cam.getByLabel(/Safe areas/).check();
 	await expect(page.getByTestId('camera').locator('rect.safe')).toHaveCount(2);
+	await tl.getByRole('button', { name: 'Camera settings' }).click();
 	// the player shows only the camera: square
 	await tl.getByRole('radio', { name: 'Once' }).click();
 	await tl.getByRole('button', { name: 'Play' }).click();
@@ -1053,4 +1054,106 @@ test('export the animation: held frames sent once, the camera, a smaller size, t
 	// the corner has no paint: see-through, not paper
 	expect(frames[0].head![3]).toBe(0);
 	expect(all.some((c) => c.cmd === 'export_end')).toBe(true);
+});
+
+/** a WAV file: a tone for the first `on` seconds, then silence (`total` seconds) */
+function toneWav(on: number, total: number): Buffer {
+	const rate = 8000;
+	const n = Math.round(rate * total);
+	const b = Buffer.alloc(44 + n * 2);
+	b.write('RIFF', 0);
+	b.writeUInt32LE(36 + n * 2, 4);
+	b.write('WAVEfmt ', 8);
+	b.writeUInt32LE(16, 16);
+	b.writeUInt16LE(1, 20);
+	b.writeUInt16LE(1, 22);
+	b.writeUInt32LE(rate, 24);
+	b.writeUInt32LE(rate * 2, 28);
+	b.writeUInt16LE(2, 32);
+	b.writeUInt16LE(16, 34);
+	b.write('data', 36);
+	b.writeUInt32LE(n * 2, 40);
+	for (let i = 0; i < n; i++)
+		b.writeInt16LE(
+			i < rate * on ? Math.round(Math.sin((i / rate) * 2 * Math.PI * 440) * 20000) : 0,
+			44 + i * 2
+		);
+	return b;
+}
+
+test('sound: a clip with its waveform, markers, kept in the file, mixed into a video', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	const tl = page.getByRole('region', { name: 'Timeline' });
+	await scribble(page, 0.3);
+	for (let i = 0; i < 2; i++) await tl.getByRole('button', { name: 'Hold longer' }).click();
+	// a second of sound: loud for the first half
+	await tl.getByLabel('Sound files').setInputFiles({
+		name: 'line.wav',
+		mimeType: 'audio/wav',
+		buffer: toneWav(0.5, 1)
+	});
+	const clip = tl.getByRole('slider', { name: /^line: starts on scene frame 1/ });
+	await expect(clip).toBeVisible();
+	await expect(page.getByLabel('not saved')).toBeVisible();
+	// its waveform: bars where it's loud (the first 12 frames at 24 fps), none after
+	const bars = (x0: number, x1: number) =>
+		clip.locator('canvas').evaluate(
+			(c: HTMLCanvasElement, [x0, x1]) => {
+				const d = c.getContext('2d')!.getImageData(0, 0, c.width, c.height).data;
+				let n = 0;
+				for (let y = 0; y < c.height; y++)
+					for (let x = Math.round(c.width * x0); x < Math.round(c.width * x1); x++)
+						if (d[(y * c.width + x) * 4 + 3] > 0) n++;
+				return n;
+			},
+			[x0, x1]
+		);
+	await expect.poll(() => bars(0, 0.45)).toBeGreaterThan(100);
+	expect(await bars(0.55, 1)).toBe(0);
+	// mute and unmute
+	await tl.getByRole('button', { name: 'Sound on: line' }).click();
+	await expect(tl.getByRole('button', { name: 'Sound on: line' })).toHaveAttribute(
+		'aria-pressed',
+		'false'
+	);
+	await tl.getByRole('button', { name: 'Sound on: line' }).click();
+
+	// a marker on frame 2 (Shift+M), shown on the frame numbers and in the list
+	await tl.getByRole('button', { name: 'Frame 2', exact: true }).click();
+	await page.keyboard.press('Shift+M');
+	await expect(tl.getByRole('button', { name: 'Frame 2, marker' })).toBeVisible();
+	await tl.getByRole('button', { name: 'Markers', exact: true }).click();
+	await tl.getByLabel('Marker 2 label').fill('hit');
+	await tl.getByLabel('Marker 2 label').press('Enter');
+	await tl.getByLabel('Marker 2 label').blur();
+
+	// saved and opened again: the sound and the marker come back
+	await page.keyboard.press('Control+s');
+	await expect(page.getByTestId('project-name')).toHaveText('Walk cycle', { timeout: 20_000 });
+	const saved = (await calls(page)).filter((c) => c.cmd === 'project_save').at(-1)!;
+	expect(saved.bytes!).toBeGreaterThan(16_000);
+	await page.keyboard.press('Control+o');
+	await expect(tl.getByRole('slider', { name: /^line: starts on scene frame 1/ })).toBeVisible({
+		timeout: 20_000
+	});
+	await expect(tl.getByRole('button', { name: 'Frame 2, marker' })).toBeVisible();
+	await expect.poll(() => bars(0, 0.45)).toBeGreaterThan(100);
+
+	// an MP4: the sound of those frames goes with it
+	await page.getByRole('button', { name: 'Export', exact: true }).click();
+	await page.getByRole('button', { name: /^Animation…/ }).click();
+	const dlg = page.getByRole('dialog', { name: 'Export the animation' });
+	await dlg.getByRole('radio', { name: /^MP4/ }).click();
+	await dlg.getByRole('button', { name: 'Export…' }).click();
+	await expect(page.getByText(/Exported to/)).toBeVisible({ timeout: 15_000 });
+	const all = await calls(page);
+	const sound = all.findIndex((c) => c.cmd === 'export_audio');
+	expect(sound).toBeGreaterThan(-1);
+	expect(all[sound].head).toEqual([0x52, 0x49, 0x46, 0x46]); // RIFF
+	// 3 frames at 24 fps at 48 kHz stereo 16-bit: 6000 samples
+	expect(all[sound].bytes).toBe(44 + 6000 * 4);
+	expect(sound).toBeLessThan(all.findIndex((c) => c.cmd === 'export_begin'));
 });

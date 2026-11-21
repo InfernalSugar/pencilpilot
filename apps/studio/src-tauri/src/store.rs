@@ -427,6 +427,7 @@ mod tests {
             scenes: vec![],
             drawings: vec![],
             static_layers: vec![],
+            audio: vec![],
         };
         encode(&header, &rgba).unwrap()
     }

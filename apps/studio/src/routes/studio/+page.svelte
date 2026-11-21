@@ -54,6 +54,7 @@
 	import { page } from '$app/state';
 	import VersionsMenu from '#lib/VersionsMenu.svelte';
 	import XSheet from '#lib/XSheet.svelte';
+	import { AudioBank, wav } from '#lib/audio.js';
 	import ExportDialog from '#lib/ExportDialog.svelte';
 	import {
 		EXPORT_DEFAULTS,
@@ -77,6 +78,8 @@
 	} from '#lib/playback.js';
 	import {
 		cutLength,
+		cutStart,
+		toggleMarker,
 		drawingAt,
 		drawingsIn,
 		findDrawing,
@@ -228,7 +231,59 @@
 	/** The timeline changed (or the frame did). */
 	function timelineEdited(changed: boolean) {
 		if (changed) docVersion++;
+		else scrubSound();
 		showFrame();
+	}
+
+	// ---- sound: clips along each scene, markers (S3-T01) ----
+	const sounds = new AudioBank();
+	/** bumps when sounds are added or loaded (the timeline draws their waveforms again) */
+	let soundTick = $state(0);
+	const theScene = () => timeline.scenes[scene] ?? timeline.scenes[0];
+	const sceneClips = () => theScene().audio ?? [];
+	/** a frame of this cut, as a frame of its scene */
+	const sceneFrameOf = (f: number) => cutStart(theScene(), cutIndex, timeline.statics) + f;
+	let scrubbedAt = -1;
+	/** Moving between frames: a snippet of the sound there (to find a word or a beat). */
+	function scrubSound() {
+		if (playing || !sceneClips().length) return;
+		const f = sceneFrameOf(frame);
+		if (f === scrubbedAt) return;
+		scrubbedAt = f;
+		sounds.scrub(sceneClips(), f, fps);
+	}
+
+	/** Sound files picked: each starts on this frame. */
+	async function addSounds(files: File[]) {
+		const s = theScene();
+		for (const file of files) {
+			try {
+				const key = await sounds.add(new Uint8Array(await file.arrayBuffer()), file.name);
+				if (!s.audio) s.audio = [];
+				const list = s.audio;
+				list.push({
+					id: Math.max(0, ...list.map((c) => c.id)) + 1,
+					name: file.name.replace(/\.[^.]+$/, ''),
+					file: key,
+					start: sceneFrameOf(frame),
+					gain: 1,
+					muted: false
+				});
+			} catch {
+				fileNote = `Couldn’t read ${file.name} as sound.`;
+			}
+		}
+		soundTick++;
+		docVersion++;
+	}
+
+	/** A marker on this frame (or off it). While playing, tapping only adds. */
+	function markFrame() {
+		const f = sceneFrameOf(frame);
+		const s = theScene();
+		if (playing && s.markers?.some((m) => m.frame === f)) return;
+		toggleMarker(s, f);
+		docVersion++;
 	}
 
 	/** Undo / redo a stroke from another frame: go there first, so it's seen. */
@@ -427,11 +482,31 @@
 			rendered.delete(k);
 		}
 		const t0 = performance.now();
+		// the scene's sound plays along (forwards only: a ping-pong's way back is silent)
+		const clips = sceneClips();
+		const at = sceneFrameOf(0);
+		let lastF = -1;
+		let heard = false;
 		const tick = () => {
 			if (!playing) return;
 			const n = Math.floor(((performance.now() - t0) * fps) / 1000);
 			const f = frameAt(n, range, playMode);
 			if (f === null) return stopPlay();
+			if (clips.length && f !== lastF) {
+				if (lastF >= 0 && f < lastF) {
+					if (playMode === 'pingpong') {
+						sounds.stop();
+						heard = false;
+					} else {
+						sounds.play(clips, at + f, fps);
+						heard = true;
+					}
+				} else if (!heard) {
+					sounds.play(clips, at + f, fps);
+					heard = true;
+				}
+				lastF = f;
+			}
 			if (f !== frame) frame = f;
 			drawPlayer(rendered.get(keys.get(f)!));
 			playTimer = requestAnimationFrame(tick);
@@ -442,6 +517,7 @@
 	function stopPlay() {
 		if (!playing) return;
 		playing = false;
+		sounds.stop();
 		preparing = null;
 		cancelAnimationFrame(playTimer);
 		// the canvas shows where playback stopped
@@ -465,6 +541,7 @@
 			[scene, cutIndex, frame] = [0, 0, 0];
 			onCanvas = { scene: 0, cut: 0, frame: 0 };
 			void cache.clear().catch(() => {});
+			sounds.clear();
 		});
 	});
 
@@ -674,6 +751,12 @@
 			thumbnail: await canvas.thumbnail(),
 			scenes: toFile(timeline, layerIds),
 			statics: staticsToFile(timeline, layerIds),
+			audio: [
+				...new Set(timeline.scenes.flatMap((s) => (s.audio ?? []).map((a) => a.file)))
+			].flatMap((file) => {
+				const snd = sounds.get(file);
+				return snd ? [{ file, bytes: snd.bytes }] : [];
+			}),
 			drawings
 		};
 	}
@@ -834,6 +917,21 @@
 		exportStop = false;
 		animExport.progress = { done: 0, total: runs.length };
 		try {
+			// a video gets the sound of the same frames
+			if (f.video) {
+				const mix = await sounds.mixdown(
+					cuts.map((c) => {
+						const sc = timeline.scenes[c.scene];
+						return {
+							clips: sc.audio ?? [],
+							from: cutStart(sc, c.cut, timeline.statics) + c.from,
+							frames: c.to - c.from + 1
+						};
+					}),
+					fps
+				);
+				if (mix) await invoke('export_audio', wav(mix));
+			}
 			await invoke('export_begin', {
 				spec: {
 					format: s.format,
@@ -923,6 +1021,14 @@
 				for (const d of doc.drawings ?? []) if (d.rgba) c.putDrawing(d.id, d.rgba);
 				cache.stored((doc.drawings ?? []).filter((d) => !d.rgba).map((d) => d.id));
 				timeline = fromFile(doc.scenes!, ids, doc.statics);
+				sounds.clear();
+				void Promise.all(
+					(doc.audio ?? []).map((a) =>
+						sounds.put(a.file, a.bytes).catch(() => {
+							fileNote = 'A sound in this project couldn’t be played here.';
+						})
+					)
+				).then(() => soundTick++);
 				scene = Math.min(at(doc.extra.scene), timeline.scenes.length - 1);
 				cutIndex = Math.min(at(doc.extra.cut), timeline.scenes[scene].cuts.length - 1);
 				frame = at(doc.extra.frame);
@@ -1081,7 +1187,8 @@
 		const combo = comboOf(e);
 		const action = combo ? actionFor(settings.keys, combo) : null;
 		// while playing: Esc or any other shortcut stops first
-		if (playing && (e.key === 'Escape' || (action && action !== 'play'))) stopPlay();
+		if (playing && (e.key === 'Escape' || (action && action !== 'play' && action !== 'add-marker')))
+			stopPlay();
 		if (!action) return;
 		e.preventDefault();
 		const toolFor = TOOL_ACTIONS[action];
@@ -1096,6 +1203,7 @@
 		else if (action === 'prev-frame') timelinePanel?.step(-1);
 		else if (action === 'next-frame') timelinePanel?.step(1);
 		else if (action === 'new-drawing') timelinePanel?.addDrawing();
+		else if (action === 'add-marker') markFrame();
 		else if (action === 'copy-frames') timelinePanel?.copyRange();
 		else if (action === 'paste-frames') timelinePanel?.pasteRange();
 		else if (action === 'duplicate-frames') void timelinePanel?.duplicateRange();
@@ -1385,6 +1493,10 @@
 					active={status.active}
 					newDrawing={() => canvas?.newDrawing() ?? 0}
 					drawings={frameDrawings}
+					audio={sounds}
+					{soundTick}
+					onsound={(files) => void addSounds(files)}
+					onmarker={markFrame}
 					onlayer={(id) => canvas?.selectLayer(id)}
 					onedit={(changed) => {
 						if (playing) stopPlay();
