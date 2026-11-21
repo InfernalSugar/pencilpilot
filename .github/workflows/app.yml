@@ -89,7 +89,9 @@ jobs:
       - run: pnpm wasm:brush
       # only the app and what it uses (not the website's server packages)
       - run: pnpm install --frozen-lockfile --filter "@pencilpilot/studio..."
-      - run: pnpm --filter @pencilpilot/studio tauri build
+      # ffmpeg for video export, bundled (GPL v3; src-tauri/ffmpeg/NOTICE.md)
+      - run: node apps/studio/scripts/fetch-ffmpeg.mjs
+      - run: pnpm --filter @pencilpilot/studio tauri build --config src-tauri/tauri.ffmpeg.conf.json
       - uses: actions/upload-artifact@v4
         if: github.event_name != 'pull_request'
         with:
