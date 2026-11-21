@@ -11,3 +11,7 @@ name = "brush"
 
 [dependencies]
 hokusai = { version = "0.3", default-features = false, features = ["myb-json"] }
+
+# compositing runs on every core natively (the browser build stays single-threaded)
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rayon = "1"

@@ -47,7 +47,7 @@ pub struct UndoSurface {
     /// tiles painted since the last `touched.clear()` (for clipping to a selection)
     touched: HashSet<TileKey>,
     /// grain / tip / dual brush for the stroke being painted (see [`texture`])
-    style: Option<std::rc::Rc<texture::DabStyle>>,
+    style: Option<std::sync::Arc<texture::DabStyle>>,
 }
 
 impl UndoSurface {
@@ -134,6 +134,15 @@ impl TiledSurface for UndoSurface {
         }
         true
     }
+}
+
+/// A composited tile: its area on the canvas and its pixels (sRGB, row by row).
+struct ComposedTile {
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    px: Vec<[u8; 3]>,
 }
 
 /// A rectangle in canvas pixels.
@@ -424,9 +433,9 @@ pub struct Painter {
     /// brush states for the mirrored copies of the current stroke
     sym_states: Vec<BrushState>,
     /// grain / tip pictures by id (see `set_texture`)
-    textures: HashMap<u32, std::rc::Rc<texture::Gray>>,
+    textures: HashMap<u32, std::sync::Arc<texture::Gray>>,
     /// how the next strokes are textured (see `set_dab_style`)
-    style: Option<std::rc::Rc<texture::DabStyle>>,
+    style: Option<std::sync::Arc<texture::DabStyle>>,
     /// an adjustment layer being changed live: (layer, its settings before)
     adjust_layer_before: Option<(u32, LayerProps)>,
 }
@@ -469,7 +478,7 @@ impl Painter {
     pub fn set_texture(&mut self, id: u32, w: u32, h: u32, px: Vec<u8>) -> bool {
         match texture::Gray::new(w, h, px) {
             Some(g) => {
-                self.textures.insert(id, std::rc::Rc::new(g));
+                self.textures.insert(id, std::sync::Arc::new(g));
                 true
             }
             None => {
@@ -511,7 +520,7 @@ impl Painter {
                 count: dual_count.clamp(1, 12),
             }),
         };
-        self.style = (!style.is_plain()).then(|| std::rc::Rc::new(style));
+        self.style = (!style.is_plain()).then(|| std::sync::Arc::new(style));
     }
 
     pub fn width(&self) -> u32 {
@@ -3000,6 +3009,74 @@ impl Painter {
 
     /// Recomposite changed tiles into the RGBA buffer. Returns the area that
     /// changed, or `None` if nothing did.
+    /// One tile of the picture, composited (None if it's off the canvas).
+    fn composite_tile(&self, (tx, ty): TileKey) -> Option<ComposedTile> {
+        let ts = TILE_SIZE as i32;
+        let (w, h) = (self.width as i32, self.height as i32);
+        let (px0, py0) = (tx * ts, ty * ts);
+        let (px1, py1) = ((px0 + ts).min(w), (py0 + ts).min(h));
+        let (cx0, cy0) = (px0.max(0), py0.max(0));
+        if cx0 >= px1 || cy0 >= py1 {
+            return None; // tile entirely off-canvas
+        }
+        // with clipping masks every layer matters (a hidden or empty base hides
+        // what's clipped to it); otherwise only visible layers with paint here
+        let clipping = self.layers.iter().any(|l| l.props.clip);
+        let groups = &self.groups;
+        let sources: Vec<TileSource<'_>> = self
+            .layers
+            .iter()
+            .filter_map(|l| {
+                // pass-through groups: their eye and opacity apply to each layer
+                let (gv, go) = groups
+                    .iter()
+                    .find(|g| g.id == l.group)
+                    .map_or((true, 1.0), |g| (g.visible, g.opacity));
+                let opacity = l.props.opacity * go;
+                let visible = l.props.visible && gv && opacity > 0.0;
+                let adjust = l.props.adjust.as_deref();
+                let tile = if adjust.is_some() {
+                    None
+                } else {
+                    l.colour().tiles.get(&(tx, ty))
+                };
+                (clipping || (visible && (tile.is_some() || adjust.is_some()))).then(|| {
+                    TileSource {
+                        adjust,
+                        tile: tile.map(|t| &**t),
+                        opacity,
+                        blend: l.props.blend,
+                        visible,
+                        clip: l.props.clip,
+                        mask: l
+                            .mask_surface()
+                            .map(|m| m.tiles.get(&(tx, ty)).map(|t| &**t)),
+                    }
+                })
+            })
+            .collect();
+        let paper = sources
+            .iter()
+            .all(|s| s.tile.is_none() && s.adjust.is_none());
+        let mut px = Vec::with_capacity(((px1 - cx0) * (py1 - cy0)) as usize);
+        for y in cy0..py1 {
+            for x in cx0..px1 {
+                px.push(if paper {
+                    [255, 255, 255]
+                } else {
+                    composite_pixel(&sources, (y - py0) as usize, (x - px0) as usize)
+                });
+            }
+        }
+        Some(ComposedTile {
+            x0: cx0,
+            y0: cy0,
+            x1: px1,
+            y1: py1,
+            px,
+        })
+    }
+
     pub fn flush(&mut self) -> Option<Rect> {
         for l in &mut self.layers {
             self.dirty.extend(l.surface.dirty.drain());
@@ -3010,72 +3087,36 @@ impl Painter {
         if self.dirty.is_empty() {
             return None;
         }
-        let ts = TILE_SIZE as i32;
-        let (w, h) = (self.width as i32, self.height as i32);
-        let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+        let w = self.width as i32;
         let dirty: Vec<TileKey> = self.dirty.drain().collect();
-        for (tx, ty) in dirty {
-            let (px0, py0) = (tx * ts, ty * ts);
-            let (px1, py1) = ((px0 + ts).min(w), (py0 + ts).min(h));
-            let (cx0, cy0) = (px0.max(0), py0.max(0));
-            if cx0 >= px1 || cy0 >= py1 {
-                continue; // tile entirely off-canvas
-            }
-            // with clipping masks every layer matters (a hidden or empty base hides
-            // what's clipped to it); otherwise only visible layers with paint here
-            let clipping = self.layers.iter().any(|l| l.props.clip);
-            let groups = &self.groups;
-            let sources: Vec<TileSource<'_>> = self
-                .layers
-                .iter()
-                .filter_map(|l| {
-                    // pass-through groups: their eye and opacity apply to each layer
-                    let (gv, go) = groups
-                        .iter()
-                        .find(|g| g.id == l.group)
-                        .map_or((true, 1.0), |g| (g.visible, g.opacity));
-                    let opacity = l.props.opacity * go;
-                    let visible = l.props.visible && gv && opacity > 0.0;
-                    let adjust = l.props.adjust.as_deref();
-                    let tile = if adjust.is_some() {
-                        None
-                    } else {
-                        l.colour().tiles.get(&(tx, ty))
-                    };
-                    (clipping || (visible && (tile.is_some() || adjust.is_some()))).then(|| {
-                        TileSource {
-                            adjust,
-                            tile: tile.map(|t| &**t),
-                            opacity,
-                            blend: l.props.blend,
-                            visible,
-                            clip: l.props.clip,
-                            mask: l
-                                .mask_surface()
-                                .map(|m| m.tiles.get(&(tx, ty)).map(|t| &**t)),
-                        }
-                    })
-                })
-                .collect();
-            for y in cy0..py1 {
-                for x in cx0..px1 {
-                    let idx = ((y * w + x) * 4) as usize;
-                    let px = if sources
-                        .iter()
-                        .all(|s| s.tile.is_none() && s.adjust.is_none())
-                    {
-                        [255, 255, 255]
-                    } else {
-                        composite_pixel(&sources, (y - py0) as usize, (x - px0) as usize)
-                    };
-                    self.rgba[idx..idx + 3].copy_from_slice(&px);
-                    self.rgba[idx + 3] = 255;
+        // each tile on its own (on every core natively), then copied into the picture
+        #[cfg(not(target_arch = "wasm32"))]
+        let done: Vec<ComposedTile> = {
+            use rayon::prelude::*;
+            dirty
+                .par_iter()
+                .filter_map(|&k| self.composite_tile(k))
+                .collect()
+        };
+        #[cfg(target_arch = "wasm32")]
+        let done: Vec<ComposedTile> = dirty
+            .iter()
+            .filter_map(|&k| self.composite_tile(k))
+            .collect();
+        let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+        for t in done {
+            let tw = (t.x1 - t.x0) as usize;
+            for (row, y) in (t.y0..t.y1).enumerate() {
+                let dst = ((y * w + t.x0) * 4) as usize;
+                for (i, px) in t.px[row * tw..(row + 1) * tw].iter().enumerate() {
+                    self.rgba[dst + i * 4..dst + i * 4 + 3].copy_from_slice(px);
+                    self.rgba[dst + i * 4 + 3] = 255;
                 }
             }
-            x0 = x0.min(cx0);
-            y0 = y0.min(cy0);
-            x1 = x1.max(px1);
-            y1 = y1.max(py1);
+            x0 = x0.min(t.x0);
+            y0 = y0.min(t.y0);
+            x1 = x1.max(t.x1);
+            y1 = y1.max(t.y1);
         }
         (x0 < x1).then(|| Rect {
             x: x0 as u32,

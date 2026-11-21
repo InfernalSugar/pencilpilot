@@ -687,8 +687,10 @@
 		untrack(() => {
 			ctx!.fillStyle = '#fff';
 			ctx!.fillRect(0, 0, w, h);
-			const data = new Uint8ClampedArray(memory!.buffer, paint!.rgbaPtr(), w * h * 4);
 			paint!.flush();
+			// a view of the engine's memory only after the last engine call (a call can
+			// grow the memory, which leaves earlier views empty)
+			const data = new Uint8ClampedArray(memory!.buffer, paint!.rgbaPtr(), w * h * 4);
 			ctx!.putImageData(new ImageData(data, w, h), 0, 0);
 			refreshAnts();
 		});
