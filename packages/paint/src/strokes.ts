@@ -122,6 +122,14 @@ export class StrokeLog {
 		this.#push({ kind: 'layer' });
 	}
 
+	/** The last two steps became one (the engine joined them); the older names it. */
+	joinLast() {
+		if (this.#undo.length < 2) return;
+		const newer = this.#undo.pop()!;
+		const older = this.#undo.pop()!;
+		this.#undo.push({ kind: 'batch', actions: [older, newer], label: older.label });
+	}
+
 	/** Start over with these strokes (a drawing brought back from the history); no undo. */
 	reset(strokes: Stroke[]) {
 		this.#all = [...strokes];
