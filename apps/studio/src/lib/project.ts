@@ -280,19 +280,27 @@ export const openVersion = async (path: string, id: string) =>
 // ---- exports ----
 
 /** Ask where to export (PNG or PSD); null if cancelled. */
+const EXPORT_KINDS = {
+	png: { name: 'PNG picture', ext: 'png' },
+	psd: { name: 'Photoshop file', ext: 'psd' },
+	mp4: { name: 'MP4 video', ext: 'mp4' },
+	prores: { name: 'ProRes video', ext: 'mov' },
+	webm: { name: 'WebM video', ext: 'webm' },
+	gif: { name: 'GIF animation', ext: 'gif' },
+	apng: { name: 'Animated PNG', ext: 'png' },
+	'png-seq': { name: 'PNG sequence (numbered from this name)', ext: 'png' }
+};
+
 export async function askExportPath(
 	name: string,
-	kind: 'png' | 'psd',
+	kind: keyof typeof EXPORT_KINDS,
 	folder?: string | null
 ): Promise<string | null> {
 	const { save } = await import('@tauri-apps/plugin-dialog');
+	const k = EXPORT_KINDS[kind];
 	return save({
-		defaultPath: await inFolder(folder, `${name}.${kind}`),
-		filters: [
-			kind === 'png'
-				? { name: 'PNG picture', extensions: ['png'] }
-				: { name: 'Photoshop file', extensions: ['psd'] }
-		]
+		defaultPath: await inFolder(folder, `${name}.${k.ext}`),
+		filters: [{ name: k.name, extensions: [k.ext] }]
 	});
 }
 

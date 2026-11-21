@@ -5,6 +5,7 @@
 //! history ([`store`]), exports, and later the native engine (crates/brush) and the
 //! animation core (crates/anim).
 
+mod export;
 mod project;
 mod store;
 
@@ -18,6 +19,10 @@ use tauri::{AppHandle, Manager, State};
 /// The animation's drawings (crates/anim): the window keeps only the frames it's working
 /// on; the rest live here, in memory up to [`FRAMES_IN_MEMORY`] and on disk past it.
 struct Frames(Mutex<FrameStore>);
+
+/// The export being written, if any (one at a time).
+#[derive(Default)]
+struct Exporting(Mutex<Option<export::Job>>);
 
 /// Bytes of drawing tiles kept in memory before the oldest go to disk.
 const FRAMES_IN_MEMORY: usize = 1 << 30;
@@ -254,6 +259,67 @@ fn export_write(request: Request<'_>) -> Result<String, String> {
     Ok(path.to_string_lossy().into_owned())
 }
 
+/// What can be exported here: ffmpeg's video formats (none without ffmpeg).
+#[tauri::command]
+fn export_tools() -> serde_json::Value {
+    let ffmpeg = export::find_ffmpeg();
+    let video = ffmpeg
+        .as_deref()
+        .map(export::video_formats)
+        .unwrap_or_default();
+    serde_json::json!({
+        "ffmpeg": ffmpeg.map(|p| p.to_string_lossy().into_owned()),
+        "video": video,
+    })
+}
+
+fn exporting(state: &Exporting) -> MutexGuard<'_, Option<export::Job>> {
+    state.0.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Start an export (one going already is cancelled).
+#[tauri::command]
+fn export_begin(spec: export::Spec, state: State<'_, Exporting>) -> Result<(), String> {
+    let mut slot = exporting(&state);
+    if let Some(old) = slot.take() {
+        old.cancel();
+    }
+    *slot = Some(export::Job::begin(spec)?);
+    Ok(())
+}
+
+/// One frame of the export (the body: straight RGBA8), held for the `repeat` header.
+#[tauri::command]
+fn export_frame(request: Request<'_>, state: State<'_, Exporting>) -> Result<(), String> {
+    let repeat = header(&request, "repeat")?
+        .parse::<u32>()
+        .map_err(|e| e.to_string())?;
+    let mut slot = exporting(&state);
+    let job = slot.as_mut().ok_or("no export is going")?;
+    if let Err(e) = job.frame(raw_body(&request)?, repeat) {
+        if let Some(j) = slot.take() {
+            j.cancel();
+        }
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Finish the export; where it went.
+#[tauri::command]
+fn export_end(state: State<'_, Exporting>) -> Result<String, String> {
+    let job = exporting(&state).take().ok_or("no export is going")?;
+    job.end()
+}
+
+/// Stop the export and take away what it wrote.
+#[tauri::command]
+fn export_cancel(state: State<'_, Exporting>) {
+    if let Some(j) = exporting(&state).take() {
+        j.cancel();
+    }
+}
+
 /// The engine benchmark (/dev/bench): bytes in, the same bytes back (an IPC round trip
 /// with a dirty rect's worth of pixels).
 #[tauri::command]
@@ -274,6 +340,7 @@ fn bench_report(app: AppHandle, report: String) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(Exporting::default())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // PP_BENCH=1: open the engine benchmark straight away
@@ -302,6 +369,11 @@ pub fn run() {
             versions_list,
             version_open,
             export_write,
+            export_tools,
+            export_begin,
+            export_frame,
+            export_end,
+            export_cancel,
             recent_list,
             recent_remove,
             settings_get,

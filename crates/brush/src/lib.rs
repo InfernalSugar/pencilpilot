@@ -26,7 +26,7 @@ pub mod texture;
 
 pub use layers::{Blend, LayerProps};
 use layers::{
-    TileSource, composite_pixel, json_str, mask_value, merge_pixel, premul_fix15, unpremul_srgb,
+    TileSource, composite_pixel_on, json_str, mask_value, merge_pixel, premul_fix15, unpremul_srgb,
 };
 
 pub(crate) type TileKey = (i32, i32);
@@ -3562,8 +3562,18 @@ impl Painter {
     /// that drawing's tiles; none = an empty cel).
     fn composite_tile_with(
         &self,
+        key: TileKey,
+        over: Option<&HashMap<u32, Option<&TileMap>>>,
+    ) -> Option<ComposedTile> {
+        self.composite_tile_on(key, over, [1.0; 3])
+    }
+
+    /// One tile composited over a paper of colour `paper` (white for the canvas).
+    fn composite_tile_on(
+        &self,
         (tx, ty): TileKey,
         over: Option<&HashMap<u32, Option<&TileMap>>>,
+        paper_rgb: [f32; 3],
     ) -> Option<ComposedTile> {
         let ts = TILE_SIZE as i32;
         let (w, h) = (self.width as i32, self.height as i32);
@@ -3619,9 +3629,9 @@ impl Painter {
         for y in cy0..py1 {
             for x in cx0..px1 {
                 px.push(if paper {
-                    [255, 255, 255]
+                    paper_rgb.map(|v| (v * 255.0).round() as u8)
                 } else {
-                    composite_pixel(&sources, (y - py0) as usize, (x - px0) as usize)
+                    composite_pixel_on(&sources, (y - py0) as usize, (x - px0) as usize, paper_rgb)
                 });
             }
         }
@@ -3772,6 +3782,41 @@ impl Painter {
     /// times smaller (each pixel the average of its square), as RGBA8 over the paper.
     /// Drawings must be here (showing or kept); a missing one shows as empty.
     pub fn render_frame(&self, pairs: &[u32], shrink: u32) -> Vec<u8> {
+        self.render_frame_on(pairs, shrink, [1.0; 3])
+    }
+
+    /// A frame as `render_frame` makes it, but on transparency (straight-alpha RGBA8):
+    /// for exports with an alpha channel. It's composited over white and over black,
+    /// and the difference gives each pixel's alpha (exact for normal layers; blend
+    /// modes that need the paper show as they would over black).
+    pub fn render_frame_alpha(&self, pairs: &[u32], shrink: u32) -> Vec<u8> {
+        let white = self.render_frame_on(pairs, shrink, [1.0; 3]);
+        let mut out = self.render_frame_on(pairs, shrink, [0.0; 3]);
+        for (b, w) in out
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(white.as_chunks::<4>().0)
+        {
+            // over white w = c·a + (1 − a), over black b = c·a: so a = 1 − (w − b)
+            let diff = (0..3)
+                .map(|i| w[i] as i32 - b[i] as i32)
+                .sum::<i32>()
+                .clamp(0, 765);
+            let a = 255 - (diff + 1) / 3;
+            if a <= 0 {
+                *b = [0; 4];
+                continue;
+            }
+            for v in &mut b[..3] {
+                *v = ((*v as i32 * 255 + a / 2) / a).min(255) as u8;
+            }
+            b[3] = a as u8;
+        }
+        out
+    }
+
+    fn render_frame_on(&self, pairs: &[u32], shrink: u32, paper: [f32; 3]) -> Vec<u8> {
         let k = shrink.max(1) as usize;
         let over: HashMap<u32, Option<&TileMap>> = pairs
             .as_chunks::<2>()
@@ -3788,13 +3833,13 @@ impl Painter {
         let done: Vec<ComposedTile> = {
             use rayon::prelude::*;
             keys.par_iter()
-                .filter_map(|&key| self.composite_tile_with(key, Some(&over)))
+                .filter_map(|&key| self.composite_tile_on(key, Some(&over), paper))
                 .collect()
         };
         #[cfg(target_arch = "wasm32")]
         let done: Vec<ComposedTile> = keys
             .iter()
-            .filter_map(|&key| self.composite_tile_with(key, Some(&over)))
+            .filter_map(|&key| self.composite_tile_on(key, Some(&over), paper))
             .collect();
         let (ow, oh) = (w.div_ceil(k), h.div_ceil(k));
         let mut sum = vec![[0u32; 4]; ow * oh];
@@ -4878,6 +4923,37 @@ mod tests {
         );
         // an unknown drawing is skipped
         assert!(p.onion_rgba(&[999, 0, 255], 1).iter().all(|&v| v == 0));
+    }
+
+    #[test]
+    fn frames_render_on_transparency() {
+        let mut p = Painter::new(64, 64);
+        let layer = p.active_layer();
+        line(&mut p, &pen(), 32.0);
+        let d = p.layer_drawing(layer);
+        let img = p.render_frame_alpha(&[layer, d], 1);
+        let at = |x: usize, y: usize| {
+            let i = (y * 64 + x) * 4;
+            [img[i], img[i + 1], img[i + 2], img[i + 3]]
+        };
+        // the line is there and opaque-ish and dark; elsewhere is see-through
+        assert_eq!(at(32, 5)[3], 0, "no paper");
+        let on = at(32, 32);
+        assert!(on[3] > 200 && on[0] < 80, "{on:?}");
+        // half-transparent paint keeps its colour and gets half alpha
+        let mut q = Painter::new(16, 16);
+        let mut sel = vec![0u8; 256];
+        sel.iter_mut().for_each(|v| *v = 255);
+        q.set_selection(&sel, 0);
+        q.fill_selection([200, 40, 40], 0.5);
+        let l = q.active_layer();
+        let im = q.render_frame_alpha(&[l, q.layer_drawing(l)], 1);
+        let px = [im[0], im[1], im[2], im[3]];
+        assert!((px[3] as i32 - 128).abs() <= 3, "{px:?}");
+        assert!(
+            (px[0] as i32 - 200).abs() <= 4 && (px[1] as i32 - 40).abs() <= 4,
+            "{px:?}"
+        );
     }
 
     #[test]

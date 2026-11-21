@@ -135,6 +135,7 @@ colour flats and lip-sync are free (local).
 - **S3-T01** Audio track: import, waveform, scrub audio, sync markers `anim`
 - **S3-T02** Lip-sync: Rhubarb → mouth shapes on the X-sheet, linked to your drawn mouth chart `anim`
 - **S3-T03** Export: MP4, ProRes 4444 (alpha), WebM, GIF, transparent GIF, APNG, PNG sequence; range, scale and fps options `anim` `app`
+  ✅ Export → Animation…: MP4 (H.264), ProRes 4444, WebM (VP9), GIF, animated PNG and a PNG sequence, for this cut, the loop range, the scene or everything, at 100 / 75 / 50 / 25% of the cut's camera and the project's or another frame rate (frames follow time), with or without the paper (transparency for everything but MP4), looping or once. The window renders each distinct frame once (a drawing on twos crosses once, held for 2) and the app's Rust side writes the file (`src-tauri/src/export.rs`): PNG / GIF / APNG itself, video by piping frames into ffmpeg. Transparent frames come from the engine compositing over white and over black. Cuts framed at another shape are fitted with bars. **ffmpeg isn't bundled yet**: the app uses the one installed (PATH, Homebrew, `PENCILPILOT_FFMPEG`); without it the video formats are greyed out with a note. Bundling a build (licence: an LGPL build has no H.264; size ~30–80 MB per platform) is a decision still to make.
 - **S3-T04** Per-frame PSD and layered PNG export; import of image sequences and video frames for rotoscoping `anim` `app`
 - **S3-T05** Timelapse of the whole project (from the stroke log) and a "drawn live" export `anim`
 

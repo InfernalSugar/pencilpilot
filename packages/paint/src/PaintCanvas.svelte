@@ -2862,11 +2862,14 @@
 	 */
 	export function renderFrame(
 		pairs: [number, number][],
-		shrink = 1
+		shrink = 1,
+		/** on transparency (straight alpha), not on the paper: for exports with alpha */
+		transparent = false
 	): { rgba: Uint8ClampedArray<ArrayBuffer>; width: number; height: number } | null {
 		if (!paint) return null;
 		const k = Math.max(1, Math.round(shrink));
-		const rgba = paint.renderFrame(new Uint32Array(pairs.flat()), k);
+		const flat = new Uint32Array(pairs.flat());
+		const rgba = transparent ? paint.renderFrameAlpha(flat, k) : paint.renderFrame(flat, k);
 		return {
 			rgba: new Uint8ClampedArray(rgba.buffer as ArrayBuffer, rgba.byteOffset, rgba.length),
 			width: Math.ceil(width / k),
