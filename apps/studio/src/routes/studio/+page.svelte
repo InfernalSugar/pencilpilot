@@ -74,9 +74,13 @@
 		outputSize,
 		placeCamera,
 		plan,
+		frameFile,
+		type ExportFormat,
+		type Run,
 		type ExportSettings
 	} from '#lib/exporting.js';
 	import TimelinePanel from '#lib/TimelinePanel.svelte';
+	import { fitInside, naturalOrder, placeFrames, sequenceName } from '#lib/rotoscope.js';
 	import { FrameCache } from '#lib/frames.js';
 	import { cleanOnion, onionEntries, type OnionSettings } from '#lib/onion.js';
 	import {
@@ -107,6 +111,7 @@
 		trackIn,
 		toFile,
 		mouthsToFile,
+		type Camera,
 		type MouthChart,
 		type MouthShape,
 		type Timeline
@@ -299,6 +304,125 @@
 		if (playing && s.markers?.some((m) => m.frame === f)) return;
 		toggleMarker(s, f);
 		docVersion++;
+	}
+
+	// ---- frames in, for rotoscoping (S3-T04): image sequences, video frames ----
+	let importOpen = $state(false);
+	let sequenceInput = $state<HTMLInputElement>();
+	let importStop = false;
+
+	/**
+	 * Bring frames in as drawings on a new layer, under the one being drawn on and half
+	 * see-through, from this frame on. `next` gives each frame's RGBA (canvas size) until
+	 * it gives none.
+	 */
+	async function importFrames(name: string, next: () => Promise<Uint8Array | null>) {
+		if (!canvas || !status || busy) return;
+		if (playing) stopPlay();
+		const c = canvas;
+		const drawingOn = status.active;
+		const before = new Set(status.layers.map((l) => l.id));
+		busy = 'importing';
+		fileNote = '';
+		importStop = false;
+		const ids: number[] = [];
+		let layer: number | undefined;
+		/** the frames that came go on the timeline (all of them, or up to a stop) */
+		const place = async () => {
+			if (!layer || !ids.length) return;
+			placeFrames(trackIn(theCut(), layer), frame, ids);
+			if (status?.layers.some((l) => l.id === drawingOn)) c.selectLayer(drawingOn);
+			docVersion++;
+			await showFrame();
+		};
+		try {
+			c.addLayer(name);
+			await tick();
+			layer = status?.layers.find((l) => !before.has(l.id))?.id;
+			if (!layer) throw new Error('no room for another layer');
+			c.moveLayer(layer, 0);
+			c.setLayer(layer, { opacity: 0.5 });
+			for (let rgba = await next(); rgba; rgba = await next()) {
+				const id = c.newDrawing();
+				if (!c.putDrawing(id, rgba)) throw new Error('the canvas is busy');
+				cache.touch([id]);
+				ids.push(id);
+				fileNote = `Importing frame ${ids.length}…`;
+				// (to the frame store as it goes, so a long clip doesn't fill the window)
+				if (ids.length % 12 === 0) {
+					await cache.push(ids.slice(-12));
+					cache.trim();
+				}
+				if (importStop) throw new Error('cancelled');
+			}
+			if (!ids.length) throw new Error('no frames came');
+			await place();
+			fileNote = `Imported ${ids.length} frame${ids.length === 1 ? '' : 's'} onto “${name}”.`;
+		} catch (e) {
+			await place();
+			fileNote = String(e).includes('cancelled')
+				? `Import stopped after ${ids.length} frame${ids.length === 1 ? '' : 's'}.`
+				: `Couldn’t import: ${e instanceof Error ? e.message : e}`;
+		} finally {
+			busy = '';
+		}
+	}
+
+	/** Picture files, in number order, fitted inside the canvas. */
+	async function importSequence(files: File[]) {
+		const list = naturalOrder(
+			files.filter(
+				(f) => f.type.startsWith('image/') || /\.(png|jpe?g|webp|gif|bmp)$/i.test(f.name)
+			)
+		);
+		if (!list.length) return;
+		const { width: W, height: H } = canvasSize;
+		const off = new OffscreenCanvas(W, H);
+		const g = off.getContext('2d', { willReadFrequently: true })!;
+		g.imageSmoothingQuality = 'high';
+		let i = 0;
+		await importFrames(sequenceName(list[0].name), async () => {
+			const f = list[i++];
+			if (!f) return null;
+			let bmp: ImageBitmap;
+			try {
+				bmp = await createImageBitmap(f);
+			} catch {
+				throw new Error(`${f.name} isn’t a picture the studio can read`);
+			}
+			const at = fitInside(bmp.width, bmp.height, W, H);
+			g.clearRect(0, 0, W, H);
+			g.drawImage(bmp, at.x, at.y, at.width, at.height);
+			bmp.close();
+			return new Uint8Array(g.getImageData(0, 0, W, H).data.buffer);
+		});
+	}
+
+	/** A video's frames at the project's frame rate (ffmpeg reads it). */
+	async function importVideo() {
+		const { open: pick } = await import('@tauri-apps/plugin-dialog');
+		const file = await pick({
+			multiple: false,
+			directory: false,
+			filters: [{ name: 'Video', extensions: ['mp4', 'mov', 'm4v', 'webm', 'mkv', 'avi', 'gif'] }]
+		});
+		if (typeof file !== 'string') return;
+		const { invoke } = await import('@tauri-apps/api/core');
+		const { width, height } = canvasSize;
+		try {
+			await invoke('video_in_open', { path: file, width, height, fps });
+		} catch (e) {
+			fileNote = `Couldn’t import: ${e}`;
+			return;
+		}
+		try {
+			await importFrames(sequenceName(file), async () => {
+				const b = await invoke<ArrayBuffer>('video_in_frame');
+				return b.byteLength ? new Uint8Array(b) : null;
+			});
+		} finally {
+			await invoke('video_in_close').catch(() => {});
+		}
 	}
 
 	// ---- lip-sync (S3-T02): Rhubarb in src-tauri/src/lipsync.rs ----
@@ -882,7 +1006,7 @@
 	let savedVersion = $state(1);
 	/** the canvas version in the recovery copy */
 	let recoveredVersion = 0;
-	let busy = $state<'' | 'saving' | 'opening' | 'exporting'>('');
+	let busy = $state<'' | 'saving' | 'opening' | 'exporting' | 'importing'>('');
 	let fileNote = $state('');
 	/** something is drawn, on this frame or another */
 	const drawn = $derived(!!status && (!status.blank || drawingsIn(timeline).length > 0));
@@ -1076,7 +1200,7 @@
 		if (!canvas || !status || !animExport || busy) return;
 		const s = $state.snapshot(exportSettings) as ExportSettings;
 		const f = FORMATS.find((x) => x.id === s.format)!;
-		const kind = s.format === 'png' ? 'png-seq' : s.format;
+		const kind = s.format === 'png' ? 'png-seq' : s.format === 'psd' ? 'psd-seq' : s.format;
 		const target = await askExportPath(projectName(path), kind, settings.projectFolder);
 		if (!target) return;
 		await showQueue;
@@ -1092,6 +1216,10 @@
 		fileNote = '';
 		exportStop = false;
 		animExport.progress = { done: 0, total: runs.length };
+		if (f.files) {
+			await writeFrameFiles(s.format, target, runs, out, transparent);
+			return;
+		}
 		try {
 			// a video gets the sound of the same frames
 			if (f.video) {
@@ -1165,6 +1293,109 @@
 		} catch (e) {
 			await invoke('export_cancel').catch(() => {});
 			fileNote = String(e).includes('cancelled') ? 'Export cancelled.' : `Couldn’t export: ${e}`;
+			if (animExport) animExport.progress = null;
+		} finally {
+			busy = '';
+		}
+	}
+
+	/**
+	 * PSD per frame, or a PNG sequence per layer: the window makes each file (cropped to
+	 * the cut's camera and scaled like the other exports) and the app writes it.
+	 */
+	async function writeFrameFiles(
+		format: ExportFormat,
+		target: string,
+		runs: Run[],
+		out: { width: number; height: number },
+		transparent: boolean
+	) {
+		const c = canvas;
+		if (!c || !status) {
+			busy = '';
+			return;
+		}
+		const stem = target.replace(/\.(psd|png)$/i, '');
+		const total = runs.reduce((n, r) => n + r.repeat, 0);
+		const paintLayers = status.layers.filter((l) => !l.adjust);
+		// (layers with nothing on any exported frame are left out of the per-layer files)
+		const used = new Set(runs.flatMap((r) => r.pairs.filter(([, d]) => d).map(([l]) => l)));
+		const off = new OffscreenCanvas(out.width, out.height);
+		const g = off.getContext('2d', { willReadFrequently: true })!;
+		g.imageSmoothingQuality = 'high';
+		const { width: W, height: H } = canvasSize;
+		/** a canvas-size picture, cropped to the camera and scaled into the output */
+		const fit = async (rgba: Uint8Array | Uint8ClampedArray, cam: Camera) => {
+			const at = placeCamera(cam, out);
+			const px = new Uint8ClampedArray(rgba.buffer as ArrayBuffer, rgba.byteOffset, rgba.length);
+			const bmp = await createImageBitmap(new ImageData(px, W, H), { premultiplyAlpha: 'none' });
+			g.clearRect(0, 0, out.width, out.height);
+			g.drawImage(bmp, cam.x, cam.y, cam.width, cam.height, at.x, at.y, at.width, at.height);
+			bmp.close();
+			return g.getImageData(0, 0, out.width, out.height).data;
+		};
+		const png = async () =>
+			new Uint8Array(await (await off.convertToBlob({ type: 'image/png' })).arrayBuffer());
+		const { writePsd } = await import('@pencilpilot/paint/psd');
+		let n = 0;
+		let last = '';
+		try {
+			for (const [i, run] of runs.entries()) {
+				if (exportStop) throw new Error('cancelled');
+				const cam = cameraOf(timeline.scenes[run.source.scene].cuts[run.source.cut], canvasSize);
+				await cache.ensure(run.pairs.map(([, d]) => d));
+				const files: { part: string; ext: string; bytes: Uint8Array }[] = [];
+				if (format === 'psd') {
+					const doc = c.exportLayered({ pairs: run.pairs, transparent });
+					if (!doc) throw new Error('the canvas went away');
+					const items = [];
+					for (const it of doc.items) {
+						if (it.kind === 'layer') items.push({ ...it, rgba: await fit(it.rgba, cam) });
+						else {
+							const children = [];
+							for (const ch of it.children) children.push({ ...ch, rgba: await fit(ch.rgba, cam) });
+							items.push({ ...it, children });
+						}
+					}
+					const flat = await fit(doc.composite, cam);
+					if (!transparent) {
+						// (bars around a cut of another shape are paper, as in the other exports)
+						g.globalCompositeOperation = 'destination-over';
+						g.fillStyle = '#fff';
+						g.fillRect(0, 0, out.width, out.height);
+						g.globalCompositeOperation = 'source-over';
+					}
+					const composite = transparent ? flat : g.getImageData(0, 0, out.width, out.height).data;
+					files.push({
+						part: '',
+						ext: 'psd',
+						bytes: writePsd({ width: out.width, height: out.height, composite, items })
+					});
+				} else {
+					for (const l of paintLayers) {
+						if (!used.has(l.id)) continue;
+						const d = run.pairs.find(([id]) => id === l.id)?.[1] ?? 0;
+						g.clearRect(0, 0, out.width, out.height);
+						if (d) await fit(c.drawingRgba(d), cam);
+						files.push({ part: l.name, ext: 'png', bytes: await png() });
+					}
+				}
+				for (let k = 0; k < run.repeat; k++) {
+					n++;
+					for (const f of files) {
+						last = frameFile(stem, n, total, f.ext, f.part);
+						await writeExport(last, f.bytes);
+					}
+				}
+				cache.trim();
+				if (animExport) animExport.progress = { done: i + 1, total: runs.length };
+			}
+			fileNote = `Exported ${n} frame${n === 1 ? '' : 's'} (the last: ${last})`;
+			animExport = null;
+		} catch (e) {
+			fileNote = String(e).includes('cancelled')
+				? `Export cancelled after ${n} frame${n === 1 ? '' : 's'}.`
+				: `Couldn’t export: ${e}`;
 			if (animExport) animExport.progress = null;
 		} finally {
 			busy = '';
@@ -1441,6 +1672,58 @@
 				{busy === 'saving' ? 'Saving…' : 'Save'}
 			</button>
 			<VersionsMenu {path} disabled={!!busy} onopen={openOldVersion} />
+			<div class="export">
+				<button
+					type="button"
+					class="act"
+					aria-expanded={importOpen}
+					disabled={!!busy || !status}
+					onclick={() => {
+						importOpen = !importOpen;
+						exportOpen = false;
+					}}
+				>
+					{busy === 'importing' ? 'Importing…' : 'Import'}
+				</button>
+				{#if busy === 'importing'}
+					<button type="button" class="act" onclick={() => (importStop = true)}>Stop</button>
+				{/if}
+				{#if importOpen}
+					<div class="menu" role="group" aria-label="Import">
+						<button
+							type="button"
+							onclick={() => {
+								importOpen = false;
+								sequenceInput?.click();
+							}}
+						>
+							<b>Image sequence…</b><span>Numbered pictures, a drawing per frame</span>
+						</button>
+						<button
+							type="button"
+							onclick={() => {
+								importOpen = false;
+								void importVideo();
+							}}
+						>
+							<b>Video frames…</b><span>A frame per frame at {fps} fps, to trace over</span>
+						</button>
+					</div>
+				{/if}
+				<input
+					bind:this={sequenceInput}
+					type="file"
+					accept="image/*"
+					multiple
+					hidden
+					aria-label="Image sequence files"
+					onchange={(e) => {
+						const files = [...(e.currentTarget.files ?? [])];
+						e.currentTarget.value = '';
+						if (files.length) void importSequence(files);
+					}}
+				/>
+			</div>
 			<div class="export">
 				<button
 					type="button"

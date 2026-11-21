@@ -8,7 +8,7 @@
  */
 import { cameraOf, cutLength, showing, type Camera, type Cut, type Timeline } from './timeline';
 
-export type ExportFormat = 'mp4' | 'prores' | 'webm' | 'gif' | 'apng' | 'png';
+export type ExportFormat = 'mp4' | 'prores' | 'webm' | 'gif' | 'apng' | 'png' | 'psd' | 'layers';
 
 export const FORMATS: {
 	id: ExportFormat;
@@ -19,6 +19,8 @@ export const FORMATS: {
 	/** made by ffmpeg */
 	video: boolean;
 	ext: string;
+	/** files the window writes one by one (not through the app's encoder) */
+	files?: true;
 }[] = [
 	{
 		id: 'mp4',
@@ -67,8 +69,33 @@ export const FORMATS: {
 		alpha: true,
 		video: false,
 		ext: 'png'
+	},
+	{
+		id: 'psd',
+		label: 'PSD per frame',
+		note: 'A layered Photoshop file per frame',
+		alpha: true,
+		video: false,
+		ext: 'psd',
+		files: true
+	},
+	{
+		id: 'layers',
+		label: 'PNG per layer',
+		note: 'Each layer as its own sequence, to composite',
+		alpha: true,
+		video: false,
+		ext: 'png',
+		files: true
 	}
 ];
+
+/** A frame's file name: `stem_0001.ext` (at least 4 digits, more for long exports). */
+export function frameFile(stem: string, n: number, total: number, ext: string, part = '') {
+	const digits = Math.max(4, String(total).length);
+	const safe = part.replace(/[\\/:*?"<>|]+/g, '-').trim();
+	return `${stem}${safe ? `_${safe}` : ''}_${String(n).padStart(digits, '0')}.${ext}`;
+}
 
 export type ExportRange = 'cut' | 'loop' | 'scene' | 'all';
 
