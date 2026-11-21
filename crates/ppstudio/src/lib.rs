@@ -235,6 +235,9 @@ pub struct Cut {
     /// exposure-sheet notes, frame → text: what's said
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub dialogue: BTreeMap<u32, String>,
+    /// how the cut goes into the next one: "flash" or "dissolve" (none: a hard cut)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transition: Option<String>,
 }
 
 /// A rectangle of the canvas, in canvas pixels.
@@ -617,6 +620,12 @@ impl Project {
                     && c.height > 0.0)
             {
                 return Err(Error::Invalid("a cut's camera".into()));
+            }
+            if let Some(t) = &cut.transition
+                && t != "flash"
+                && t != "dissolve"
+            {
+                return Err(Error::Invalid(format!("a cut's transition: {t}")));
             }
             for (layer, track) in &cut.tracks {
                 if !m.layers.iter().any(|l| l.id == *layer) {
@@ -1080,6 +1089,7 @@ mod tests {
                 dialogue: [(1, "hel-".to_string()), (2, "lo".to_string())]
                     .into_iter()
                     .collect(),
+                transition: Some("flash".into()),
             }],
             ..Default::default()
         }];
@@ -1168,6 +1178,7 @@ mod tests {
                     .insert("A".into(), "wobbly".into());
             } else if bad == 4 {
                 chart.layer = 9;
+                q.manifest.timeline.scenes[0].cuts[0].transition = Some("wipe".into());
             } else if bad == 5 {
                 chart.shapes.insert("B".into(), "NOPE".into());
             } else if bad == 2 {
