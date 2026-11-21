@@ -3207,6 +3207,128 @@ impl Painter {
         self.cels.retain(|d, _| used.contains(d));
     }
 
+    /// A drawing's tiles packed for the frame store: `u32` count, then per tile `i32`
+    /// x, `i32` y and 64×64 straight-alpha sRGB RGBA8 (the project file's tiles). Only
+    /// tiles with paint; empty for an unknown drawing.
+    pub fn drawing_tiles_packed(&self, drawing: u32) -> Vec<u8> {
+        let tiles = self.drawing_tiles(drawing);
+        let ts = TILE_SIZE;
+        let list: Vec<(&TileKey, &Box<TilePixels>)> = tiles
+            .map(|t| {
+                t.iter()
+                    .filter(|(_, px)| px.iter().flatten().any(|p| p[3] > 0))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut out = Vec::with_capacity(4 + list.len() * (8 + ts * ts * 4));
+        out.extend_from_slice(&(list.len() as u32).to_le_bytes());
+        for (&(tx, ty), px) in list {
+            out.extend_from_slice(&tx.to_le_bytes());
+            out.extend_from_slice(&ty.to_le_bytes());
+            for row in px.iter() {
+                for p in row {
+                    if p[3] == 0 {
+                        out.extend_from_slice(&[0; 4]);
+                        continue;
+                    }
+                    let (c, a) = unpremul_srgb(*p);
+                    out.extend_from_slice(&[
+                        (c[0] * 255.0).round() as u8,
+                        (c[1] * 255.0).round() as u8,
+                        (c[2] * 255.0).round() as u8,
+                        (a * 255.0).round() as u8,
+                    ]);
+                }
+            }
+        }
+        out
+    }
+
+    /// Load a drawing from packed tiles (as [`Painter::drawing_tiles_packed`] makes them),
+    /// replacing it if it exists. Not an undo step. False if busy or the bytes don't
+    /// add up.
+    pub fn put_drawing_tiles(&mut self, drawing: u32, packed: &[u8]) -> bool {
+        let ts = TILE_SIZE;
+        let tile_bytes = ts * ts * 4;
+        if drawing == 0 || !self.idle() || packed.len() < 4 {
+            return false;
+        }
+        let n = u32::from_le_bytes(packed[..4].try_into().unwrap()) as usize;
+        if packed.len() != 4 + n * (8 + tile_bytes) {
+            return false;
+        }
+        let mut tiles = TileMap::new();
+        for i in 0..n {
+            let at = 4 + i * (8 + tile_bytes);
+            let tx = i32::from_le_bytes(packed[at..at + 4].try_into().unwrap());
+            let ty = i32::from_le_bytes(packed[at + 4..at + 8].try_into().unwrap());
+            let src = &packed[at + 8..at + 8 + tile_bytes];
+            let mut t = empty_tile();
+            for (k, px) in src.as_chunks::<4>().0.iter().enumerate() {
+                if px[3] == 0 {
+                    continue;
+                }
+                let c = [px[0], px[1], px[2]].map(|v| v as f32 / 255.0);
+                t[k / ts][k % ts] = premul_fix15(c, px[3] as f32 / 255.0);
+            }
+            tiles.insert((tx, ty), t);
+        }
+        self.next_drawing = self.next_drawing.max(drawing + 1);
+        if let Some(idx) = self.layers.iter().position(|l| l.drawing == drawing) {
+            let l = &mut self.layers[idx];
+            let keys: Vec<TileKey> = l
+                .surface
+                .tiles
+                .keys()
+                .chain(tiles.keys())
+                .copied()
+                .collect();
+            l.surface.tiles = tiles;
+            l.surface.dirty.extend(keys);
+        } else {
+            self.cels.insert(drawing, tiles);
+        }
+        true
+    }
+
+    /// Whether the engine holds a drawing's pixels (showing or kept).
+    pub fn has_drawing(&self, drawing: u32) -> bool {
+        drawing != 0
+            && (self.cels.contains_key(&drawing)
+                || self.layers.iter().any(|l| l.drawing == drawing))
+    }
+
+    /// Drawings kept here that aren't showing.
+    pub fn kept_drawings(&self) -> Vec<u32> {
+        self.cels.keys().copied().collect()
+    }
+
+    /// Drawings the undo / redo history changes (they must stay here to be undone).
+    pub fn history_drawings(&self) -> Vec<u32> {
+        let mut used = HashSet::new();
+        fn collect(e: &Edit, used: &mut HashSet<u32>) {
+            match e {
+                Edit::Tiles { drawing, .. } if *drawing != 0 => {
+                    used.insert(*drawing);
+                }
+                Edit::Batch(list) => list.iter().for_each(|e| collect(e, used)),
+                _ => {}
+            }
+        }
+        for e in self.undo.iter().chain(&self.redo) {
+            collect(e, &mut used);
+        }
+        used.into_iter().collect()
+    }
+
+    /// Let go of a kept drawing (the frame store has it). False if it isn't kept here
+    /// (showing, or unknown). If the history still changes it, it must be back
+    /// ([`Painter::put_drawing_tiles`]) before that undo / redo: see
+    /// [`Painter::undo_drawing`].
+    pub fn forget_drawing(&mut self, drawing: u32) -> bool {
+        self.cels.remove(&drawing).is_some()
+    }
+
     /// The drawing the next undo changes (0: none, or not a drawing's pixels).
     pub fn undo_drawing(&self) -> u32 {
         self.undo.last().map_or(0, edit_drawing)
@@ -4336,6 +4458,35 @@ mod tests {
         let d = *p.cels.keys().next().unwrap();
         assert!(p.show_drawings(&[id, d]));
         assert!(!p.layers().iter().find(|l| l.id == id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn drawings_pack_into_file_tiles_and_back() {
+        let mut p = Painter::new(200, 100);
+        let layer = p.active_layer();
+        line(&mut p, &pen(), 40.0);
+        let d = p.layer_drawing(layer);
+        let packed = p.drawing_tiles_packed(d);
+        let n = u32::from_le_bytes(packed[..4].try_into().unwrap()) as usize;
+        assert!(n > 0 && packed.len() == 4 + n * (8 + 64 * 64 * 4));
+        // the same pixels, under another id
+        assert!(p.put_drawing_tiles(50, &packed));
+        assert_eq!(p.drawing_rgba(50), p.drawing_rgba(d));
+        assert!(!p.put_drawing_tiles(51, &packed[..packed.len() - 1]));
+        assert_eq!(p.drawing_tiles_packed(999), 0u32.to_le_bytes());
+        // a kept drawing can go (the store has it), unless undo needs it
+        p.show_drawings(&[layer, 0]);
+        assert!(p.has_drawing(50) && p.kept_drawings().contains(&50));
+        assert!(p.forget_drawing(50));
+        assert!(!p.has_drawing(50));
+        assert!(p.history_drawings().contains(&d));
+        // one the history needs can go too, if it's back before its undo
+        let back = p.drawing_tiles_packed(d);
+        assert!(p.forget_drawing(d) && !p.has_drawing(d));
+        assert_eq!(p.undo_drawing(), d);
+        assert!(p.put_drawing_tiles(d, &back));
+        p.undo();
+        assert!(p.drawing_empty(d));
     }
 
     fn px(p: &Painter, x: u32, y: u32) -> [u8; 3] {

@@ -19,6 +19,7 @@ tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 pencilpilot-ppstudio = { path = "../../../crates/ppstudio" }
+pencilpilot-anim = { path = "../../../crates/anim" }
 tauri-plugin-dialog = "2"
 blake3 = "1"
 

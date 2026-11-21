@@ -9,9 +9,24 @@ mod project;
 mod store;
 
 use std::path::PathBuf;
+use std::sync::{Mutex, MutexGuard};
 
+use anim::FrameStore;
 use tauri::ipc::{InvokeBody, Request, Response};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, State};
+
+/// The animation's drawings (crates/anim): the window keeps only the frames it's working
+/// on; the rest live here, in memory up to [`FRAMES_IN_MEMORY`] and on disk past it.
+struct Frames(Mutex<FrameStore>);
+
+/// Bytes of drawing tiles kept in memory before the oldest go to disk.
+const FRAMES_IN_MEMORY: usize = 1 << 30;
+
+fn frames<'a>(state: &'a State<'_, Frames>) -> MutexGuard<'a, FrameStore> {
+    // a panic mid-change can't leave the store half-done in a way that matters more
+    // than losing it, so carry on with what's there
+    state.0.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// The app's own data folder (recovery copies, versions).
 fn data_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -60,13 +75,17 @@ fn path_header(request: &Request<'_>) -> Result<PathBuf, String> {
 /// Save the window's document (a raw packet, see [`project`]) to the `path` header,
 /// keeping the file it replaces as a version. Returns the path it was saved to.
 #[tauri::command]
-fn project_save(app: AppHandle, request: Request<'_>) -> Result<String, String> {
+fn project_save(
+    app: AppHandle,
+    request: Request<'_>,
+    store: State<'_, Frames>,
+) -> Result<String, String> {
     let path = path_header(&request)?;
     let packet = raw_body(&request)?;
     let data = data_dir(&app)?;
     store::keep_version(&data, &path, store::versions_kept(&data))?;
     let name = format!("PencilPilot {}", env!("CARGO_PKG_VERSION"));
-    project::save(&path, packet, &name)?;
+    project::save(&path, packet, &name, Some(&mut frames(&store)))?;
     // the home screen's list; a failure there mustn't fail the save
     let _ = store::recent_add(&data, &path);
     Ok(path.to_string_lossy().into_owned())
@@ -74,9 +93,13 @@ fn project_save(app: AppHandle, request: Request<'_>) -> Result<String, String> 
 
 /// Open the project at the `path` header: the packet the window restores from.
 #[tauri::command]
-fn project_open(app: AppHandle, request: Request<'_>) -> Result<Response, String> {
+fn project_open(
+    app: AppHandle,
+    request: Request<'_>,
+    store: State<'_, Frames>,
+) -> Result<Response, String> {
     let path = path_header(&request)?;
-    let packet = project::open(&path)?;
+    let packet = project::open(&path, Some(&mut frames(&store)))?;
     if let Ok(data) = data_dir(&app) {
         let _ = store::recent_add(&data, &path);
     }
@@ -112,10 +135,20 @@ fn recent_remove(app: AppHandle, path: String) -> Result<(), String> {
 /// Keep an unsaved document as recovery copy `id` (header), for the file `path` (header,
 /// optional).
 #[tauri::command]
-fn recovery_write(app: AppHandle, request: Request<'_>) -> Result<(), String> {
+fn recovery_write(
+    app: AppHandle,
+    request: Request<'_>,
+    store: State<'_, Frames>,
+) -> Result<(), String> {
     let id = header(&request, "id")?;
     let path = header(&request, "path").ok().filter(|p| !p.is_empty());
-    store::recovery_write(&data_dir(&app)?, &id, raw_body(&request)?, path.as_deref())
+    store::recovery_write(
+        &data_dir(&app)?,
+        &id,
+        raw_body(&request)?,
+        path.as_deref(),
+        Some(&mut frames(&store)),
+    )
 }
 
 #[tauri::command]
@@ -124,8 +157,12 @@ fn recovery_list(app: AppHandle) -> Result<Vec<store::RecoveryItem>, String> {
 }
 
 #[tauri::command]
-fn recovery_open(app: AppHandle, id: String) -> Result<Response, String> {
-    Ok(Response::new(store::recovery_open(&data_dir(&app)?, &id)?))
+fn recovery_open(app: AppHandle, id: String, store: State<'_, Frames>) -> Result<Response, String> {
+    Ok(Response::new(store::recovery_open(
+        &data_dir(&app)?,
+        &id,
+        Some(&mut frames(&store)),
+    )?))
 }
 
 #[tauri::command]
@@ -142,13 +179,64 @@ fn versions_list(app: AppHandle, path: String) -> Result<Vec<store::VersionItem>
 }
 
 #[tauri::command]
-fn version_open(app: AppHandle, path: String, id: String) -> Result<Response, String> {
+fn version_open(
+    app: AppHandle,
+    path: String,
+    id: String,
+    store: State<'_, Frames>,
+) -> Result<Response, String> {
     let file = project::project_path(&path)?;
     Ok(Response::new(store::version_open(
         &data_dir(&app)?,
         &file,
         &id,
+        Some(&mut frames(&store)),
     )?))
+}
+
+// ---- the frame store ----
+
+/// Keep drawings from the window (a packet: see [`anim::pack`]).
+#[tauri::command]
+fn frames_put(request: Request<'_>, store: State<'_, Frames>) -> Result<(), String> {
+    let drawings = anim::unpack(raw_body(&request)?).map_err(|e| e.to_string())?;
+    let mut s = frames(&store);
+    for (id, tiles) in drawings {
+        s.put(id, tiles).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Drawings for the window (a packet); unknown ones are left out.
+#[tauri::command]
+fn frames_get(ids: Vec<u32>, store: State<'_, Frames>) -> Result<Response, String> {
+    let mut s = frames(&store);
+    let mut out = Vec::new();
+    for id in ids {
+        if let Some(tiles) = s.get(id).map_err(|e| e.to_string())? {
+            out.push((id, tiles));
+        }
+    }
+    Ok(Response::new(anim::pack(&out)))
+}
+
+/// Forget every drawing not in `keep` (a new document starts with none).
+#[tauri::command]
+fn frames_retain(keep: Vec<u32>, store: State<'_, Frames>) {
+    frames(&store).retain(&keep.into_iter().collect());
+}
+
+/// How much the store holds (for the developer page and tests).
+#[tauri::command]
+fn frames_stats(store: State<'_, Frames>) -> serde_json::Value {
+    let st = frames(&store).stats();
+    serde_json::json!({
+        "drawings": st.drawings,
+        "tiles": st.tiles,
+        "placed": st.placed,
+        "bytesInMemory": st.bytes_in_memory,
+        "bytesOnDisk": st.bytes_on_disk,
+    })
 }
 
 /// Write an export (the body) to the `path` header: a PNG or a PSD only.
@@ -194,6 +282,13 @@ pub fn run() {
             {
                 w.eval("location.replace('/dev/bench')")?;
             }
+            // the frame store spills to this run's own folder in the app's cache
+            let dir = app
+                .path()
+                .app_cache_dir()
+                .ok()
+                .map(|d| d.join("frames").join(std::process::id().to_string()));
+            app.manage(Frames(Mutex::new(FrameStore::new(FRAMES_IN_MEMORY, dir)?)));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -213,7 +308,11 @@ pub fn run() {
             settings_set,
             data_folder,
             bench_echo,
-            bench_report
+            bench_report,
+            frames_put,
+            frames_get,
+            frames_retain,
+            frames_stats
         ])
         .run(tauri::generate_context!())
         .expect("error while running PencilPilot");

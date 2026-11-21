@@ -2667,6 +2667,23 @@
 	/** Forget kept drawings not in `keep` (and not needed by undo). */
 	export const dropDrawingsExcept = (keep: number[]) =>
 		paint?.dropDrawingsExcept(new Uint32Array(keep));
+	/** A drawing as packed file tiles (u32 count; per tile i32 x, i32 y, 64×64 RGBA8). */
+	export const drawingTilesPacked = (drawing: number) =>
+		paint?.drawingTilesPacked(drawing) ?? new Uint8Array(4);
+	/** Load a drawing from packed file tiles (from the frame store). */
+	export function putDrawingTiles(drawing: number, packed: Uint8Array): boolean {
+		const ok = paint?.putDrawingTiles(drawing, packed) ?? false;
+		schedule();
+		return ok;
+	}
+	/** The engine holds this drawing's pixels (showing or kept). */
+	export const hasDrawing = (drawing: number) => paint?.hasDrawing(drawing) ?? false;
+	/** Drawings kept in the engine that aren't showing. */
+	export const keptDrawings = (): number[] => [...(paint?.keptDrawings() ?? [])];
+	/** Drawings the undo history needs (they stay in the engine). */
+	export const historyDrawings = (): number[] => [...(paint?.historyDrawings() ?? [])];
+	/** Let go of a kept drawing (the frame store has it). */
+	export const forgetDrawing = (drawing: number) => paint?.forgetDrawing(drawing) ?? false;
 	/** The drawing the next undo / redo changes (0: none, or not a drawing). */
 	export const undoDrawing = () => paint?.undoDrawing() ?? 0;
 	export const redoDrawing = () => paint?.redoDrawing() ?? 0;

@@ -35,8 +35,8 @@ export interface ProjectDoc {
 export interface ProjectDrawing {
 	id: number;
 	layer: number;
-	/** straight-alpha RGBA, canvas size */
-	rgba: Uint8Array;
+	/** straight-alpha RGBA, canvas size; none: it's in the app's frame store */
+	rgba?: Uint8Array;
 }
 
 interface PacketLayer {
@@ -66,7 +66,7 @@ interface Header {
 	created?: string | null;
 	thumbnail?: [number, number] | null;
 	scenes?: FileScene[];
-	drawings?: { id: number; layer: number; rgba: [number, number] }[];
+	drawings?: { id: number; layer: number; rgba?: [number, number] | null }[];
 }
 
 const MAGIC = [0x50, 0x50, 0x53, 0x31]; // "PPS1"
@@ -111,7 +111,7 @@ export function pack(doc: ProjectDoc): Uint8Array {
 					drawings: (doc.drawings ?? []).map((d) => ({
 						id: d.id,
 						layer: d.layer,
-						rgba: put(d.rgba)
+						rgba: d.rgba ? put(d.rgba) : null
 					}))
 				}
 			: {})
@@ -168,7 +168,11 @@ export function unpack(packet: ArrayBuffer | Uint8Array): ProjectDoc {
 		created: h.created ?? undefined,
 		thumbnail: h.thumbnail ? get(h.thumbnail) : null,
 		scenes: h.scenes ?? [],
-		drawings: (h.drawings ?? []).map((d) => ({ id: d.id, layer: d.layer, rgba: get(d.rgba) }))
+		drawings: (h.drawings ?? []).map((d) => ({
+			id: d.id,
+			layer: d.layer,
+			...(d.rgba ? { rgba: get(d.rgba) } : {})
+		}))
 	};
 }
 

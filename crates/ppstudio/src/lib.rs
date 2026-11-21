@@ -350,6 +350,16 @@ impl Project {
         Ok(())
     }
 
+    /// Cut a layer mask (one grey byte a canvas pixel) into tiles, kept in the project;
+    /// returns them for a [`Drawing`]'s `mask`.
+    pub fn put_mask(&mut self, mask: &[u8]) -> Result<Vec<TileRef>> {
+        let Canvas { width, height } = self.manifest.canvas;
+        if mask.len() != (width * height) as usize {
+            return Err(Error::Invalid("wrong mask size".into()));
+        }
+        Ok(self.cut(mask, 1, |t| t.iter().all(|&v| v == 255)))
+    }
+
     fn paste(&self, refs: &[TileRef], channels: usize, fill: u8) -> Result<Vec<u8>> {
         let Canvas { width, height } = self.manifest.canvas;
         let (w, h) = (width as usize, height as usize);

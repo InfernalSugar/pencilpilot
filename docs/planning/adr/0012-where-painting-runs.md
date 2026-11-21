@@ -36,8 +36,9 @@ window's timer has 1 ms resolution, so these are upper bounds.
    single-threaded). That makes it 8× faster than the window at flattening whole canvases.
    Animation needs it: playback caches (every frame flattened), export, thumbnails and
    onion skins all run natively (S2, S3).
-3. **Animation frames live natively** (S2's frame store). The window holds only the frame
-   being drawn, so WebAssembly's 4 GB ceiling doesn't limit long cuts.
+3. **Animation frames live natively** (S2's frame store, `crates/anim`). The window holds
+   the frame being drawn and a few recent drawings, so WebAssembly's 4 GB ceiling doesn't
+   limit long cuts.
 4. **Revisit live painting** if the pen test on a tablet shows lag with heavy brushes. The
    airbrush case takes ~16 ms a frame at 240 Hz in the window and ~5 ms natively. The
    options then are WebAssembly threads (Tauri can send the COOP / COEP headers they
