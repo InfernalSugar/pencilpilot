@@ -54,6 +54,16 @@
 	import { page } from '$app/state';
 	import VersionsMenu from '#lib/VersionsMenu.svelte';
 	import XSheet from '#lib/XSheet.svelte';
+	import ExportDialog from '#lib/ExportDialog.svelte';
+	import {
+		EXPORT_DEFAULTS,
+		FORMATS,
+		cutsIn,
+		outputSize,
+		placeCamera,
+		plan,
+		type ExportSettings
+	} from '#lib/exporting.js';
 	import TimelinePanel from '#lib/TimelinePanel.svelte';
 	import { FrameCache } from '#lib/frames.js';
 	import { cleanOnion, onionEntries, type OnionSettings } from '#lib/onion.js';
@@ -779,6 +789,114 @@
 		}
 	}
 
+	// ---- exporting the animation (src-tauri/src/export.rs writes the file) ----
+	let animExport = $state<{
+		video: string[];
+		ffmpeg: string | null;
+		progress: { done: number; total: number } | null;
+	} | null>(null);
+	let exportSettings = $state<ExportSettings>({
+		...EXPORT_DEFAULTS,
+		...readLocal<Partial<ExportSettings>>('pp.app.export', {})
+	});
+	$effect(() => keepLocal('pp.app.export', $state.snapshot(exportSettings)));
+	let exportStop = false;
+
+	async function openAnimExport() {
+		exportOpen = false;
+		if (playing) stopPlay();
+		const { invoke } = await import('@tauri-apps/api/core');
+		const tools = await invoke<{ ffmpeg: string | null; video: string[] }>('export_tools').catch(
+			() => ({ ffmpeg: null, video: [] })
+		);
+		animExport = { ...tools, progress: null };
+	}
+
+	/** Render the frames and send them to be written; returns where the file went. */
+	async function runAnimExport() {
+		if (!canvas || !status || !animExport || busy) return;
+		const s = $state.snapshot(exportSettings) as ExportSettings;
+		const f = FORMATS.find((x) => x.id === s.format)!;
+		const kind = s.format === 'png' ? 'png-seq' : s.format;
+		const target = await askExportPath(projectName(path), kind, settings.projectFolder);
+		if (!target) return;
+		await showQueue;
+		const outFps = s.fps || fps;
+		const cuts = cutsIn(timeline, s.range, { scene, cut: cutIndex }, playRange);
+		const layerIds = status.layers.filter((l) => !l.adjust).map((l) => l.id);
+		const runs = plan(timeline, cuts, layerIds, fps, outFps);
+		const first = timeline.scenes[cuts[0].scene].cuts[cuts[0].cut];
+		const out = outputSize(cameraOf(first, canvasSize), s.scale, f.video);
+		const transparent = s.transparent && f.alpha;
+		const { invoke } = await import('@tauri-apps/api/core');
+		busy = 'exporting';
+		fileNote = '';
+		exportStop = false;
+		animExport.progress = { done: 0, total: runs.length };
+		try {
+			await invoke('export_begin', {
+				spec: {
+					format: s.format,
+					path: target,
+					width: out.width,
+					height: out.height,
+					fps: outFps,
+					transparent,
+					frames: runs.length,
+					total: runs.reduce((n, r) => n + r.repeat, 0),
+					once: s.once
+				}
+			});
+			const off = new OffscreenCanvas(out.width, out.height);
+			const g = off.getContext('2d', { willReadFrequently: true })!;
+			g.imageSmoothingQuality = 'high';
+			for (const [i, run] of runs.entries()) {
+				if (exportStop) throw new Error('cancelled');
+				const cut = timeline.scenes[run.source.scene].cuts[run.source.cut];
+				const cam = cameraOf(cut, canvasSize);
+				const at = placeCamera(cam, out);
+				// (render smaller first when the output is much smaller: faster, and smoother)
+				const k = Math.max(1, Math.floor(1 / at.k));
+				await cache.ensure(run.pairs.map(([, d]) => d));
+				const r = canvas.renderFrame(run.pairs, k, transparent);
+				if (!r) throw new Error('the canvas went away');
+				const bmp = await createImageBitmap(new ImageData(r.rgba, r.width, r.height));
+				g.clearRect(0, 0, out.width, out.height);
+				if (!transparent) {
+					g.fillStyle = '#fff';
+					g.fillRect(0, 0, out.width, out.height);
+				}
+				g.drawImage(
+					bmp,
+					cam.x / k,
+					cam.y / k,
+					cam.width / k,
+					cam.height / k,
+					at.x,
+					at.y,
+					at.width,
+					at.height
+				);
+				bmp.close();
+				const px = g.getImageData(0, 0, out.width, out.height).data;
+				await invoke('export_frame', new Uint8Array(px.buffer, px.byteOffset, px.byteLength), {
+					headers: { repeat: String(run.repeat) }
+				});
+				cache.trim();
+				if (animExport) animExport.progress = { done: i + 1, total: runs.length };
+			}
+			const where = await invoke<string>('export_end');
+			fileNote = `Exported to ${where}`;
+			animExport = null;
+		} catch (e) {
+			await invoke('export_cancel').catch(() => {});
+			fileNote = String(e).includes('cancelled') ? 'Export cancelled.' : `Couldn’t export: ${e}`;
+			if (animExport) animExport.progress = null;
+		} finally {
+			busy = '';
+		}
+	}
+
 	// the new canvas is ready: put the document's layers on it
 	$effect(() => {
 		const p = pending;
@@ -1069,6 +1187,9 @@
 						>
 							<b>Photoshop file (.psd)</b><span>Keeps layers, groups and masks</span>
 						</button>
+						<button type="button" onclick={() => void openAnimExport()}>
+							<b>Animation…</b><span>MP4, ProRes, WebM, GIF, animated PNG, PNG sequence</span>
+						</button>
 					</div>
 				{/if}
 			</div>
@@ -1316,6 +1437,20 @@
 					y={quickMenu.y}
 					actions={quickActions()}
 					onclose={() => (quickMenu = null)}
+				/>
+			{/if}
+			{#if animExport}
+				<ExportDialog
+					bind:settings={exportSettings}
+					video={animExport.video}
+					ffmpeg={animExport.ffmpeg}
+					{fps}
+					hasLoop={!!playRange}
+					camera={cameraOf(theCut(), canvasSize)}
+					progress={animExport.progress}
+					onstart={() => void runAnimExport()}
+					oncancel={() => (exportStop = true)}
+					onclose={() => (animExport = null)}
 				/>
 			{/if}
 			{#if timelapseOpen && canvas}

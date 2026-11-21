@@ -859,6 +859,12 @@ impl PaintCanvas {
 
     /// An animation frame as it would look ((layer, drawing) pairs flattened), made
     /// `shrink` times smaller; RGBA8. Changes nothing.
+    /// A frame on transparency (straight-alpha RGBA8), for exports with alpha.
+    #[wasm_bindgen(js_name = renderFrameAlpha)]
+    pub fn render_frame_alpha(&self, pairs: &[u32], shrink: u32) -> Vec<u8> {
+        self.inner.render_frame_alpha(pairs, shrink)
+    }
+
     #[wasm_bindgen(js_name = renderFrame)]
     pub fn render_frame(&self, pairs: &[u32], shrink: u32) -> Vec<u8> {
         self.inner.render_frame(pairs, shrink)

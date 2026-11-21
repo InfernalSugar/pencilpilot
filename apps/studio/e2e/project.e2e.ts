@@ -36,8 +36,14 @@ async function stubTauri(page: Page, stub: Stub = {}) {
 	});
 	await page.addInitScript((stub: Stub) => {
 		const w = window as unknown as Record<string, unknown>;
-		const calls: { cmd: string; path?: string; bytes?: number; head?: number[]; json?: string }[] =
-			[];
+		const calls: {
+			cmd: string;
+			path?: string;
+			bytes?: number;
+			head?: number[];
+			json?: string;
+			repeat?: string;
+		}[] = [];
 		w.__calls = calls;
 		w.isTauri = true;
 		const packet = async () => (await fetch('/__packet')).arrayBuffer();
@@ -61,16 +67,12 @@ async function stubTauri(page: Page, stub: Stub = {}) {
 					path,
 					bytes: bytes?.length,
 					head: bytes ? [...bytes.subarray(0, 4)] : undefined,
-					json: bytes ? undefined : JSON.stringify(args ?? null)
+					json: bytes ? undefined : JSON.stringify(args ?? null),
+					repeat: options?.headers?.repeat
 				});
 				switch (cmd) {
 					case 'plugin:dialog|save': {
-						const json = JSON.stringify(args);
-						const ext = json.includes('"png"')
-							? 'png'
-							: json.includes('"psd"')
-								? 'psd'
-								: 'ppstudio';
+						const ext = JSON.stringify(args).match(/"extensions":\["(\w+)"/)?.[1] ?? 'ppstudio';
 						return `/home/me/Walk cycle.${ext}`;
 					}
 					case 'plugin:dialog|open':
@@ -93,6 +95,10 @@ async function stubTauri(page: Page, stub: Stub = {}) {
 						return stub.recent ?? [];
 					case 'export_write':
 						return path;
+					case 'export_tools':
+						return { ffmpeg: '/usr/bin/ffmpeg', video: ['mp4', 'prores', 'webm'] };
+					case 'export_end':
+						return '/home/me/Walk cycle.gif';
 					case 'frames_put': {
 						const b = bytes!;
 						const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
@@ -999,4 +1005,52 @@ test('X-sheet: drawings written down the page, empty cels, dialogue kept in the 
 	// (numbered in order of appearance: with drawing 2 gone, the new one is now 2)
 	await expect(cellAt(4)).toHaveAccessibleName('Layer 1, frame 4: drawing 2');
 	await expect(cellAt(2)).toHaveAccessibleName('Layer 1, frame 2: empty cel');
+});
+
+test('export the animation: held frames sent once, the camera, a smaller size, transparency', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	const tl = page.getByRole('region', { name: 'Timeline' });
+	// A held 2 frames, then B
+	await scribble(page, 0.3);
+	await tl.getByRole('button', { name: '2s' }).click();
+	await tl.getByRole('button', { name: 'New drawing' }).click();
+	await scribble(page, 0.6);
+	await tl.getByRole('button', { name: '1s' }).click();
+	// a square camera
+	await tl.getByRole('button', { name: 'Camera settings' }).click();
+	await tl.getByRole('group', { name: 'Camera' }).getByRole('button', { name: '1:1' }).click();
+	const size = await canvas(page).evaluate((el: HTMLCanvasElement) => el.height);
+
+	await page.getByRole('button', { name: 'Export', exact: true }).click();
+	await page.getByRole('button', { name: /^Animation…/ }).click();
+	const dlg = page.getByRole('dialog', { name: 'Export the animation' });
+	await expect(dlg).toBeVisible();
+	await dlg.getByRole('radio', { name: /^GIF/ }).click();
+	await dlg.getByLabel('Size').selectOption('0.5');
+	await expect(dlg.getByText(`${size / 2} × ${size / 2} px`)).toBeVisible();
+	await dlg.getByLabel(/Transparent background/).check();
+	await dlg.getByRole('button', { name: 'Export…' }).click();
+	await expect(page.getByText(/Exported to/)).toBeVisible({ timeout: 15_000 });
+	await expect(dlg).toHaveCount(0);
+
+	const all = await calls(page);
+	const begin = JSON.parse(all.find((c) => c.cmd === 'export_begin')!.json!).spec;
+	expect(begin).toMatchObject({
+		format: 'gif',
+		path: '/home/me/Walk cycle.gif',
+		width: size / 2,
+		height: size / 2,
+		frames: 2,
+		total: 3,
+		transparent: true
+	});
+	const frames = all.filter((c) => c.cmd === 'export_frame');
+	expect(frames.map((c) => c.repeat)).toEqual(['2', '1']);
+	expect(frames[0].bytes).toBe((size / 2) * (size / 2) * 4);
+	// the corner has no paint: see-through, not paper
+	expect(frames[0].head![3]).toBe(0);
+	expect(all.some((c) => c.cmd === 'export_end')).toBe(true);
 });
