@@ -162,6 +162,8 @@
 		smoothing = 0,
 		onpick,
 		ongesture,
+		fingers = 'auto',
+		tapGestures = true,
 		fillTolerance = 0.12,
 		fillAllLayers = true,
 		fillReference = 0,
@@ -284,6 +286,10 @@
 		onpick?: (hex: string) => void;
 		/** two-finger tap = undo, three-finger tap = redo; defaults to this canvas's own */
 		ongesture?: (g: 'undo' | 'redo') => void;
+		/** what one finger does: draw, move the view, or 'auto' (draw until a pen is used, then move) */
+		fingers?: 'auto' | 'draw' | 'move';
+		/** two-finger tap = undo, three-finger tap = redo */
+		tapGestures?: boolean;
 		/** local strokes as they happen (shared canvases) */
 		onlive?: (e: LiveEvent) => void;
 		/** no more strokes (e.g. time is up); a stroke in progress is finished */
@@ -2165,7 +2171,7 @@
 				return;
 			}
 			if (touches.size > 2 || gestureLatch) return;
-			if (penSeen) {
+			if (fingers === 'move' || (fingers === 'auto' && penSeen)) {
 				// with a pen around, a finger moves the view, or picks a colour when held still
 				clearTimeout(holdTimer);
 				const id = e.pointerId;
@@ -2503,7 +2509,7 @@
 			if (touches.size === 0) {
 				gestureLatch = false;
 				// a quick tap with two or three fingers that didn't move: undo / redo
-				if (tap && !tap.moved && tap.max >= 2 && e.timeStamp - tap.t0 < 350) {
+				if (tapGestures && tap && !tap.moved && tap.max >= 2 && e.timeStamp - tap.t0 < 350) {
 					({ zoom, rot, panX, panY } = tap.view);
 					const g = tap.max === 2 ? 'undo' : 'redo';
 					if (ongesture) ongesture(g);

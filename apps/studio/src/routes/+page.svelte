@@ -8,6 +8,7 @@
 	import { isTauri } from '@tauri-apps/api/core';
 	import Logo from '@pencilpilot/ui/Logo.svelte';
 	import { onMount } from 'svelte';
+	import { loadSettings, settings } from '#lib/settings.svelte.js';
 	import {
 		ago,
 		askOpenPath,
@@ -53,7 +54,8 @@
 	const go = (s: StudioStart) => goto(resolve(`/studio${studioQuery(s)}`));
 
 	async function openFile() {
-		const path = await askOpenPath();
+		await loadSettings();
+		const path = await askOpenPath(settings.projectFolder);
 		if (path) await go({ kind: 'open', path });
 	}
 
@@ -82,6 +84,7 @@
 		</div>
 		<div class="top-actions">
 			<a class="ghost" href={resolve('/pen-test')}>Pen test</a>
+			<a class="ghost" href={resolve('/settings')}>Settings</a>
 			<button type="button" class="primary" onclick={openFile}>Open…</button>
 		</div>
 	</header>

@@ -9,6 +9,8 @@
 //!   [`VERSIONS_KEPT`] stay.
 //!
 //! - **Recent projects:** `recent.json`, newest first (the home screen's list).
+//! - **Settings:** `settings.json`, as the window saves it; the Rust side reads
+//!   `versionsKept` from it.
 //!
 //! Every function takes the data folder, so tests use a temporary one.
 
@@ -21,8 +23,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::project;
 
-/// Versions kept per project.
+/// Versions kept per project, unless the settings say otherwise.
 pub const VERSIONS_KEPT: usize = 20;
+/// The most versions anyone can ask for.
+pub const VERSIONS_MAX: usize = 100;
 /// Projects remembered on the home screen.
 pub const RECENT_KEPT: usize = 30;
 
@@ -180,9 +184,10 @@ fn now_ms() -> u128 {
         .map_or(0, |d| d.as_millis())
 }
 
-/// Before a save replaces `project_file`: keep the file as it is now as a version.
-pub fn keep_version(data: &Path, project_file: &Path) -> Result<(), String> {
-    if !project_file.is_file() {
+/// Before a save replaces `project_file`: keep the file as it is now as a version
+/// (`kept` versions stay; 0 keeps none).
+pub fn keep_version(data: &Path, project_file: &Path, kept: usize) -> Result<(), String> {
+    if !project_file.is_file() || kept == 0 {
         return Ok(());
     }
     let dir = versions_dir(data, project_file);
@@ -202,7 +207,7 @@ pub fn keep_version(data: &Path, project_file: &Path) -> Result<(), String> {
         .filter(|p| p.extension().is_some_and(|e| e == "ppstudio"))
         .collect();
     versions.sort();
-    let extra = versions.len().saturating_sub(VERSIONS_KEPT);
+    let extra = versions.len().saturating_sub(kept);
     for old in &versions[..extra] {
         let _ = fs::remove_file(old);
     }
@@ -237,6 +242,43 @@ pub fn versions_list(data: &Path, project_file: &Path) -> Vec<VersionItem> {
 pub fn version_open(data: &Path, project_file: &Path, id: &str) -> Result<Vec<u8>, String> {
     check_id(id)?;
     project::open(&versions_dir(data, project_file).join(format!("{id}.ppstudio")))
+}
+
+// ---- settings ----
+
+fn settings_file(data: &Path) -> PathBuf {
+    data.join("settings.json")
+}
+
+/// The window's settings as saved (null before the first save, or if unreadable).
+pub fn settings_get(data: &Path) -> serde_json::Value {
+    fs::read(settings_file(data))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or(serde_json::Value::Null)
+}
+
+/// Keep the window's settings (a JSON object, at most 64 KB).
+pub fn settings_set(data: &Path, value: &serde_json::Value) -> Result<(), String> {
+    if !value.is_object() {
+        return Err("settings must be an object".into());
+    }
+    let bytes = serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?;
+    if bytes.len() > 64 * 1024 {
+        return Err("settings are too big".into());
+    }
+    fs::create_dir_all(data).map_err(|e| e.to_string())?;
+    let tmp = settings_file(data).with_extension("json.saving");
+    fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
+    fs::rename(&tmp, settings_file(data)).map_err(|e| e.to_string())
+}
+
+/// How many versions to keep per project (the `versionsKept` setting).
+pub fn versions_kept(data: &Path) -> usize {
+    settings_get(data)
+        .get("versionsKept")
+        .and_then(serde_json::Value::as_u64)
+        .map_or(VERSIONS_KEPT, |n| (n as usize).min(VERSIONS_MAX))
 }
 
 // ---- recent projects ----
@@ -415,11 +457,11 @@ mod tests {
         let data = temp("versions");
         let file = data.join("walk.ppstudio");
         // first save: nothing to keep yet
-        keep_version(&data, &file).unwrap();
+        keep_version(&data, &file, VERSIONS_KEPT).unwrap();
         project::save(&file, &packet(1), "t").unwrap();
         assert!(versions_list(&data, &file).is_empty());
         for shade in 2..=4 {
-            keep_version(&data, &file).unwrap();
+            keep_version(&data, &file, VERSIONS_KEPT).unwrap();
             project::save(&file, &packet(shade), "t").unwrap();
             std::thread::sleep(std::time::Duration::from_millis(3));
         }
@@ -444,7 +486,7 @@ mod tests {
         let file = data.join("p.ppstudio");
         project::save(&file, &packet(1), "t").unwrap();
         for _ in 0..VERSIONS_KEPT + 5 {
-            keep_version(&data, &file).unwrap();
+            keep_version(&data, &file, VERSIONS_KEPT).unwrap();
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
         assert_eq!(versions_list(&data, &file).len(), VERSIONS_KEPT);
@@ -474,6 +516,26 @@ mod tests {
             recent_add(&data, &data.join(format!("{i}.ppstudio"))).unwrap();
         }
         assert_eq!(recent_paths(&data).len(), RECENT_KEPT);
+        fs::remove_dir_all(&data).unwrap();
+    }
+
+    #[test]
+    fn settings_round_trip_and_set_how_many_versions_stay() {
+        let data = temp("settings");
+        assert!(settings_get(&data).is_null());
+        assert_eq!(versions_kept(&data), VERSIONS_KEPT);
+        let v = serde_json::json!({ "versionsKept": 3, "keys": { "brush": "N" } });
+        settings_set(&data, &v).unwrap();
+        assert_eq!(settings_get(&data), v);
+        assert_eq!(versions_kept(&data), 3);
+        settings_set(&data, &serde_json::json!({ "versionsKept": 100000 })).unwrap();
+        assert_eq!(versions_kept(&data), VERSIONS_MAX);
+        assert!(settings_set(&data, &serde_json::json!([1, 2])).is_err());
+        // 0: no versions at all
+        let file = data.join("p.ppstudio");
+        project::save(&file, &packet(1), "t").unwrap();
+        keep_version(&data, &file, 0).unwrap();
+        assert!(versions_list(&data, &file).is_empty());
         fs::remove_dir_all(&data).unwrap();
     }
 
