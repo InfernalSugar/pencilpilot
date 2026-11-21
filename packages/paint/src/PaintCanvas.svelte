@@ -155,6 +155,7 @@
 		onblocked,
 		overlaySrc = null,
 		overlayOpacity = 0.3,
+		onionImage = null,
 		overlayTransform = { x: 0, y: 0, scale: 1, rotate: 0 },
 		adjustOverlay = false,
 		onoverlaymove,
@@ -215,6 +216,8 @@
 		/** a picture shown over the canvas (fitted like the grader fits references); never part of the drawing */
 		overlaySrc?: string | null;
 		overlayOpacity?: number;
+		/** onion skin / light table: tinted drawings over the canvas (from `onionRgba`) */
+		onionImage?: ImageBitmap | null;
 		/** where the overlay sits: offset (fraction of the canvas), scale and rotation (degrees) */
 		overlayTransform?: { x: number; y: number; scale: number; rotate: number };
 		/** what a press on the canvas does */
@@ -670,6 +673,18 @@
 			film.capture(el);
 		}
 	}
+
+	// ---- onion skin: the picture the page made, drawn over the canvas ----
+	let onionEl = $state<HTMLCanvasElement>();
+	$effect(() => {
+		const img = onionImage;
+		const el = onionEl;
+		if (!img || !el) return;
+		[el.width, el.height] = [img.width, img.height];
+		const g = el.getContext('2d');
+		g?.clearRect(0, 0, img.width, img.height);
+		g?.drawImage(img, 0, 0);
+	});
 
 	// ---- timelapse: a frame after every change ----
 
@@ -2701,6 +2716,31 @@
 			height: Math.ceil(height / k)
 		};
 	}
+	/**
+	 * Onion skin: drawings as tinted lines on transparency, farthest first, made `shrink`
+	 * times smaller. Pass the result to `onionImage` (as an ImageBitmap).
+	 */
+	export function onionRgba(
+		entries: { drawing: number; colour: string; opacity: number }[],
+		shrink = 1
+	): ImageData | null {
+		if (!paint) return null;
+		const k = Math.max(1, Math.round(shrink));
+		const flat = entries.flatMap((e) => [
+			e.drawing,
+			parseInt(e.colour.replace('#', ''), 16) || 0,
+			Math.round(Math.min(1, Math.max(0, e.opacity)) * 255)
+		]);
+		const rgba = paint.onionRgba(new Uint32Array(flat), k);
+		const w = Math.ceil(width / k);
+		const h = Math.ceil(height / k);
+		return new ImageData(
+			new Uint8ClampedArray(rgba.buffer as ArrayBuffer, rgba.byteOffset, rgba.length),
+			w,
+			h
+		);
+	}
+
 	/** The drawing the next undo / redo changes (0: none, or not a drawing). */
 	export const undoDrawing = () => paint?.undoDrawing() ?? 0;
 	export const redoDrawing = () => paint?.redoDrawing() ?? 0;
@@ -3480,6 +3520,11 @@
 				{/if}
 			</svg>
 		{/if}
+		{#if onionImage}
+			<div class="overlay-clip">
+				<canvas class="overlay onion" bind:this={onionEl} data-testid="onion"></canvas>
+			</div>
+		{/if}
 		{#if overlaySrc}
 			<div class="overlay-clip">
 				<img
@@ -3868,6 +3913,9 @@
 		object-fit: contain;
 		pointer-events: none;
 		mix-blend-mode: multiply;
+	}
+	.overlay.onion {
+		object-fit: fill;
 	}
 	.drop-tol {
 		position: absolute;

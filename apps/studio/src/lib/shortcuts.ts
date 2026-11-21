@@ -45,6 +45,8 @@ export type ActionId =
 	| 'play'
 	| 'set-in'
 	| 'set-out'
+	| 'onion'
+	| 'pin-frame'
 	| 'save'
 	| 'save-as'
 	| 'open';
@@ -102,6 +104,13 @@ export const ACTIONS: Action[] = [
 	{ id: 'play', label: 'Play / stop', group: 'Animation', key: 'Shift+Space' },
 	{ id: 'set-in', label: 'Loop from this frame', group: 'Animation', key: 'Alt+I' },
 	{ id: 'set-out', label: 'Loop to this frame', group: 'Animation', key: 'Alt+O' },
+	{ id: 'onion', label: 'Onion skin on / off', group: 'Animation', key: 'O' },
+	{
+		id: 'pin-frame',
+		label: 'Pin this frame to the light table',
+		group: 'Animation',
+		key: 'Shift+O'
+	},
 	{ id: 'save', label: 'Save', group: 'File', key: 'Ctrl+S' },
 	{ id: 'save-as', label: 'Save as…', group: 'File', key: 'Ctrl+Shift+S' },
 	{ id: 'open', label: 'Open…', group: 'File', key: 'Ctrl+O' }

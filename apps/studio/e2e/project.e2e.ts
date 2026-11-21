@@ -733,3 +733,64 @@ test('playback: plays the cut at its frame rate, loops a range, ping-pongs, scru
 	await expect.poll(() => ink(page, 0.4, 0.6)).toBeGreaterThan(50);
 	expect(await ink(page, 0, 0.35)).toBe(0);
 });
+
+test('onion skin: red before, green after; the light table pins frames in blue', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	const tl = page.getByRole('region', { name: 'Timeline' });
+	const onion = page.getByTestId('onion');
+	/** onion pixels of a colour in rows y0–y1 (fractions) */
+	const tinted = (hue: 'red' | 'green' | 'blue', y0: number, y1: number) =>
+		onion.evaluate(
+			(el: HTMLCanvasElement, [hue, y0, y1]) => {
+				const top = Math.round(el.height * (y0 as number));
+				const h = Math.max(1, Math.round(el.height * ((y1 as number) - (y0 as number))));
+				const d = el.getContext('2d')!.getImageData(0, top, el.width, h).data;
+				let n = 0;
+				for (let i = 0; i < d.length; i += 4) {
+					const [r, g, b, a] = [d[i], d[i + 1], d[i + 2], d[i + 3]];
+					if (a < 40) continue;
+					if (hue === 'red' && r > g + 60 && r > b + 60) n++;
+					if (hue === 'green' && g > r + 40 && g > b + 20) n++;
+					if (hue === 'blue' && b > r + 60 && b > g + 30) n++;
+				}
+				return n;
+			},
+			[hue, y0, y1] as const
+		);
+	// three drawings: top, middle, bottom
+	for (let i = 0; i < 3; i++) {
+		if (i) await tl.getByRole('button', { name: 'New drawing' }).click();
+		await scribble(page, 0.15 + i * 0.3);
+	}
+	await expect(onion).toHaveCount(0);
+	// on the middle frame, onion on: the top drawing in red, the bottom one in green
+	await tl.getByRole('button', { name: 'Frame 2', exact: true }).click();
+	await page.keyboard.press('o');
+	await expect(tl.getByRole('button', { name: 'Onion', exact: true })).toHaveAttribute(
+		'aria-pressed',
+		'true'
+	);
+	await expect.poll(() => tinted('red', 0.05, 0.3)).toBeGreaterThan(50);
+	await expect.poll(() => tinted('green', 0.65, 0.9)).toBeGreaterThan(50);
+	expect(await tinted('red', 0.65, 0.9)).toBe(0);
+	// it's over the canvas, not in the drawing
+	expect(await ink(page, 0.05, 0.3)).toBe(0);
+	// two before, on the last frame: both earlier drawings in red
+	await tl.getByRole('button', { name: 'Onion skin settings' }).click();
+	await page.getByRole('group', { name: 'Onion skin' }).getByRole('spinbutton').first().fill('2');
+	await tl.getByRole('button', { name: 'Frame 3', exact: true }).click();
+	await expect.poll(() => tinted('red', 0.05, 0.3)).toBeGreaterThan(50);
+	await expect.poll(() => tinted('red', 0.35, 0.6)).toBeGreaterThan(50);
+	// onion off, frame 1 pinned to the light table: blue, from any frame
+	await page.keyboard.press('o');
+	await tl.getByRole('button', { name: 'Frame 1', exact: true }).click();
+	await page.keyboard.press('Shift+O');
+	await tl.getByRole('button', { name: 'Frame 3', exact: true }).click();
+	await expect.poll(() => tinted('blue', 0.05, 0.3)).toBeGreaterThan(50);
+	expect(await tinted('red', 0.35, 0.6)).toBe(0);
+	await tl.getByRole('button', { name: '1 pinned ×' }).click();
+	await expect(onion).toHaveCount(0);
+});
