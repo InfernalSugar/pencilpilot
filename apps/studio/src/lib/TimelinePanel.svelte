@@ -63,6 +63,7 @@
 		fps = $bindable(24),
 		playing = false,
 		playMode = $bindable<PlayMode>('loop'),
+		playScope = $bindable<'cut' | 'scene'>('cut'),
 		playRange = $bindable<PlayRange | null>(null),
 		onplay,
 		onrange,
@@ -92,6 +93,8 @@
 		fps?: number;
 		playing?: boolean;
 		playMode?: PlayMode;
+		/** play this cut, or the whole scene with its transitions */
+		playScope?: 'cut' | 'scene';
 		/** the frames played (none: the whole cut) */
 		playRange?: PlayRange | null;
 		onplay: () => void;
@@ -551,7 +554,9 @@
 					go(0);
 				}}
 			>
-				{#each theScene.cuts as c, i (c.id)}<option value={i}>{c.name}</option>{/each}
+				{#each theScene.cuts as c, i (c.id)}<option value={i}>
+						{c.name} · {(cutLength(c, statics) / fps).toFixed(1)} s
+					</option>{/each}
 			</select>
 		</label>
 		<select
@@ -589,6 +594,22 @@
 					{n} fps
 				</option>{/each}
 		</select>
+		<div class="seg" role="radiogroup" aria-label="Play what">
+			{#each [['cut', 'Cut'], ['scene', 'Scene']] as [id, label] (id)}
+				<button
+					type="button"
+					class="b"
+					role="radio"
+					aria-checked={playScope === id}
+					title={id === 'scene'
+						? 'Play the whole scene, every cut, with the transitions between them'
+						: 'Play this cut (or its loop range)'}
+					onclick={() => (playScope = id as 'cut' | 'scene')}
+				>
+					{label}
+				</button>
+			{/each}
+		</div>
 		<div class="seg" role="radiogroup" aria-label="Play">
 			{#each [['once', 'Once'], ['loop', 'Loop'], ['pingpong', 'Ping-pong']] as [id, label] (id)}
 				<button

@@ -1748,3 +1748,42 @@ test('transitions: a white flash and a dissolve between cuts, in the export', as
 	expect(d[8]).toBeGreaterThan(0);
 	expect(new Set(d.slice(2, 14)).size).toBeGreaterThan(4);
 });
+
+test('play the scene: every cut in turn, with the flash between them', async ({ page }) => {
+	await stubTauri(page);
+	await ready(page);
+	const tl = page.getByRole('region', { name: 'Timeline' });
+	await scribble(page, 0.3);
+	for (let i = 0; i < 11; i++) await tl.getByRole('button', { name: 'Hold longer' }).click();
+	await tl.getByRole('button', { name: '+ Cut' }).click();
+	await scribble(page, 0.7);
+	for (let i = 0; i < 11; i++) await tl.getByRole('button', { name: 'Hold longer' }).click();
+	const cutPick = tl.getByLabel('Cut', { exact: true });
+	// each cut's length in seconds (12 frames at 24 fps)
+	await expect(cutPick.locator('option').first()).toHaveText('Cut 1 · 0.5 s');
+	await cutPick.selectOption({ index: 0 });
+	await tl.getByLabel('Into the next cut').selectOption('flash');
+	await tl
+		.getByRole('radiogroup', { name: 'Play what' })
+		.getByRole('radio', { name: 'Scene' })
+		.click();
+	await tl.getByRole('radio', { name: 'Once' }).click();
+	await tl.getByRole('button', { name: 'Play' }).click();
+	// watch the player: the paper darkens before the cut (the flash), cut 2 plays, it stops
+	const player = page.getByTestId('player');
+	await expect(player).toBeVisible();
+	const seen = { dark: false, cut2: false };
+	for (let i = 0; i < 60 && (await player.count()); i++) {
+		const v = await player
+			.evaluate((c: HTMLCanvasElement) => {
+				const d = c.getContext('2d')!.getImageData(c.width >> 1, c.height >> 1, 1, 1).data;
+				return d[0];
+			})
+			.catch(() => -1);
+		if (v >= 0 && v < 235) seen.dark = true;
+		if ((await cutPick.inputValue()) === '1') seen.cut2 = true;
+		await page.waitForTimeout(15);
+	}
+	expect(seen).toEqual({ dark: true, cut2: true });
+	await expect(player).toHaveCount(0, { timeout: 5000 });
+});
