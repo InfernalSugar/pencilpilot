@@ -39,6 +39,10 @@ export class ToolOptions {
 	liquifySize = $state(60);
 	liquifyStrength = $state(0.6);
 	selectMode = $state<'replace' | 'add' | 'subtract' | 'intersect'>('replace');
+	/** colour fill: selections fill with the colour as they're made (Procreate's Color Fill) */
+	selectFill = $state(false);
+	/** the rectangle select tool draws rectangles or ellipses */
+	selectShape = $state<'rect' | 'ellipse'>('rect');
 	/** magic wand: joined-up area only, or every similar colour (Color Range) */
 	wandContiguous = $state(true);
 	wandTolerance = $state(0.15);

@@ -1171,6 +1171,8 @@
 					warp={toolOpts.warp}
 					quickShape={toolOpts.quickShape}
 					selectMode={toolOpts.selectMode}
+					selectFill={toolOpts.selectFill}
+					selectShape={toolOpts.selectShape}
 					wandTolerance={toolOpts.wandTolerance}
 					wandContiguous={toolOpts.wandContiguous}
 					liquifySize={toolOpts.liquifySize}
