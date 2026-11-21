@@ -9,6 +9,7 @@ mod export;
 mod lipsync;
 mod project;
 mod store;
+mod video_in;
 
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
@@ -24,6 +25,10 @@ struct Frames(Mutex<FrameStore>);
 /// The export being written, if any (one at a time), and the sound for the next one.
 #[derive(Default)]
 struct Exporting(Mutex<Option<export::Job>>, Mutex<Option<PathBuf>>);
+
+/// A video being read for its frames (rotoscoping), if any.
+#[derive(Default)]
+struct VideoIn(Mutex<Option<video_in::Reader>>);
 
 /// Lip-sync: the recording to listen to next, and the run going.
 #[derive(Default)]
@@ -295,6 +300,47 @@ fn export_audio(request: Request<'_>, state: State<'_, Exporting>) -> Result<(),
     Ok(())
 }
 
+/// Start reading a video's frames at `fps`, fitted inside `width`×`height`. Says how
+/// long it is and its size (when ffmpeg can tell).
+#[tauri::command]
+fn video_in_open(
+    path: String,
+    width: u32,
+    height: u32,
+    fps: u32,
+    state: State<'_, VideoIn>,
+) -> Result<video_in::Probe, String> {
+    let ffmpeg = export::find_ffmpeg().ok_or("Reading video needs ffmpeg")?;
+    if width == 0 || height == 0 || width > 16_384 || height > 16_384 || fps == 0 || fps > 120 {
+        return Err("a canvas size or frame rate out of range".into());
+    }
+    let video = PathBuf::from(path);
+    let probe = video_in::probe(&ffmpeg, &video);
+    let reader = video_in::Reader::open(&ffmpeg, &video, width, height, fps)?;
+    *state.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(reader);
+    Ok(probe)
+}
+
+/// The next frame (RGBA), or nothing at the end.
+#[tauri::command]
+fn video_in_frame(state: State<'_, VideoIn>) -> Result<Response, String> {
+    let mut g = state.0.lock().unwrap_or_else(|e| e.into_inner());
+    let r = g.as_mut().ok_or("no video is open")?;
+    match r.next()? {
+        Some(f) => Ok(Response::new(f)),
+        None => {
+            *g = None;
+            Ok(Response::new(Vec::new()))
+        }
+    }
+}
+
+/// Stop reading the video.
+#[tauri::command]
+fn video_in_close(state: State<'_, VideoIn>) {
+    *state.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
 /// Where Rhubarb (lip-sync) is, if it's here.
 #[tauri::command]
 fn lipsync_tools(app: AppHandle) -> Option<String> {
@@ -431,6 +477,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(Exporting::default())
         .manage(LipSync::default())
+        .manage(VideoIn::default())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // PP_BENCH=1: open the engine benchmark straight away
@@ -469,6 +516,9 @@ pub fn run() {
             lipsync_audio,
             lipsync_run,
             lipsync_cancel,
+            video_in_open,
+            video_in_frame,
+            video_in_close,
             recent_list,
             recent_remove,
             settings_get,

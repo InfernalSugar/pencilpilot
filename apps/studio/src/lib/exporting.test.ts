@@ -99,3 +99,13 @@ describe('export plans', () => {
 		});
 	});
 });
+
+describe('frame files', () => {
+	it('numbers frames from the name, with the layer when there is one', async () => {
+		const { frameFile } = await import('./exporting');
+		expect(frameFile('/a/Walk', 7, 120, 'psd')).toBe('/a/Walk_0007.psd');
+		expect(frameFile('/a/Walk', 7, 12000, 'png', 'Ink / colour')).toBe(
+			'/a/Walk_Ink - colour_00007.png'
+		);
+	});
+});
