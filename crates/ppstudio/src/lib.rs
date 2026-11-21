@@ -157,7 +157,17 @@ pub struct Timeline {
     /// mouth charts for lip-sync: which drawing of a layer is each mouth shape
     #[serde(default, rename = "mouthCharts", skip_serializing_if = "Vec::is_empty")]
     pub mouth_charts: Vec<MouthChart>,
+    /// what drawings are in the animation: drawing id → "key", "breakdown" or "inbetween"
+    #[serde(
+        default,
+        rename = "drawingKinds",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub drawing_kinds: BTreeMap<String, String>,
 }
+
+/// What a drawing can be marked as.
+pub const DRAWING_KINDS: [&str; 3] = ["key", "breakdown", "inbetween"];
 
 /// The mouth shapes lip-sync uses (Rhubarb's: A–F, and the extended G, H and X).
 pub const MOUTH_SHAPES: &str = "ABCDEFGHX";
@@ -395,6 +405,7 @@ impl Project {
                     scenes: Vec::new(),
                     static_layers: Vec::new(),
                     mouth_charts: Vec::new(),
+                    drawing_kinds: BTreeMap::new(),
                 },
                 drawings: BTreeMap::new(),
                 extra: serde_json::Value::Null,
@@ -576,6 +587,11 @@ impl Project {
         for layer in &m.timeline.static_layers {
             if !m.layers.iter().any(|l| l.id == *layer) {
                 return Err(Error::Invalid(format!("static layer {layer} isn't there")));
+            }
+        }
+        for (d, kind) in &m.timeline.drawing_kinds {
+            if !m.drawings.contains_key(d) || !DRAWING_KINDS.contains(&kind.as_str()) {
+                return Err(Error::Invalid(format!("drawing mark {d}: {kind}")));
             }
         }
         for chart in &m.timeline.mouth_charts {
@@ -1110,6 +1126,13 @@ mod tests {
                 .into_iter()
                 .collect(),
         });
+        // a key and a breakdown
+        p.manifest.timeline.drawing_kinds = [
+            ("A".to_string(), "key".to_string()),
+            ("B".into(), "breakdown".into()),
+        ]
+        .into_iter()
+        .collect();
         // a timelapse of two pictures
         p.timelapse = vec![b"\xff\xd8one".to_vec(), b"\xff\xd8two".to_vec()];
         p.manifest.timelapse = vec![1_700_000_000_000, 1_700_000_005_000];
@@ -1139,6 +1162,10 @@ mod tests {
                 q.manifest.timeline.static_layers = vec![9];
             } else if bad == 3 {
                 chart.shapes.insert("Q".into(), "A".into());
+                q.manifest
+                    .timeline
+                    .drawing_kinds
+                    .insert("A".into(), "wobbly".into());
             } else if bad == 4 {
                 chart.layer = 9;
             } else if bad == 5 {

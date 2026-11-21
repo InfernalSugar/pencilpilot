@@ -429,6 +429,7 @@ mod tests {
             static_layers: vec![],
             audio: vec![],
             mouth_charts: vec![],
+            drawing_kinds: Default::default(),
             timelapse: vec![],
         };
         encode(&header, &rgba).unwrap()
