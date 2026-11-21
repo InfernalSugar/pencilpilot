@@ -1,0 +1,75 @@
+# The `.ppstudio` project file, version 1
+
+A PencilPilot project is a standard **zip** file, so any zip tool can look inside.
+This crate (`pencilpilot-ppstudio`) reads and writes it.
+
+| Entry | Compression | What |
+|---|---|---|
+| `manifest.json` | deflate | everything except pixels (below). Always the first entry |
+| `strokes.json` | deflate | the stroke log: a JSON array the app writes and reads back as is |
+| `thumbnail.png` | stored | optional; at most 512 px on its long side, for the project browser |
+| `tiles/<hash>` | deflate | one tile of pixels (below) |
+
+## manifest.json
+
+```jsonc
+{
+  "format": "ppstudio",          // always this
+  "version": 1,                  // a reader refuses versions newer than it knows
+  "app": "PencilPilot 0.1.0",    // what wrote the file
+  "created": "2026-11-21T09:30:00Z",
+  "modified": "2026-11-21T10:05:12Z",
+  "canvas": { "width": 1920, "height": 1080 },   // 1–8192 a side
+  "layers": [                    // bottom → top
+    {
+      "id": 1, "name": "Sketch", "visible": true, "opacity": 0.6,
+      "blend": "normal",         // normal multiply screen overlay darken lighten add
+      "locked": false, "alphaLock": false, "clip": false,
+      "imported": false,         // holds an imported picture
+      "group": 0,                // its group's id (0 = none); a group's layers are next to each other
+      "adjust": null             // an adjustment layer's settings (the app's JSON string)
+    }
+  ],
+  "groups": [ { "id": 1, "name": "Character", "visible": true, "opacity": 1.0 } ],
+  "activeLayer": 1,
+  "timeline": {
+    "fps": 24,
+    "frames": [                  // version 1 files from the app have one frame
+      { "cels": { "1": "L1" },   // layer id → drawing id; a layer missing here is empty
+        "hold": 1 }              // frames it is held for
+    ]
+  },
+  "drawings": {
+    "L1": {
+      "tiles": [ { "x": 3, "y": 7, "hash": "9f2c…" } ],
+      "mask":  [ { "x": 0, "y": 0, "hash": "51ab…" } ]   // only when the layer has a mask
+    }
+  },
+  "extra": { }                   // the app's own settings (brush, colour…), kept as given
+}
+```
+
+## Tiles
+
+- A drawing covers the whole canvas, cut into **64×64 tiles** from the top-left corner.
+  `x` and `y` count tiles, not pixels. Tiles on the right and bottom edges are padded to
+  64×64.
+- **Colour tiles** are 16 384 bytes: RGBA, 8 bits a channel, **straight (not
+  premultiplied) alpha**, sRGB, row by row. Padding is transparent.
+- **Mask tiles** are 4 096 bytes: one grey byte a pixel (255 shows the layer, 0 hides it).
+  Padding is 255.
+- A tile that is fully transparent (colour) or fully 255 (mask) is **left out**. A
+  drawing with no tiles is empty.
+- The file name is the first 32 hex digits of the **BLAKE3** hash of the tile's bytes.
+  Identical tiles are stored once and shared, within a drawing and across drawings and
+  frames.
+
+## Rules for readers
+- Check `format` and `version` first. A newer version means "update the app".
+- Every frame's layers and drawings must exist, and every tile a drawing names must be in
+  the zip with the right size. Otherwise the file is damaged.
+- Keep `extra` and `strokes.json` as you found them if you don't understand them.
+
+## Saving
+Write to `<name>.ppstudio.saving`, flush it to disk, then rename it over the old file. A
+crash mid-save leaves the previous version intact.

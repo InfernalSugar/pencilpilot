@@ -2839,6 +2839,22 @@
 		adjust?: string | null;
 	}
 
+	/** A small PNG of the drawing as it shows (at most `max` px on its long side). */
+	export async function thumbnail(max = 512): Promise<Uint8Array | null> {
+		if (!ctx || !paint) return null;
+		render();
+		const k = Math.min(1, max / Math.max(width, height));
+		const c = new OffscreenCanvas(
+			Math.max(1, Math.round(width * k)),
+			Math.max(1, Math.round(height * k))
+		);
+		const g = c.getContext('2d');
+		if (!g) return null;
+		g.drawImage(el, 0, 0, c.width, c.height);
+		const blob = await c.convertToBlob({ type: 'image/png' });
+		return new Uint8Array(await blob.arrayBuffer());
+	}
+
 	/** Everything needed to bring this drawing back later (bottom → top). */
 	export function snapshotLayers(): {
 		layers: LayerSnapshot[];
