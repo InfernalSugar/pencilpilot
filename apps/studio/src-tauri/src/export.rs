@@ -87,9 +87,22 @@ pub struct Job {
     sent: u32,
 }
 
-/// Where ffmpeg is: `PENCILPILOT_FFMPEG`, the PATH, or a usual install folder.
+/// Where ffmpeg is: `PENCILPILOT_FFMPEG`, the one installed with the app (next to it,
+/// as `pencilpilot-ffmpeg`: see scripts/fetch-ffmpeg.mjs), the PATH, or a usual folder.
 pub fn find_ffmpeg() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("PENCILPILOT_FFMPEG").map(PathBuf::from)
+        && p.is_file()
+    {
+        return Some(p);
+    }
+    let bundled = if cfg!(windows) {
+        "pencilpilot-ffmpeg.exe"
+    } else {
+        "pencilpilot-ffmpeg"
+    };
+    if let Some(p) = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|d| d.join(bundled)))
         && p.is_file()
     {
         return Some(p);
