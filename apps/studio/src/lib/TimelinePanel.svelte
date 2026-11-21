@@ -33,6 +33,19 @@
 		type Track
 	} from './timeline';
 	import type { PlayMode, PlayRange } from './playback';
+	import {
+		BOIL_DEFAULTS,
+		boilFrames,
+		copyFrames,
+		cycleFrames,
+		duplicateFrames,
+		exposureRange,
+		inRange as inSel,
+		pasteFrames,
+		reverseFrames,
+		type BoilSettings,
+		type FrameRange
+	} from './frametools';
 	import type { OnionSettings } from './onion';
 
 	let {
@@ -54,6 +67,7 @@
 		layers,
 		active,
 		newDrawing,
+		drawings,
 		onlayer,
 		onedit
 	}: {
@@ -84,6 +98,12 @@
 		active: number;
 		/** a new, empty drawing's id (from the canvas) */
 		newDrawing: () => number;
+		/** drawings for the frame tools: brought from the store, copied, boiled */
+		drawings: {
+			ensure: (ids: number[]) => Promise<void>;
+			copy: (drawing: number) => number;
+			boil: (drawing: number, amount: number, seed: number) => number;
+		};
 		onlayer: (id: number) => void;
 		/** the timeline changed (or the frame did): show it */
 		onedit: (changed: boolean) => void;
@@ -120,8 +140,14 @@
 
 	/** a drawing's number on its layer: 1, 2, 3… in order */
 	function numbers(t: Track): number[] {
-		let n = 0;
-		return t.map((e) => (e.drawing ? ++n : 0));
+		// (a drawing exposed again keeps its number)
+		// eslint-disable-next-line svelte/prefer-svelte-reactivity -- a local lookup, not state
+		const seen = new Map<number, number>();
+		return t.map((e) => {
+			if (!e.drawing) return 0;
+			if (!seen.has(e.drawing)) seen.set(e.drawing, seen.size + 1);
+			return seen.get(e.drawing)!;
+		});
 	}
 
 	// ---- buttons ----
@@ -273,7 +299,119 @@
 	function cellClick(e: MouseEvent, layer: number) {
 		const box = (e.currentTarget as HTMLElement).getBoundingClientRect();
 		onlayer(layer);
-		go(Math.floor((e.clientX - box.left) / CELL));
+		pick(e, Math.floor((e.clientX - box.left) / CELL));
+	}
+
+	// ---- frame tools: on the chosen frames (Shift+click), or the drawing here ----
+	/** frames chosen with Shift+click (none: the active layer's drawing on this frame) */
+	let sel = $state<FrameRange | null>(null);
+	/** a click goes to the frame; Shift+click chooses the frames from here to there */
+	function pick(e: MouseEvent, f: number) {
+		if (e.shiftKey) {
+			sel = { from: Math.min(frame, f), to: Math.max(frame, f) };
+			return;
+		}
+		sel = null;
+		go(f);
+	}
+	let toolsOpen = $state(false);
+	let scope = $state<'layer' | 'all'>('layer');
+	let cycleTimes = $state(2);
+	let cycleMode = $state<'loop' | 'pingpong'>('loop');
+	let boilSet = $state<BoilSettings>({ ...BOIL_DEFAULTS });
+	/** copied frames: one layer's (pasted on the active layer), or every layer's */
+	let clip = $state<{ one: number[] } | { all: Record<number, number[]> } | null>(null);
+	let toolNote = $state('');
+
+	/** the frames the tools work on */
+	const target = $derived<FrameRange | null>(
+		sel ?? (activeStatic ? null : exposureRange(activeTrack, frame))
+	);
+	/** the tracks the tools work on: the active layer's, or every cel layer's */
+	function targets(): Track[] {
+		if (scope === 'layer') return activeStatic ? [] : [trackOf(active)];
+		return rows.filter((l) => !statics.includes(l.id)).map((l) => trackOf(l.id));
+	}
+	const rangeLabel = (r: FrameRange | null) =>
+		!r
+			? 'nothing here'
+			: r.from === r.to
+				? `frame ${r.from + 1}`
+				: `frames ${r.from + 1}–${r.to + 1}`;
+
+	/** Copy the frames (the same drawings, to paste elsewhere). */
+	export function copyRange() {
+		const r = target;
+		if (!r) return;
+		clip =
+			scope === 'layer'
+				? { one: copyFrames(trackOf(active), r) }
+				: {
+						all: Object.fromEntries(
+							rows
+								.filter((l) => !statics.includes(l.id))
+								.map((l) => [l.id, copyFrames(trackOf(l.id), r)])
+						)
+					};
+		toolNote = `Copied ${rangeLabel(r)}.`;
+	}
+	/** Paste copied frames before this one (the same drawings, so changing one changes both). */
+	export function pasteRange() {
+		const c = clip;
+		if (!c) return;
+		if ('one' in c) {
+			if (activeStatic) return;
+			pasteFrames(trackOf(active), frame, c.one);
+		} else for (const [l, f] of Object.entries(c.all)) pasteFrames(trackOf(+l), frame, f);
+		toolNote = 'Pasted: the same drawings as the copied frames.';
+		edited();
+	}
+	/** The frames again right after them, as new drawings to change. */
+	export async function duplicateRange() {
+		const r = target;
+		const ts = targets();
+		if (!r || !ts.length) return;
+		await drawings.ensure(ts.flatMap((t) => copyFrames(t, r)));
+		let at = r.to + 1;
+		for (const t of ts) at = duplicateFrames(t, r, drawings.copy);
+		sel = null;
+		frame = at;
+		toolNote = 'Duplicated as new drawings.';
+		edited();
+	}
+	function reverseRange() {
+		const r = target;
+		if (!r) return;
+		for (const t of targets()) reverseFrames(t, r);
+		edited();
+	}
+	function cycleRange() {
+		const r = target;
+		if (!r) return;
+		for (const t of targets()) cycleFrames(t, r, cycleTimes, cycleMode);
+		toolNote = `${rangeLabel(r)} ${cycleMode === 'loop' ? 'looped' : 'back and forth'} ${cycleTimes}× more.`;
+		edited();
+	}
+	let boiling = $state(false);
+	async function boilRange() {
+		const r = target;
+		const ts = targets();
+		if (!r || !ts.length || boiling) return;
+		boiling = true;
+		try {
+			await drawings.ensure(ts.flatMap((t) => copyFrames(t, r)));
+			// a new wobble each time (so boiling twice doesn't repeat itself)
+			const seed = Math.floor(Math.random() * 1e6);
+			let made = 0;
+			for (const t of ts)
+				made += boilFrames(t, r, boilSet, (d, n) => drawings.boil(d, boilSet.amount, seed + n));
+			toolNote = made
+				? `Boiled: ${made} wobbled cop${made === 1 ? 'y' : 'ies'}, swapped every ${boilSet.step} frames.`
+				: `Nothing held longer than ${boilSet.step} frames there to boil.`;
+			if (made) edited();
+		} finally {
+			boiling = false;
+		}
 	}
 
 	const seconds = (f: number) => `${Math.floor(f / fps)}+${String(f % fps).padStart(2, '0')}`;
@@ -615,6 +753,129 @@
 		>
 			Remove drawing
 		</button>
+		<div class="onion">
+			<button
+				type="button"
+				class="b"
+				aria-expanded={toolsOpen}
+				title="Frame tools: copy, paste, duplicate, reverse, cycle, boil"
+				onclick={() => (toolsOpen = !toolsOpen)}
+			>
+				Frames ▾
+			</button>
+			{#if toolsOpen}
+				<div class="pop wide right" role="group" aria-label="Frame tools">
+					<p class="hint" data-testid="frames-target">
+						On {rangeLabel(target)}{sel ? '' : ' (this drawing)'}. Shift+click frames to choose
+						others.
+					</p>
+					<div class="seg" role="radiogroup" aria-label="Frame tools work on">
+						{#each [['layer', 'This layer'], ['all', 'All layers']] as [id, label] (id)}
+							<button
+								type="button"
+								class="b"
+								role="radio"
+								aria-checked={scope === id}
+								onclick={() => (scope = id as 'layer' | 'all')}
+							>
+								{label}
+							</button>
+						{/each}
+					</div>
+					<div class="seg wrap">
+						<button
+							type="button"
+							class="b"
+							disabled={!target}
+							title="Copy these frames (Alt+C)"
+							onclick={copyRange}
+						>
+							Copy
+						</button>
+						<button
+							type="button"
+							class="b"
+							disabled={!clip}
+							title="Paste before this frame: the same drawings, so changing one changes both (Alt+V)"
+							onclick={pasteRange}
+						>
+							Paste
+						</button>
+						<button
+							type="button"
+							class="b"
+							disabled={!target}
+							title="The frames again right after them, as new drawings to change (Shift+D)"
+							onclick={duplicateRange}
+						>
+							Duplicate
+						</button>
+						<button
+							type="button"
+							class="b"
+							disabled={!target || target.from === target.to}
+							title="Play these frames backwards"
+							onclick={reverseRange}
+						>
+							Reverse
+						</button>
+					</div>
+					<div class="line">
+						<span>Cycle</span>
+						<input
+							type="number"
+							min="1"
+							max="99"
+							aria-label="Cycle times"
+							bind:value={cycleTimes}
+						/>
+						<span>× more</span>
+						<select aria-label="Cycle as" bind:value={cycleMode}>
+							<option value="loop">Loop (A B C A B C)</option>
+							<option value="pingpong">Back and forth (A B C B A)</option>
+						</select>
+						<button
+							type="button"
+							class="b"
+							disabled={!target}
+							title="Repeat these frames after them (the same drawings)"
+							onclick={cycleRange}
+						>
+							Cycle
+						</button>
+					</div>
+					<div class="line">
+						<span>Boil</span>
+						<select aria-label="Boil drawings" bind:value={boilSet.variants}>
+							<option value={2}>2 drawings</option>
+							<option value={3}>3 drawings</option>
+							<option value={4}>4 drawings</option>
+						</select>
+						<select aria-label="Boil every" bind:value={boilSet.step}>
+							<option value={1}>on ones</option>
+							<option value={2}>on twos</option>
+							<option value={3}>on threes</option>
+						</select>
+						<select aria-label="Boil strength" bind:value={boilSet.amount}>
+							<option value={0.6}>Subtle</option>
+							<option value={1}>Light</option>
+							<option value={2}>Medium</option>
+							<option value={3.5}>Strong</option>
+						</select>
+						<button
+							type="button"
+							class="b"
+							disabled={!target || boiling}
+							title="Held drawings swap between themselves and slightly wobbled copies, as if traced again"
+							onclick={boilRange}
+						>
+							{boiling ? 'Boiling…' : 'Boil'}
+						</button>
+					</div>
+					{#if toolNote}<p class="hint" aria-live="polite">{toolNote}</p>{/if}
+				</div>
+			{/if}
+		</div>
 	</div>
 
 	<div class="grid" style="--cell: {CELL}px; --cols: {shown}">
@@ -624,7 +885,9 @@
 			role="group"
 			aria-label="Frames"
 			onpointerdown={(e) => {
-				if (e.button !== 0) return;
+				if (e.button !== 0 || e.shiftKey) return;
+				// (a plain click or drag here goes to frames: the chosen ones are let go)
+				sel = null;
 				scrubbing = true;
 				(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
 				scrubAt(e);
@@ -641,9 +904,10 @@
 					class:past={f >= length}
 					class:ranged={inRange(f)}
 					class:pinned={pinned.includes(f)}
+					class:chosen={inSel(sel, f)}
 					aria-label="Frame {f + 1}"
 					aria-current={f === frame ? 'true' : undefined}
-					onclick={() => go(f)}
+					onclick={(e) => pick(e, f)}
 				>
 					{f === 0 || (f + 1) % 5 === 0 ? f + 1 : ''}
 				</button>
@@ -679,6 +943,12 @@
 				onclick={(e) => cellClick(e, l.id)}
 			>
 				<div class="playhead" style="left: {frame * CELL}px"></div>
+				{#if sel && (scope === 'all' || l.id === active) && !still}
+					<div
+						class="band"
+						style="left: {sel.from * CELL}px; width: {(sel.to - sel.from + 1) * CELL}px"
+					></div>
+				{/if}
 				{#if still}
 					{#if staticDrawing(t)}
 						<div
@@ -948,6 +1218,35 @@
 	}
 	.pop.wide {
 		width: 300px;
+	}
+	.pop.right {
+		left: auto;
+		right: 0;
+		width: 360px;
+	}
+	.pop .line {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 6px;
+	}
+	.pop .line select {
+		height: 30px;
+		padding: 0 6px;
+	}
+	.pop p {
+		margin: 0;
+	}
+	.tick.chosen {
+		box-shadow: inset 0 -3px 0 var(--pp-yellow);
+	}
+	.band {
+		position: absolute;
+		top: 0;
+		bottom: 0;
+		background: rgba(255, 214, 80, 0.16);
+		outline: 1px solid rgba(255, 214, 80, 0.55);
+		pointer-events: none;
 	}
 	.seg.wrap {
 		flex-wrap: wrap;

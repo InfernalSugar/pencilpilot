@@ -757,6 +757,12 @@ impl PaintCanvas {
         self.inner.new_drawing()
     }
 
+    /// A boiled copy of a drawing (lines nudged up to `amount` px); its id, 0 if none.
+    #[wasm_bindgen(js_name = boilDrawing)]
+    pub fn boil_drawing(&mut self, drawing: u32, amount: f32, seed: u32) -> u32 {
+        self.inner.boil_drawing(drawing, amount, seed)
+    }
+
     #[wasm_bindgen(js_name = copyDrawing)]
     pub fn copy_drawing(&mut self, drawing: u32) -> u32 {
         self.inner.copy_drawing(drawing)
