@@ -596,13 +596,19 @@ test('timeline: drawings on frames, timing, undo across frames, saved and opened
 	await page.keyboard.press('.');
 	await expect(frameNo).toHaveText('2');
 	expect(await top()).toBeGreaterThan(50);
-	// undo from frame 1's side: the last stroke was drawing 2's, so it goes there first
+	// undo: first the timing (a timeline step), then the last stroke, which was drawing
+	// 2's, so it goes there first
 	await tl.getByRole('button', { name: 'Frame 1', exact: true }).click();
 	await page.keyboard.press('Control+z');
-	await expect(frameNo).toHaveText('3');
+	await expect(tl.getByRole('button', { name: /drawing 2, frame 2$/ })).toBeVisible();
+	await page.keyboard.press('Control+z');
+	await expect(frameNo).toHaveText('2');
 	await expect.poll(bottom).toBe(0);
 	await page.keyboard.press('Control+Shift+z');
 	await expect.poll(bottom).toBeGreaterThan(50);
+	await page.keyboard.press('Control+Shift+z');
+	await expect(tl.getByRole('button', { name: /drawing 2, frame 3$/ })).toBeVisible();
+	await tl.getByRole('button', { name: 'Frame 3', exact: true }).click();
 
 	// saved and opened again: the frames and their timing come back
 	await page.keyboard.press('Control+s');
@@ -1492,4 +1498,46 @@ test('films: the timelapse (kept in the file) and this frame drawn live', async 
 	});
 	dlg = await openFilm();
 	await expect.poll(() => pictures(dlg)).toBeGreaterThanOrEqual(before);
+});
+
+test('undo: timeline edits are steps in the history, with the strokes', async ({ page }) => {
+	await stubTauri(page);
+	await ready(page);
+	const tl = page.getByRole('region', { name: 'Timeline' });
+	const length = () => tl.getByTestId('frame').locator('..');
+	await scribble(page, 0.3);
+	// hold it a frame longer: one step, undone and redone
+	await tl.getByRole('button', { name: 'Hold longer' }).click();
+	await expect(length()).toContainText('of 2');
+	await page.keyboard.press('Control+z');
+	await expect(length()).toContainText('of 1');
+	await expect.poll(() => ink(page)).toBeGreaterThan(0);
+	await page.keyboard.press('Control+Shift+z');
+	await expect(length()).toContainText('of 2');
+
+	// drawing on an empty cel makes a drawing there: one undo takes the stroke and the cel
+	await tl.getByRole('button', { name: 'Frame 3', exact: true }).click();
+	await expect.poll(() => ink(page)).toBe(0);
+	await scribble(page, 0.6);
+	await expect(length()).toContainText('of 3');
+	await page.keyboard.press('Control+z');
+	await expect(length()).toContainText('of 2');
+	await expect.poll(() => ink(page)).toBe(0);
+	await page.keyboard.press('Control+Shift+z');
+	await expect(length()).toContainText('of 3');
+	await expect.poll(() => ink(page)).toBeGreaterThan(0);
+
+	// the History panel lists the timeline step, and going back through it works too
+	await page.getByRole('tab', { name: /History/ }).click();
+	const history = page.getByRole('region', { name: 'History' });
+	await expect(history).toContainText('Timeline change');
+	// back over the stroke on frame 3 and the hold: one frame again, its drawing kept
+	await page.keyboard.press('Control+z');
+	await page.keyboard.press('Control+z');
+	await expect(length()).toContainText('of 1');
+	await tl.getByRole('button', { name: 'Frame 1', exact: true }).click();
+	await expect.poll(() => ink(page)).toBeGreaterThan(0);
+	// one more: the first stroke goes too
+	await page.keyboard.press('Control+z');
+	await expect.poll(() => ink(page)).toBe(0);
 });
