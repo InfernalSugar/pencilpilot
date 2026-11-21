@@ -14,6 +14,8 @@ export interface Stroke {
 	eraser: boolean;
 	/** the layer it was painted on (paint engine layer id) */
 	layer?: number;
+	/** the drawing that layer showed (an animation's frame), for replays */
+	drawing?: number;
 	/** brush colour (#rrggbb), size multiplier and opacity, for replays */
 	color?: string;
 	size?: number;
@@ -77,7 +79,11 @@ export class StrokeLog {
 	}
 
 	/** One finished stroke. Empty strokes still take an undo step (the engine records one). */
+	/** Called on each stroke as it's added (to note what it was drawn on). */
+	tag: ((stroke: Stroke) => void) | null = null;
+
 	add(stroke: Stroke) {
+		this.tag?.(stroke);
 		if (stroke.points.length) this.#all.push(stroke);
 		this.#push({ kind: 'stroke', stroke });
 	}

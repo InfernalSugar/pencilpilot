@@ -78,6 +78,16 @@ pub struct Header {
     /// lip-sync mouth charts (their drawings are among `drawings`)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mouth_charts: Vec<MouthChart>,
+    /// the timelapse: JPEG pictures and when each was taken (ms since 1970)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub timelapse: Vec<PacketTimelapse>,
+}
+
+/// A timelapse picture: when it was taken, and its JPEG bytes in the blobs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PacketTimelapse {
+    pub t: u64,
+    pub bytes: [usize; 2],
 }
 
 /// A sound file: the name the scenes use for it, and its bytes in the blobs. (Saved,
@@ -228,6 +238,12 @@ pub fn to_project(
         h.strokes
     })
     .map_err(|e| e.to_string())?;
+    p.timelapse = h
+        .timelapse
+        .iter()
+        .map(|f| slice(blobs, f.bytes).map(<[u8]>::to_vec))
+        .collect::<Result<_, _>>()?;
+    p.manifest.timelapse = h.timelapse.iter().map(|f| f.t).collect();
     p.thumbnail = h
         .thumbnail
         .map(|t| slice(blobs, t).map(<[u8]>::to_vec))
@@ -302,6 +318,15 @@ pub fn from_project(p: &Project, mut frames: Option<&mut FrameStore>) -> Result<
         drawings.push(PacketDrawing { id, layer, rgba });
     }
     let thumbnail = p.thumbnail.as_deref().map(&mut put);
+    let timelapse = p
+        .timelapse
+        .iter()
+        .zip(&m.timelapse)
+        .map(|(jpeg, &t)| PacketTimelapse {
+            t,
+            bytes: put(jpeg),
+        })
+        .collect();
     let mut audio: Vec<PacketAudio> = Vec::new();
     for clip in m.timeline.scenes.iter().flat_map(|s| &s.audio) {
         if audio.iter().any(|a| a.file == clip.file) {
@@ -329,6 +354,7 @@ pub fn from_project(p: &Project, mut frames: Option<&mut FrameStore>) -> Result<
         static_layers: m.timeline.static_layers.clone(),
         audio,
         mouth_charts: m.timeline.mouth_charts.clone(),
+        timelapse,
     };
     encode(&header, &blobs)
 }
@@ -456,6 +482,7 @@ mod tests {
             static_layers: vec![],
             audio: vec![],
             mouth_charts: vec![],
+            timelapse: vec![],
         };
         (encode(&header, &blobs).unwrap(), rgba, mask)
     }
@@ -576,6 +603,22 @@ mod tests {
         let (hm2, bm2) = decode(&pk_m).unwrap();
         assert_eq!(hm2.mouth_charts, hm.mouth_charts);
         let d11 = hm2.drawings.iter().find(|d| d.id == 11).unwrap();
+
+        // a timelapse: its pictures and times through the file and back
+        let mut ht = h.clone();
+        let mut blobs_t = blobs.clone();
+        let at = blobs_t.len();
+        blobs_t.extend_from_slice(b"\xff\xd8jpeg");
+        ht.timelapse = vec![PacketTimelapse {
+            t: 1_700_000_000_000,
+            bytes: [at, 6],
+        }];
+        let pt = to_project(&encode(&ht, &blobs_t).unwrap(), "test", "now", None).unwrap();
+        assert_eq!(pt.timelapse, vec![b"\xff\xd8jpeg".to_vec()]);
+        let pk_t = from_project(&pt, None).unwrap();
+        let (ht2, bt2) = decode(&pk_t).unwrap();
+        assert_eq!(ht2.timelapse[0].t, 1_700_000_000_000);
+        assert_eq!(slice(bt2, ht2.timelapse[0].bytes).unwrap(), b"\xff\xd8jpeg");
         assert_eq!(slice(bm2, d11.rgba.unwrap()).unwrap(), &rgba[..]);
 
         // with the frame store: opening puts the drawings in it, the packet carries none
