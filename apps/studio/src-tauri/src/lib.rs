@@ -166,10 +166,36 @@ fn export_write(request: Request<'_>) -> Result<String, String> {
     Ok(path.to_string_lossy().into_owned())
 }
 
+/// The engine benchmark (/dev/bench): bytes in, the same bytes back (an IPC round trip
+/// with a dirty rect's worth of pixels).
+#[tauri::command]
+fn bench_echo(request: Request<'_>) -> Result<Response, String> {
+    Ok(Response::new(raw_body(&request)?.to_vec()))
+}
+
+/// The benchmark's results, printed to the app's output; with `PP_BENCH` set, the app
+/// then closes (it was started just to measure).
+#[tauri::command]
+fn bench_report(app: AppHandle, report: String) {
+    println!("PP_BENCH {}", report.replace('\n', " "));
+    if std::env::var_os("PP_BENCH").is_some() {
+        app.exit(0);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            // PP_BENCH=1: open the engine benchmark straight away
+            if std::env::var_os("PP_BENCH").is_some()
+                && let Some(w) = app.get_webview_window("main")
+            {
+                w.eval("location.replace('/dev/bench')")?;
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             app_info,
             project_save,
@@ -185,7 +211,9 @@ pub fn run() {
             recent_remove,
             settings_get,
             settings_set,
-            data_folder
+            data_folder,
+            bench_echo,
+            bench_report
         ])
         .run(tauri::generate_context!())
         .expect("error while running PencilPilot");

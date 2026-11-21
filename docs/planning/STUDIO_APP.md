@@ -110,6 +110,7 @@ colour flats and lip-sync are free (local).
 - **S1-T04** Autosave, crash recovery, version history (snapshots), native open / save / export dialogs `app`
   ✅ Unsaved work is copied to the app's data folder every 20 s and offered back at the next start (Recover / Discard / Decide later); each save keeps the replaced file as a version (last 20, Versions menu); closing or opening over unsaved work asks first; Export → PNG or layered PSD.
 - **S1-T05** The native engine behind PaintCanvas (same API as WASM), with multi-threaded compositing `brush` `app`
+  ✅ Re-scoped by measurement (ADR-0012): live painting stays in the window (0.1 ms a sample for pencils and inks); the native engine composites on every core (whole-canvas recomposite 149 → 23 ms, 8× the window) for playback, export and thumbnails in S2/S3. Benchmarks: `cargo run --release -p pencilpilot-brush --example bench`, the app's `/dev/bench`, `PP_BENCH=1`.
 - **S1-T06** Settings: keyboard shortcuts editor, pen curve, tablet gestures, storage location `app`
   ✅ A Settings screen (from home and the studio): every shortcut can be changed (a taken key swaps), pen pressure on / off and the pressure curve, what one finger does and the tap gestures, the projects folder (dialogs start there), how often unsaved work is copied, and how many versions are kept. Kept in the app's data folder. (The tool buttons' tooltips still show the default keys: S1-T01.)
 

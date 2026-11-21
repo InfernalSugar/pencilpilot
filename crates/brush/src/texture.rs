@@ -62,7 +62,7 @@ impl Gray {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Grain {
-    pub tex: std::rc::Rc<Gray>,
+    pub tex: std::sync::Arc<Gray>,
     /// canvas pixels per texel
     pub scale: f32,
     /// 0 (no grain) … 1 (the low spots get no paint)
@@ -71,7 +71,7 @@ pub struct Grain {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Dual {
-    pub tip: std::rc::Rc<Gray>,
+    pub tip: std::sync::Arc<Gray>,
     /// the second tip's size, as a fraction of the dab's radius
     pub size: f32,
     /// how far the stamps spread, as a fraction of the dab's radius
@@ -84,7 +84,7 @@ pub struct Dual {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct DabStyle {
     pub grain: Option<Grain>,
-    pub tip: Option<std::rc::Rc<Gray>>,
+    pub tip: Option<std::sync::Arc<Gray>>,
     pub dual: Option<Dual>,
 }
 
@@ -164,7 +164,7 @@ impl DabStyle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::rc::Rc;
+    use std::sync::Arc;
 
     fn dab(x: f32, y: f32, r: f32) -> Dab {
         Dab {
@@ -200,7 +200,7 @@ mod tests {
         assert!(g.wrap(2.5, 0.5) < 0.01, "repeats");
         let s = DabStyle {
             grain: Some(Grain {
-                tex: Rc::new(g),
+                tex: Arc::new(g),
                 scale: 10.0,
                 strength: 1.0,
             }),
@@ -220,7 +220,7 @@ mod tests {
                 px[y * 4 + x] = 255;
             }
         }
-        let tip = Rc::new(Gray::new(4, 4, px).unwrap());
+        let tip = Arc::new(Gray::new(4, 4, px).unwrap());
         let s = DabStyle {
             tip: Some(tip),
             ..Default::default()
@@ -245,7 +245,7 @@ mod tests {
     fn dual_stamps_stay_near_the_dab_and_are_repeatable() {
         let s = DabStyle {
             dual: Some(Dual {
-                tip: Rc::new(Gray::new(1, 1, vec![255]).unwrap()),
+                tip: Arc::new(Gray::new(1, 1, vec![255]).unwrap()),
                 size: 0.3,
                 scatter: 1.0,
                 count: 4,
