@@ -72,6 +72,17 @@ pub struct Header {
     /// static layers (one drawing all cut long)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub static_layers: Vec<u32>,
+    /// the sound files the scenes play
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audio: Vec<PacketAudio>,
+}
+
+/// A sound file: the name the scenes use for it, and its bytes in the blobs. (Saved,
+/// it's renamed by its content; scenes are updated to match.)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PacketAudio {
+    pub file: String,
+    pub bytes: [usize; 2],
 }
 
 pub fn encode(header: &Header, blobs: &[u8]) -> Result<Vec<u8>, String> {
@@ -183,8 +194,24 @@ pub fn to_project(
             p.put_drawing(&name, rgba, mask)
                 .map_err(|e| e.to_string())?;
         }
-        p.manifest.timeline.frames = Timeline::flatten(&h.scenes, &h.static_layers);
-        p.manifest.timeline.scenes = h.scenes;
+        // the sound files, named by their content
+        let mut names = std::collections::HashMap::new();
+        for a in &h.audio {
+            let ext = a.file.rsplit_once('.').map_or("bin", |(_, e)| e);
+            let name = p
+                .put_audio(slice(blobs, a.bytes)?, ext)
+                .map_err(|e| e.to_string())?;
+            names.insert(a.file.clone(), name);
+        }
+        let mut scenes = h.scenes;
+        for clip in scenes.iter_mut().flat_map(|s| s.audio.iter_mut()) {
+            clip.file = names
+                .get(&clip.file)
+                .ok_or_else(|| format!("sound {} isn't in the packet", clip.file))?
+                .clone();
+        }
+        p.manifest.timeline.frames = Timeline::flatten(&scenes, &h.static_layers);
+        p.manifest.timeline.scenes = scenes;
         p.manifest.timeline.static_layers = h.static_layers;
     }
     p.manifest.layers = h.layers.iter().map(|l| l.layer.clone()).collect();
@@ -260,6 +287,18 @@ pub fn from_project(p: &Project, mut frames: Option<&mut FrameStore>) -> Result<
         }
     }
     let thumbnail = p.thumbnail.as_deref().map(&mut put);
+    let mut audio: Vec<PacketAudio> = Vec::new();
+    for clip in m.timeline.scenes.iter().flat_map(|s| &s.audio) {
+        if audio.iter().any(|a| a.file == clip.file) {
+            continue;
+        }
+        if let Some(bytes) = p.audio.get(&clip.file) {
+            audio.push(PacketAudio {
+                file: clip.file.clone(),
+                bytes: put(bytes),
+            });
+        }
+    }
     let header = Header {
         canvas: m.canvas.clone(),
         fps: m.timeline.fps,
@@ -273,6 +312,7 @@ pub fn from_project(p: &Project, mut frames: Option<&mut FrameStore>) -> Result<
         scenes: m.timeline.scenes.clone(),
         drawings,
         static_layers: m.timeline.static_layers.clone(),
+        audio,
     };
     encode(&header, &blobs)
 }
@@ -398,6 +438,7 @@ mod tests {
             scenes: vec![],
             drawings: vec![],
             static_layers: vec![],
+            audio: vec![],
         };
         (encode(&header, &blobs).unwrap(), rgba, mask)
     }
@@ -443,6 +484,7 @@ mod tests {
                 dialogue: [(3, "ah".to_string())].into_iter().collect(),
                 ..Default::default()
             }],
+            ..Default::default()
         }];
         let pk = encode(&h, &blobs).unwrap();
         let p = to_project(&pk, "test", "2026-11-21T00:00:00Z", None).unwrap();
@@ -458,6 +500,30 @@ mod tests {
         assert_eq!(slice(b2, d9.rgba.unwrap()).unwrap(), &second[..]);
         // the layer shows the first frame's drawing
         assert_eq!(slice(b2, h2.layers[0].rgba).unwrap(), &rgba[..]);
+
+        // a sound in the scene: renamed by its content, and back
+        let mut ha = h.clone();
+        let mut blobs_a = blobs.clone();
+        let at = blobs_a.len();
+        blobs_a.extend_from_slice(b"RIFF....WAVE");
+        ha.audio = vec![PacketAudio {
+            file: "a1.wav".into(),
+            bytes: [at, 12],
+        }];
+        ha.scenes[0].audio.push(ppstudio::AudioClip {
+            name: "line".into(),
+            file: "a1.wav".into(),
+            start: 4,
+            gain: 1.0,
+            muted: false,
+        });
+        let pa = to_project(&encode(&ha, &blobs_a).unwrap(), "test", "now", None).unwrap();
+        let file = &pa.manifest.timeline.scenes[0].audio[0].file;
+        assert!(file.ends_with(".wav") && file != "a1.wav");
+        let pk_a = from_project(&pa, None).unwrap();
+        let (ha2, ba2) = decode(&pk_a).unwrap();
+        assert_eq!(ha2.audio[0].file, *file);
+        assert_eq!(slice(ba2, ha2.audio[0].bytes).unwrap(), b"RIFF....WAVE");
 
         // a static layer: one drawing all cut long, so one frame; kept through the file
         let mut hs = h.clone();

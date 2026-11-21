@@ -8,6 +8,7 @@
 //! | `tiles/<hash>` | one 64×64 tile: RGBA8 (16 384 bytes) or a mask tile, grey (4 096 bytes) |
 //! | `strokes.json` | the app's stroke log (kept as given) |
 //! | `thumbnail.png` | a small picture for the project browser (optional) |
+//! | `audio/<hash>.<ext>` | a sound file a scene plays (as imported: WAV, MP3, OGG…) |
 //!
 //! Pixels are cut into 64×64 tiles. Empty tiles (fully transparent, or a mask that
 //! shows everything) are left out, and identical tiles are stored once, under the
@@ -158,6 +159,40 @@ pub struct Timeline {
 pub struct Scene {
     pub name: String,
     pub cuts: Vec<Cut>,
+    /// sound: clips placed along the scene (its cuts one after another)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audio: Vec<AudioClip>,
+    /// sync markers on the scene's frames (beats, accents, lines)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub markers: Vec<Marker>,
+}
+
+/// A sound file placed in a scene.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AudioClip {
+    pub name: String,
+    /// the file in the archive: `audio/<file>`
+    pub file: String,
+    /// the scene frame it starts on (negative: it started before the scene)
+    #[serde(default)]
+    pub start: i64,
+    /// loudness (1 = as recorded)
+    #[serde(default = "one_f")]
+    pub gain: f32,
+    #[serde(default)]
+    pub muted: bool,
+}
+
+fn one_f() -> f32 {
+    1.0
+}
+
+/// A marker on a scene frame.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct Marker {
+    pub frame: u32,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub label: String,
 }
 
 /// A cut (shot): each layer's exposures, from its first frame.
@@ -294,6 +329,22 @@ pub struct Project {
     pub strokes: Vec<u8>,
     /// PNG
     pub thumbnail: Option<Vec<u8>>,
+    /// sound files: name (`<hash>.<ext>`) → bytes
+    pub audio: HashMap<String, Vec<u8>>,
+}
+
+/// Sound files may be this big (each).
+pub const AUDIO_MAX: usize = 512 << 20;
+
+/// A safe audio file name: `<hex hash>.<ext>`, no folders.
+fn audio_name_ok(name: &str) -> bool {
+    let Some((h, ext)) = name.split_once('.') else {
+        return false;
+    };
+    !h.is_empty()
+        && h.chars().all(|c| c.is_ascii_hexdigit())
+        && (1..=5).contains(&ext.len())
+        && ext.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
 fn hash(bytes: &[u8]) -> String {
@@ -326,7 +377,30 @@ impl Project {
             tiles: HashMap::new(),
             strokes: b"[]".to_vec(),
             thumbnail: None,
+            audio: HashMap::new(),
         }
+    }
+
+    /// Keep a sound file (stored once, by its content); returns its name in the archive.
+    pub fn put_audio(&mut self, bytes: &[u8], ext: &str) -> Result<String> {
+        let ext: String = ext
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .take(5)
+            .collect::<String>()
+            .to_ascii_lowercase();
+        let name = format!(
+            "{}.{}",
+            hash(bytes),
+            if ext.is_empty() { "bin" } else { &ext }
+        );
+        if bytes.len() > AUDIO_MAX {
+            return Err(Error::Invalid(format!("sound file {name} is too big")));
+        }
+        self.audio
+            .entry(name.clone())
+            .or_insert_with(|| bytes.to_vec());
+        Ok(name)
     }
 
     fn cut(&mut self, px: &[u8], channels: usize, skip: impl Fn(&[u8]) -> bool) -> Vec<TileRef> {
@@ -453,6 +527,19 @@ impl Project {
         if m.timeline.frames.is_empty() || m.timeline.fps == 0 || m.timeline.fps > 120 {
             return Err(Error::Invalid("timeline".into()));
         }
+        for s in &m.timeline.scenes {
+            for a in &s.audio {
+                if !audio_name_ok(&a.file) || !self.audio.contains_key(&a.file) {
+                    return Err(Error::Invalid(format!(
+                        "a scene names sound file {}",
+                        a.file
+                    )));
+                }
+                if !a.gain.is_finite() || a.gain < 0.0 || a.gain > 16.0 {
+                    return Err(Error::Invalid("a sound's loudness".into()));
+                }
+            }
+        }
         for layer in &m.timeline.static_layers {
             if !m.layers.iter().any(|l| l.id == *layer) {
                 return Err(Error::Invalid(format!("static layer {layer} isn't there")));
@@ -538,6 +625,24 @@ impl Project {
             z.start_file(format!("tiles/{h}"), deflate)?;
             z.write_all(tile)?;
         }
+        // the sound files the scenes use (already compressed, mostly: stored)
+        let mut sounds: Vec<&String> = self
+            .manifest
+            .timeline
+            .scenes
+            .iter()
+            .flat_map(|s| s.audio.iter().map(|a| &a.file))
+            .collect();
+        sounds.sort();
+        sounds.dedup();
+        for name in sounds {
+            let bytes = self
+                .audio
+                .get(name)
+                .ok_or_else(|| Error::Invalid(format!("missing sound file {name}")))?;
+            z.start_file(format!("audio/{name}"), stored)?;
+            z.write_all(bytes)?;
+        }
         z.finish()?;
         Ok(())
     }
@@ -568,8 +673,18 @@ impl Project {
         let strokes = read_all("strokes.json", 512 << 20)?.unwrap_or_else(|| b"[]".to_vec());
         let thumbnail = read_all("thumbnail.png", 16 << 20)?;
         let mut tiles = HashMap::new();
+        let mut audio = HashMap::new();
         for i in 0..z.len() {
             let mut f = z.by_index(i)?;
+            if let Some(name) = f.name()?.strip_prefix("audio/").map(str::to_owned) {
+                let mut v = Vec::new();
+                (&mut f).take(AUDIO_MAX as u64 + 1).read_to_end(&mut v)?;
+                if v.len() > AUDIO_MAX || !audio_name_ok(&name) {
+                    return Err(Error::Invalid(format!("sound file {name}")));
+                }
+                audio.insert(name, v);
+                continue;
+            }
             let Some(h) = f.name()?.strip_prefix("tiles/").map(str::to_owned) else {
                 continue;
             };
@@ -585,6 +700,7 @@ impl Project {
             tiles,
             strokes,
             thumbnail,
+            audio,
         };
         p.validate()?;
         Ok(p)
@@ -800,6 +916,7 @@ mod tests {
                 ]),
                 cut(vec![(1, vec![e(None, 1)])]),
             ],
+            ..Default::default()
         }];
         let frames = Timeline::flatten(&scenes, &[]);
         assert_eq!(frames.len(), 3);
@@ -862,6 +979,7 @@ mod tests {
                     .into_iter()
                     .collect(),
             }],
+            ..Default::default()
         }];
         assert_eq!(scenes[0].cuts[0].length(&[]), 11);
         assert_eq!(scenes[0].cuts[0].length(&[2]), 3);
@@ -880,16 +998,41 @@ mod tests {
         p.manifest.timeline.frames = frames;
         p.manifest.timeline.scenes = scenes;
         p.manifest.timeline.static_layers = vec![2];
+        // a sound file and a marker in the scene
+        let file = p.put_audio(b"RIFF fake wav", "WAV").unwrap();
+        assert!(file.ends_with(".wav"));
+        assert_eq!(
+            p.put_audio(b"RIFF fake wav", "wav").unwrap(),
+            file,
+            "stored once"
+        );
+        p.manifest.timeline.scenes[0].audio.push(AudioClip {
+            name: "line.wav".into(),
+            file: file.clone(),
+            start: -3,
+            gain: 0.8,
+            muted: false,
+        });
+        p.manifest.timeline.scenes[0].markers.push(Marker {
+            frame: 2,
+            label: "beat".into(),
+        });
         let mut buf = std::io::Cursor::new(Vec::new());
         p.write(&mut buf).unwrap();
         let back = Project::read(std::io::Cursor::new(buf.into_inner())).unwrap();
         assert_eq!(back.manifest.timeline, p.manifest.timeline);
+        assert_eq!(back.audio.get(&file).unwrap(), b"RIFF fake wav");
 
-        // a static layer that isn't there, or a camera with no size, is damage
-        for bad in 0..2 {
+        // a static layer that isn't there, a camera with no size, or a sound file that
+        // isn't in the archive is damage
+        for bad in 0..3 {
             let mut q = p.clone();
             if bad == 0 {
                 q.manifest.timeline.static_layers = vec![9];
+            } else if bad == 2 {
+                // (a name that climbs out of audio/)
+                q.manifest.timeline.scenes[0].audio[0].file = "../x.wav".into();
+                q.audio.insert("../x.wav".into(), vec![1]);
             } else {
                 q.manifest.timeline.scenes[0].cuts[0]
                     .camera

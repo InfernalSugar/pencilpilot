@@ -90,6 +90,11 @@ This crate (`pencilpilot-ppstudio`) reads and writes it.
 - A cut's **camera** is the part of the canvas it shows, in canvas pixels (none: the
   whole canvas). Players and exports show what's inside it. Apps may mark safe areas
   (action 90%, title 80% of the camera, centred); they aren't stored.
+- A scene's **audio** lists sound clips: `{ "name", "file", "start", "gain", "muted" }`. `file`
+  is an entry `audio/<file>` in the archive (the sound file as imported, named by the
+  BLAKE3 hash of its bytes and its extension); `start` is the scene frame it starts on (the
+  scene's cuts one after another; negative: it began before the scene); `gain` 1 is as
+  recorded. A scene's **markers** are `{ "frame", "label" }` on scene frames.
 - A cut's **action** and **dialogue** are exposure-sheet notes: frame (from 0, in the
   cut) → text. They don't change what shows.
 - Without `scenes`, `frames` is the whole timeline (a single picture has one frame).

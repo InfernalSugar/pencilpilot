@@ -20,9 +20,9 @@ use tauri::{AppHandle, Manager, State};
 /// on; the rest live here, in memory up to [`FRAMES_IN_MEMORY`] and on disk past it.
 struct Frames(Mutex<FrameStore>);
 
-/// The export being written, if any (one at a time).
+/// The export being written, if any (one at a time), and the sound for the next one.
 #[derive(Default)]
-struct Exporting(Mutex<Option<export::Job>>);
+struct Exporting(Mutex<Option<export::Job>>, Mutex<Option<PathBuf>>);
 
 /// Bytes of drawing tiles kept in memory before the oldest go to disk.
 const FRAMES_IN_MEMORY: usize = 1 << 30;
@@ -277,12 +277,41 @@ fn exporting(state: &Exporting) -> MutexGuard<'_, Option<export::Job>> {
     state.0.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Start an export (one going already is cancelled).
+/// The sound for the next video export: a WAV file (the body), kept until it's used.
 #[tauri::command]
-fn export_begin(spec: export::Spec, state: State<'_, Exporting>) -> Result<(), String> {
+fn export_audio(request: Request<'_>, state: State<'_, Exporting>) -> Result<(), String> {
+    let bytes = raw_body(&request)?;
+    if bytes.len() < 44 || &bytes[..4] != b"RIFF" {
+        return Err("not a WAV file".into());
+    }
+    let path = std::env::temp_dir().join(format!("pencilpilot-export-{}.wav", std::process::id()));
+    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    *state.1.lock().unwrap_or_else(|e| e.into_inner()) = Some(path);
+    Ok(())
+}
+
+/// Start an export (one going already is cancelled). A video takes the sound sent
+/// with `export_audio` just before.
+#[tauri::command]
+fn export_begin(mut spec: export::Spec, state: State<'_, Exporting>) -> Result<(), String> {
+    let sound = state.1.lock().unwrap_or_else(|e| e.into_inner()).take();
     let mut slot = exporting(&state);
     if let Some(old) = slot.take() {
         old.cancel();
+    }
+    match sound {
+        Some(wav)
+            if matches!(
+                spec.format,
+                export::Format::Mp4 | export::Format::Prores | export::Format::Webm
+            ) =>
+        {
+            spec.audio = Some(wav)
+        }
+        Some(wav) => {
+            let _ = std::fs::remove_file(wav);
+        }
+        None => {}
     }
     *slot = Some(export::Job::begin(spec)?);
     Ok(())
@@ -370,6 +399,7 @@ pub fn run() {
             version_open,
             export_write,
             export_tools,
+            export_audio,
             export_begin,
             export_frame,
             export_end,
