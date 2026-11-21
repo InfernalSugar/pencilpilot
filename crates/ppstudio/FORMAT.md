@@ -34,13 +34,22 @@ This crate (`pencilpilot-ppstudio`) reads and writes it.
   "activeLayer": 1,
   "timeline": {
     "fps": 24,
-    "frames": [                  // version 1 files from the app have one frame
-      { "cels": { "1": "L1" },   // layer id → drawing id; a layer missing here is empty
-        "hold": 1 }              // frames it is held for
+    "frames": [                  // what shows on each frame, every cut in turn
+      { "cels": { "1": "D1" },   // layer id → drawing id; a layer missing here is empty
+        "hold": 2 }              // frames it is held for
+    ],
+    "scenes": [                  // optional: the animation as it is edited
+      { "name": "Scene 1",
+        "cuts": [
+          { "name": "Cut 1",
+            "tracks": {          // layer id → its exposures, in order
+              "1": [ { "drawing": "D1", "length": 2 },     // held for 2 frames ("on twos")
+                     { "drawing": null, "length": 1 },     // an empty cel
+                     { "drawing": "D2", "length": 2 } ] } } ] }
     ]
   },
   "drawings": {
-    "L1": {
+    "D1": {
       "tiles": [ { "x": 3, "y": 7, "hash": "9f2c…" } ],
       "mask":  [ { "x": 0, "y": 0, "hash": "51ab…" } ]   // only when the layer has a mask
     }
@@ -63,6 +72,17 @@ This crate (`pencilpilot-ppstudio`) reads and writes it.
 - The file name is the first 32 hex digits of the **BLAKE3** hash of the tile's bytes.
   Identical tiles are stored once and shared, within a drawing and across drawings and
   frames.
+
+## Timeline
+
+- With `scenes`, the timeline is scenes → cuts → each layer's **exposures**: a drawing
+  (or `null`, an empty cel) held for `length` frames. A cut is as long as its longest
+  track. `frames` is then the scenes flattened (every cut in turn; runs of identical
+  frames joined into holds), so a simple reader can play the file without knowing about
+  cuts.
+- Without `scenes`, `frames` is the whole timeline (a single picture has one frame).
+- The app names drawings `D<number>`; a drawing belongs to one layer. Every drawing a
+  frame or exposure names must be in `drawings`.
 
 ## Rules for readers
 - Check `format` and `version` first. A newer version means "update the app".

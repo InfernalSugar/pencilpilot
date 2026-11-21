@@ -138,7 +138,76 @@ fn one() -> u32 {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Timeline {
     pub fps: u32,
+    /// what shows on each frame, every cut one after another (for simple readers)
     pub frames: Vec<Frame>,
+    /// the animation as it is edited: scenes → cuts → each layer's exposures. When
+    /// present, `frames` is its flattening ([`Timeline::flatten`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scenes: Vec<Scene>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct Scene {
+    pub name: String,
+    pub cuts: Vec<Cut>,
+}
+
+/// A cut (shot): each layer's exposures, from its first frame.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct Cut {
+    pub name: String,
+    /// layer id → its exposures in order; a layer missing here is empty all cut long
+    pub tracks: BTreeMap<u32, Vec<Exposure>>,
+}
+
+/// One drawing held for some frames (2 = "on twos").
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct Exposure {
+    /// the drawing shown; none = an empty cel
+    pub drawing: Option<String>,
+    pub length: u32,
+}
+
+impl Cut {
+    /// Frames long: its longest track (at least one frame).
+    pub fn length(&self) -> u32 {
+        self.tracks
+            .values()
+            .map(|t| t.iter().map(|e| e.length).sum::<u32>())
+            .max()
+            .unwrap_or(0)
+            .max(1)
+    }
+}
+
+impl Timeline {
+    /// The scenes as plain frames: one per frame, with runs of identical frames
+    /// joined into holds.
+    pub fn flatten(scenes: &[Scene]) -> Vec<Frame> {
+        let mut frames: Vec<Frame> = Vec::new();
+        for cut in scenes.iter().flat_map(|s| &s.cuts) {
+            for f in 0..cut.length() {
+                let mut cels = BTreeMap::new();
+                for (&layer, track) in &cut.tracks {
+                    let mut at = 0;
+                    for e in track {
+                        if f < at + e.length {
+                            if let Some(d) = &e.drawing {
+                                cels.insert(layer, d.clone());
+                            }
+                            break;
+                        }
+                        at += e.length;
+                    }
+                }
+                match frames.last_mut() {
+                    Some(last) if last.cels == cels => last.hold += 1,
+                    _ => frames.push(Frame { cels, hold: 1 }),
+                }
+            }
+        }
+        frames
+    }
 }
 
 /// A tile of a drawing: its column and row, and the hash it is stored under.
@@ -214,6 +283,7 @@ impl Project {
                 timeline: Timeline {
                     fps,
                     frames: vec![Frame::default()],
+                    scenes: Vec::new(),
                 },
                 drawings: BTreeMap::new(),
                 extra: serde_json::Value::Null,
@@ -337,6 +407,23 @@ impl Project {
         }
         if m.timeline.frames.is_empty() || m.timeline.fps == 0 || m.timeline.fps > 120 {
             return Err(Error::Invalid("timeline".into()));
+        }
+        for cut in m.timeline.scenes.iter().flat_map(|s| &s.cuts) {
+            for (layer, track) in &cut.tracks {
+                if !m.layers.iter().any(|l| l.id == *layer) {
+                    return Err(Error::Invalid(format!("a cut names layer {layer}")));
+                }
+                for e in track {
+                    if e.length == 0 || e.length > 100_000 {
+                        return Err(Error::Invalid("an exposure's length".into()));
+                    }
+                    if let Some(d) = &e.drawing
+                        && !m.drawings.contains_key(d)
+                    {
+                        return Err(Error::Invalid(format!("a cut names drawing {d}")));
+                    }
+                }
+            }
         }
         for f in &m.timeline.frames {
             for (layer, d) in &f.cels {
@@ -632,5 +719,58 @@ mod tests {
         p.write(&mut buf).unwrap();
         let size = buf.into_inner().len();
         assert!(size < 64 * 1024, "{size} bytes");
+    }
+
+    #[test]
+    fn scenes_flatten_into_frames_and_are_checked() {
+        let e = |d: Option<&str>, length| Exposure {
+            drawing: d.map(String::from),
+            length,
+        };
+        let cut = |tracks: Vec<(u32, Vec<Exposure>)>| Cut {
+            name: "C".into(),
+            tracks: tracks.into_iter().collect(),
+        };
+        // cut 1: layer 1 on twos (A A B B), layer 2 held all along; cut 2: one frame
+        let scenes = vec![Scene {
+            name: "S1".into(),
+            cuts: vec![
+                cut(vec![
+                    (1, vec![e(Some("A"), 2), e(Some("B"), 2)]),
+                    (2, vec![e(Some("BG"), 4)]),
+                ]),
+                cut(vec![(1, vec![e(None, 1)])]),
+            ],
+        }];
+        let frames = Timeline::flatten(&scenes);
+        assert_eq!(frames.len(), 3);
+        assert_eq!(
+            (frames[0].cels.get(&1).unwrap().as_str(), frames[0].hold),
+            ("A", 2)
+        );
+        assert_eq!(
+            (frames[1].cels.get(&1).unwrap().as_str(), frames[1].hold),
+            ("B", 2)
+        );
+        assert!(frames[2].cels.is_empty() && frames[2].hold == 1);
+
+        let mut p = Project::new("test", "2026-11-21T00:00:00Z", 64, 64, 24);
+        p.manifest.layers = vec![layer(1), layer(2)];
+        for d in ["A", "B", "BG"] {
+            p.put_drawing(d, &vec![0u8; 64 * 64 * 4], None).unwrap();
+        }
+        p.manifest.timeline.frames = frames;
+        p.manifest.timeline.scenes = scenes;
+        let mut buf = std::io::Cursor::new(Vec::new());
+        p.write(&mut buf).unwrap();
+        let back = Project::read(std::io::Cursor::new(buf.into_inner())).unwrap();
+        assert_eq!(back.manifest.timeline, p.manifest.timeline);
+        // a cut naming a drawing that isn't there is damage
+        p.manifest.timeline.scenes[0].cuts[1]
+            .tracks
+            .insert(1, vec![e(Some("Z"), 1)]);
+        let mut buf = std::io::Cursor::new(Vec::new());
+        p.write(&mut buf).unwrap();
+        assert!(Project::read(std::io::Cursor::new(buf.into_inner())).is_err());
     }
 }

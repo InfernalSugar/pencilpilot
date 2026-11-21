@@ -410,6 +410,8 @@ mod tests {
             extra: serde_json::json!({}),
             created: None,
             thumbnail: None,
+            scenes: vec![],
+            drawings: vec![],
         };
         encode(&header, &rgba).unwrap()
     }

@@ -170,6 +170,9 @@ pub struct Layer {
     editing_mask: bool,
     /// the group this layer is in (0 = none); a group's layers are always next to each other
     group: u32,
+    /// the drawing (animation cel) showing on this layer; 0 = none yet (the first
+    /// change gives it one). Other drawings wait in [`Painter::cels`].
+    drawing: u32,
 }
 
 /// A layer group ("pass-through": its visibility and opacity apply to each of its layers).
@@ -190,6 +193,7 @@ impl Layer {
             mask: None,
             editing_mask: false,
             group: 0,
+            drawing: 0,
         }
     }
 
@@ -359,6 +363,9 @@ enum Edit {
         snap: Snapshot,
         /// the tiles are the layer's mask, not its colour
         mask: bool,
+        /// the drawing (animation cel) the colour tiles belong to; 0 = not tagged yet
+        /// ([`Painter::push_undo`] tags it with the layer's drawing)
+        drawing: u32,
     },
     /// Replace the whole group list (add / remove / change a group).
     Groups(Vec<Group>),
@@ -413,6 +420,9 @@ pub struct Painter {
     rgba: Vec<u8>,
     undo: Vec<Edit>,
     redo: Vec<Edit>,
+    /// drawings (animation cels) that aren't showing on their layer right now
+    cels: HashMap<u32, TileMap>,
+    next_drawing: u32,
     /// the layer the current stroke paints on
     stroking: Option<u32>,
     /// alpha-locked strokes paint with a copy of the brush that has lock_alpha on
@@ -455,6 +465,8 @@ impl Painter {
             rgba: vec![255; (width * height * 4) as usize],
             undo: Vec::new(),
             redo: Vec::new(),
+            cels: HashMap::new(),
+            next_drawing: 1,
             stroking: None,
             stroke_brush: None,
             alpha_lock_stroke: false,
@@ -793,6 +805,7 @@ impl Painter {
         props.visible = g.visible;
         props.imported = m.iter().any(|&i| self.layers[i].props.imported);
         let mut edits = vec![Edit::Tiles {
+            drawing: 0,
             layer: bottom_id,
             snap,
             mask: false,
@@ -973,6 +986,7 @@ impl Painter {
         let snap: Snapshot = baked.into_iter().map(|(k, t)| (k, Some(t))).collect();
         self.perform(Edit::Batch(vec![
             Edit::Tiles {
+                drawing: 0,
                 layer: id,
                 snap,
                 mask: false,
@@ -1006,7 +1020,24 @@ impl Painter {
     /// Apply an edit and return its inverse.
     fn apply(&mut self, e: Edit) -> Edit {
         match e {
-            Edit::Tiles { layer, snap, mask } => {
+            Edit::Tiles {
+                layer,
+                snap,
+                mask,
+                drawing,
+            } => {
+                // a drawing that isn't showing (another frame): change it where it's kept
+                let shown = self.layer_mut(layer).map(|l| l.drawing);
+                if !mask && drawing != 0 && shown != Some(drawing) {
+                    let tiles = self.cels.entry(drawing).or_default();
+                    let replaced = swap_tiles(tiles, snap);
+                    return Edit::Tiles {
+                        layer,
+                        snap: replaced,
+                        mask,
+                        drawing,
+                    };
+                }
                 let Some(l) = self.layer_mut(layer) else {
                     return Edit::Batch(Vec::new());
                 };
@@ -1020,6 +1051,7 @@ impl Painter {
                 };
                 let replaced = target.swap_in(snap);
                 Edit::Tiles {
+                    drawing,
                     layer,
                     snap: replaced,
                     mask,
@@ -1172,6 +1204,12 @@ impl Painter {
         let mut copy = self.layers[idx].clone();
         copy.set_editing(false);
         copy.id = new_id;
+        // its own drawing (a copy of the pixels, not the same cel)
+        copy.drawing = if copy.is_empty() {
+            0
+        } else {
+            self.new_drawing()
+        };
         copy.props.name = format!("{} copy", copy.props.name)
             .chars()
             .take(60)
@@ -1281,6 +1319,7 @@ impl Painter {
             let snap: Snapshot = adjusted.into_iter().map(|(k, t)| (k, Some(t))).collect();
             self.perform(Edit::Batch(vec![
                 Edit::Tiles {
+                    drawing: 0,
                     layer: lower_id,
                     mask: false,
                     snap,
@@ -1323,6 +1362,7 @@ impl Painter {
             ..lower.props.clone()
         };
         let mut edits = vec![Edit::Tiles {
+            drawing: 0,
             layer: lower_id,
             mask: self.editing_mask(lower_id),
             snap: merged,
@@ -1496,6 +1536,7 @@ impl Painter {
         // Always record a history step, even if no pixels changed, so the
         // web app's history and this undo stack stay one-to-one.
         self.push_undo(Edit::Tiles {
+            drawing: 0,
             layer: id,
             mask: self.editing_mask(id),
             snap: snap.unwrap_or_default(),
@@ -1519,7 +1560,8 @@ impl Painter {
         self.alpha_lock_stroke = false;
     }
 
-    fn push_undo(&mut self, e: Edit) {
+    fn push_undo(&mut self, mut e: Edit) {
+        self.tag_drawings(&mut e);
         self.undo.push(e);
         if self.undo.len() > UNDO_LIMIT {
             self.undo.remove(0);
@@ -1573,6 +1615,7 @@ impl Painter {
                 return false;
             }
             self.perform(Edit::Tiles {
+                drawing: 0,
                 layer: active,
                 mask: self.editing_mask(active),
                 snap,
@@ -1583,6 +1626,7 @@ impl Painter {
         let snap: Snapshot = l.surface.tiles.drain().map(|(k, t)| (k, Some(t))).collect();
         l.surface.dirty.extend(snap.keys().copied());
         self.push_undo(Edit::Tiles {
+            drawing: 0,
             layer: active,
             mask: self.editing_mask(active),
             snap,
@@ -1718,6 +1762,7 @@ impl Painter {
             return false;
         }
         self.perform(Edit::Tiles {
+            drawing: 0,
             layer: active,
             mask: self.editing_mask(active),
             snap,
@@ -1805,6 +1850,7 @@ impl Painter {
             return false;
         }
         self.perform(Edit::Tiles {
+            drawing: 0,
             layer: active,
             mask: self.editing_mask(active),
             snap,
@@ -1945,6 +1991,10 @@ impl Painter {
         scale: bool,
     ) -> bool {
         if !self.idle() || width == 0 || height == 0 || width > 8192 || height > 8192 {
+            return false;
+        }
+        // (an animation's other frames would keep the old size: not yet)
+        if !self.cels.is_empty() {
             return false;
         }
         if width == self.width && height == self.height && (scale || (dx == 0 && dy == 0)) {
@@ -2393,6 +2443,7 @@ impl Painter {
             return false;
         }
         self.push_undo(Edit::Tiles {
+            drawing: 0,
             layer: t.layer,
             mask: self.editing_mask(t.layer),
             snap,
@@ -2561,6 +2612,7 @@ impl Painter {
             return false;
         }
         self.push_undo(Edit::Tiles {
+            drawing: 0,
             layer,
             mask: self.editing_mask(layer),
             snap,
@@ -2864,6 +2916,7 @@ impl Painter {
             return false;
         }
         self.push_undo(Edit::Tiles {
+            drawing: 0,
             layer,
             mask: self.editing_mask(layer),
             snap,
@@ -2958,6 +3011,210 @@ impl Painter {
     pub fn clear_history(&mut self) {
         self.undo.clear();
         self.redo.clear();
+    }
+
+    // ---- drawings (animation cels) ---------------------------------------
+    //
+    // Each layer shows one drawing at a time; the others wait in `cels`. Moving to
+    // another frame swaps them (`show_drawings`): nothing is copied. Undo steps
+    // remember their drawing, so undoing a stroke from another frame changes that
+    // drawing, not the one showing ([`Painter::undo_drawing`] says which it is).
+
+    /// Give tile edits that don't know their drawing the one their layer shows (a
+    /// layer showing none gets a new drawing: drawing on an empty cel starts one).
+    fn tag_drawings(&mut self, e: &mut Edit) {
+        match e {
+            Edit::Tiles {
+                layer,
+                mask: false,
+                drawing,
+                ..
+            } if *drawing == 0 => {
+                let next = self.next_drawing;
+                if let Some(l) = self.layer_mut(*layer) {
+                    if l.drawing == 0 {
+                        l.drawing = next;
+                        self.next_drawing += 1;
+                    }
+                    *drawing = self.layer_mut(*layer).map_or(0, |l| l.drawing);
+                }
+            }
+            Edit::Batch(list) => {
+                for e in list {
+                    self.tag_drawings(e);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Give every layer that has paint but no drawing yet (an imported or pasted
+    /// picture, a restored layer) a drawing of its own.
+    pub fn ensure_drawings(&mut self) {
+        for i in 0..self.layers.len() {
+            if self.layers[i].drawing == 0 && !self.layers[i].surface.tiles.is_empty() {
+                let id = self.new_drawing();
+                self.layers[i].drawing = id;
+            }
+        }
+    }
+
+    /// The drawing a layer shows (0 = none yet).
+    pub fn layer_drawing(&self, id: u32) -> u32 {
+        self.layers
+            .iter()
+            .find(|l| l.id == id)
+            .map_or(0, |l| l.drawing)
+    }
+
+    /// Show other drawings: `pairs` is (layer id, drawing id) flattened; drawing 0
+    /// shows an empty cel. Not an undo step. False if busy (a stroke, transform,
+    /// adjustment or mask being edited) or a layer is missing; nothing changes then.
+    pub fn show_drawings(&mut self, pairs: &[u32]) -> bool {
+        if !self.idle()
+            || self.layers.iter().any(|l| l.editing_mask)
+            || !pairs.len().is_multiple_of(2)
+        {
+            return false;
+        }
+        let pairs: Vec<(u32, u32)> = pairs
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| (c[0], c[1]))
+            .collect();
+        if pairs.iter().any(|&(l, _)| self.index_of(l).is_none()) {
+            return false;
+        }
+        // a drawing can show on one layer only
+        for (i, &(_, d)) in pairs.iter().enumerate() {
+            if d != 0 && pairs[i + 1..].iter().any(|&(_, e)| e == d) {
+                return false;
+            }
+        }
+        self.ensure_drawings();
+        for &(id, drawing) in &pairs {
+            let idx = self.index_of(id).unwrap();
+            let l = &mut self.layers[idx];
+            if l.drawing == drawing {
+                continue;
+            }
+            let old = std::mem::take(&mut l.surface.tiles);
+            // a layer's dirty tiles: everywhere either drawing has paint
+            let mut keys: HashSet<TileKey> = old.keys().copied().collect();
+            if l.drawing != 0 {
+                self.cels.insert(l.drawing, old);
+            }
+            let new = if drawing == 0 {
+                TileMap::new()
+            } else {
+                self.cels.remove(&drawing).unwrap_or_default()
+            };
+            keys.extend(new.keys().copied());
+            let l = &mut self.layers[idx];
+            l.surface.tiles = new;
+            l.drawing = drawing;
+            l.surface.dirty.extend(keys);
+            self.next_drawing = self.next_drawing.max(drawing + 1);
+        }
+        true
+    }
+
+    /// A new, empty drawing's id (it shows nowhere until `show_drawings`).
+    pub fn new_drawing(&mut self) -> u32 {
+        let id = self.next_drawing;
+        self.next_drawing += 1;
+        id
+    }
+
+    /// The tiles of a drawing, wherever it is (showing on a layer, or kept).
+    fn drawing_tiles(&self, drawing: u32) -> Option<&TileMap> {
+        if drawing == 0 {
+            return None;
+        }
+        self.layers
+            .iter()
+            .find(|l| l.drawing == drawing)
+            .map(|l| &l.surface.tiles)
+            .or_else(|| self.cels.get(&drawing))
+    }
+
+    /// A copy of a drawing (for a duplicated frame); returns the copy's id.
+    pub fn copy_drawing(&mut self, drawing: u32) -> u32 {
+        let tiles = self.drawing_tiles(drawing).cloned().unwrap_or_default();
+        let id = self.new_drawing();
+        self.cels.insert(id, tiles);
+        id
+    }
+
+    /// A drawing's pixels at full size (straight-alpha sRGB RGBA8); transparent if
+    /// it's empty or unknown.
+    pub fn drawing_rgba(&self, drawing: u32) -> Vec<u8> {
+        match self.drawing_tiles(drawing) {
+            Some(t) => self.tiles_rgba(t),
+            None => vec![0; (self.width * self.height * 4) as usize],
+        }
+    }
+
+    /// Whether a drawing has no paint.
+    pub fn drawing_empty(&self, drawing: u32) -> bool {
+        self.drawing_tiles(drawing).is_none_or(|t| t.is_empty())
+    }
+
+    /// Load a drawing's pixels (straight-alpha sRGB RGBA8, canvas size), replacing
+    /// it if it exists. Not an undo step: for opening a project.
+    pub fn put_drawing(&mut self, drawing: u32, rgba: &[u8]) -> bool {
+        if drawing == 0 || !self.idle() {
+            return false;
+        }
+        let Some(tiles) = self.picture_tiles(rgba) else {
+            return false;
+        };
+        self.next_drawing = self.next_drawing.max(drawing + 1);
+        if let Some(idx) = self.layers.iter().position(|l| l.drawing == drawing) {
+            let l = &mut self.layers[idx];
+            let keys: Vec<TileKey> = l
+                .surface
+                .tiles
+                .keys()
+                .chain(tiles.keys())
+                .copied()
+                .collect();
+            l.surface.tiles = tiles;
+            l.surface.dirty.extend(keys);
+        } else {
+            self.cels.insert(drawing, tiles);
+        }
+        true
+    }
+
+    /// Forget kept drawings that aren't in `keep` (frames deleted for good). Drawings
+    /// still in the undo history are kept too.
+    pub fn drop_drawings_except(&mut self, keep: &[u32]) {
+        let mut used: HashSet<u32> = keep.iter().copied().collect();
+        fn collect(e: &Edit, used: &mut HashSet<u32>) {
+            match e {
+                Edit::Tiles { drawing, .. } => {
+                    used.insert(*drawing);
+                }
+                Edit::Batch(list) => list.iter().for_each(|e| collect(e, used)),
+                _ => {}
+            }
+        }
+        for e in self.undo.iter().chain(&self.redo) {
+            collect(e, &mut used);
+        }
+        self.cels.retain(|d, _| used.contains(d));
+    }
+
+    /// The drawing the next undo changes (0: none, or not a drawing's pixels).
+    pub fn undo_drawing(&self) -> u32 {
+        self.undo.last().map_or(0, edit_drawing)
+    }
+
+    /// The drawing the next redo changes (0: none, or not a drawing's pixels).
+    pub fn redo_drawing(&self) -> u32 {
+        self.redo.last().map_or(0, edit_drawing)
     }
 
     pub fn can_undo(&self) -> bool {
@@ -3199,10 +3456,15 @@ impl Painter {
         let Some(l) = self.layers.iter().find(|l| l.id == id) else {
             return Vec::new();
         };
+        self.tiles_rgba(&l.colour().tiles)
+    }
+
+    /// Tiles at full canvas size (straight-alpha sRGB RGBA8).
+    fn tiles_rgba(&self, tiles: &TileMap) -> Vec<u8> {
         let (w, h) = (self.width as i64, self.height as i64);
         let ts = TILE_SIZE as i64;
         let mut out = vec![0u8; (w * h * 4) as usize];
-        for (&(tx, ty), tile) in &l.colour().tiles {
+        for (&(tx, ty), tile) in tiles {
             for (py, row) in tile.iter().enumerate() {
                 let y = ty as i64 * ts + py as i64;
                 if y < 0 || y >= h {
@@ -3261,7 +3523,7 @@ impl Painter {
             .map(|l| {
                 let p = &l.props;
                 format!(
-                    r#"{{"id":{},"name":{},"visible":{},"opacity":{},"blend":"{}","locked":{},"alphaLock":{},"clip":{},"mask":{},"editingMask":{},"group":{},"imported":{},"empty":{},"adjust":{}}}"#,
+                    r#"{{"id":{},"name":{},"visible":{},"opacity":{},"blend":"{}","locked":{},"alphaLock":{},"clip":{},"mask":{},"editingMask":{},"group":{},"imported":{},"empty":{},"drawing":{},"adjust":{}}}"#,
                     l.id,
                     json_str(&p.name),
                     p.visible,
@@ -3275,6 +3537,7 @@ impl Painter {
                     l.group,
                     p.imported,
                     l.is_empty(),
+                    l.drawing,
                     if p.adjust.is_some() {
                         json_str(&p.adjust_spec)
                     } else {
@@ -3284,6 +3547,32 @@ impl Painter {
             })
             .collect();
         format!("[{}]", items.join(","))
+    }
+}
+
+/// Swap tiles in a kept drawing, returning what was replaced (as [`UndoSurface::swap_in`]).
+fn swap_tiles(tiles: &mut TileMap, snap: Snapshot) -> Snapshot {
+    snap.into_iter()
+        .map(|(key, tile)| {
+            let old = match tile {
+                Some(t) => tiles.insert(key, t),
+                None => tiles.remove(&key),
+            };
+            (key, old)
+        })
+        .collect()
+}
+
+/// The drawing an undo step changes (the first one, for a batch; 0 for none).
+fn edit_drawing(e: &Edit) -> u32 {
+    match e {
+        Edit::Tiles {
+            drawing,
+            mask: false,
+            ..
+        } => *drawing,
+        Edit::Batch(list) => list.iter().map(edit_drawing).find(|&d| d != 0).unwrap_or(0),
+        _ => 0,
     }
 }
 
@@ -3939,6 +4228,114 @@ mod tests {
             n += 1;
         }
         assert_eq!(n, UNDO_LIMIT);
+    }
+
+    // ---- drawings (animation cels) ----
+
+    /// dark pixels in rows y0..y1
+    fn dark_rows(p: &Painter, y0: u32, y1: u32) -> usize {
+        let w = p.width() as usize;
+        p.rgba()[y0 as usize * w * 4..y1 as usize * w * 4]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|px| px[0] < 128)
+            .count()
+    }
+
+    #[test]
+    fn frames_swap_drawings_without_losing_them() {
+        let mut p = Painter::new(256, 128);
+        let layer = p.active_layer();
+        let b = pen();
+        line(&mut p, &b, 30.0); // frame 1: a line at the top
+        let first = p.layer_drawing(layer);
+        assert_ne!(first, 0, "drawing on an empty cel starts a drawing");
+        p.flush();
+        let top = dark_rows(&p, 20, 40);
+        assert!(top > 50);
+        // frame 2: an empty cel, then a line at the bottom
+        assert!(p.show_drawings(&[layer, 0]));
+        p.flush();
+        assert_eq!(dark_pixels(&p), 0);
+        line(&mut p, &b, 100.0);
+        let second = p.layer_drawing(layer);
+        assert!(second != 0 && second != first);
+        p.flush();
+        assert_eq!(dark_rows(&p, 20, 40), 0);
+        // back to frame 1: its line, not frame 2's
+        assert!(p.show_drawings(&[layer, first]));
+        p.flush();
+        assert_eq!(dark_rows(&p, 20, 40), top);
+        assert_eq!(dark_rows(&p, 90, 110), 0);
+        assert!(p.drawing_rgba(second).chunks(4).any(|px| px[3] > 0));
+        assert!(!p.drawing_empty(second) && p.drawing_empty(999));
+    }
+
+    #[test]
+    fn undo_changes_the_drawing_it_was_made_on() {
+        let mut p = Painter::new(256, 128);
+        let layer = p.active_layer();
+        let b = pen();
+        line(&mut p, &b, 30.0);
+        let first = p.layer_drawing(layer);
+        p.show_drawings(&[layer, 0]);
+        line(&mut p, &b, 100.0);
+        let second = p.layer_drawing(layer);
+        assert_eq!(p.undo_drawing(), second);
+        p.undo();
+        assert_eq!(p.undo_drawing(), first, "the next undo is frame 1's stroke");
+        // undoing it while frame 2 shows: frame 2 stays as it is, frame 1 loses its line
+        p.undo();
+        assert!(p.drawing_empty(first));
+        assert_eq!(p.redo_drawing(), first);
+        p.redo();
+        assert!(!p.drawing_empty(first));
+        p.show_drawings(&[layer, first]);
+        p.flush();
+        assert!(dark_rows(&p, 20, 40) > 50);
+    }
+
+    #[test]
+    fn drawings_copy_load_and_stay_with_their_layer() {
+        let mut p = Painter::new(128, 64);
+        let layer = p.active_layer();
+        line(&mut p, &pen(), 30.0);
+        let first = p.layer_drawing(layer);
+        let copy = p.copy_drawing(first);
+        assert_eq!(p.drawing_rgba(copy), p.drawing_rgba(first));
+        // loading a drawing (opening a project)
+        let mut rgba = vec![0u8; 128 * 64 * 4];
+        rgba[..4].copy_from_slice(&[255, 0, 0, 255]);
+        assert!(p.put_drawing(40, &rgba));
+        assert_eq!(&p.drawing_rgba(40)[..4], &[255, 0, 0, 255]);
+        assert!(p.new_drawing() > 40);
+        // one drawing can't show on two layers at once
+        let other = p.add_layer("B");
+        assert!(!p.show_drawings(&[layer, 40, other, 40]));
+        assert!(p.show_drawings(&[other, 40]));
+        // a duplicated layer gets its own drawing
+        let dup = p.duplicate_layer(layer);
+        assert!(p.layer_drawing(dup) != 0 && p.layer_drawing(dup) != first);
+        // forgetting unused drawings keeps what's showing and what undo needs
+        p.drop_drawings_except(&[]);
+        assert!(!p.drawing_empty(first) && !p.drawing_empty(40));
+    }
+
+    #[test]
+    fn a_pasted_picture_gets_a_drawing_before_frames_change() {
+        let mut p = Painter::new(64, 64);
+        let rgba = vec![200u8; 64 * 64 * 4];
+        let id = p.add_image_layer("Picture", &rgba);
+        assert_eq!(p.layer_drawing(id), 0);
+        assert!(p.show_drawings(&[id, 0]));
+        // its pixels were kept as a drawing of their own
+        let kept = p.layers().iter().find(|l| l.id == id).unwrap();
+        assert!(kept.is_empty());
+        assert_eq!(p.cels.len(), 1);
+        let d = *p.cels.keys().next().unwrap();
+        assert!(p.show_drawings(&[id, d]));
+        assert!(!p.layers().iter().find(|l| l.id == id).unwrap().is_empty());
     }
 
     fn px(p: &Painter, x: u32, y: u32) -> [u8; 3] {

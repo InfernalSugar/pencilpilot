@@ -39,6 +39,9 @@ export type ActionId =
 	| 'rotate-right'
 	| 'rotate-reset'
 	| 'mirror'
+	| 'prev-frame'
+	| 'next-frame'
+	| 'new-drawing'
 	| 'save'
 	| 'save-as'
 	| 'open';
@@ -46,7 +49,7 @@ export type ActionId =
 export interface Action {
 	id: ActionId;
 	label: string;
-	group: 'Tools' | 'Brush' | 'Edit' | 'Selection' | 'View' | 'File';
+	group: 'Tools' | 'Brush' | 'Edit' | 'Selection' | 'View' | 'Animation' | 'File';
 	/** the key it starts with */
 	key: string;
 }
@@ -90,6 +93,9 @@ export const ACTIONS: Action[] = [
 	{ id: 'rotate-right', label: 'Rotate right', group: 'View', key: '6' },
 	{ id: 'rotate-reset', label: 'Straighten the view', group: 'View', key: '5' },
 	{ id: 'mirror', label: 'Mirror the view', group: 'View', key: 'H' },
+	{ id: 'prev-frame', label: 'Previous frame', group: 'Animation', key: ',' },
+	{ id: 'next-frame', label: 'Next frame', group: 'Animation', key: '.' },
+	{ id: 'new-drawing', label: 'New drawing after this one', group: 'Animation', key: 'N' },
 	{ id: 'save', label: 'Save', group: 'File', key: 'Ctrl+S' },
 	{ id: 'save-as', label: 'Save as…', group: 'File', key: 'Ctrl+Shift+S' },
 	{ id: 'open', label: 'Open…', group: 'File', key: 'Ctrl+O' }
