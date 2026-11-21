@@ -705,14 +705,14 @@ test('playback: plays the cut at its frame rate, loops a range, ping-pongs, scru
 	// the player's picture: a frame rendered small, the line where it belongs
 	await page.keyboard.press('Shift+Space');
 	await expect(player).toBeVisible();
-	// (once its frames are ready)
+	// (once its frames are ready; a light pencil line shrunk for the player is pale grey)
 	await expect
 		.poll(() =>
 			player.evaluate((el: HTMLCanvasElement) => {
 				if (!el.width || !el.height) return 0;
 				const d = el.getContext('2d')!.getImageData(0, 0, el.width, el.height).data;
 				let n = 0;
-				for (let i = 0; i < d.length; i += 4) if (d[i] < 150) n++;
+				for (let i = 0; i < d.length; i += 4) if (d[i] < 200) n++;
 				return n;
 			})
 		)
