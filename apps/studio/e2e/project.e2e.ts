@@ -1787,3 +1787,52 @@ test('play the scene: every cut in turn, with the flash between them', async ({ 
 	expect(seen).toEqual({ dark: true, cut2: true });
 	await expect(player).toHaveCount(0, { timeout: 5000 });
 });
+
+test('shift & trace: the onion skin’s drawings move to line up, then go back', async ({ page }) => {
+	await stubTauri(page);
+	await ready(page);
+	const tl = page.getByRole('region', { name: 'Timeline' });
+	const onion = page.getByTestId('onion');
+	/** red onion pixels in rows y0–y1 (fractions) */
+	const red = (y0: number, y1: number) =>
+		onion.evaluate(
+			(el: HTMLCanvasElement, [y0, y1]) => {
+				const top = Math.round(el.height * y0);
+				const h = Math.max(1, Math.round(el.height * (y1 - y0)));
+				const d = el.getContext('2d')!.getImageData(0, top, el.width, h).data;
+				let n = 0;
+				for (let i = 0; i < d.length; i += 4)
+					if (d[i + 3] >= 40 && d[i] > d[i + 1] + 60 && d[i] > d[i + 2] + 60) n++;
+				return n;
+			},
+			[y0, y1] as const
+		);
+	await scribble(page, 0.2);
+	await tl.getByRole('button', { name: 'New drawing' }).click();
+	await page.keyboard.press('o');
+	await expect.poll(() => red(0.1, 0.35)).toBeGreaterThan(50);
+	// move the drawing before down, with the pad's arrow keys (Shift: 20 px a press)
+	await tl.getByRole('button', { name: 'Onion skin settings' }).click();
+	const pad = tl.getByRole('slider', { name: 'Drag to move the drawings before' });
+	await pad.focus();
+	const { height } = await canvas(page).evaluate((el: HTMLCanvasElement) => ({
+		height: el.height
+	}));
+	const presses = Math.ceil((height * 0.4) / 20);
+	for (let i = 0; i < presses; i++) await page.keyboard.press('Shift+ArrowDown');
+	await expect(pad).toHaveAttribute('aria-valuetext', `0, ${presses * 20} px, 0°`);
+	await expect.poll(() => red(0.1, 0.35)).toBe(0);
+	await expect.poll(() => red(0.5, 0.8)).toBeGreaterThan(50);
+	// the drawing itself didn't move: put back, it's where it was
+	await tl.getByRole('button', { name: 'Put back' }).click();
+	await expect.poll(() => red(0.1, 0.35)).toBeGreaterThan(50);
+	// and shifted views go back on their own on another frame
+	await pad.focus();
+	await page.keyboard.press('Shift+ArrowDown');
+	await expect(pad).not.toHaveAttribute('aria-valuetext', '0, 0 px, 0°');
+	await tl.getByRole('button', { name: 'Onion skin settings' }).click();
+	await tl.getByRole('button', { name: 'Frame 1', exact: true }).click();
+	await tl.getByRole('button', { name: 'Frame 2', exact: true }).click();
+	await tl.getByRole('button', { name: 'Onion skin settings' }).click();
+	await expect(pad).toHaveAttribute('aria-valuetext', '0, 0 px, 0°');
+});
