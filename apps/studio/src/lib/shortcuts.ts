@@ -42,6 +42,9 @@ export type ActionId =
 	| 'prev-frame'
 	| 'next-frame'
 	| 'new-drawing'
+	| 'copy-frames'
+	| 'paste-frames'
+	| 'duplicate-frames'
 	| 'play'
 	| 'set-in'
 	| 'set-out'
@@ -101,6 +104,14 @@ export const ACTIONS: Action[] = [
 	{ id: 'prev-frame', label: 'Previous frame', group: 'Animation', key: ',' },
 	{ id: 'next-frame', label: 'Next frame', group: 'Animation', key: '.' },
 	{ id: 'new-drawing', label: 'New drawing after this one', group: 'Animation', key: 'N' },
+	{ id: 'copy-frames', label: 'Copy frames', group: 'Animation', key: 'Alt+C' },
+	{ id: 'paste-frames', label: 'Paste frames', group: 'Animation', key: 'Alt+V' },
+	{
+		id: 'duplicate-frames',
+		label: 'Duplicate frames (as new drawings)',
+		group: 'Animation',
+		key: 'Shift+D'
+	},
 	{ id: 'play', label: 'Play / stop', group: 'Animation', key: 'Shift+Space' },
 	{ id: 'set-in', label: 'Loop from this frame', group: 'Animation', key: 'Alt+I' },
 	{ id: 'set-out', label: 'Loop to this frame', group: 'Animation', key: 'Alt+O' },

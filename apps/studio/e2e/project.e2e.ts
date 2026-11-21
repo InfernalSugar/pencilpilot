@@ -859,3 +859,82 @@ test('static layers hold one drawing all cut long; each cut has a camera', async
 	await expect.poll(bottom).toBeGreaterThan(50);
 	await expect.poll(top).toBeGreaterThan(bg * 0.9);
 });
+
+test('frame tools: cycle, reverse, duplicate, copy and paste, boil', async ({ page }) => {
+	await stubTauri(page);
+	await ready(page);
+	const tl = page.getByRole('region', { name: 'Timeline' });
+	const frameNo = tl.getByTestId('frame');
+	const top = () => ink(page, 0, 0.45);
+	const bottom = () => ink(page, 0.5, 1);
+	const tick = (n: number) => tl.getByRole('button', { name: `Frame ${n}`, exact: true });
+	/** where the dark pixels are (to tell two drawings of the same amount of ink apart) */
+	const signature = () =>
+		canvas(page).evaluate((el: HTMLCanvasElement) => {
+			const d = el.getContext('2d')!.getImageData(0, 0, el.width, el.height).data;
+			let s = 0;
+			for (let i = 0; i < d.length; i += 4) if (d[i] < 200) s = (s * 31 + i) % 1_000_000_007;
+			return s;
+		});
+	// drawing A at the top on frame 1, B at the bottom on frame 2
+	await scribble(page, 0.25);
+	await tl.getByRole('button', { name: 'New drawing' }).click();
+	await scribble(page, 0.75);
+	await tl.getByRole('button', { name: 'Frames ▾' }).click();
+	const tools = tl.getByRole('group', { name: 'Frame tools' });
+	const on = tools.getByTestId('frames-target');
+
+	// cycle frames 1–2 twice more: A B A B A B
+	await tick(1).click({ modifiers: ['Shift'] });
+	await expect(on).toContainText('On frames 1–2.');
+	await tools.getByRole('button', { name: 'Cycle', exact: true }).click();
+	await expect(tl.getByText('of 6')).toBeVisible();
+	await expect(tl.getByRole('button', { name: /drawing 1, frame 5$/ })).toBeVisible();
+
+	// reverse frames 1–2: B A A B A B (B is now the first drawing)
+	await tick(1).click();
+	await tick(2).click({ modifiers: ['Shift'] });
+	await tools.getByRole('button', { name: 'Reverse' }).click();
+	await expect(tl.getByRole('button', { name: /drawing 2, frame 2–3$/ })).toBeVisible();
+	await tick(1).click();
+	await expect.poll(bottom).toBeGreaterThan(50);
+	expect(await top()).toBe(0);
+
+	// duplicate frame 1 (B) as a new drawing, and change the copy: B stays as it was
+	await page.keyboard.press('Shift+D');
+	await expect(frameNo).toHaveText('2');
+	await expect(tl.getByText('of 7')).toBeVisible();
+	await expect.poll(bottom).toBeGreaterThan(50);
+	await scribble(page, 0.25);
+	await expect.poll(top).toBeGreaterThan(50);
+	await tick(1).click();
+	await expect.poll(top).toBe(0);
+	expect(await bottom()).toBeGreaterThan(50);
+
+	// copy frame 2 (the changed copy) and paste it at the end: the same drawing
+	await tick(2).click();
+	await page.keyboard.press('Alt+C');
+	await tick(8).click();
+	await page.keyboard.press('Alt+V');
+	await expect(tl.getByText('of 8')).toBeVisible();
+	await expect(tl.getByRole('button', { name: /drawing 2, frame 8$/ })).toBeVisible();
+	await expect.poll(top).toBeGreaterThan(50);
+
+	// boil: hold frame 1 for 4 frames, boil it on twos
+	await tick(1).click();
+	for (let i = 0; i < 3; i++) await tl.getByRole('button', { name: 'Hold longer' }).click();
+	await expect(tl.getByRole('button', { name: /drawing 1, frame 1–4$/ })).toBeVisible();
+	await expect(on).toContainText('On frames 1–4 (this drawing)');
+	const still = await signature();
+	const inkStill = await bottom();
+	await tools.getByRole('button', { name: 'Boil', exact: true }).click();
+	await expect(tools.getByText(/Boiled: 2 wobbled copies/)).toBeVisible();
+	await expect(tl.getByRole('button', { name: /frame 1–2$/ })).toBeVisible();
+	await expect(tl.getByRole('button', { name: /frame 3–4$/ })).toBeVisible();
+	await tick(3).click();
+	await expect.poll(signature).not.toBe(still);
+	// the same line, a little moved
+	const inkBoiled = await bottom();
+	expect(Math.abs(inkBoiled - inkStill) / inkStill).toBeLessThan(0.3);
+	expect(await top()).toBe(0);
+});

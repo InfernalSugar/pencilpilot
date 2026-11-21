@@ -3147,6 +3147,111 @@ impl Painter {
         id
     }
 
+    /// A "boiled" copy of a drawing: the same lines nudged by a smooth wobble of up to
+    /// `amount` pixels, different for each `seed`, as if traced again by hand. Held
+    /// frames alternating between a drawing and its boils look alive. Returns the
+    /// copy's id (0: no such drawing, or busy).
+    pub fn boil_drawing(&mut self, drawing: u32, amount: f32, seed: u32) -> u32 {
+        if !self.idle() {
+            return 0;
+        }
+        let Some(tiles) = self.drawing_tiles(drawing) else {
+            return 0;
+        };
+        let (w, h) = (self.width as usize, self.height as usize);
+        let src = self.tiles_rgba(tiles);
+        // where there's paint (in tiles), and a margin it can move into
+        let ts = TILE_SIZE as i64;
+        let (mut x0, mut y0, mut x1, mut y1) = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
+        for &(tx, ty) in tiles.keys() {
+            x0 = x0.min(tx as i64 * ts);
+            y0 = y0.min(ty as i64 * ts);
+            x1 = x1.max((tx as i64 + 1) * ts);
+            y1 = y1.max((ty as i64 + 1) * ts);
+        }
+        let amount = amount.clamp(0.0, 16.0);
+        let pad = amount.ceil() as i64 + 1;
+        let clampx = |v: i64| v.clamp(0, w as i64) as usize;
+        let clampy = |v: i64| v.clamp(0, h as i64) as usize;
+        let (x0, x1) = (clampx(x0 - pad), clampx(x1 + pad));
+        let (y0, y1) = (clampy(y0 - pad), clampy(y1 + pad));
+        let mut out = vec![0u8; w * h * 4];
+        // the wobble: smooth noise, a cell every ~40 px (about a stroke's curve)
+        let cell = 40.0f32;
+        let noise = |x: f32, y: f32, k: u32| -> f32 {
+            let hash = |ix: i32, iy: i32| -> f32 {
+                let mut v = (ix as u32)
+                    .wrapping_mul(0x9e37_79b1)
+                    .wrapping_add((iy as u32).wrapping_mul(0x85eb_ca77))
+                    .wrapping_add(seed.wrapping_mul(0xc2b2_ae3d))
+                    .wrapping_add(k.wrapping_mul(0x27d4_eb2f));
+                v ^= v >> 15;
+                v = v.wrapping_mul(0x2c1b_3c6d);
+                v ^= v >> 12;
+                v = v.wrapping_mul(0x297a_2d39);
+                v ^= v >> 15;
+                v as f32 / u32::MAX as f32 * 2.0 - 1.0
+            };
+            let (gx, gy) = (x / cell, y / cell);
+            let (ix, iy) = (gx.floor() as i32, gy.floor() as i32);
+            let (fx, fy) = (gx - ix as f32, gy - iy as f32);
+            let s = |t: f32| t * t * (3.0 - 2.0 * t);
+            let (sx, sy) = (s(fx), s(fy));
+            let a = hash(ix, iy) + (hash(ix + 1, iy) - hash(ix, iy)) * sx;
+            let b = hash(ix, iy + 1) + (hash(ix + 1, iy + 1) - hash(ix, iy + 1)) * sx;
+            a + (b - a) * sy
+        };
+        // sample the original, premultiplied (so edges don't pick up dark fringes)
+        let at = |x: i64, y: i64| -> [f32; 4] {
+            if x < 0 || y < 0 || x >= w as i64 || y >= h as i64 {
+                return [0.0; 4];
+            }
+            let i = (y as usize * w + x as usize) * 4;
+            let a = src[i + 3] as f32 / 255.0;
+            [
+                src[i] as f32 * a,
+                src[i + 1] as f32 * a,
+                src[i + 2] as f32 * a,
+                a,
+            ]
+        };
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let (fx, fy) = (x as f32, y as f32);
+                let sx = fx + noise(fx, fy, 1) * amount;
+                let sy = fy + noise(fx, fy, 2) * amount;
+                let (ix, iy) = (sx.floor() as i64, sy.floor() as i64);
+                let (tx, ty) = (sx - ix as f32, sy - iy as f32);
+                let (p00, p10, p01, p11) = (
+                    at(ix, iy),
+                    at(ix + 1, iy),
+                    at(ix, iy + 1),
+                    at(ix + 1, iy + 1),
+                );
+                let mut c = [0.0f32; 4];
+                for k in 0..4 {
+                    let top = p00[k] + (p10[k] - p00[k]) * tx;
+                    let bot = p01[k] + (p11[k] - p01[k]) * tx;
+                    c[k] = top + (bot - top) * ty;
+                }
+                if c[3] <= 0.5 / 255.0 {
+                    continue;
+                }
+                let i = (y * w + x) * 4;
+                out[i] = (c[0] / c[3]).round().clamp(0.0, 255.0) as u8;
+                out[i + 1] = (c[1] / c[3]).round().clamp(0.0, 255.0) as u8;
+                out[i + 2] = (c[2] / c[3]).round().clamp(0.0, 255.0) as u8;
+                out[i + 3] = (c[3] * 255.0).round().clamp(0.0, 255.0) as u8;
+            }
+        }
+        let Some(boiled) = self.picture_tiles(&out) else {
+            return 0;
+        };
+        let id = self.new_drawing();
+        self.cels.insert(id, boiled);
+        id
+    }
+
     /// A drawing's pixels at full size (straight-alpha sRGB RGBA8); transparent if
     /// it's empty or unknown.
     pub fn drawing_rgba(&self, drawing: u32) -> Vec<u8> {
@@ -4713,6 +4818,40 @@ mod tests {
         );
         // an unknown drawing is skipped
         assert!(p.onion_rgba(&[999, 0, 255], 1).iter().all(|&v| v == 0));
+    }
+
+    #[test]
+    fn boiled_drawings_wobble_a_little() {
+        let mut p = Painter::new(256, 128);
+        let layer = p.active_layer();
+        line(&mut p, &pen(), 64.0);
+        let d = p.layer_drawing(layer);
+        let rgba = p.drawing_rgba(d);
+        let ink = |v: &[u8]| v.as_chunks::<4>().0.iter().filter(|px| px[3] > 128).count();
+        let b1 = p.boil_drawing(d, 1.5, 1);
+        let b2 = p.boil_drawing(d, 1.5, 2);
+        assert!(b1 != 0 && b2 != 0 && b1 != b2 && b1 != d);
+        let (r1, r2) = (p.drawing_rgba(b1), p.drawing_rgba(b2));
+        // about as much ink, in different places, never far from the line
+        for r in [&r1, &r2] {
+            let (a, b) = (ink(&rgba) as f32, ink(r) as f32);
+            assert!((b - a).abs() / a < 0.25, "{a} vs {b}");
+            assert_ne!(r, &rgba);
+            for y in 0..128usize {
+                for x in 0..256usize {
+                    if r[(y * 256 + x) * 4 + 3] > 128 {
+                        assert!((y as f32 - 64.0).abs() < 12.0, "ink at {x},{y}");
+                    }
+                }
+            }
+        }
+        assert_ne!(r1, r2);
+        // the same seed boils the same way; the original is untouched
+        let again = p.boil_drawing(d, 1.5, 1);
+        assert_eq!(p.drawing_rgba(again), r1);
+        assert_eq!(p.drawing_rgba(d), rgba);
+        // nothing to boil
+        assert_eq!(p.boil_drawing(999, 1.0, 1), 0);
     }
 
     fn px(p: &Painter, x: u32, y: u32) -> [u8; 3] {

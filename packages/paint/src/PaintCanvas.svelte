@@ -2675,6 +2675,9 @@
 	export const newDrawing = () => paint?.newDrawing() ?? 0;
 	/** A copy of a drawing; returns the copy's id. */
 	export const copyDrawing = (drawing: number) => paint?.copyDrawing(drawing) ?? 0;
+	/** A boiled copy of a drawing: its lines nudged up to `amount` px, as if traced again. */
+	export const boilDrawing = (drawing: number, amount: number, seed: number) =>
+		paint?.boilDrawing(drawing, amount, seed) ?? 0;
 	/** A drawing's pixels (straight-alpha RGBA, canvas size). */
 	export const drawingRgba = (drawing: number) =>
 		paint?.drawingRgba(drawing) ?? new Uint8Array(width * height * 4);
