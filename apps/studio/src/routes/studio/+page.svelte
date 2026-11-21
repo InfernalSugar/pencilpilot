@@ -1437,7 +1437,7 @@
 					onguides={toolOpts.onguides}
 					onpenpath={toolOpts.onpenpath}
 					onimport={toolOpts.onimport}
-					onshape={(kind) => note(`Snapped to a ${kind}`, 1800)}
+					onshape={(kind) => note(`Snapped to ${/^[aeiou]/.test(kind) ? 'an' : 'a'} ${kind}`, 1800)}
 					ontransformend={(r) => {
 						tool = 'brush';
 						if (r === 'empty') note('Nothing to move on this layer (or it’s locked).');
