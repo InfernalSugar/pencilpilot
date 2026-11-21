@@ -1,0 +1,17 @@
+[package]
+name = "pencilpilot-ppstudio-cli"
+description = "Make and read PencilPilot projects from the command line (used by the director plugin)"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "ppstudio"
+path = "src/main.rs"
+
+[dependencies]
+pencilpilot-ppstudio = { path = "../ppstudio" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }

@@ -1,0 +1,7 @@
+{
+  "name": "pencilpilot-director",
+  "version": "0.1.0",
+  "description": "An animation director for PencilPilot: from an idea to a finished frame-by-frame video, step by step, with local Qwen-Image stills and Seedance clips",
+  "author": { "name": "InfernalSugar" },
+  "keywords": ["animation", "pencilpilot", "seedance", "comfyui", "storyboard"]
+}

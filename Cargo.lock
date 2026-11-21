@@ -1276,6 +1276,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pencilpilot-ppstudio-cli"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "pencilpilot-ppstudio",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "pencilpilot-ref-filters"
 version = "0.1.0"
 dependencies = [
