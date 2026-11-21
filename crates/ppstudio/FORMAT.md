@@ -53,6 +53,7 @@ This crate (`pencilpilot-ppstudio`) reads and writes it.
                      { "drawing": "D2", "length": 2 } ] } } ] }
     ],
     "staticLayers": [ 2 ],       // optional: layers that show one drawing all cut long
+    "drawingKinds": { "D1": "key", "D3": "breakdown" },  // optional: key / breakdown / inbetween
     "mouthCharts": [             // optional: lip-sync, which drawing is each mouth shape
       { "layer": 3, "shapes": { "A": "D7", "B": "D8", "X": "D9" } } ]
   },
@@ -106,6 +107,9 @@ This crate (`pencilpilot-ppstudio`) reads and writes it.
   shape used in lip-sync: `A`–`F` (closed for M B P; slightly open, teeth together; open;
   wide open; rounded; puckered) and the optional `G` (F V), `H` (L) and `X` (rest), as
   Rhubarb Lip Sync names them. Its drawings are stored even when no frame shows them.
+- **Drawing marks** (`drawingKinds`) say what a drawing is in the animation: `key`,
+  `breakdown` or `inbetween`. Apps show them on the timeline and the exposure sheet (keys
+  circled, breakdowns boxed) and use them for flipping and a keys-only onion skin.
 - The **timelapse** is a small picture of the canvas (at most 540 px on its long side)
   taken after each change, across every session: `timelapse/000000.jpg`, `000001.jpg`…
   in order, with `timelapse` in the manifest saying when each was taken. A reader may

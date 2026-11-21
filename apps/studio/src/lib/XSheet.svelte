@@ -89,7 +89,10 @@
 	let sheetEl = $state<HTMLElement>();
 
 	/** What a layer's cell shows on a frame. */
-	function cell(layer: number, f: number): { text: string; kind: 'key' | 'hold' | 'empty' | '' } {
+	function cell(
+		layer: number,
+		f: number
+	): { text: string; kind: 'key' | 'hold' | 'empty' | ''; mark?: string } {
 		const t = theCut.tracks[layer] ?? [];
 		if (statics.includes(layer)) {
 			const d = staticDrawing(t);
@@ -101,8 +104,13 @@
 		const d = t[at.index].drawing;
 		if (at.start !== f) return { text: '', kind: d ? 'hold' : '' };
 		if (!d) return { text: '×', kind: 'empty' };
-		return { text: String(nums(layer).get(d) ?? '?'), kind: 'key' };
+		return { text: String(nums(layer).get(d) ?? '?'), kind: 'key', mark: timeline.kinds?.[d] };
 	}
+	const MARK_NAME: Record<string, string> = {
+		key: 'key',
+		breakdown: 'breakdown',
+		inbetween: 'in-between'
+	};
 	const numbersOf = $derived(
 		new Map(
 			cols
@@ -358,10 +366,11 @@
 							{@const sel = col === l && f === frame}
 							<td
 								class="cel {c.kind}"
+								data-mark={c.mark}
 								role="gridcell"
 								aria-selected={sel}
 								aria-label="{layerName(l)}, frame {f + 1}: {c.kind === 'key'
-									? `drawing ${c.text}`
+									? `drawing ${c.text}${c.mark ? ` (${MARK_NAME[c.mark]})` : ''}`
 									: c.kind === 'hold'
 										? 'held'
 										: c.kind === 'empty'
@@ -482,6 +491,27 @@
 	}
 	.cel.key {
 		font-weight: 800;
+	}
+	/* as on a paper sheet: keys circled, breakdowns boxed, in-betweens underlined */
+	.cel[data-mark='key'],
+	.cel[data-mark='breakdown'],
+	.cel[data-mark='inbetween'] {
+		background-clip: padding-box;
+	}
+	.cel[data-mark='key'] {
+		background-image: radial-gradient(
+			circle,
+			transparent 0 8px,
+			var(--pp-ink, #16161a) 8px 9.5px,
+			transparent 9.5px
+		);
+	}
+	.cel[data-mark='breakdown'] {
+		outline: 1.5px solid #6b5bd6;
+		outline-offset: -4px;
+	}
+	.cel[data-mark='inbetween'] {
+		text-decoration: underline;
 	}
 	.cel.empty {
 		color: #9a9aa3;

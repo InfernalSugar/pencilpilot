@@ -78,6 +78,9 @@ pub struct Header {
     /// lip-sync mouth charts (their drawings are among `drawings`)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mouth_charts: Vec<MouthChart>,
+    /// drawing marks: drawing name → "key", "breakdown" or "inbetween"
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub drawing_kinds: std::collections::BTreeMap<String, String>,
     /// the timelapse: JPEG pictures and when each was taken (ms since 1970)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub timelapse: Vec<PacketTimelapse>,
@@ -227,6 +230,7 @@ pub fn to_project(
         p.manifest.timeline.scenes = scenes;
         p.manifest.timeline.static_layers = h.static_layers;
         p.manifest.timeline.mouth_charts = h.mouth_charts;
+        p.manifest.timeline.drawing_kinds = h.drawing_kinds;
     }
     p.manifest.layers = h.layers.iter().map(|l| l.layer.clone()).collect();
     p.manifest.groups = h.groups;
@@ -354,6 +358,7 @@ pub fn from_project(p: &Project, mut frames: Option<&mut FrameStore>) -> Result<
         static_layers: m.timeline.static_layers.clone(),
         audio,
         mouth_charts: m.timeline.mouth_charts.clone(),
+        drawing_kinds: m.timeline.drawing_kinds.clone(),
         timelapse,
     };
     encode(&header, &blobs)
@@ -482,6 +487,7 @@ mod tests {
             static_layers: vec![],
             audio: vec![],
             mouth_charts: vec![],
+            drawing_kinds: Default::default(),
             timelapse: vec![],
         };
         (encode(&header, &blobs).unwrap(), rgba, mask)
@@ -602,6 +608,14 @@ mod tests {
         let pk_m = from_project(&pm, None).unwrap();
         let (hm2, bm2) = decode(&pk_m).unwrap();
         assert_eq!(hm2.mouth_charts, hm.mouth_charts);
+        // and drawing marks
+        let mut hk = h.clone();
+        hk.drawing_kinds = [("D9".to_string(), "key".to_string())]
+            .into_iter()
+            .collect();
+        let pk = to_project(&encode(&hk, &blobs).unwrap(), "test", "now", None).unwrap();
+        let (hk2, _) = decode(&from_project(&pk, None).unwrap()).unwrap();
+        assert_eq!(hk2.drawing_kinds, hk.drawing_kinds);
         let d11 = hm2.drawings.iter().find(|d| d.id == 11).unwrap();
 
         // a timelapse: its pictures and times through the file and back

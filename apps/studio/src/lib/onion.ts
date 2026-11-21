@@ -17,6 +17,8 @@ export interface OnionSettings {
 	afterColour: string;
 	/** the active layer's drawings, or every layer's */
 	layers: 'active' | 'all';
+	/** only keys and breakdowns (the drawings an in-between is drawn from) */
+	keysOnly: boolean;
 }
 
 export const ONION_DEFAULTS: OnionSettings = {
@@ -26,7 +28,8 @@ export const ONION_DEFAULTS: OnionSettings = {
 	opacity: 0.6,
 	beforeColour: '#e0453a',
 	afterColour: '#22a05a',
-	layers: 'active'
+	layers: 'active',
+	keysOnly: false
 };
 
 export const PIN_COLOUR = '#3d6bff';
@@ -46,7 +49,8 @@ export function cleanOnion(raw: unknown): OnionSettings {
 		opacity: n(o.opacity, D.opacity, 0.05, 1),
 		beforeColour: colour(o.beforeColour, D.beforeColour),
 		afterColour: colour(o.afterColour, D.afterColour),
-		layers: o.layers === 'all' ? 'all' : 'active'
+		layers: o.layers === 'all' ? 'all' : 'active',
+		keysOnly: o.keysOnly === true
 	};
 }
 
@@ -57,16 +61,23 @@ export interface OnionEntry {
 }
 
 /** The drawings before and after `frame` on a track: nearest first. */
-export function neighbours(t: Track, frame: number, before: number, after: number) {
+export function neighbours(
+	t: Track,
+	frame: number,
+	before: number,
+	after: number,
+	/** only drawings this says yes to */
+	keep: (drawing: number) => boolean = () => true
+) {
 	const at = exposureAt(t, frame);
 	// past the end (or on an empty cel past it): everything is "before"
 	const here = at ? at.index : t.length;
 	const prev: number[] = [];
 	for (let i = here - 1; i >= 0 && prev.length < before; i--)
-		if (t[i].drawing) prev.push(t[i].drawing);
+		if (t[i].drawing && keep(t[i].drawing)) prev.push(t[i].drawing);
 	const next: number[] = [];
 	for (let i = here + 1; i < t.length && next.length < after; i++)
-		if (t[i].drawing) next.push(t[i].drawing);
+		if (t[i].drawing && keep(t[i].drawing)) next.push(t[i].drawing);
 	return { prev, next };
 }
 
@@ -83,8 +94,12 @@ export function onionEntries(
 	active: number,
 	frame: number,
 	s: OnionSettings,
-	pinned: number[] = []
+	pinned: number[] = [],
+	kinds: Record<number, string> = {}
 ): OnionEntry[] {
+	const keep = s.keysOnly
+		? (d: number) => kinds[d] === 'key' || kinds[d] === 'breakdown'
+		: () => true;
 	const which = s.layers === 'all' ? layers : layers.filter((l) => l === active);
 	const showing = new Set(
 		which.map((l) => {
@@ -111,7 +126,7 @@ export function onionEntries(
 		for (const l of which) {
 			const t = cut.tracks[l];
 			if (!t) continue;
-			const { prev, next } = neighbours(t, frame, s.before, s.after);
+			const { prev, next } = neighbours(t, frame, s.before, s.after, keep);
 			// farthest first, before and after alternating towards the nearest
 			for (let i = Math.max(prev.length, next.length) - 1; i >= 0; i--) {
 				if (prev[i]) add(prev[i], s.beforeColour, fade(s.opacity, i, s.before));
