@@ -5,8 +5,25 @@
 	 */
 	import { cleanInvite, memberColour, type ShareInfo } from './share';
 
+	interface LayerRow {
+		lid: string;
+		name: string;
+		owner: string;
+		mine: boolean;
+		canDraw: boolean;
+		asked: boolean;
+		writers: { id: string; name: string }[];
+		asks: { id: string; name: string }[];
+	}
+
 	let {
 		info,
+		layers = [],
+		synced = true,
+		onask = () => {},
+		ongrant = () => {},
+		ondeny = () => {},
+		onrevoke = () => {},
 		name = $bindable(),
 		busy,
 		error,
@@ -17,6 +34,14 @@
 	}: {
 		/** the session in progress */
 		info: ShareInfo | null;
+		/** the shared layers, bottom → top */
+		layers?: LayerRow[];
+		/** the project has arrived (joining) */
+		synced?: boolean;
+		onask?: (lid: string) => void;
+		ongrant?: (lid: string, to: string, handover: boolean) => void;
+		ondeny?: (lid: string, to: string) => void;
+		onrevoke?: (lid: string, to: string) => void;
 		/** this person's name, as others see it */
 		name: string;
 		busy: boolean;
@@ -81,9 +106,53 @@
 				</li>
 			{/each}
 		</ul>
+		{#if !synced}
+			<p class="status" role="status">Getting the drawing from the others…</p>
+		{:else if layers.length}
+			<h3>Layers</h3>
+			<ul class="layers">
+				{#each [...layers].reverse() as l (l.lid)}
+					<li>
+						<div class="lrow">
+							<span class="lname">{l.name}</span>
+							<span class="owner">{l.mine ? 'yours' : l.owner}</span>
+							{#if l.canDraw && !l.mine}
+								<span class="tag">you can draw</span>
+							{:else if !l.canDraw}
+								<button type="button" class="small" disabled={l.asked} onclick={() => onask(l.lid)}>
+									{l.asked ? 'Asked' : 'Ask to draw here'}
+								</button>
+							{/if}
+						</div>
+						{#each l.asks as a (a.id)}
+							<div class="ask">
+								<span><b>{a.name}</b> asks to draw here</span>
+								<button type="button" class="small go" onclick={() => ongrant(l.lid, a.id, false)}>
+									Let them draw
+								</button>
+								<button type="button" class="small" onclick={() => ongrant(l.lid, a.id, true)}>
+									Hand it over
+								</button>
+								<button type="button" class="small" onclick={() => ondeny(l.lid, a.id)}>No</button>
+							</div>
+						{/each}
+						{#if l.mine && l.writers.length}
+							<div class="ask">
+								<span>Also drawing: {l.writers.map((w) => w.name).join(', ')}</span>
+								{#each l.writers as w (w.id)}
+									<button type="button" class="small" onclick={() => onrevoke(l.lid, w.id)}>
+										Take back from {w.name}
+									</button>
+								{/each}
+							</div>
+						{/if}
+					</li>
+				{/each}
+			</ul>
+		{/if}
 		<p class="note">
 			The code is like a house key: anyone who has it can join. Drawings travel straight between
-			your computers, encrypted.
+			your computers, encrypted. Everyone keeps a full copy: save it any time.
 		</p>
 		<div class="actions">
 			<button type="button" onclick={onleave} disabled={busy}>Leave</button>
@@ -200,6 +269,52 @@
 		height: 10px;
 		margin-right: 6px;
 		border-radius: 50%;
+	}
+	.layers {
+		margin: 0;
+		padding: 0;
+		list-style: none;
+		display: grid;
+		gap: 6px;
+		max-height: 240px;
+		overflow: auto;
+	}
+	.layers li {
+		padding: 6px 8px;
+		border-radius: 10px;
+		background: #f1ecdf;
+	}
+	.lrow,
+	.ask {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		flex-wrap: wrap;
+	}
+	.ask {
+		margin-top: 6px;
+		font-size: 13px;
+	}
+	.lname {
+		font-weight: 600;
+	}
+	.owner {
+		color: #6b6559;
+		font-size: 13px;
+		flex: 1;
+	}
+	.tag {
+		font-size: 12px;
+		color: #2a9d8f;
+	}
+	button.small {
+		padding: 4px 10px;
+		font-size: 13px;
+		background: #fff;
+	}
+	button.small.go {
+		background: var(--pp-ink, #16161a);
+		color: #fff;
 	}
 	.about,
 	.note {
