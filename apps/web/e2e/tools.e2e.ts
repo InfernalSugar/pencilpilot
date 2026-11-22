@@ -776,6 +776,11 @@ test('guides: grid, ruler and perspective assist straighten strokes; vanishing p
 	// one-point perspective (vanishing point at 0.5, 0.4): a stroke heading for it goes straight there
 	await g.getByRole('radio', { name: '1-point' }).click();
 	await expect(page.locator('svg.guides line.horizon')).toBeAttached();
+	// drawing assist is the layer's (as in Procreate): on for this one
+	const assist = g.getByRole('button', { name: 'Assist' });
+	await expect(assist).toHaveAttribute('aria-pressed', 'false');
+	await assist.click();
+	await expect(assist).toHaveAttribute('aria-pressed', 'true');
 	await wobbly(page, [0.1, 0.9], [0.3, 0.75], 0.008);
 	const ink = await inkFrac(page);
 	// on the line from (0.1, 0.9) towards (0.5, 0.4): slope dy/dx = -1.25 (in canvas px, 4:3)

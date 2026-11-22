@@ -3,6 +3,7 @@
 	import ToolRail, { SELECT_TOOLS } from '@pencilpilot/paint/ToolRail.svelte';
 	import ToolOptionsBar from '@pencilpilot/paint/ToolOptionsBar.svelte';
 	import { ToolOptions } from '@pencilpilot/paint/tool-options.svelte.js';
+	import { smoothTool, type SmoothTool } from '@pencilpilot/paint/stabilizer';
 	import Swatches from '@pencilpilot/paint/Swatches.svelte';
 	import { onMount } from 'svelte';
 	import { warmGrader } from '#lib/grader.js';
@@ -350,7 +351,6 @@
 		clearTimeout(shapeTimer);
 		shapeTimer = setTimeout(() => (shapeNote = ''), 1800);
 	}
-	let smoothing = $state(0);
 	function picked(c: string) {
 		color = c;
 		eraser = false;
@@ -477,6 +477,8 @@
 	let manifest = $state<BrushManifest>();
 	let brushId = $state(DEFAULT_BRUSH);
 	let eraser = $state(false);
+	/** the painting tool whose smoothing the slider shows */
+	const smoothKind = $derived(smoothTool(tool, eraser));
 	let size = $state(1);
 	let opacity = $state(1);
 	let color = $state('#16161a');
@@ -708,7 +710,14 @@
 		refPlace = savedPlace();
 		setSplit(Number(recall('pp.refSplit', 0.4)) || 0.4);
 		floatBox = recall('pp.refFloat', floatBox);
-		smoothing = recall('pp.smoothing', 0);
+		// (one smoothing for every tool before each kept its own)
+		const smoothing = Number(recall('pp.smoothing', 0)) || 0;
+		toolOpts.smoothing = {
+			brush: smoothing,
+			eraser: smoothing,
+			smudge: smoothing,
+			...recall<Partial<Record<SmoothTool, number>>>('pp.smoothingTools', {})
+		};
 		toolOpts.quickShape = recall('pp.quickShape', true);
 		toolOpts.closeFill = recall('pp.closeFill', false);
 		penPressure = recall('pp.penPressure', true);
@@ -1293,18 +1302,20 @@
 			onmore={() => openDock('colour')}
 			moreOpen={dockTab === 'colour' && dockOpen}
 		/>
-		<label class="slider">
-			<span>Smoothing <b>{Math.round(smoothing * 100)}%</b></span>
-			<input
-				type="range"
-				min="0"
-				max="1"
-				step="0.05"
-				bind:value={smoothing}
-				onchange={() => remember('pp.smoothing', smoothing)}
-				title="Steadies wobbly lines (like StreamLine)"
-			/>
-		</label>
+		{#if smoothKind}
+			<label class="slider">
+				<span>Smoothing <b>{Math.round(toolOpts.smoothing[smoothKind] * 100)}%</b></span>
+				<input
+					type="range"
+					min="0"
+					max="1"
+					step="0.05"
+					bind:value={toolOpts.smoothing[smoothKind]}
+					onchange={() => remember('pp.smoothingTools', $state.snapshot(toolOpts.smoothing))}
+					title="Steadies wobbly lines (like StreamLine). The brush, eraser and smudge each keep their own."
+				/>
+			</label>
+		{/if}
 		<button
 			type="button"
 			class="tool"
@@ -1463,7 +1474,7 @@
 						{opacity}
 						{color}
 						{tool}
-						{smoothing}
+						smoothing={toolOpts.smoothingFor(tool, eraser)}
 						onpick={picked}
 						bind:grayView
 						bind:notan

@@ -81,6 +81,14 @@ describe('project packets', () => {
 		expect(back).toEqual(doc());
 	});
 
+	it('keep drawing assist on its layers (with the app’s settings)', () => {
+		const d = doc();
+		d.layers[0].assist = true;
+		const back = unpack(pack(d));
+		expect(back.layers.map((l) => !!l.assist)).toEqual([true, false]);
+		expect(back.extra).toEqual({ color: '#ff0000', assistLayers: [1] });
+	});
+
 	it('start with the magic word and the header length', () => {
 		const p = pack(doc());
 		expect([...p.subarray(0, 4)]).toEqual([0x50, 0x50, 0x53, 0x31]);

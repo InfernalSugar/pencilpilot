@@ -12,6 +12,7 @@
 	import TimelapsePlayer from '@pencilpilot/paint/TimelapsePlayer.svelte';
 	import { ToolOptions } from '@pencilpilot/paint/tool-options.svelte.js';
 	import { anyGuide, defaultGuides, type GuideSettings } from '@pencilpilot/paint/guides';
+	import { smoothTool, type SmoothTool } from '@pencilpilot/paint/stabilizer';
 	import PaintCanvas, {
 		BLANK_STATUS,
 		type CanvasStatus,
@@ -186,7 +187,6 @@
 	let manifest = $state<BrushManifest | null>(null);
 	let tab = $state('layers');
 	let dockOpen = $state(false);
-	let smoothing = $state(0.2);
 	/** the canvas size (a project brings its own) */
 	/** what home asked for: a new canvas, a project file, or a recovery copy */
 	const start = parseStart(page.url.searchParams);
@@ -1381,6 +1381,15 @@
 		const { width, height } = canvasSize;
 		untrack(() => loadGuides(width, height));
 	});
+	toolOpts.smoothing = {
+		brush: 0.2,
+		eraser: 0.2,
+		smudge: 0.2,
+		...readLocal<Partial<Record<SmoothTool, number>>>('pp.app.smoothing', {})
+	};
+	$effect(() => keepLocal('pp.app.smoothing', $state.snapshot(toolOpts.smoothing)));
+	/** the painting tool whose smoothing the slider shows */
+	const smoothKind = $derived(smoothTool(tool, eraser));
 	toolOpts.quickShape = readLocal('pp.app.quickShape', true);
 	toolOpts.closeFill = readLocal('pp.app.closeFill', false);
 	toolOpts.animated = true;
@@ -2000,7 +2009,6 @@
 				color,
 				size,
 				opacity,
-				smoothing,
 				scene,
 				cut: cutIndex,
 				frame,
@@ -2099,7 +2107,6 @@
 		if (typeof x.color === 'string') color = x.color;
 		if (typeof x.size === 'number') size = x.size;
 		if (typeof x.opacity === 'number') opacity = x.opacity;
-		if (typeof x.smoothing === 'number') smoothing = x.smoothing;
 		status = null;
 		canvasSize = { width: doc.width, height: doc.height };
 		canvasKey++;
@@ -3178,17 +3185,19 @@
 		{#snippet options()}
 			<span class="brush-name">{manifest ? brushLabel(manifest, brushId) : ''}</span>
 			<Swatches bind:color onmore={() => ((tab = 'colour'), (dockOpen = true))} />
-			<label class="slider">
-				<span>Smoothing <b>{Math.round(smoothing * 100)}%</b></span>
-				<input
-					type="range"
-					min="0"
-					max="1"
-					step="0.05"
-					bind:value={smoothing}
-					title="Steadies wobbly lines (like StreamLine)"
-				/>
-			</label>
+			{#if smoothKind}
+				<label class="slider">
+					<span>Smoothing <b>{Math.round(toolOpts.smoothing[smoothKind] * 100)}%</b></span>
+					<input
+						type="range"
+						min="0"
+						max="1"
+						step="0.05"
+						bind:value={toolOpts.smoothing[smoothKind]}
+						title="Steadies wobbly lines (like StreamLine). The brush, eraser and smudge each keep their own."
+					/>
+				</label>
+			{/if}
 			<button
 				type="button"
 				class="opt"
@@ -3255,7 +3264,7 @@
 					{opacity}
 					{color}
 					tool={tool as never}
-					{smoothing}
+					smoothing={toolOpts.smoothingFor(tool, eraser)}
 					penPressure={settings.penPressure}
 					fingers={settings.fingers}
 					tapGestures={settings.tapGestures}
