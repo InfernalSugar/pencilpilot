@@ -1,9 +1,12 @@
 <script lang="ts">
 	/**
 	 * Draw together (peer to peer): host a session and share its invite code, or join one
-	 * with a friend's code. Shows who's here. Nothing connects until Host or Join.
+	 * with a friend's code. Shows who's here. Nothing connects until Host or Join, and both
+	 * need a PencilPilot account (names come from it).
 	 */
-	import { cleanInvite, inviteQr, memberColour, type ShareInfo } from './share';
+	import { onMount } from 'svelte';
+	import { account, endAccount, loadAccount, startSignIn, stopSignIn } from './account.svelte';
+	import { cleanInvite, inviteQr, memberColour, shareChoices, type ShareInfo } from './share';
 
 	interface LayerRow {
 		lid: string;
@@ -29,7 +32,6 @@
 		ongrant = () => {},
 		ondeny = () => {},
 		onrevoke = () => {},
-		name = $bindable(),
 		busy,
 		error,
 		onhost,
@@ -50,8 +52,6 @@
 		ongrant?: (lid: string, to: string, handover: boolean) => void;
 		ondeny?: (lid: string, to: string) => void;
 		onrevoke?: (lid: string, to: string) => void;
-		/** this person's name, as others see it */
-		name: string;
 		busy: boolean;
 		error: string;
 		onhost: () => void;
@@ -77,6 +77,13 @@
 	});
 	let copied = $state(false);
 	const cleaned = $derived(cleanInvite(code));
+	const can = $derived(shareChoices(account.me, busy));
+
+	onMount(() => void loadAccount());
+	// a refusal may mean the app was unlinked on the website: show it signed out
+	$effect(() => {
+		if (error) void loadAccount();
+	});
 
 	async function copy() {
 		if (!info) return;
@@ -196,10 +203,31 @@
 			<button type="button" class="go" onclick={onclose}>Back to drawing</button>
 		</div>
 	{:else}
-		<label class="name">
-			<span>Your name</span>
-			<input bind:value={name} maxlength="24" placeholder="What others see" />
-		</label>
+		<section class="account" aria-label="Your PencilPilot account">
+			{#if account.me}
+				<p>Signed in as <b>{account.me.name}</b></p>
+				<button type="button" class="small" disabled={busy} onclick={() => void endAccount()}>
+					Sign out
+				</button>
+			{:else if account.signingIn}
+				<p>Finish signing in in your browser…</p>
+				<button type="button" class="small" onclick={() => void stopSignIn()}>Cancel</button>
+			{:else}
+				<p>
+					Drawing together needs a PencilPilot account, so everyone knows who they’re drawing with.
+					Solo drawing never needs one.
+				</p>
+				<button
+					type="button"
+					class="go"
+					disabled={!account.loaded || !can.signIn}
+					onclick={() => void startSignIn()}
+				>
+					Sign in with PencilPilot
+				</button>
+			{/if}
+			{#if account.error}<p class="error" role="alert">{account.error}</p>{/if}
+		</section>
 		{#if canRejoin}
 			<section class="rejoin">
 				<h3>This project is shared</h3>
@@ -207,18 +235,14 @@
 					Rejoin it: you’ll join whoever of its members is online, or, if no one is, open it for
 					them. What you drew on your own layers meanwhile is kept.
 				</p>
-				<button type="button" class="go" disabled={busy || !name.trim()} onclick={onrejoin}>
-					Rejoin
-				</button>
+				<button type="button" class="go" disabled={!can.rejoin} onclick={onrejoin}>Rejoin</button>
 			</section>
 		{/if}
 		<div class="ways">
 			<section>
 				<h3>Start a session</h3>
 				<p>You host; friends join with your code.</p>
-				<button type="button" class="go" disabled={busy || !name.trim()} onclick={onhost}>
-					Host
-				</button>
+				<button type="button" class="go" disabled={!can.host} onclick={onhost}>Host</button>
 			</section>
 			<section>
 				<h3>Join a session</h3>
@@ -226,7 +250,7 @@
 				<button
 					type="button"
 					class="go"
-					disabled={busy || !name.trim() || !cleaned}
+					disabled={!can.join || !cleaned}
 					onclick={() => cleaned && onjoin(cleaned)}
 				>
 					Join
@@ -275,9 +299,21 @@
 		background: #fff;
 		font: inherit;
 	}
-	.name {
-		display: grid;
-		gap: 4px;
+	.account {
+		display: flex;
+		align-items: center;
+		flex-wrap: wrap;
+		gap: 8px 12px;
+		padding: 12px;
+		border-radius: 12px;
+		background: #f1ecdf;
+	}
+	.account p {
+		flex: 1 1 200px;
+		margin: 0;
+	}
+	.account .error {
+		flex-basis: 100%;
 	}
 	.rejoin {
 		display: grid;

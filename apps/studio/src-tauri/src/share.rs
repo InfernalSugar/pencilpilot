@@ -5,6 +5,9 @@
 //! The window calls `share_host` / `share_join`, sends edits and cursors, and listens to
 //! "share-event" for what the others do.
 //!
+//! **Signed in only:** hosting and joining need this computer's sign-in pass from the
+//! website ([`crate::account`]); names in the session come from passes.
+//!
 //! **AI generation is a solo act** (the owner's rule, ADR-0013): nothing made by AI is
 //! generated during a shared session. Every AI feature in the shell starts with
 //! [`Sharing::solo_only`], which refuses while a session is live; the session's edits
@@ -13,6 +16,8 @@
 use std::path::Path;
 
 use pencilpilot_share::{Event, Identity, Invite, Member, Relays, Session};
+
+use crate::account::Account;
 use serde::Serialize;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter};
@@ -86,12 +91,13 @@ impl Sharing {
         &self,
         app: AppHandle,
         data: &Path,
-        name: &str,
+        account: &Account,
         relay: Option<&str>,
     ) -> Result<Info, String> {
-        self.leave().await;
         let id = identity(data)?;
-        let s = Session::host(&id, name, relays(relay))
+        let (pass, site) = account.pass(data, &id).await?;
+        self.leave().await;
+        let s = Session::host(&id, &pass, &site, relays(relay))
             .await
             .map_err(|e| e.to_string())?;
         Ok(self.start(app, s).await)
@@ -102,13 +108,14 @@ impl Sharing {
         app: AppHandle,
         data: &Path,
         code: &str,
-        name: &str,
+        account: &Account,
         relay: Option<&str>,
     ) -> Result<Info, String> {
         let invite = Invite::decode(code).map_err(|e| e.to_string())?;
-        self.leave().await;
         let id = identity(data)?;
-        let s = Session::join(&id, &invite, name, relays(relay))
+        let (pass, site) = account.pass(data, &id).await?;
+        self.leave().await;
+        let s = Session::join(&id, &invite, &pass, &site, relays(relay))
             .await
             .map_err(|e| e.to_string())?;
         Ok(self.start(app, s).await)
@@ -123,12 +130,13 @@ impl Sharing {
         data: &Path,
         code: &str,
         addrs: Vec<Value>,
-        name: &str,
+        account: &Account,
         relay: Option<&str>,
     ) -> Result<Info, String> {
         let mut invite = Invite::decode(code).map_err(|e| e.to_string())?;
-        self.leave().await;
         let id = identity(data)?;
+        let (pass, site) = account.pass(data, &id).await?;
+        self.leave().await;
         for a in addrs {
             if let Ok(a) = serde_json::from_value::<pencilpilot_share::EndpointAddr>(a)
                 && a.id.to_string() != id.id()
@@ -143,7 +151,7 @@ impl Sharing {
         } else {
             tokio::time::timeout(
                 std::time::Duration::from_secs(12),
-                Session::join(&id, &invite, name, relays(relay)),
+                Session::join(&id, &invite, &pass, &site, relays(relay)),
             )
             .await
             .ok()
@@ -151,7 +159,7 @@ impl Sharing {
         };
         let s = match joined {
             Some(s) => s,
-            None => Session::host_again(&id, &invite, name, relays(relay))
+            None => Session::host_again(&id, &invite, &pass, &site, relays(relay))
                 .await
                 .map_err(|e| e.to_string())?,
         };
@@ -324,10 +332,15 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         let me = Member {
             id: "me".into(),
+            user: "u_me".into(),
             name: "Me".into(),
             addr: pencilpilot_share::EndpointAddr::new(
                 pencilpilot_share::SecretKey::generate().public(),
             ),
+            pass: pencilpilot_share::Pass {
+                body: String::new(),
+                sig: String::new(),
+            },
         };
         *sharing.0.lock().await = Some(Live {
             info: std::sync::Arc::new(std::sync::Mutex::new(Info {

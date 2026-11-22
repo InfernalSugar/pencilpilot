@@ -21,6 +21,11 @@ export const variables = defineEnvVars({
 		description:
 			'Set to "on" to enable community critique (sharing + peer judging). Off by default.'
 	},
+	PASS_SIGNING_KEY: {
+		schema: optional,
+		description:
+			'The ed25519 key (32-byte seed, 64 hex characters) that signs the app’s Draw together passes. Make one with `node apps/web/scripts/pass-key.mjs`; the app is built with its public half. Development uses a known key when unset; production can’t issue passes without it.'
+	},
 	REF_SERVICE_URL: {
 		schema: optional,
 		description:

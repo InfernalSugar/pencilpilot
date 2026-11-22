@@ -40,6 +40,7 @@ One git-ignored `.env` at the repo root:
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | optional; enables "Continue with Google" (redirect URI: `<site>/auth/google/callback`) |
 | `COMMUNITY` | optional; `on` enables community critique (beta, [ADR-0006](docs/planning/adr/0006-community-critique.md)). Needs the ref-service running with its NSFW model, or sharing is refused |
 | `REF_SERVICE_URL` | optional; where the web server reaches the ref-service (default `http://127.0.0.1:8787`) |
+| `PASS_SIGNING_KEY` | the key that signs the app's Draw together passes (64 hex characters; `node apps/web/scripts/pass-key.mjs` makes a pair). Optional in development (a known dev key is used); without it in production nobody can draw together ([ADR-0013](docs/planning/adr/0013-solo-and-shared-projects.md#sign-in-and-passes-decided-2026-11-23)) |
 
 ## Licences
 
@@ -50,3 +51,5 @@ One git-ignored `.env` at the repo root:
 ## Production
 
 `pnpm -C apps/web build`, then `node apps/web/server.js` (`PORT`, default 3000). The custom server adds the live connections for private lobbies ([ADR-0008](docs/planning/adr/0008-private-lobbies.md)).
+
+Drawing together in the app needs the site live, over HTTPS, with `PASS_SIGNING_KEY` set (behind a proxy, also `ORIGIN=https://your.site`, so form posts pass SvelteKit's origin check). The app is then built with the site's address and the key's public half: `PENCILPILOT_SITE_URL=https://your.site PENCILPILOT_PASS_KEY=<public hex> pnpm app:build` (in CI: the repository variables of the same names, used by the App workflow). Locally, `pnpm --filter @pencilpilot/web dev` and `pnpm app` (a debug build) work together as they are: the app signs in at `http://localhost:5173` with the development key.

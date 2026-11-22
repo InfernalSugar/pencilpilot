@@ -9,6 +9,7 @@ import {
 	signIn,
 	verifyPassword
 } from '#lib/server/auth.js';
+import { listLinks, unlink } from '#lib/server/applink.js';
 import type { Actions, PageServerLoad } from './$types';
 
 export const load: PageServerLoad = ({ locals, url }) => {
@@ -28,6 +29,7 @@ export const load: PageServerLoad = ({ locals, url }) => {
 	return {
 		account: { ...locals.user, created },
 		counts: { attempts: count('attempts'), drills: count('drill_results') },
+		apps: listLinks(db, locals.user.id),
 		welcome: url.searchParams.has('welcome')
 	};
 };
@@ -62,6 +64,13 @@ export const actions: Actions = {
 		invalidateUserSessions(db, locals.user.id);
 		signIn(db, cookies, locals.user.id);
 		return { saved: 'password' };
+	},
+	/** Unlink a PencilPilot app: it can't draw together as this account any more. */
+	unlink: async ({ locals, request }) => {
+		if (!locals.user) return fail(401);
+		const id = String((await request.formData()).get('id') ?? '');
+		unlink(getDb(), locals.user.id, id);
+		return { saved: 'unlinked' };
 	},
 	delete: async ({ locals, request, cookies }) => {
 		if (!locals.user) return fail(401);

@@ -6,6 +6,7 @@ import {
 	Cursors,
 	isCursor,
 	memberColour,
+	shareChoices,
 	Throttle
 } from './share';
 
@@ -18,6 +19,24 @@ describe('drawing together', () => {
 	it('finds the invite code in pasted text', () => {
 		expect(cleanInvite('join me:\n pp1-eyJw_b3-xyz  thanks!')).toBe('pp1-eyJw_b3-xyz');
 		expect(cleanInvite('hello')).toBeNull();
+	});
+
+	it('asks to sign in before hosting or joining', () => {
+		expect(shareChoices(null, false)).toEqual({
+			signIn: true,
+			host: false,
+			join: false,
+			rejoin: false
+		});
+		const ana = { user: 'u_ana', name: 'Ana' };
+		expect(shareChoices(ana, false)).toEqual({
+			signIn: false,
+			host: true,
+			join: true,
+			rejoin: true
+		});
+		// while connecting, nothing else starts
+		expect(shareChoices(ana, true).host).toBe(false);
 	});
 
 	it('keeps AI to solo work', () => {

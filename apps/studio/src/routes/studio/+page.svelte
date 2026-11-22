@@ -1706,12 +1706,10 @@
 		shareBusy = true;
 		shareError = '';
 		try {
-			const name = settings.shareName.trim();
 			void saveSettings().catch(() => {});
 			const info = await rejoinSession(
 				saved.code,
 				saved.members.map((m) => m.addr).filter(Boolean),
-				name,
 				cleanRelay(settings.shareRelay)
 			);
 			sharing = info;
@@ -1745,10 +1743,9 @@
 		shareBusy = true;
 		shareError = '';
 		try {
-			const name = settings.shareName.trim();
 			void saveSettings().catch(() => {});
 			const relay = cleanRelay(settings.shareRelay);
-			sharing = join ? await joinSession(join, name, relay) : await hostSession(name, relay);
+			sharing = join ? await joinSession(join, relay) : await hostSession(relay);
 			startTogether(sharing, !!join);
 		} catch (e) {
 			shareError = String(e);
@@ -3455,7 +3452,6 @@
 					ongrant={(lid, to, handover) => together?.grant(lid, to, handover)}
 					ondeny={(lid, to) => together?.deny(lid, to)}
 					onrevoke={(lid, to) => together?.revoke(lid, to)}
-					bind:name={settings.shareName}
 					busy={shareBusy}
 					error={shareError}
 					onhost={() => void shareStart()}
