@@ -35,7 +35,10 @@ class FakeCanvas implements CanvasPort {
 		blend: string;
 		adjust: string | null;
 		mask: TileMap | null;
+		group: number;
 	}[] = [];
+	groupList: { id: number; name: string; visible: boolean; opacity: number }[] = [];
+	#nextGroup = 1;
 	drawings = new Map<number, TileMap>();
 	selected = 0;
 	busy = false;
@@ -54,9 +57,59 @@ class FakeCanvas implements CanvasPort {
 			opacity: 1,
 			blend: 'normal',
 			adjust: adjust ?? null,
-			mask: null
+			mask: null,
+			group: 0
 		});
 		return id;
+	}
+	place(id: number, ref: number, above: boolean, group: number) {
+		if (this.busy) return false;
+		if (ref && ref !== id) this.moveNextTo(id, ref, above);
+		const l = this.layerList.find((x) => x.id === id);
+		if (l) l.group = this.groupList.some((g) => g.id === group) ? group : 0;
+		return true;
+	}
+	addGroup(layer: number) {
+		if (this.busy) return 0;
+		const id = this.#nextGroup++;
+		this.groupList.push({ id, name: `Group ${id}`, visible: true, opacity: 1 });
+		this.layerList.find((l) => l.id === layer)!.group = id;
+		return id;
+	}
+	setGroup(id: number, s: { name: string; visible: boolean; opacity: number }) {
+		const g = this.groupList.find((x) => x.id === id);
+		if (g) Object.assign(g, s);
+	}
+	ungroup(id: number) {
+		if (this.busy) return false;
+		for (const l of this.layerList) if (l.group === id) l.group = 0;
+		this.groupList = this.groupList.filter((g) => g.id !== id);
+		return true;
+	}
+	/** (the upper layer's tiles over the lower's) */
+	mergeDown(id: number) {
+		const i = this.layerList.findIndex((l) => l.id === id);
+		if (this.busy || i < 1) return false;
+		const [lower, upper] = [this.layerList[i - 1], this.layerList[i]];
+		const into = this.drawings.get(this.drawingOf(lower.id))!;
+		for (const [k, px] of this.drawings.get(this.drawingOf(upper.id)) ?? []) into.set(k, px);
+		this.layerList.splice(i, 1);
+		return true;
+	}
+	mergeGroup(id: number) {
+		const m = this.layerList.filter((l) => l.group === id);
+		const g = this.groupList.find((x) => x.id === id);
+		if (this.busy || !m.length || !g) return 0;
+		const into = this.drawings.get(this.drawingOf(m[0].id))!;
+		for (const l of m.slice(1))
+			for (const [k, px] of this.drawings.get(this.drawingOf(l.id)) ?? []) into.set(k, px);
+		this.layerList = this.layerList.filter((l) => !m.slice(1).includes(l));
+		Object.assign(m[0], { name: g.name, group: 0, opacity: g.opacity });
+		this.groupList = this.groupList.filter((x) => x !== g);
+		return m[0].id;
+	}
+	groups() {
+		return structuredClone(this.groupList);
 	}
 	setAdjust(id: number, spec: string) {
 		if (this.busy) return false;
@@ -171,6 +224,7 @@ class FakeCanvas implements CanvasPort {
 			id: l.id,
 			name: l.name,
 			adjust: l.adjust,
+			group: l.group,
 			look: {
 				visible: l.visible,
 				opacity: l.opacity,
@@ -239,8 +293,8 @@ describe('drawing together: the shared layers', () => {
 		expect(s.apply(A, { k: 'layer', lid, name: 'A' })).toBe(true);
 		const t = { k: 'tiles' as const, lid, did: lid, set: [], clear: [] };
 		expect(s.apply(B, t)).toBe(false);
-		expect(s.apply(B, { k: 'ask', lid })).toBe(true);
-		expect(s.asks).toEqual([{ lid, from: B }]);
+		expect(s.apply(B, { k: 'ask', lid, why: 'draw', own: false })).toBe(true);
+		expect(s.asks).toEqual([{ lid, from: B, why: 'draw' }]);
 		expect(s.apply(B, { k: 'grant', lid, to: B, handover: false })).toBe(false); // not owner
 		expect(s.apply(A, { k: 'grant', lid, to: B, handover: false })).toBe(true);
 		expect(s.asks).toEqual([]);
@@ -252,6 +306,49 @@ describe('drawing together: the shared layers', () => {
 		expect(s.layers.get(lid)!.owner).toBe(B);
 		expect(s.canDraw(lid, A)).toBe(false);
 		expect(s.apply(A, { k: 'revoke', lid, to: B })).toBe(false);
+	});
+});
+
+describe('drawing together: groups and asking first', () => {
+	it('lets groups change only with their owner’s leave, and layers join only if drawable', () => {
+		const s = new Shared();
+		const la = 'aaaaaaaaaaaa:1';
+		const lb = 'bbbbbbbbbbbb:1';
+		const g = 'aaaaaaaaaaaa:2';
+		s.apply(A, { k: 'layer', lid: la, name: 'A' });
+		s.apply(B, { k: 'layer', lid: lb, name: 'B' });
+		// A can't put B's layer in a group, nor use B's id for the group
+		expect(s.apply(A, { k: 'group', lid: la, gid: g, name: 'G', lids: [la, lb] })).toBe(false);
+		expect(s.apply(A, { k: 'group', lid: la, gid: 'bbbbbbbbbbbb:9', name: 'G', lids: [la] })).toBe(
+			false
+		);
+		expect(s.apply(A, { k: 'group', lid: la, gid: g, name: 'G', lids: [la] })).toBe(true);
+		expect(s.members(g)).toEqual([la]);
+		// B can't rename A's group, or move his layer into it, until A says yes
+		const gset = { k: 'gset' as const, lid: g, name: 'Mine', visible: true, opacity: 0.5 };
+		expect(s.apply(B, gset)).toBe(false);
+		expect(s.apply(B, { k: 'place', lid: lb, to: 0, gid: g })).toBe(false);
+		expect(s.apply(B, { k: 'ask', lid: g, why: 'group', own: false })).toBe(true);
+		expect(s.asks).toEqual([{ lid: g, from: B, why: 'group' }]);
+		expect(s.apply(A, { k: 'grant', lid: g, to: B, handover: false })).toBe(true);
+		expect(s.apply(B, { k: 'place', lid: lb, to: 0, gid: g })).toBe(true);
+		expect(s.order).toEqual([lb, la]);
+		expect(s.members(g)).toEqual([lb, la]);
+		expect(s.apply(B, gset)).toBe(true);
+		// only the group's owner takes it apart; a group left empty goes
+		expect(s.apply(B, { k: 'ungroup', lid: g })).toBe(false);
+		expect(s.apply(A, { k: 'block', lid: g, to: 0 })).toBe(true);
+		expect(s.apply(B, { k: 'place', lid: lb, to: 1, gid: '' })).toBe(true);
+		expect(s.apply(A, { k: 'remove', lid: la })).toBe(true);
+		expect(s.groups.has(g)).toBe(false);
+		// asking for a layer to be handed over (to merge it) says so; an owner can't ask
+		expect(s.apply(A, { k: 'ask', lid: lb, why: 'merge', own: true, with: la })).toBe(true);
+		expect(s.apply(B, { k: 'ask', lid: lb, why: 'merge', own: true })).toBe(false);
+		expect(s.asks).toEqual([{ lid: lb, from: A, why: 'merge', own: true, with: la }]);
+		const snap = s.snapshot();
+		const back = new Shared();
+		back.load(structuredClone(snap));
+		expect(back.snapshot()).toEqual(snap);
 	});
 });
 
@@ -329,6 +426,120 @@ describe('drawing together: apps', () => {
 		).toEqual(['Sky', 'Bo’s layer']);
 	});
 
+	it('merges into someone else’s layer once they allow it', async () => {
+		const session = new FakeSession();
+		const hc = new FakeCanvas(['Sky']);
+		const host = new Together(A, 'Ana', hc, session.net(A));
+		session.apps.set(A, host);
+		hc.paint(hc.byName('Sky').id, 0, 0, 10);
+		await host.startHost();
+		await session.settle();
+		const bc = new FakeCanvas();
+		const bo = new Together(B, 'Bo', bc, session.net(B));
+		session.apps.set(B, bo);
+		bo.startJoin(A);
+		await session.settle();
+		const mine = bc.byName('Bo’s layer');
+		bc.paint(mine.id, 1, 1, 77);
+		await bo.localChanged();
+		await session.settle();
+
+		// Bo merges his layer down into Ana's Sky: Ana is asked first
+		const notes: string[] = [];
+		bo.onnote = (t) => notes.push(t);
+		expect(bo.mergeDown(mine.id)).toEqual([A]);
+		await session.settle();
+		const skyLid = host.lidOf(hc.byName('Sky').id)!;
+		expect(host.shared.asks).toMatchObject([{ lid: skyLid, from: B, why: 'merge' }]);
+		expect(bc.layerList.some((l) => l.name === 'Bo’s layer')).toBe(true);
+
+		// she allows it: merged, for both
+		host.grant(skyLid, B);
+		await session.settle();
+		for (const c of [hc, bc]) {
+			expect(c.layerList.some((l) => l.name === 'Bo’s layer')).toBe(false);
+			expect(c.pixel(c.byName('Sky').id, 1, 1)).toBe(77);
+			expect(c.pixel(c.byName('Sky').id, 0, 0)).toBe(10);
+		}
+		expect(notes).toEqual([]);
+
+		// asked again and refused: nothing changes, and Bo is told
+		bc.addLayer('Extra');
+		await bo.localChanged();
+		await session.settle();
+		host.revoke(skyLid, B);
+		await session.settle();
+		const extra = bc.byName('Extra');
+		const sky = bc.byName('Sky');
+		expect(bc.layerList.indexOf(extra)).toBe(bc.layerList.indexOf(sky) + 1);
+		expect(bo.mergeDown(extra.id)).toEqual([A]);
+		await session.settle();
+		host.deny(skyLid, B);
+		await session.settle();
+		expect(notes).toEqual(['They said no: nothing was changed.']);
+		expect(hc.layerList.some((l) => l.name === 'Extra')).toBe(true);
+	});
+
+	it('shares groups, and groups and merges others’ layers with their leave', async () => {
+		const session = new FakeSession();
+		const hc = new FakeCanvas(['Sky', 'Hills']);
+		// Ana's Hills are in a group already when she starts
+		hc.addGroup(hc.byName('Hills').id);
+		hc.setGroup(1, { name: 'Land', visible: true, opacity: 0.8 });
+		const host = new Together(A, 'Ana', hc, session.net(A));
+		session.apps.set(A, host);
+		hc.paint(hc.byName('Sky').id, 0, 0, 10);
+		await host.startHost();
+		await session.settle();
+		const bc = new FakeCanvas();
+		const bo = new Together(B, 'Bo', bc, session.net(B));
+		session.apps.set(B, bo);
+		bo.startJoin(A);
+		await session.settle();
+		// Bo has the group, as Ana does
+		const land = bc.groupList.find((g) => g.name === 'Land')!;
+		expect(land).toMatchObject({ opacity: 0.8 });
+		expect(bc.byName('Hills').group).toBe(land.id);
+
+		// Bo puts his layer in Ana's group: asks; once she allows it, it's in, for both
+		const mine = bc.byName('Bo’s layer');
+		bc.paint(mine.id, 2, 2, 55);
+		bo.timelineChanged();
+		await bo.localChanged();
+		await session.settle();
+		const at = bo.shared.order.indexOf(bo.lidOf(bc.byName('Hills').id)!) + 1;
+		expect(bo.moveLayerTo(mine.id, at, land.id)).toEqual([A]);
+		await session.settle();
+		const gid = bo.gidOf(land.id)!;
+		host.grant(gid, B);
+		await session.settle();
+		expect(bc.byName('Bo’s layer').group).toBe(land.id);
+		expect(hc.byName('Bo’s layer').group).toBe(1);
+		expect(hc.layers().map((l) => l.name)).toEqual(['Sky', 'Hills', 'Bo’s layer']);
+
+		// Bo changes the group's opacity (he may now): Ana sees it
+		bc.setGroup(land.id, { name: 'Land', visible: true, opacity: 0.3 });
+		await bo.localChanged();
+		await session.settle();
+		expect(hc.groupList[0].opacity).toBeCloseTo(0.3);
+
+		// Ana merges the group into one layer: Bo's layer must be handed over first
+		expect(host.mergeGroup(1)).toEqual([B]);
+		await session.settle();
+		const boLid = host.lidOf(hc.byName('Bo’s layer').id)!;
+		expect(bo.shared.asks).toMatchObject([{ lid: boLid, from: A, why: 'merge', own: true }]);
+		bo.grant(boLid, A, true);
+		await session.settle();
+		for (const c of [hc, bc]) {
+			expect(c.layers().map((l) => l.name)).toContain('Land');
+			expect(c.layerList.some((l) => l.name === 'Bo’s layer' || l.name === 'Hills')).toBe(false);
+			expect(c.pixel(c.byName('Land').id, 2, 2)).toBe(55);
+			expect(c.byName('Land').group).toBe(0);
+			expect(c.groupList).toEqual([]);
+		}
+		expect(host.shared.groups.size).toBe(0);
+	});
+
 	it('asks, grants and takes back access to a layer', async () => {
 		const session = new FakeSession();
 		const hc = new FakeCanvas(['Sky']);
@@ -345,7 +556,7 @@ describe('drawing together: apps', () => {
 
 		bo.ask(skyLid);
 		await session.settle();
-		expect(host.shared.asks).toEqual([{ lid: skyLid, from: B }]);
+		expect(host.shared.asks).toEqual([{ lid: skyLid, from: B, why: 'draw' }]);
 		host.grant(skyLid, B);
 		await session.settle();
 		const sky = bc.byName('Sky');
