@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { NO_STYLE, type LayerStyle } from '@pencilpilot/paint/layer-style';
 import {
 	decodeTile,
 	diffTiles,
@@ -36,6 +37,7 @@ class FakeCanvas implements CanvasPort {
 		adjust: string | null;
 		mask: TileMap | null;
 		group: number;
+		style: LayerStyle | null;
 	}[] = [];
 	groupList: { id: number; name: string; visible: boolean; opacity: number }[] = [];
 	#nextGroup = 1;
@@ -58,7 +60,8 @@ class FakeCanvas implements CanvasPort {
 			blend: 'normal',
 			adjust: adjust ?? null,
 			mask: null,
-			group: 0
+			group: 0,
+			style: null
 		});
 		return id;
 	}
@@ -127,7 +130,14 @@ class FakeCanvas implements CanvasPort {
 	}
 	setLayer(
 		id: number,
-		patch: { name?: string; locked?: boolean; visible?: boolean; opacity?: number; blend?: string }
+		patch: {
+			name?: string;
+			locked?: boolean;
+			visible?: boolean;
+			opacity?: number;
+			blend?: string;
+			style?: LayerStyle | null;
+		}
 	) {
 		Object.assign(
 			this.layerList.find((l) => l.id === id)!,
@@ -230,7 +240,8 @@ class FakeCanvas implements CanvasPort {
 				opacity: l.opacity,
 				blend: l.blend,
 				alphaLock: false,
-				clip: false
+				clip: false,
+				style: l.style
 			}
 		}));
 	}
@@ -284,6 +295,26 @@ describe('drawing together: the shared layers', () => {
 		expect(parseEdit({ k: 'layer', lid: '../etc' })).toBeNull();
 		expect(parseEdit({ k: 'grant', lid: 'aaaaaaaaaaaa:1', to: 'nope' })).toBeNull();
 		expect(parseEdit(null)).toBeNull();
+	});
+
+	it('checks a layer style in a look', () => {
+		const lid = 'aaaaaaaaaaaa:1';
+		const look = { visible: true, opacity: 1, blend: 'normal', alphaLock: false, clip: false };
+		const outline = {
+			...NO_STYLE,
+			stroke: { on: true, size: 500, colour: '#FF0000', position: 'sideways', opacity: 1 }
+		};
+		const e = parseEdit({ k: 'look', lid, look: { ...look, style: outline } });
+		expect(e).toMatchObject({
+			k: 'look',
+			look: { style: { stroke: { on: true, size: 100, colour: '#ff0000', position: 'outside' } } }
+		});
+		// junk is no style; an app without styles leaves it out (and the style alone)
+		expect(parseEdit({ k: 'look', lid, look: { ...look, style: 'glow' } })).toMatchObject({
+			look: { style: null }
+		});
+		const old = parseEdit({ k: 'look', lid, look });
+		expect(old && old.k === 'look' && 'style' in old.look).toBe(false);
 	});
 
 	it('lets only writers change a layer, and only owners give access', () => {
@@ -787,6 +818,15 @@ describe('drawing together: apps', () => {
 		await bo.localChanged();
 		await session.settle();
 		expect(hc.byName('Sky').opacity).toBe(0.4);
+		// a layer style (an outline) goes too
+		const outline: LayerStyle = {
+			...NO_STYLE,
+			stroke: { ...NO_STYLE.stroke, on: true, colour: '#ff0000' }
+		};
+		hc.setLayer(hc.byName('Sky').id, { style: outline });
+		await host.localChanged();
+		await session.settle();
+		expect(bc.byName('Sky').style).toEqual(outline);
 		// and nothing echoes back and forth
 		const before = session.seq;
 		await host.localChanged();

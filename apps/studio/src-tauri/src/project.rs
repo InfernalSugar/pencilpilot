@@ -451,6 +451,7 @@ mod tests {
             imported: false,
             group: 0,
             adjust: None,
+            style: None,
         }
     }
 

@@ -37,6 +37,7 @@
 
 <script lang="ts">
 	import type { BlendMode, CanvasStatus, GroupInfo, LayerInfo } from './PaintCanvas.svelte';
+	import { NO_STYLE, type LayerStyle, type StrokePosition } from './layer-style';
 
 	let {
 		status,
@@ -68,6 +69,24 @@
 	const rows = $derived([...status.layers].reverse());
 	const active = $derived(status.layers.find((l) => l.id === status.active) ?? null);
 	const activeIndex = $derived(status.layers.findIndex((l) => l.id === status.active));
+
+	// ---- layer style: changes preview live, and each slider drag is one undo step ----
+	const look = $derived(active?.style ?? NO_STYLE);
+	/** the active layer's style with one effect changed */
+	function restyle<K extends keyof LayerStyle>(k: K, patch: Partial<LayerStyle[K]>): LayerStyle {
+		return { ...look, [k]: { ...look[k], ...patch } };
+	}
+	function setStyle<K extends keyof LayerStyle>(k: K, patch: Partial<LayerStyle[K]>) {
+		if (active) controls?.setLayer(active.id, { style: restyle(k, patch) });
+	}
+	function previewStyle<K extends keyof LayerStyle>(k: K, patch: Partial<LayerStyle[K]>) {
+		if (active) controls?.previewLayer(active.id, { style: restyle(k, patch) });
+	}
+	const POSITIONS: { id: StrokePosition; label: string }[] = [
+		{ id: 'outside', label: 'Outside' },
+		{ id: 'centre', label: 'Centre' },
+		{ id: 'inside', label: 'Inside' }
+	];
 
 	let renaming = $state<number | null>(null);
 	/** a group picked in the list (its settings show instead of the layer's) */
@@ -482,6 +501,179 @@
 			</div>
 			{#if active.editingMask}
 				<p class="mask-hint" role="status">Painting on the mask: black hides, white shows.</p>
+			{/if}
+			{#if !active.adjust}
+				<details class="style" open={look.stroke.on || look.shadow.on || look.glow.on}>
+					<summary>Layer style</summary>
+					<div class="effect">
+						<button
+							type="button"
+							class="chip"
+							aria-pressed={look.stroke.on}
+							title="Outline the paint on this layer"
+							onclick={() => setStyle('stroke', { on: !look.stroke.on })}
+						>
+							Stroke
+						</button>
+						{#if look.stroke.on}
+							<label class="field">
+								<span>Colour</span>
+								<input
+									type="color"
+									value={look.stroke.colour}
+									aria-label="Stroke colour"
+									oninput={(e) => previewStyle('stroke', { colour: e.currentTarget.value })}
+									onchange={() => controls?.commitLayer()}
+								/>
+							</label>
+							<label class="field">
+								<span>Position</span>
+								<select
+									value={look.stroke.position}
+									onchange={(e) =>
+										setStyle('stroke', { position: e.currentTarget.value as StrokePosition })}
+								>
+									{#each POSITIONS as p (p.id)}<option value={p.id}>{p.label}</option>{/each}
+								</select>
+							</label>
+							<label class="field grow">
+								<span>Size <b>{look.stroke.size} px</b></span>
+								<input
+									type="range"
+									min="1"
+									max="100"
+									value={look.stroke.size}
+									oninput={(e) => previewStyle('stroke', { size: +e.currentTarget.value })}
+									onchange={() => controls?.commitLayer()}
+								/>
+							</label>
+							<label class="field grow">
+								<span>Opacity <b>{Math.round(look.stroke.opacity * 100)}%</b></span>
+								<input
+									type="range"
+									min="0"
+									max="100"
+									value={Math.round(look.stroke.opacity * 100)}
+									oninput={(e) => previewStyle('stroke', { opacity: +e.currentTarget.value / 100 })}
+									onchange={() => controls?.commitLayer()}
+								/>
+							</label>
+						{/if}
+					</div>
+					<div class="effect">
+						<button
+							type="button"
+							class="chip"
+							aria-pressed={look.shadow.on}
+							title="A soft shadow behind the paint"
+							onclick={() => setStyle('shadow', { on: !look.shadow.on })}
+						>
+							Drop shadow
+						</button>
+						{#if look.shadow.on}
+							<label class="field">
+								<span>Colour</span>
+								<input
+									type="color"
+									value={look.shadow.colour}
+									aria-label="Shadow colour"
+									oninput={(e) => previewStyle('shadow', { colour: e.currentTarget.value })}
+									onchange={() => controls?.commitLayer()}
+								/>
+							</label>
+							<label class="field grow">
+								<span>Opacity <b>{Math.round(look.shadow.opacity * 100)}%</b></span>
+								<input
+									type="range"
+									min="0"
+									max="100"
+									value={Math.round(look.shadow.opacity * 100)}
+									oninput={(e) => previewStyle('shadow', { opacity: +e.currentTarget.value / 100 })}
+									onchange={() => controls?.commitLayer()}
+								/>
+							</label>
+							<label class="field grow">
+								<span>Angle <b>{Math.round(look.shadow.angle)}°</b></span>
+								<input
+									type="range"
+									min="0"
+									max="359"
+									value={Math.round(look.shadow.angle)}
+									title="Where the light comes from"
+									oninput={(e) => previewStyle('shadow', { angle: +e.currentTarget.value })}
+									onchange={() => controls?.commitLayer()}
+								/>
+							</label>
+							<label class="field grow">
+								<span>Distance <b>{look.shadow.distance} px</b></span>
+								<input
+									type="range"
+									min="0"
+									max="200"
+									value={look.shadow.distance}
+									oninput={(e) => previewStyle('shadow', { distance: +e.currentTarget.value })}
+									onchange={() => controls?.commitLayer()}
+								/>
+							</label>
+							<label class="field grow">
+								<span>Blur <b>{look.shadow.blur} px</b></span>
+								<input
+									type="range"
+									min="0"
+									max="100"
+									value={look.shadow.blur}
+									oninput={(e) => previewStyle('shadow', { blur: +e.currentTarget.value })}
+									onchange={() => controls?.commitLayer()}
+								/>
+							</label>
+						{/if}
+					</div>
+					<div class="effect">
+						<button
+							type="button"
+							class="chip"
+							aria-pressed={look.glow.on}
+							title="A soft glow around the paint"
+							onclick={() => setStyle('glow', { on: !look.glow.on })}
+						>
+							Outer glow
+						</button>
+						{#if look.glow.on}
+							<label class="field">
+								<span>Colour</span>
+								<input
+									type="color"
+									value={look.glow.colour}
+									aria-label="Glow colour"
+									oninput={(e) => previewStyle('glow', { colour: e.currentTarget.value })}
+									onchange={() => controls?.commitLayer()}
+								/>
+							</label>
+							<label class="field grow">
+								<span>Size <b>{look.glow.size} px</b></span>
+								<input
+									type="range"
+									min="1"
+									max="100"
+									value={look.glow.size}
+									oninput={(e) => previewStyle('glow', { size: +e.currentTarget.value })}
+									onchange={() => controls?.commitLayer()}
+								/>
+							</label>
+							<label class="field grow">
+								<span>Opacity <b>{Math.round(look.glow.opacity * 100)}%</b></span>
+								<input
+									type="range"
+									min="0"
+									max="100"
+									value={Math.round(look.glow.opacity * 100)}
+									oninput={(e) => previewStyle('glow', { opacity: +e.currentTarget.value / 100 })}
+									onchange={() => controls?.commitLayer()}
+								/>
+							</label>
+						{/if}
+					</div>
+				</details>
 			{/if}
 		</div>
 	{/if}
@@ -908,6 +1100,31 @@
 	}
 	.mask-thumb {
 		background: #fff;
+	}
+	.style {
+		flex: 1 1 100%;
+	}
+	.style summary {
+		min-height: 32px;
+		font-size: 13px;
+		font-weight: 600;
+		color: var(--pp-ink-2);
+		cursor: pointer;
+	}
+	.effect {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 8px 14px;
+		align-items: end;
+		padding: 8px 0;
+	}
+	.effect input[type='color'] {
+		width: 44px;
+		height: 32px;
+		padding: 0;
+		border: 1px solid var(--pp-track);
+		border-radius: 8px;
+		background: var(--pp-surface);
 	}
 	.mask-hint {
 		margin: 6px 0 0;

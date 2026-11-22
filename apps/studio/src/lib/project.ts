@@ -7,6 +7,7 @@
  */
 import type { GroupInfo, LayerSnapshot } from '@pencilpilot/paint/PaintCanvas.svelte';
 import type { Stroke } from '@pencilpilot/paint/strokes';
+import { readStyle, type LayerStyle } from '@pencilpilot/paint/layer-style';
 import type { FileMouthChart, FileScene } from './timeline';
 
 export const EXTENSION = 'ppstudio';
@@ -61,6 +62,7 @@ interface PacketLayer {
 	imported: boolean;
 	group: number;
 	adjust?: string | null;
+	style?: LayerStyle | null;
 	rgba: [number, number];
 	mask?: [number, number] | null;
 }
@@ -112,6 +114,7 @@ export function pack(doc: ProjectDoc): Uint8Array {
 			imported: l.imported,
 			group: l.group,
 			adjust: l.adjust ?? null,
+			...(l.style ? { style: l.style } : {}),
 			rgba: put(l.rgba),
 			mask: l.mask ? put(l.mask) : null
 		})),
@@ -184,6 +187,7 @@ export function unpack(packet: ArrayBuffer | Uint8Array): ProjectDoc {
 			imported: l.imported,
 			group: l.group,
 			adjust: l.adjust ?? null,
+			...(readStyle(l.style) ? { style: readStyle(l.style) } : {}),
 			rgba: get(l.rgba),
 			mask: l.mask ? get(l.mask) : undefined,
 			...(assisted.includes(l.id) ? { assist: true } : {})

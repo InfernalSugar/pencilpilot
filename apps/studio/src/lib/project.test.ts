@@ -8,6 +8,7 @@ import {
 	unpack,
 	type ProjectDoc
 } from './project';
+import { NO_STYLE } from '@pencilpilot/paint/layer-style';
 
 const doc = (): ProjectDoc => ({
 	width: 4,
@@ -27,7 +28,11 @@ const doc = (): ProjectDoc => ({
 			group: 2,
 			rgba: Uint8Array.from({ length: 32 }, (_, i) => i),
 			mask: Uint8Array.from([255, 0, 255, 0, 255, 0, 255, 0]),
-			adjust: null
+			adjust: null,
+			style: {
+				...NO_STYLE,
+				stroke: { on: true, size: 3, colour: '#102030', position: 'outside', opacity: 1 }
+			}
 		},
 		{
 			id: 5,
