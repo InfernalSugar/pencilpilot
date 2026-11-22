@@ -11,7 +11,9 @@ export default defineConfig({
 				DATABASE_PATH: `${process.env.TMPDIR ?? '/tmp'}/pp-e2e-${Date.now()}.db`,
 				// community critique on, with a fake safety check (e2e/fake-ref-service.mjs)
 				COMMUNITY: 'on',
-				REF_SERVICE_URL: 'http://127.0.0.1:8799'
+				REF_SERVICE_URL: 'http://127.0.0.1:8799',
+				// a throwaway key for the app's Draw together passes (e2e/app-link.e2e.ts)
+				PASS_SIGNING_KEY: '5e'.repeat(32)
 			}
 		},
 		{ command: 'node e2e/fake-ref-service.mjs', url: 'http://127.0.0.1:8799/api/health' },

@@ -9,6 +9,10 @@
 //!   came). The others reconnect to it, it sends them the edits they missed, they send it the
 //!   edits it missed (their own not yet numbered, and others' it hadn't seen), and the session
 //!   carries on, numbering from where it was.
+//! - **Everyone is signed in** ([`Pass`]): a joiner shows the host a pass from the website
+//!   for its computer, and the host shows its own in the welcome. Names come from passes.
+//!   A pass is needed to join, not to stay: someone whose pass runs out mid-session stays,
+//!   and comes back after a hand-over.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -22,8 +26,9 @@ use serde_json::Value;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::invite::{self, Invite};
+use crate::pass::{self, Pass, PassInfo, SiteKey};
 use crate::wire::{self, Frame, Ordered, Presence, Resume, Signed};
-use crate::{ALPN, Error, Identity, Result, err};
+use crate::{ALPN, ALPN_V1, Error, Identity, Result, err};
 
 /// How long a joiner has to say hello, and a member to answer.
 const HANDSHAKE: Duration = Duration::from_secs(15);
@@ -50,9 +55,14 @@ pub enum Relays {
 pub struct Member {
     /// their [`Identity::id`]
     pub id: String,
+    /// their PencilPilot account's id, from their pass
+    pub user: String,
+    /// their account's display name, from their pass
     pub name: String,
     /// how to reach them (their relay; IP addresses only without relays)
     pub addr: EndpointAddr,
+    /// their sign-in pass (it travels with them, so a new host can be checked too)
+    pub pass: Pass,
 }
 
 /// What happens in the session, in the order the app should apply it.
@@ -99,6 +109,8 @@ pub struct Session {
 struct Core {
     endpoint: Endpoint,
     secret: SecretKey,
+    /// the website's key: passes are checked with it
+    site: SiteKey,
     me: Member,
     key: [u8; 32],
     project: String,
@@ -149,9 +161,10 @@ enum Answer {
 
 impl Session {
     /// Start a new shared session with this app as the host. The invite (see
-    /// [`Session::invite`]) is what others join with.
-    pub async fn host(id: &Identity, name: &str, relays: Relays) -> Result<Self> {
-        let (core, events) = Core::start(id, name, &relays, Invite::random_key()).await?;
+    /// [`Session::invite`]) is what others join with. `pass`: this computer's sign-in pass;
+    /// `site`: the website's key, to check others' passes.
+    pub async fn host(id: &Identity, pass: &Pass, site: &SiteKey, relays: Relays) -> Result<Self> {
+        let (core, events) = Core::start(id, pass, site, &relays, Invite::random_key()).await?;
         {
             let mut st = core.st.lock().unwrap();
             st.hosting = true;
@@ -166,10 +179,11 @@ impl Session {
     pub async fn host_again(
         id: &Identity,
         invite: &Invite,
-        name: &str,
+        pass: &Pass,
+        site: &SiteKey,
         relays: Relays,
     ) -> Result<Self> {
-        let (core, events) = Core::start(id, name, &relays, invite.key).await?;
+        let (core, events) = Core::start(id, pass, site, &relays, invite.key).await?;
         {
             let mut st = core.st.lock().unwrap();
             st.hosting = true;
@@ -179,8 +193,14 @@ impl Session {
     }
 
     /// Join the session an invite points to (through any member in it).
-    pub async fn join(id: &Identity, invite: &Invite, name: &str, relays: Relays) -> Result<Self> {
-        let (core, events) = Core::start(id, name, &relays, invite.key).await?;
+    pub async fn join(
+        id: &Identity,
+        invite: &Invite,
+        pass: &Pass,
+        site: &SiteKey,
+        relays: Relays,
+    ) -> Result<Self> {
+        let (core, events) = Core::start(id, pass, site, &relays, invite.key).await?;
         let mut last = Error("The invite has no one to ask.".into());
         for addr in &invite.addrs {
             match core.clone().enter(addr.clone(), None).await {
@@ -298,10 +318,15 @@ impl Session {
 impl Core {
     async fn start(
         id: &Identity,
-        name: &str,
+        pass: &Pass,
+        site: &SiteKey,
         relays: &Relays,
         key: [u8; 32],
     ) -> Result<(Arc<Self>, UnboundedReceiver<Event>)> {
+        // a pass that others would refuse: say so now, not after connecting
+        let who = pass
+            .check(site, &id.id(), pass::now())
+            .map_err(|e| Error(format!("{} Sign in with PencilPilot again.", e.0)))?;
         let endpoint = bind(id, relays).await?;
         if *relays != Relays::Off {
             // reachable through the relay before handing out an address
@@ -319,13 +344,16 @@ impl Core {
         };
         let me = Member {
             id: endpoint.id().to_string(),
-            name: clean_name(name),
+            user: who.user,
+            name: clean_name(&who.name),
             addr,
+            pass: pass.clone(),
         };
         let (events, rx) = unbounded_channel();
         let core = Arc::new(Core {
             endpoint: endpoint.clone(),
             secret: id.secret(),
+            site: *site,
             me,
             key,
             project: invite::project_of(&key),
@@ -433,12 +461,12 @@ impl Core {
         let conn = tokio::time::timeout(HANDSHAKE, self.endpoint.connect(addr.clone(), ALPN))
             .await
             .map_err(|_| Error("Couldn't reach the session: is someone in it online?".into()))?
-            .map_err(|e| err(format!("Couldn't reach the session: {e}")))?;
+            .map_err(|e| connect_error(&e.to_string()))?;
         let (mut send, mut recv) = conn.open_bi().await.map_err(err)?;
         let hello = Frame::Hello {
             project: self.project.clone(),
             proof: invite::proof(&self.key, self.endpoint.id(), target),
-            name: self.me.name.clone(),
+            pass: Some(self.me.pass.clone()),
             addr: self.me.addr.clone(),
             resume,
         };
@@ -457,6 +485,18 @@ impl Core {
             Some(Frame::Refused { reason }) => return Ok(Answer::Refused(reason)),
             _ => return Err(Error("The session answered something unexpected.".into())),
         };
+        // only members with a good pass, and the host must be one of them
+        let members: Vec<Member> = members
+            .into_iter()
+            .filter_map(|m| signed_in(&self.site, m))
+            .collect();
+        if !members.iter().any(|m| m.id == target.to_string()) {
+            conn.close(0u32.into(), b"not signed in");
+            return Ok(Answer::Refused(
+                "That session's host isn't signed in with PencilPilot, so it can't be joined."
+                    .into(),
+            ));
+        }
         let (out, out_rx) = unbounded_channel();
         let n = {
             let mut st = self.st.lock().unwrap();
@@ -508,6 +548,9 @@ impl Core {
             match frame {
                 Ok(Some(Frame::Ordered(o))) => self.apply(&mut st, o),
                 Ok(Some(Frame::Joined { member })) => {
+                    let Some(member) = signed_in(&self.site, member) else {
+                        continue;
+                    };
                     st.members.retain(|x| x.id != member.id);
                     st.members.push(member.clone());
                     self.emit(Event::Joined(member));
@@ -614,7 +657,8 @@ async fn bind(id: &Identity, relays: &Relays) -> Result<Endpoint> {
         .transport_config(quic)
         .dns_resolver(resolver())
         .secret_key(id.secret())
-        .alpns(vec![ALPN.to_vec()])
+        // the old protocol too, only to tell an older app to update
+        .alpns(vec![ALPN.to_vec(), ALPN_V1.to_vec()])
         .bind()
         .await
         .map_err(|e| err(format!("Couldn't start the connection: {e}")))
@@ -631,6 +675,51 @@ fn resolver() -> iroh::dns::DnsResolver {
         .with_system_defaults()
         .with_fallback_mode(iroh::dns::FallbackMode::Eager)
         .build()
+}
+
+/// Whether a joiner's pass lets them in: the website signed it, for the computer that's
+/// connecting, and it hasn't run out (unless they're coming back after a hand-over: a pass
+/// is needed to join, not to stay). What it says, or why not.
+fn admit(
+    site: &SiteKey,
+    pass: Option<&Pass>,
+    remote: EndpointId,
+    rejoining: bool,
+    now: u64,
+) -> std::result::Result<PassInfo, String> {
+    let Some(pass) = pass else {
+        return Err("Only people signed in with PencilPilot can join this session.".into());
+    };
+    let endpoint = remote.to_string();
+    let checked = if rejoining {
+        pass.check_owner(site, &endpoint)
+    } else {
+        pass.check(site, &endpoint, now)
+    };
+    checked.map_err(|e| format!("The session didn't let you in: {} Sign in again.", e.0))
+}
+
+/// A member as the host describes them, if their pass is good (its name and account win
+/// over what the host says). Not checked for expiry: they're in already.
+fn signed_in(site: &SiteKey, mut m: Member) -> Option<Member> {
+    let who = m.pass.check_owner(site, &m.id).ok()?;
+    m.user = who.user;
+    m.name = clean_name(&who.name);
+    Some(m)
+}
+
+/// A failed connection, in words: an app on another version of the protocol needs updating
+/// (the handshake fails with TLS alert 120, "no application protocol").
+fn connect_error(e: &str) -> Error {
+    let l = e.to_lowercase();
+    if l.contains("error 120") || l.contains("known protocol") || l.contains("alpn") {
+        Error(
+            "That session runs another version of PencilPilot: everyone needs the latest app."
+                .into(),
+        )
+    } else {
+        Error(format!("Couldn't reach the session: {e}"))
+    }
 }
 
 /// 1–24 visible characters, or "Someone".
@@ -693,7 +782,7 @@ async fn serve(conn: Connection, core: Arc<Core>) -> Result<()> {
     let Some(Frame::Hello {
         project,
         proof,
-        name,
+        pass,
         addr,
         resume,
     }) = hello
@@ -704,12 +793,25 @@ async fn serve(conn: Connection, core: Arc<Core>) -> Result<()> {
     let refuse = |reason: &str| Frame::Refused {
         reason: reason.into(),
     };
-    let answer = if project != core.project
+    let admitted = admit(
+        &core.site,
+        pass.as_ref(),
+        remote,
+        resume.is_some(),
+        pass::now(),
+    );
+    let answer = if conn.alpn() == ALPN_V1 {
+        Some(refuse(
+            "This session needs a newer PencilPilot: update the app, then join again.",
+        ))
+    } else if project != core.project
         || !invite::check(&core.key, &proof, remote, core.endpoint.id())
     {
         Some(refuse(
             "This invite isn't valid any more: ask for a new one.",
         ))
+    } else if let Err(reason) = &admitted {
+        Some(refuse(reason))
     } else {
         // asked to take over by someone whose host left: if it was this app's host too
         let host_gone = {
@@ -741,10 +843,15 @@ async fn serve(conn: Connection, core: Arc<Core>) -> Result<()> {
         return Ok(());
     }
 
+    let (Ok(who), Some(pass)) = (admitted, pass) else {
+        return Ok(());
+    };
     let member = Member {
         id: remote.to_string(),
-        name: clean_name(&name),
+        user: who.user,
+        name: clean_name(&who.name),
         addr: EndpointAddr::from_parts(remote, addr.addrs),
+        pass,
     };
     let (out, out_rx) = unbounded_channel();
     let n = {
@@ -871,6 +978,7 @@ async fn guest_datagrams(core: Arc<Core>, conn: Connection) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pass::tests::{info, test_site};
     use serde_json::json;
 
     async fn next(s: &mut Session) -> Event {
@@ -900,14 +1008,16 @@ mod tests {
     }
 
     async fn host() -> Session {
-        Session::host(&Identity::generate(), "Host", Relays::Off)
+        let (id, pass) = signed_in_as("Host");
+        Session::host(&id, &pass, &site(), Relays::Off)
             .await
             .unwrap()
     }
 
     async fn join(code: &str, name: &str) -> Session {
         let invite = Invite::decode(code).unwrap();
-        Session::join(&Identity::generate(), &invite, name, Relays::Off)
+        let (id, pass) = signed_in_as(name);
+        Session::join(&id, &invite, &pass, &site(), Relays::Off)
             .await
             .unwrap()
     }
@@ -1088,10 +1198,16 @@ mod tests {
     async fn the_first_one_back_hosts_the_project_again() {
         let h = host().await;
         let code = h.invite().encode();
-        let a_id = Identity::generate();
-        let a = Session::join(&a_id, &Invite::decode(&code).unwrap(), "Ana", Relays::Off)
-            .await
-            .unwrap();
+        let (a_id, a_pass) = signed_in_as("Ana");
+        let a = Session::join(
+            &a_id,
+            &Invite::decode(&code).unwrap(),
+            &a_pass,
+            &site(),
+            Relays::Off,
+        )
+        .await
+        .unwrap();
         let project = a.invite().project();
         // everyone leaves
         a.close().await;
@@ -1099,18 +1215,19 @@ mod tests {
         // Ana comes back first: no one answers, so she hosts the same project
         let saved = Invite::decode(&code).unwrap();
         assert!(
-            Session::join(&a_id, &saved, "Ana", Relays::Off)
+            Session::join(&a_id, &saved, &a_pass, &site(), Relays::Off)
                 .await
                 .is_err()
         );
-        let a2 = Session::host_again(&a_id, &saved, "Ana", Relays::Off)
+        let a2 = Session::host_again(&a_id, &saved, &a_pass, &site(), Relays::Off)
             .await
             .unwrap();
         assert_eq!(a2.invite().project(), project);
         // someone with the old code plus Ana's address finds her
         let mut back = saved.clone();
         back.addrs.insert(0, a2.me().addr.clone());
-        let b = Session::join(&Identity::generate(), &back, "Bo", Relays::Off)
+        let (b_id, b_pass) = signed_in_as("Bo");
+        let b = Session::join(&b_id, &back, &b_pass, &site(), Relays::Off)
             .await
             .unwrap();
         assert_eq!(b.members().len(), 2);
@@ -1144,7 +1261,8 @@ mod tests {
         let host = host().await;
         let mut forged = host.invite();
         forged.key = [0; 32];
-        let e = Session::join(&Identity::generate(), &forged, "Eve", Relays::Off)
+        let (id, pass) = signed_in_as("Eve");
+        let e = Session::join(&id, &forged, &pass, &site(), Relays::Off)
             .await
             .err()
             .expect("refused");
@@ -1152,6 +1270,223 @@ mod tests {
         assert_eq!(host.members().len(), 1);
         host.close().await;
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn names_come_from_passes() {
+        let mut host = host().await;
+        let a = join(&host.invite().encode(), "Ana").await;
+        assert_eq!(a.me().user, "u_ana");
+        match next(&mut host).await {
+            Event::Joined(m) => assert_eq!((m.name.as_str(), m.user.as_str()), ("Ana", "u_ana")),
+            other => panic!("expected a join, got {other:?}"),
+        }
+        let names: Vec<String> = a.members().into_iter().map(|m| m.name).collect();
+        assert_eq!(names, ["Host", "Ana"]);
+        a.close().await;
+        host.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_joiner_without_a_genuine_pass_is_refused() {
+        let host = host().await;
+        // a pass from somewhere else (its maker trusts it; the host doesn't)
+        let fake_site = SecretKey::generate();
+        let id = Identity::generate();
+        let pass = Pass::sign(&fake_site, &info(&id.id(), "Eve", pass::now() + 3600));
+        let e = Session::join(&id, &host.invite(), &pass, &fake_site.public(), Relays::Off)
+            .await
+            .err()
+            .expect("refused");
+        assert!(e.0.contains("genuine"), "{e}");
+        assert_eq!(host.members().len(), 1);
+        host.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_host_without_a_genuine_pass_is_refused() {
+        // a host whose app lets anyone in, showing a pass from somewhere else
+        let rogue = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .alpns(vec![ALPN.to_vec()])
+            .bind()
+            .await
+            .unwrap();
+        let addr = rogue.addr();
+        let fake = Pass::sign(
+            &SecretKey::generate(),
+            &info(&rogue.id().to_string(), "Mallory", pass::now() + 3600),
+        );
+        let welcome = Frame::Welcome {
+            members: vec![Member {
+                id: rogue.id().to_string(),
+                user: "u_mallory".into(),
+                name: "Mallory".into(),
+                addr: addr.clone(),
+                pass: fake,
+            }],
+            seq: 0,
+            seen: HashMap::new(),
+            missed: Vec::new(),
+        };
+        let server = rogue.clone();
+        tokio::spawn(async move {
+            let conn = server.accept().await.unwrap().await.unwrap();
+            let (mut send, mut recv) = conn.accept_bi().await.unwrap();
+            let _ = wire::read(&mut recv).await;
+            wire::write(&mut send, &welcome).await.unwrap();
+            let _ = tokio::time::timeout(Duration::from_secs(5), conn.closed()).await;
+        });
+        let (a, a_pass) = signed_in_as("Ana");
+        let invite = Invite::new(Invite::random_key(), vec![addr]);
+        let e = Session::join(&a, &invite, &a_pass, &site(), Relays::Off)
+            .await
+            .err()
+            .expect("refused");
+        assert!(e.0.contains("host isn't signed in"), "{e}");
+        rogue.close().await;
+    }
+
+    #[test]
+    fn members_named_by_the_host_need_a_good_pass() {
+        let id = SecretKey::generate().public();
+        let good = Pass::sign(
+            &test_site(),
+            &info(&id.to_string(), "Ana", pass::now() - 10),
+        );
+        let m = Member {
+            id: id.to_string(),
+            user: "u_someone".into(),
+            name: "Someone else".into(),
+            addr: EndpointAddr::new(id),
+            pass: good,
+        };
+        // the pass wins over what the host says, even once it has run out
+        let ok = signed_in(&site(), m.clone()).unwrap();
+        assert_eq!((ok.name.as_str(), ok.user.as_str()), ("Ana", "u_ana"));
+        // a pass for another computer
+        let mut other = m.clone();
+        other.id = SecretKey::generate().public().to_string();
+        assert!(signed_in(&site(), other).is_none());
+        // signed by someone else
+        let mut forged = m;
+        forged.pass = Pass::sign(
+            &SecretKey::generate(),
+            &info(&id.to_string(), "Ana", pass::now() + 60),
+        );
+        assert!(signed_in(&site(), forged).is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_expired_or_borrowed_pass_stays_home() {
+        let id = Identity::generate();
+        let expired = Pass::sign(&test_site(), &info(&id.id(), "Ana", pass::now() - 1));
+        let e = Session::host(&id, &expired, &site(), Relays::Off)
+            .await
+            .err()
+            .expect("refused");
+        assert!(e.0.contains("expired") && e.0.contains("Sign in"), "{e}");
+        // someone else's pass
+        let (_, theirs) = signed_in_as("Bo");
+        let e = Session::host(&id, &theirs, &site(), Relays::Off)
+            .await
+            .err()
+            .expect("refused");
+        assert!(e.0.contains("another computer"), "{e}");
+    }
+
+    #[test]
+    fn the_host_checks_every_joiner_s_pass() {
+        let site = site();
+        let joiner = SecretKey::generate().public();
+        let now = pass::now();
+        let good = Pass::sign(&test_site(), &info(&joiner.to_string(), "Ana", now + 60));
+        assert_eq!(
+            admit(&site, Some(&good), joiner, false, now).unwrap().name,
+            "Ana"
+        );
+        // no pass at all
+        let e = admit(&site, None, joiner, false, now).unwrap_err();
+        assert!(e.contains("signed in"), "{e}");
+        // a bad signature
+        let mut bad = good.clone();
+        bad.sig = bad.sig.replace('a', "b");
+        assert!(admit(&site, Some(&bad), joiner, false, now).is_err());
+        // run out: refused to join, but fine coming back after a hand-over
+        let old = Pass::sign(&test_site(), &info(&joiner.to_string(), "Ana", now - 60));
+        let e = admit(&site, Some(&old), joiner, false, now).unwrap_err();
+        assert!(e.contains("expired"), "{e}");
+        assert!(admit(&site, Some(&old), joiner, true, now).is_ok());
+        // made for another computer (even coming back)
+        let other = SecretKey::generate().public();
+        assert!(admit(&site, Some(&good), other, false, now).is_err());
+        assert!(admit(&site, Some(&good), other, true, now).is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_older_app_is_told_to_update() {
+        let host = host().await;
+        // an app on the first protocol (before passes) knocks
+        let old = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await
+            .unwrap();
+        let conn = old.connect(host.me().addr.clone(), ALPN_V1).await.unwrap();
+        let (mut send, mut recv) = conn.open_bi().await.unwrap();
+        let hello = Frame::Hello {
+            project: host.invite().project(),
+            proof: String::new(),
+            pass: None,
+            addr: old.addr(),
+            resume: None,
+        };
+        wire::write(&mut send, &hello).await.unwrap();
+        match wire::read(&mut recv).await.unwrap() {
+            Some(Frame::Refused { reason }) => assert!(reason.contains("update"), "{reason}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        old.close().await;
+
+        // and a new app reaching an old one says why it can't
+        let old = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .alpns(vec![ALPN_V1.to_vec()])
+            .bind()
+            .await
+            .unwrap();
+        let server = old.clone();
+        tokio::spawn(async move {
+            while let Some(incoming) = server.accept().await {
+                let _ = incoming.await;
+            }
+        });
+        let (id, pass) = signed_in_as("Ana");
+        let invite = Invite::new(host.invite().key, vec![old.addr()]);
+        let e = Session::join(&id, &invite, &pass, &site(), Relays::Off)
+            .await
+            .err()
+            .expect("refused");
+        assert!(e.0.contains("version"), "{e}");
+        old.close().await;
+        host.close().await;
+    }
+}
+
+/// A computer signed in as `name`: its key, and a pass from the test site for it.
+#[cfg(test)]
+fn signed_in_as(name: &str) -> (Identity, Pass) {
+    let id = Identity::generate();
+    let p = Pass::sign(
+        &crate::pass::tests::test_site(),
+        &crate::pass::tests::info(&id.id(), name, pass::now() + 3600),
+    );
+    (id, p)
+}
+
+/// The test site's public key.
+#[cfg(test)]
+fn site() -> SiteKey {
+    crate::pass::tests::test_site().public()
 }
 
 /// Through our own relay (a relay server run in the test, as on the VPS): members that know
@@ -1165,7 +1500,8 @@ mod own_relay {
     async fn joins_and_hands_over_through_our_own_relay() {
         let (_map, url, _server) = iroh::test_utils::run_relay_server().await.unwrap();
         let relays = Relays::Custom(vec![url.to_string()]);
-        let mut h = Session::host(&Identity::generate(), "Host", relays.clone())
+        let (h_id, h_pass) = signed_in_as("Host");
+        let mut h = Session::host(&h_id, &h_pass, &site(), relays.clone())
             .await
             .unwrap();
         let invite = h.invite();
@@ -1176,18 +1512,22 @@ mod own_relay {
         assert_eq!(via, [url.to_string()], "the code points at our relay");
         assert_eq!(invite.addrs[0].ip_addrs().count(), 0);
         let code = invite.encode();
+        let (a_id, a_pass) = signed_in_as("Ana");
         let a = Session::join(
-            &Identity::generate(),
+            &a_id,
             &Invite::decode(&code).unwrap(),
-            "Ana",
+            &a_pass,
+            &site(),
             relays.clone(),
         )
         .await
         .unwrap();
+        let (b_id, b_pass) = signed_in_as("Bo");
         let mut b = Session::join(
-            &Identity::generate(),
+            &b_id,
             &Invite::decode(&code).unwrap(),
-            "Bo",
+            &b_pass,
+            &site(),
             relays,
         )
         .await
@@ -1236,7 +1576,8 @@ mod online {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "uses the internet and iroh's public relays"]
     async fn joins_through_the_public_relays() {
-        let mut host = Session::host(&Identity::generate(), "Host", Relays::Iroh)
+        let (h_id, h_pass) = signed_in_as("Host");
+        let mut host = Session::host(&h_id, &h_pass, &site(), Relays::Iroh)
             .await
             .unwrap();
         let invite = host.invite();
@@ -1248,10 +1589,12 @@ mod online {
         let code = invite.encode();
         println!("code: {} characters", code.len());
         let t = std::time::Instant::now();
+        let (a_id, a_pass) = signed_in_as("Ana");
         let a = Session::join(
-            &Identity::generate(),
+            &a_id,
             &Invite::decode(&code).unwrap(),
-            "Ana",
+            &a_pass,
+            &site(),
             Relays::Iroh,
         )
         .await

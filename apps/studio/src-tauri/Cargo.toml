@@ -22,7 +22,13 @@ pencilpilot-ppstudio = { path = "../../../crates/ppstudio" }
 pencilpilot-anim = { path = "../../../crates/anim" }
 pencilpilot-share = { path = "../../../crates/share" }
 qrcode = { version = "0.15", default-features = false, features = ["svg"] }
-tokio = { version = "1", features = ["sync", "time", "macros"] }
+tokio = { version = "1", features = ["sync", "time", "macros", "net", "io-util"] }
+# signing in with a PencilPilot account (account.rs): the same HTTP and TLS (ring) as iroh's
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+sha2 = "0.10"
+rand = "0.9"
+data-encoding = "2"
 tauri-plugin-dialog = "2"
 blake3 = "1"
 png = "0.18"

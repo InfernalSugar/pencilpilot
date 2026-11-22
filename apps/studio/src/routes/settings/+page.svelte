@@ -13,6 +13,13 @@
 	} from '#lib/settings.svelte.js';
 	import { cleanRelay } from '#lib/share.js';
 	import {
+		account,
+		endAccount,
+		loadAccount,
+		startSignIn,
+		stopSignIn
+	} from '#lib/account.svelte.js';
+	import {
 		ACTIONS,
 		clashes,
 		comboOf,
@@ -33,6 +40,7 @@
 
 	onMount(() => {
 		loadSettings().then(() => (ready = true));
+		if (isTauri()) void loadAccount();
 		if (isTauri())
 			import('@tauri-apps/api/core').then(({ invoke }) =>
 				invoke<string>('data_folder')
@@ -210,10 +218,35 @@
 
 	<section aria-labelledby="together-h">
 		<h2 id="together-h">Drawing together</h2>
-		<label class="row">
-			<span>Your name</span>
-			<input maxlength="24" placeholder="What others see" bind:value={settings.shareName} />
-		</label>
+		<div class="row">
+			<span>PencilPilot account</span>
+			{#if !isTauri()}
+				<span class="hint">In the app</span>
+			{:else if account.me}
+				<span>
+					Signed in as <b>{account.me.name}</b>
+					<button type="button" class="ghost small" onclick={() => void endAccount()}>
+						Sign out
+					</button>
+				</span>
+			{:else if account.signingIn}
+				<span>
+					Finish signing in in your browser…
+					<button type="button" class="ghost small" onclick={() => void stopSignIn()}>
+						Cancel
+					</button>
+				</span>
+			{:else}
+				<button type="button" class="ghost small" onclick={() => void startSignIn()}>
+					Sign in with PencilPilot
+				</button>
+			{/if}
+		</div>
+		{#if account.error}<p class="hint" role="alert">{account.error}</p>{/if}
+		<p class="hint">
+			Drawing together needs a PencilPilot account: others see the name on it. You can unlink this
+			app on the website’s Account page.
+		</p>
 		<label class="row">
 			<span>Relay</span>
 			<input

@@ -6,6 +6,7 @@ use iroh::endpoint::{RecvStream, SendStream};
 use iroh::{EndpointAddr, PublicKey, SecretKey, Signature};
 use serde::{Deserialize, Serialize};
 
+use crate::pass::Pass;
 use crate::session::Member;
 use crate::{Error, Result, err};
 
@@ -78,7 +79,9 @@ pub enum Frame {
     Hello {
         project: String,
         proof: String,
-        name: String,
+        /// the joiner's sign-in pass: their name and account come from it
+        #[serde(default)]
+        pass: Option<Pass>,
         /// how others can reach the joiner (for a later hand-over)
         addr: EndpointAddr,
         #[serde(default)]

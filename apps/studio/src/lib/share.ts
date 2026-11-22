@@ -2,11 +2,18 @@
  * Drawing together, peer to peer (ADR-0013, S12-T03). The session runs in the app's Rust
  * side (`share_*` commands, "share-event" events); the window itself stays offline.
  * Nothing connects until the person hosts or joins.
+ *
+ * Drawing together needs a PencilPilot account (`account_*` commands): the shell links the
+ * app to the website in the system browser, then gets a signed pass for each session.
+ * Names come from the account; solo work never needs one.
  */
 
 export interface Member {
 	id: string;
+	/** their name, from their PencilPilot account */
 	name: string;
+	/** their account's id */
+	user?: string;
 	/** how to reach them (kept for rejoining later) */
 	addr?: unknown;
 }
@@ -158,11 +165,30 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
 	return invoke<T>(cmd, args);
 }
 
+/** Who this app is signed in as. */
+export interface Account {
+	user: string;
+	name: string;
+}
+
+/** The PencilPilot account this app is signed in with, or null. */
+export const accountStatus = () => call<Account | null>('account_status');
+/** Sign in in the system browser; resolves once the person has confirmed on the website. */
+export const signIn = () => call<Account>('account_sign_in');
+/** Stop waiting for the browser. */
+export const cancelSignIn = () => call<void>('account_cancel');
+export const signOut = () => call<void>('account_sign_out');
+
+/** What the Draw together dialog can offer: signing in comes first. */
+export function shareChoices(account: Account | null, busy: boolean) {
+	const ready = !!account && !busy;
+	return { signIn: !account, host: ready, join: ready, rejoin: ready };
+}
+
 /** `relay`: our own relay's URL (Settings), or empty for the default */
-export const hostSession = (name: string, relay = '') =>
-	call<ShareInfo>('share_host', { name, relay: relay || null });
-export const joinSession = (code: string, name: string, relay = '') =>
-	call<ShareInfo>('share_join', { code, name, relay: relay || null });
+export const hostSession = (relay = '') => call<ShareInfo>('share_host', { relay: relay || null });
+export const joinSession = (code: string, relay = '') =>
+	call<ShareInfo>('share_join', { code, relay: relay || null });
 
 /** A relay URL as typed: https only, no spaces; '' when empty or not a URL. */
 export function cleanRelay(text: string): string {
@@ -176,8 +202,8 @@ export function cleanRelay(text: string): string {
 	}
 }
 /** Back to a shared project: join a member who's online, or host it again. */
-export const rejoinSession = (code: string, addrs: unknown[], name: string, relay = '') =>
-	call<ShareInfo>('share_rejoin', { code, addrs, name, relay: relay || null });
+export const rejoinSession = (code: string, addrs: unknown[], relay = '') =>
+	call<ShareInfo>('share_rejoin', { code, addrs, relay: relay || null });
 export const sessionStatus = () => call<ShareInfo | null>('share_status');
 export const sendEdit = (body: unknown) => call<void>('share_edit', { body });
 export const sendPresence = (body: unknown) => call<void>('share_presence', { body });

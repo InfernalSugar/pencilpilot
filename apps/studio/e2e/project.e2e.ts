@@ -13,6 +13,8 @@ interface Stub {
 	recent?: unknown[];
 	/** the answer to "lose unsaved changes?" */
 	askAnswer?: boolean;
+	/** the PencilPilot account the app starts signed in with */
+	account?: { user: string; name: string } | null;
 }
 
 async function stubTauri(page: Page, stub: Stub = {}) {
@@ -118,6 +120,15 @@ async function stubTauri(page: Page, stub: Stub = {}) {
 						return stub.versions ?? [];
 					case 'recent_list':
 						return stub.recent ?? [];
+					// signing in for drawing together: the browser step is the shell's
+					case 'account_status':
+						return w.__account === undefined ? (stub.account ?? null) : w.__account;
+					case 'account_sign_in':
+						w.__account = { user: 'u_ana', name: 'Ana' };
+						return w.__account;
+					case 'account_sign_out':
+						w.__account = null;
+						return null;
 					case 'export_write':
 						return path;
 					case 'export_tools':
@@ -1937,4 +1948,38 @@ test('layer style: an outline, undone in one step, kept in the file', async ({ p
 		.getByRole('button', { name: 'No' })
 		.click();
 	await expect.poll(async () => Math.abs((await red()) - outlined)).toBeLessThan(outlined * 0.02);
+});
+
+test('draw together: sign in with PencilPilot before hosting or joining', async ({ page }) => {
+	await stubTauri(page);
+	await ready(page);
+	await page.getByRole('button', { name: 'Draw together' }).click();
+	const dialog = page.getByRole('dialog', { name: 'Draw together' });
+	const host = dialog.getByRole('button', { name: 'Host', exact: true });
+	const join = dialog.getByRole('button', { name: 'Join', exact: true });
+	// signed out: Host and Join wait, and the dialog says why
+	await expect(dialog.getByText(/needs a PencilPilot account/)).toBeVisible();
+	await dialog.getByLabel('Invite code').fill('pp1-abc');
+	await expect(host).toBeDisabled();
+	await expect(join).toBeDisabled();
+	await expect(dialog.getByPlaceholder('What others see')).toHaveCount(0);
+	// signed in: the name comes from the account
+	await dialog.getByRole('button', { name: 'Sign in with PencilPilot' }).click();
+	await expect(dialog.getByText('Signed in as Ana')).toBeVisible();
+	await expect(host).toBeEnabled();
+	await expect(join).toBeEnabled();
+	await dialog.getByRole('button', { name: 'Sign out' }).click();
+	await expect(dialog.getByRole('button', { name: 'Sign in with PencilPilot' })).toBeVisible();
+	await expect(host).toBeDisabled();
+	expect((await calls(page)).map((c) => c.cmd)).toEqual(
+		expect.arrayContaining(['account_status', 'account_sign_in', 'account_sign_out'])
+	);
+});
+
+test('settings: signed in for drawing together', async ({ page }) => {
+	await stubTauri(page, { account: { user: 'u_bo', name: 'Bo' } });
+	await page.goto('/settings');
+	await expect(page.getByText('Signed in as Bo')).toBeVisible();
+	await page.getByRole('button', { name: 'Sign out' }).click();
+	await expect(page.getByRole('button', { name: 'Sign in with PencilPilot' })).toBeVisible();
 });
