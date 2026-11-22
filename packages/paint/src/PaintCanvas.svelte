@@ -732,6 +732,18 @@
 		};
 	}
 
+	/** Erase someone's layer of live strokes (their real pixels arrived elsewhere). */
+	export function remoteClear(playerId: string) {
+		const id = remoteLayers.get(playerId);
+		if (!paint || !id) return;
+		paint.clearLayerSilent(id);
+		schedule();
+	}
+	/** Forget someone's layer of live strokes (it's gone from the canvas). */
+	export function remoteForget(playerId: string) {
+		remoteLayers.delete(playerId);
+	}
+
 	/** Redraw someone's whole layer from their strokes (after their undo / clear, or on joining). */
 	export async function remoteRedraw(
 		playerId: string,
