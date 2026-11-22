@@ -40,11 +40,48 @@ export interface SharedLayer {
 	owner: string;
 	name: string;
 	writers: string[];
+	/** how it shows (set by whoever may draw on it) */
+	look?: Look;
 }
+
+/** A layer's settings that everyone sees the same (its lock stays each app's own: it's how
+ * access is shown). */
+export interface Look {
+	visible: boolean;
+	/** 0–1 */
+	opacity: number;
+	blend: string;
+	alphaLock: boolean;
+	clip: boolean;
+}
+
+function readLook(v: unknown): Look | null {
+	const l = v as Look;
+	if (!l || typeof l !== 'object') return null;
+	if (typeof l.blend !== 'string' || !/^[a-z-]{1,20}$/.test(l.blend)) return null;
+	if (!Number.isFinite(l.opacity)) return null;
+	return {
+		visible: l.visible !== false,
+		opacity: Math.min(1, Math.max(0, l.opacity)),
+		blend: l.blend,
+		alphaLock: l.alphaLock === true,
+		clip: l.clip === true
+	};
+}
+
+const sameLook = (a: Look | undefined, b: Look | undefined) =>
+	!!a &&
+	!!b &&
+	a.visible === b.visible &&
+	Math.abs(a.opacity - b.opacity) < 1e-3 &&
+	a.blend === b.blend &&
+	a.alphaLock === b.alphaLock &&
+	a.clip === b.clip;
 
 export type TogetherEdit =
 	| { k: 'layer'; lid: string; name: string }
 	| { k: 'rename'; lid: string; name: string }
+	| { k: 'look'; lid: string; look: Look }
 	| { k: 'remove'; lid: string }
 	| { k: 'move'; lid: string; to: number }
 	| {
@@ -88,6 +125,10 @@ export function parseEdit(body: unknown): TogetherEdit | null {
 			return { k: 'layer', lid, name: name || 'Layer' };
 		case 'rename':
 			return name ? { k: 'rename', lid, name } : null;
+		case 'look': {
+			const look = readLook(b.look);
+			return look ? { k: 'look', lid, look } : null;
+		}
 		case 'remove':
 			return { k: 'remove', lid };
 		case 'move':
@@ -156,9 +197,11 @@ export class Shared {
 				return true;
 			}
 			case 'rename':
+			case 'look':
 			case 'tiles':
 				if (!l || !l.writers.includes(from)) return false;
 				if (e.k === 'rename') l.name = e.name;
+				if (e.k === 'look') l.look = e.look;
 				return true;
 			case 'ask':
 				if (!l || l.writers.includes(from)) return false;
@@ -200,7 +243,8 @@ export class Shared {
 				lid: l.lid,
 				owner: String(l.owner),
 				name: String(l.name).slice(0, 60),
-				writers: l.writers.map(String)
+				writers: l.writers.map(String),
+				...(readLook(l.look) ? { look: readLook(l.look)! } : {})
 			});
 			this.order.push(l.lid);
 		}
@@ -314,7 +358,7 @@ export async function decodeTile(s: string): Promise<Uint8Array | null> {
 export interface CanvasPort {
 	/** a new layer on top; its engine id (0: couldn't) */
 	addLayer(name: string): number;
-	setLayer(id: number, patch: { name?: string; locked?: boolean; visible?: boolean }): void;
+	setLayer(id: number, patch: { name?: string; locked?: boolean } & Partial<Look>): void;
 	/** the drawing the layer shows now (made if it has none) */
 	drawingOf(id: number): number;
 	/** a new, empty drawing's id */
@@ -331,7 +375,7 @@ export interface CanvasPort {
 	/** move a layer right above / below another (false: busy, try later); clears undo */
 	moveNextTo(id: number, ref: number, above: boolean): boolean;
 	/** paint layers, bottom → top */
-	layers(): { id: number; name: string }[];
+	layers(): { id: number; name: string; look?: Look }[];
 	/** the app's timeline now */
 	timeline(): Timeline;
 	/** put the session's timeline in (not an undo step; shows the frame again) */
@@ -436,6 +480,8 @@ export class Together {
 	#again = false;
 	/** a layer made here, to select when the session numbers it */
 	#mine = new Set<string>();
+	/** the settings last sent for each layer (so a change goes once) */
+	#lookSent = new Map<string, Look>();
 	/** coming back after a break: this app's own layers keep what was drawn meanwhile */
 	#rejoining = false;
 	/** someone's tiles arrived (their live stroke previews can go) */
@@ -634,6 +680,13 @@ export class Together {
 				if (id) this.canvas.setLayer(id, { name: e.name });
 				break;
 			}
+			case 'look': {
+				const id = this.ids.get(e.lid);
+				// (as if sent from here too, so it isn't sent back)
+				this.#lookSent.set(e.lid, e.look);
+				if (id && from !== this.me) this.canvas.setLayer(id, e.look);
+				break;
+			}
 			case 'remove': {
 				const id = this.ids.get(e.lid);
 				this.ids.delete(e.lid);
@@ -753,6 +806,16 @@ export class Together {
 						this.ids.set(lid, l.id);
 						this.net.edit({ k: 'layer', lid, name: l.name });
 					}
+				// layer settings changed here (opacity, blend…) on layers this app may change
+				const now = new Map(this.canvas.layers().map((l) => [l.id, l.look]));
+				for (const [lid, id] of this.ids) {
+					const look = now.get(id);
+					if (!look || !this.shared.canDraw(lid, this.me)) continue;
+					if (sameLook(look, this.#lookSent.get(lid) ?? this.shared.layers.get(lid)?.look))
+						continue;
+					this.#lookSent.set(lid, look);
+					this.net.edit({ k: 'look', lid, look });
+				}
 				// what may have changed: each drawable layer's drawing showing, and drawings
 				// touched elsewhere (an undo on another frame)
 				const look = new Map<number, number>();
@@ -855,6 +918,7 @@ export class Together {
 		const id = this.canvas.addLayer(l.name);
 		if (!id) return;
 		this.ids.set(lid, id);
+		if (l.look) this.canvas.setLayer(id, l.look);
 		this.#refreshLock(lid);
 	}
 

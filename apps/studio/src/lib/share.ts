@@ -183,6 +183,8 @@ export const sendEdit = (body: unknown) => call<void>('share_edit', { body });
 export const sendPresence = (body: unknown) => call<void>('share_presence', { body });
 export const sendDirect = (to: string, body: unknown) => call<void>('share_direct', { to, body });
 export const leaveSession = () => call<void>('share_leave');
+/** An invite code as a QR code (SVG markup). */
+export const inviteQr = (code: string) => call<string>('share_qr', { code });
 
 /**
  * AI generation is a solo act (ADR-0013): AI tools stay hidden and refuse to run while

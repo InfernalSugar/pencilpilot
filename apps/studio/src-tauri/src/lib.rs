@@ -556,6 +556,18 @@ async fn ai_allowed(state: State<'_, share::Sharing>) -> Result<(), String> {
     state.solo_only().await
 }
 
+/// An invite code as a QR code (SVG), to scan instead of pasting.
+#[tauri::command]
+fn share_qr(code: String) -> Result<String, String> {
+    let qr = qrcode::QrCode::with_error_correction_level(code.as_bytes(), qrcode::EcLevel::M)
+        .map_err(|e| e.to_string())?;
+    Ok(qr
+        .render::<qrcode::render::svg::Color>()
+        .min_dimensions(200, 200)
+        .quiet_zone(true)
+        .build())
+}
+
 /// Leave the session.
 #[tauri::command]
 async fn share_leave(state: State<'_, share::Sharing>) -> Result<(), String> {
@@ -630,6 +642,7 @@ pub fn run() {
             share_direct,
             share_presence,
             share_leave,
+            share_qr,
             ai_allowed
         ])
         .run(tauri::generate_context!())

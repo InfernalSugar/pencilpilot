@@ -3292,7 +3292,17 @@
 	export const paintLayers = () =>
 		layerList()
 			.filter((l) => !l.adjust)
-			.map((l) => ({ id: l.id, name: l.name }));
+			.map((l) => ({
+				id: l.id,
+				name: l.name,
+				look: {
+					visible: l.visible,
+					opacity: l.opacity,
+					blend: l.blend as string,
+					alphaLock: l.alphaLock,
+					clip: !!l.clip
+				}
+			}));
 
 	/** Change layer settings as one undo step. */
 	export function setLayer(id: number, patch: Partial<LayerSettings>) {

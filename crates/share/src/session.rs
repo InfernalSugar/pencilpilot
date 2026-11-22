@@ -601,7 +601,17 @@ async fn bind(id: &Identity, relays: &Relays) -> Result<Endpoint> {
         }
         Relays::Off => Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled),
     };
+    // someone whose app closes or loses its connection is noticed within about 10 s
+    let quic = iroh::endpoint::QuicTransportConfig::builder()
+        .keep_alive_interval(Duration::from_secs(3))
+        .max_idle_timeout(Some(
+            Duration::from_secs(10)
+                .try_into()
+                .expect("10 s is a valid idle timeout"),
+        ))
+        .build();
     builder
+        .transport_config(quic)
         .dns_resolver(resolver())
         .secret_key(id.secret())
         .alpns(vec![ALPN.to_vec()])

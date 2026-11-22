@@ -25,8 +25,15 @@ function tile(v: number) {
 
 /** A canvas: layers with drawings of tiles. */
 class FakeCanvas implements CanvasPort {
-	layerList: { id: number; name: string; locked: boolean; visible: boolean; drawing: number }[] =
-		[];
+	layerList: {
+		id: number;
+		name: string;
+		locked: boolean;
+		visible: boolean;
+		drawing: number;
+		opacity: number;
+		blend: string;
+	}[] = [];
 	drawings = new Map<number, TileMap>();
 	selected = 0;
 	busy = false;
@@ -36,10 +43,21 @@ class FakeCanvas implements CanvasPort {
 	}
 	addLayer(name: string) {
 		const id = this.#next++;
-		this.layerList.push({ id, name, locked: false, visible: true, drawing: 0 });
+		this.layerList.push({
+			id,
+			name,
+			locked: false,
+			visible: true,
+			drawing: 0,
+			opacity: 1,
+			blend: 'normal'
+		});
 		return id;
 	}
-	setLayer(id: number, patch: { name?: string; locked?: boolean; visible?: boolean }) {
+	setLayer(
+		id: number,
+		patch: { name?: string; locked?: boolean; visible?: boolean; opacity?: number; blend?: string }
+	) {
 		Object.assign(
 			this.layerList.find((l) => l.id === id)!,
 			patch
@@ -124,7 +142,17 @@ class FakeCanvas implements CanvasPort {
 		return true;
 	}
 	layers() {
-		return this.layerList.map((l) => ({ id: l.id, name: l.name }));
+		return this.layerList.map((l) => ({
+			id: l.id,
+			name: l.name,
+			look: {
+				visible: l.visible,
+				opacity: l.opacity,
+				blend: l.blend,
+				alphaLock: false,
+				clip: false
+			}
+		}));
 	}
 	/** draw: set a tile on a layer, if it isn't locked */
 	paint(id: number, x: number, y: number, v: number) {
@@ -497,5 +525,36 @@ describe('drawing together: apps', () => {
 		await session.settle();
 		expect(cc.pixel(cc.byName('Sky').id, 1, 1)).toBe(9);
 		expect(readSavedShare({ code: 'nope' })).toBeNull();
+	});
+
+	it('shares layer settings (opacity, blend, visibility) from whoever may draw there', async () => {
+		const session = new FakeSession();
+		const hc = new FakeCanvas(['Sky']);
+		const host = new Together(A, 'Ana', hc, session.net(A));
+		session.apps.set(A, host);
+		await host.startHost();
+		await session.settle();
+		const bc = new FakeCanvas();
+		const bo = new Together(B, 'Bo', bc, session.net(B));
+		session.apps.set(B, bo);
+		bo.startJoin(A);
+		await session.settle();
+
+		hc.setLayer(hc.byName('Sky').id, { opacity: 0.4, blend: 'multiply' });
+		await host.localChanged();
+		await session.settle();
+		expect(bc.byName('Sky')).toMatchObject({ opacity: 0.4, blend: 'multiply' });
+
+		// Bo changing Ana's layer here doesn't go anywhere (he may not draw there)
+		bc.setLayer(bc.byName('Sky').id, { opacity: 1 });
+		await bo.localChanged();
+		await session.settle();
+		expect(hc.byName('Sky').opacity).toBe(0.4);
+		// and nothing echoes back and forth
+		const before = session.seq;
+		await host.localChanged();
+		await bo.localChanged();
+		await session.settle();
+		expect(session.seq).toBe(before);
 	});
 });

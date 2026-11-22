@@ -1531,7 +1531,7 @@
 	function canvasPort(c: PaintCanvas): CanvasPort {
 		return {
 			addLayer: (name) => c.addLayerQuiet(name),
-			setLayer: (id, patch) => c.setLayerQuiet(id, patch),
+			setLayer: (id, patch) => c.setLayerQuiet(id, patch as Partial<LayerSettings>),
 			drawingOf: (id) => c.layerDrawingOf(id),
 			newDrawing: () => c.newDrawing(),
 			layerOfDrawing: (d) =>
@@ -1760,6 +1760,10 @@
 					};
 				if (
 					[
+						'duplicateLayer',
+						'addMask',
+						'deleteMask',
+						'applyMask',
 						'moveLayerTo',
 						'mergeDown',
 						'addGroup',
@@ -1949,6 +1953,9 @@
 			// saved for real: the recovery copy has done its job
 			await discardRecovery(docId).catch(() => {});
 			recoveredVersion = 0;
+			if (together || savedShare)
+				fileNote =
+					'Saved your copy of this shared project. Open it any time and press Rejoin (Draw together) to carry on with the others.';
 		} catch (e) {
 			fileNote = `Couldn’t save: ${e}`;
 		} finally {
