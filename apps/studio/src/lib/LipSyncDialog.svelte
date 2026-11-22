@@ -237,7 +237,7 @@
 		flex-wrap: wrap;
 		gap: 4px 16px;
 		margin: 0 0 12px;
-		color: #6b6b74;
+		color: var(--pp-muted);
 		font-size: 13px;
 	}
 	.range label {
@@ -248,15 +248,15 @@
 		margin: 8px 0;
 		padding: 8px 10px;
 		border-radius: 10px;
-		background: #fff4d6;
+		background: var(--pp-note);
 		font-size: 13px;
 	}
 	.hint {
-		background: #f1ecdf;
+		background: var(--pp-surface-sunk);
 	}
 	.error {
 		margin: 8px 0;
-		color: #b3261e;
+		color: var(--pp-error);
 		font-size: 13px;
 	}
 	.field {
@@ -269,9 +269,9 @@
 	}
 	select,
 	textarea {
-		border: 1px solid rgba(0, 0, 0, 0.15);
+		border: 1px solid color-mix(in srgb, currentColor 15%, transparent);
 		border-radius: 10px;
-		background: #fff;
+		background: var(--pp-surface);
 		font: inherit;
 		font-weight: 400;
 	}
@@ -291,7 +291,7 @@
 	}
 	.chart-head span {
 		flex: 1;
-		color: #6b6b74;
+		color: var(--pp-muted);
 		font-size: 12px;
 	}
 	.chart-head button,
@@ -300,7 +300,7 @@
 		padding: 0 12px;
 		border: 0;
 		border-radius: 10px;
-		background: #e9e4d6;
+		background: var(--pp-track);
 		font: 600 13px var(--pp-font-body);
 		cursor: pointer;
 	}
@@ -317,14 +317,14 @@
 		gap: 4px;
 		padding: 6px;
 		border-radius: 12px;
-		background: #f1ecdf;
+		background: var(--pp-surface-sunk);
 		font-size: 11px;
 	}
 	.shape.extended {
-		background: #f6f2e8;
+		background: var(--pp-ground);
 	}
 	.shape.set {
-		background: #fff;
+		background: var(--pp-surface);
 		box-shadow: inset 0 0 0 2px var(--pp-accent-strong, #e8492f);
 	}
 	.pic {
@@ -332,8 +332,8 @@
 		place-items: center;
 		height: 56px;
 		border-radius: 8px;
-		background: #fff;
-		color: #b8b2a3;
+		background: var(--pp-surface);
+		color: var(--pp-muted);
 		font-size: 22px;
 	}
 	.pic img {

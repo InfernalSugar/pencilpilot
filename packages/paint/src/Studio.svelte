@@ -5,6 +5,24 @@
 		/** small second line (e.g. the current layer or brush) */
 		meta?: string;
 	}
+
+	/** Which bars and panels are folded away, and how big they are (kept by the app). */
+	export interface StudioLayout {
+		/** the options bar is open */
+		options: boolean;
+		/** the tool options bar under it is open */
+		context: boolean;
+		/** the bottom bar (the timeline) is open */
+		bottom: boolean;
+		/** the dock is open (wide windows; narrower ones slide it in) */
+		dock: boolean;
+		/** the bottom bar's height in px (0: as tall as it needs) */
+		bottomHeight: number;
+		/** the dock's width in px */
+		dockWidth: number;
+	}
+	/** what the bottom bar and the dock may be resized to */
+	export const SIZES = { bottomMin: 120, bottomMax: 640, dockMin: 260, dockMax: 640 };
 </script>
 
 <script lang="ts">
@@ -19,6 +37,7 @@
 	let {
 		backHref,
 		title,
+		menu,
 		actions,
 		rail,
 		options,
@@ -33,11 +52,14 @@
 		tabs = [],
 		tab = $bindable(''),
 		dockOpen = $bindable(false),
-		dockLabel = 'Panel'
+		dockLabel = 'Panel',
+		layout = $bindable()
 	}: {
 		/** the back button (none: no back button) */
 		backHref?: string;
 		title: Snippet;
+		/** a menu on the left of the top bar, after the back button (the title goes right) */
+		menu?: Snippet;
 		/** right side of the top bar */
 		actions?: Snippet;
 		rail: Snippet;
@@ -62,7 +84,48 @@
 		dockOpen?: boolean;
 		/** the dock's button when it has no tabs */
 		dockLabel?: string;
+		/** bars that fold away and resize (none: they stay as they are) */
+		layout?: StudioLayout;
 	} = $props();
+
+	let bottomEl = $state<HTMLDivElement>();
+	/** a drag on the bottom bar's or the dock's edge */
+	let drag: { what: 'bottom' | 'dock'; from: number; size: number } | null = null;
+	const clamp = (v: number, lo: number, hi: number) => Math.round(Math.min(hi, Math.max(lo, v)));
+
+	function resizeTo(what: 'bottom' | 'dock', size: number) {
+		if (!layout) return;
+		if (what === 'bottom') layout.bottomHeight = clamp(size, SIZES.bottomMin, SIZES.bottomMax);
+		else layout.dockWidth = clamp(size, SIZES.dockMin, SIZES.dockMax);
+	}
+	const bottomNow = () =>
+		layout?.bottomHeight || Math.round(bottomEl?.getBoundingClientRect().height ?? 200);
+
+	function edgeDown(e: PointerEvent, what: 'bottom' | 'dock') {
+		if (!layout || e.button !== 0) return;
+		e.preventDefault();
+		(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+		drag =
+			what === 'bottom'
+				? { what, from: e.clientY, size: bottomNow() }
+				: { what, from: e.clientX, size: layout.dockWidth };
+	}
+	function edgeMove(e: PointerEvent) {
+		if (!drag) return;
+		// up makes the bottom bar taller; left makes the dock wider
+		if (drag.what === 'bottom') resizeTo('bottom', drag.size + drag.from - e.clientY);
+		else resizeTo('dock', drag.size + drag.from - e.clientX);
+	}
+	function edgeKey(e: KeyboardEvent, what: 'bottom' | 'dock') {
+		if (!layout) return;
+		const grow =
+			what === 'bottom' ? { ArrowUp: 1, ArrowDown: -1 } : { ArrowLeft: 1, ArrowRight: -1 };
+		const step = grow[e.key as keyof typeof grow];
+		if (!step) return;
+		e.preventDefault();
+		const now = what === 'bottom' ? bottomNow() : layout.dockWidth;
+		resizeTo(what, now + step * (e.shiftKey ? 64 : 16));
+	}
 
 	let root: HTMLDivElement;
 	let height = $state('calc(100dvh - 80px)');
@@ -113,13 +176,28 @@
 	const hasDock = $derived(!!(dockTop || panel));
 </script>
 
+{#snippet chevron(dir: 'up' | 'down' | 'left' | 'right')}
+	<svg viewBox="0 0 24 24" aria-hidden="true">
+		<path
+			d={dir === 'up'
+				? 'M6 15l6-6 6 6'
+				: dir === 'down'
+					? 'M6 9l6 6 6-6'
+					: dir === 'left'
+						? 'M15 6l-6 6 6 6'
+						: 'M9 6l6 6-6 6'}
+		/>
+	</svg>
+{/snippet}
+
 <div class="studio" bind:this={root} style="height: {height}">
-	<header class="sbar">
+	<header class="sbar" class:menu-first={!!menu}>
 		{#if backHref}
 			<a class="icon-btn" href={backHref} aria-label="Back" title="Back">
 				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7" /></svg>
 			</a>
 		{/if}
+		{#if menu}<div class="sbar-menu">{@render menu()}</div>{/if}
 		<div class="title">{@render title()}</div>
 		<div class="sbar-actions">
 			{@render actions?.()}
@@ -190,18 +268,120 @@
 	</header>
 
 	<div class="work">
-		<div class="rail">{@render rail()}</div>
+		<div class="rail pp-ink-bar">{@render rail()}</div>
 
 		<div class="center">
 			{#if options}
-				<div class="opts" role="group" aria-label="Brush options">{@render options()}</div>
+				{#if layout && !layout.options}
+					<div class="strip pp-ink-bar">
+						<button
+							type="button"
+							class="fold"
+							aria-expanded="false"
+							aria-label="Show the brush options"
+							title="Show the brush options"
+							onclick={() => layout && (layout.options = true)}
+						>
+							{@render chevron('down')}<span>Brush options</span>
+						</button>
+					</div>
+				{:else}
+					<div class="opts pp-ink-bar" role="group" aria-label="Brush options">
+						{@render options()}
+						{#if layout}
+							<button
+								type="button"
+								class="fold end"
+								aria-expanded="true"
+								aria-label="Hide the brush options"
+								title="Hide the brush options"
+								onclick={() => layout && (layout.options = false)}
+							>
+								{@render chevron('up')}
+							</button>
+						{/if}
+					</div>
+				{/if}
 			{/if}
 			{#if context}
-				<div class="ctx">{@render context()}</div>
+				{#if layout && !layout.context}
+					<div class="strip pp-ink-bar">
+						<button
+							type="button"
+							class="fold"
+							aria-expanded="false"
+							aria-label="Show the tool options bar"
+							title="Show the tool options bar"
+							onclick={() => layout && (layout.context = true)}
+						>
+							{@render chevron('down')}<span>Tool options</span>
+						</button>
+					</div>
+				{:else}
+					<div class="ctx pp-ink-bar">
+						<div class="ctx-body">{@render context()}</div>
+						{#if layout}
+							<button
+								type="button"
+								class="fold end"
+								aria-expanded="true"
+								aria-label="Hide the tool options bar"
+								title="Hide the tool options bar"
+								onclick={() => layout && (layout.context = false)}
+							>
+								{@render chevron('up')}
+							</button>
+						{/if}
+					</div>
+				{/if}
 			{/if}
 			{@render banner?.()}
 			<div class="stage">{@render stage()}</div>
-			{#if bottom}<div class="bottom">{@render bottom()}</div>{/if}
+			{#if bottom}
+				{#if layout}
+					<div class="bottom-edge" class:folded={!layout.bottom} class:pp-ink-bar={!layout.bottom}>
+						{#if layout.bottom}
+							<!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+							<div
+								class="grip"
+								role="separator"
+								aria-orientation="horizontal"
+								aria-label="Resize the timeline"
+								aria-valuemin={SIZES.bottomMin}
+								aria-valuemax={SIZES.bottomMax}
+								aria-valuenow={layout.bottomHeight || undefined}
+								title="Drag to resize (double-click: as tall as it needs)"
+								tabindex="0"
+								onpointerdown={(e) => edgeDown(e, 'bottom')}
+								onpointermove={edgeMove}
+								onpointerup={() => (drag = null)}
+								onpointercancel={() => (drag = null)}
+								onkeydown={(e) => edgeKey(e, 'bottom')}
+								ondblclick={() => layout && (layout.bottomHeight = 0)}
+							></div>
+						{/if}
+						<button
+							type="button"
+							class="fold"
+							aria-expanded={layout.bottom}
+							aria-label={layout.bottom ? 'Hide the timeline' : 'Show the timeline'}
+							title={layout.bottom ? 'Hide the timeline' : 'Show the timeline'}
+							onclick={() => layout && (layout.bottom = !layout.bottom)}
+						>
+							{@render chevron(layout.bottom ? 'down' : 'up')}<span>Timeline</span>
+						</button>
+					</div>
+				{/if}
+				<div
+					class="bottom"
+					class:sized={!!layout?.bottomHeight}
+					hidden={layout && !layout.bottom}
+					bind:this={bottomEl}
+					style:height={layout?.bottomHeight ? `${layout.bottomHeight}px` : undefined}
+				>
+					{@render bottom()}
+				</div>
+			{/if}
 		</div>
 
 		{#if hasDock}
@@ -213,7 +393,47 @@
 					onclick={() => (dockOpen = false)}
 				></button>
 			{/if}
-			<aside class="dock" class:open={dockOpen} aria-label="Side panel">
+			{#if layout}
+				{#if layout.dock}
+					<!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+					<div
+						class="dock-edge"
+						role="separator"
+						aria-orientation="vertical"
+						aria-label="Resize the side panel"
+						aria-valuemin={SIZES.dockMin}
+						aria-valuemax={SIZES.dockMax}
+						aria-valuenow={layout.dockWidth}
+						title="Drag to resize"
+						tabindex="0"
+						onpointerdown={(e) => edgeDown(e, 'dock')}
+						onpointermove={edgeMove}
+						onpointerup={() => (drag = null)}
+						onpointercancel={() => (drag = null)}
+						onkeydown={(e) => edgeKey(e, 'dock')}
+					></div>
+				{:else}
+					<div class="dock-strip">
+						<button
+							type="button"
+							class="fold"
+							aria-expanded="false"
+							aria-label="Show the side panel"
+							title="Show the side panel"
+							onclick={() => layout && (layout.dock = true)}
+						>
+							{@render chevron('left')}<span>Panels</span>
+						</button>
+					</div>
+				{/if}
+			{/if}
+			<aside
+				class="dock"
+				class:open={dockOpen}
+				class:folded={layout && !layout.dock}
+				style:--dock-w={layout ? `${layout.dockWidth}px` : undefined}
+				aria-label="Side panel"
+			>
 				<button
 					type="button"
 					class="dock-close"
@@ -240,6 +460,18 @@
 									{#if t.meta}<span class="tab-meta">{t.meta}</span>{/if}
 								</button>
 							{/each}
+							{#if layout}
+								<button
+									type="button"
+									class="fold dock-fold"
+									aria-expanded="true"
+									aria-label="Hide the side panel"
+									title="Hide the side panel"
+									onclick={() => layout && (layout.dock = false)}
+								>
+									{@render chevron('right')}
+								</button>
+							{/if}
 						</div>
 					{/if}
 					<div class="tab-panel" role="tabpanel" id="panel-{tab}" aria-labelledby="tab-{tab}">
@@ -305,6 +537,22 @@
 		gap: 8px;
 		margin-left: auto;
 	}
+	/* the menu on the left, the title on the right */
+	.sbar-menu {
+		flex: 1 1 auto;
+		min-width: 0;
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 4px;
+	}
+	.menu-first .title {
+		flex: 0 1 auto;
+		align-items: flex-end;
+	}
+	.menu-first .sbar-actions {
+		margin-left: 0;
+	}
 	.sbar-actions :global(.btn) {
 		min-height: 40px;
 		padding: 8px 18px;
@@ -333,7 +581,7 @@
 	}
 	.icon-btn[aria-pressed='true'] {
 		background: var(--pp-ink);
-		color: #fff;
+		color: var(--pp-on-ink);
 	}
 
 	.work {
@@ -344,6 +592,7 @@
 		position: relative;
 	}
 	.rail {
+		color-scheme: dark;
 		flex: none;
 		display: flex;
 		flex-direction: column;
@@ -382,11 +631,164 @@
 		flex: none;
 	}
 	.ctx {
+		align-items: flex-start;
+	}
+	.ctx-body {
+		flex: 1 1 auto;
+		min-width: 0;
+		display: flex;
 		flex-direction: column;
 		align-items: stretch;
+		gap: 8px 14px;
 	}
-	.ctx:not(:has(*)) {
+	.ctx:not(:has(.ctx-body *)) {
 		display: none;
+	}
+
+	/* folding bars away: a chevron button, and a slim strip while folded */
+	.fold {
+		flex: none;
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		height: 28px;
+		min-width: 28px;
+		padding: 0 6px;
+		border: 0;
+		border-radius: 9px;
+		background: transparent;
+		color: inherit;
+		font: 600 12px var(--pp-font-body);
+		opacity: 0.75;
+		cursor: pointer;
+	}
+	.fold:hover,
+	.fold:focus-visible {
+		opacity: 1;
+		background: color-mix(in srgb, currentColor 14%, transparent);
+	}
+	.fold svg {
+		width: 16px;
+		height: 16px;
+		fill: none;
+		stroke: currentColor;
+		stroke-width: 2.4;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+	}
+	.fold.end {
+		position: sticky;
+		right: 0;
+		margin-left: auto;
+		background: var(--pp-ink);
+		box-shadow: -10px 0 10px var(--pp-ink);
+	}
+	.fold.end:hover,
+	.fold.end:focus-visible {
+		background: #2a2a30;
+	}
+	.strip {
+		flex: none;
+		display: flex;
+		align-items: center;
+		padding: 2px 8px;
+		background: var(--pp-ink);
+		color: var(--pp-on-ink);
+		border-radius: 12px;
+	}
+	.strip .fold {
+		height: 22px;
+	}
+	.bottom-edge {
+		flex: none;
+		position: relative;
+		display: flex;
+		justify-content: flex-end;
+		height: 12px;
+		margin: -4px 0 -6px;
+		color: var(--pp-muted);
+	}
+	.bottom-edge .fold {
+		position: relative;
+		z-index: 1;
+		height: 22px;
+		margin-top: -5px;
+		padding: 0 8px;
+		background: var(--pp-ground);
+		border-radius: 8px 8px 0 0;
+	}
+	.bottom-edge.folded {
+		height: auto;
+		margin: 0;
+		padding: 2px 8px;
+		justify-content: flex-start;
+		background: var(--pp-ink);
+		color: var(--pp-on-ink);
+		border-radius: 12px;
+	}
+	.bottom-edge.folded .fold {
+		height: 22px;
+		margin: 0;
+		background: transparent;
+	}
+	.grip {
+		position: absolute;
+		inset: 0;
+		cursor: row-resize;
+		touch-action: none;
+	}
+	.grip::after,
+	.dock-edge::after {
+		content: '';
+		position: absolute;
+		inset: 50% auto auto 50%;
+		width: 44px;
+		height: 4px;
+		border-radius: 2px;
+		background: currentColor;
+		opacity: 0.35;
+		transform: translate(-50%, -50%);
+	}
+	.grip:hover::after,
+	.grip:focus-visible::after,
+	.dock-edge:hover::after,
+	.dock-edge:focus-visible::after {
+		opacity: 0.8;
+		background: var(--pp-accent);
+	}
+	.dock-edge {
+		flex: none;
+		position: relative;
+		width: 8px;
+		margin: 0 -8px;
+		color: var(--pp-muted);
+		cursor: col-resize;
+		touch-action: none;
+	}
+	.dock-edge::after {
+		width: 4px;
+		height: 44px;
+	}
+	.dock-strip {
+		flex: none;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		padding: 6px 2px;
+		background: var(--pp-surface);
+		border-radius: 14px;
+	}
+	.dock-strip .fold {
+		flex-direction: column;
+		height: auto;
+		padding: 8px 2px;
+	}
+	.dock-strip .fold span {
+		writing-mode: vertical-rl;
+	}
+	.tabs .dock-fold {
+		align-self: center;
+		color: var(--pp-ink-2);
 	}
 	.stage {
 		flex: 1 1 0;
@@ -400,11 +802,22 @@
 		flex: none;
 		min-width: 0;
 	}
+	/* a height chosen by hand: the bar fills it (its own rows scroll; --pp-bottom-rows
+	   lifts its usual cap on them) */
+	.bottom.sized {
+		--pp-bottom-rows: none;
+		display: flex;
+		flex-direction: column;
+	}
+	.bottom.sized > :global(*) {
+		flex: 1 1 auto;
+		min-height: 0;
+	}
 
 	.dock {
 		--ref-max-h: min(28vh, 260px);
 		flex: none;
-		width: 330px;
+		width: var(--dock-w, 330px);
 		display: flex;
 		flex-direction: column;
 		gap: 8px;
@@ -424,7 +837,8 @@
 	}
 	.dock-close,
 	.dock-btn,
-	.scrim {
+	.scrim,
+	.dock.folded {
 		display: none;
 	}
 	.tabs {
@@ -500,6 +914,15 @@
 		.dock.open {
 			transform: none;
 			visibility: visible;
+		}
+		/* here the dock slides in when asked: folding and resizing are for wide windows */
+		.dock.folded {
+			display: flex;
+		}
+		.dock-edge,
+		.dock-strip,
+		.dock-fold {
+			display: none;
 		}
 		.dock-close {
 			display: grid;

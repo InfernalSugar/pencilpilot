@@ -254,7 +254,7 @@
 	.primary {
 		border: 0;
 		background: var(--pp-ink);
-		color: #fff;
+		color: var(--pp-on-ink);
 	}
 	.ghost {
 		border: 1px solid var(--pp-track);

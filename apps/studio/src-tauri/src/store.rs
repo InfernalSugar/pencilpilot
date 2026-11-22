@@ -310,6 +310,37 @@ pub struct RecentItem {
     /// when it was last saved (RFC 3339)
     pub modified: String,
     pub thumbnail: Option<String>,
+    /// a project drawn together: who it was with (its invite code stays in the file)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shared: Option<Shared>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Shared {
+    /// the names of the people in its session
+    pub with: Vec<String>,
+}
+
+/// A project's shared session (`extra.share`), if it has one: only the names leave.
+fn shared_of(extra: &serde_json::Value) -> Option<Shared> {
+    let share = extra.get("share")?;
+    let code = share.get("code")?.as_str()?;
+    if !code.starts_with("pp1-") {
+        return None;
+    }
+    let with = share
+        .get("members")
+        .and_then(|m| m.as_array())
+        .map(|m| {
+            m.iter()
+                .filter_map(|p| p.get("name")?.as_str())
+                .filter(|n| !n.is_empty())
+                .map(|n| n.chars().take(24).collect())
+                .take(12)
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(Shared { with })
 }
 
 fn recent_file(data: &Path) -> PathBuf {
@@ -361,6 +392,7 @@ pub fn recent_list(data: &Path) -> Vec<RecentItem> {
                 layers: m.layers.len(),
                 modified: m.modified,
                 thumbnail: thumb.as_deref().map(base64),
+                shared: shared_of(&m.extra),
                 path,
             },
             Err(_) => RecentItem {
@@ -372,6 +404,7 @@ pub fn recent_list(data: &Path) -> Vec<RecentItem> {
                 layers: 0,
                 modified: String::new(),
                 thumbnail: None,
+                shared: None,
             },
         })
         .collect()
@@ -541,6 +574,22 @@ mod tests {
         }
         assert_eq!(recent_paths(&data).len(), RECENT_KEPT);
         fs::remove_dir_all(&data).unwrap();
+    }
+
+    #[test]
+    fn a_shared_project_shows_who_it_was_with_but_not_its_code() {
+        let extra = serde_json::json!({ "share": {
+            "code": "pp1-secret",
+            "members": [{ "id": "a", "name": "Sam" }, { "id": "b", "name": "" }, { "id": "c", "name": "Ana" }]
+        }});
+        let s = shared_of(&extra).unwrap();
+        assert_eq!(s.with, vec!["Sam".to_string(), "Ana".to_string()]);
+        assert!(!serde_json::to_string(&s).unwrap().contains("secret"));
+        assert_eq!(shared_of(&serde_json::json!({})), None);
+        assert_eq!(
+            shared_of(&serde_json::json!({ "share": { "code": "nope" } })),
+            None
+        );
     }
 
     #[test]
