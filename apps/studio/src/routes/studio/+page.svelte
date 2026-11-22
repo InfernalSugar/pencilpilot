@@ -219,11 +219,13 @@
 		if (quiet) return;
 		docVersion++;
 		// what changed: the drawings showing, or one undo / redo just changed
-		cache.touch([
+		const touched = [
 			...s.layers.map((l) => l.drawing),
 			canvas?.undoDrawing() ?? 0,
 			canvas?.redoDrawing() ?? 0
-		]);
+		];
+		cache.touch(touched);
+		together?.touch(touched);
 		// drawing on an empty cel started a drawing (or a pasted picture got one): it's
 		// on this frame now
 		if (timelineFor !== canvasKey) return;
@@ -271,6 +273,8 @@
 		const [join, label] = [tlJoin, tlLabel || 'Timeline change'];
 		[tlJoin, tlLabel] = [false, ''];
 		if (now === tlSaved) return;
+		// drawing together: everyone gets it (theirs come in through putTimeline, not here)
+		together?.timelineChanged();
 		const id = tlNext++;
 		tlSteps.set(id, { before: tlSaved, after: now });
 		tlSaved = now;
@@ -1526,8 +1530,25 @@
 			addLayer: (name) => c.addLayerQuiet(name),
 			setLayer: (id, patch) => c.setLayerQuiet(id, patch),
 			drawingOf: (id) => c.layerDrawingOf(id),
-			packed: (d) => c.drawingTilesPacked(d),
-			put: (d, p) => c.putDrawingTiles(d, p),
+			newDrawing: () => c.newDrawing(),
+			layerOfDrawing: (d) =>
+				status?.layers.find((l) => l.drawing === d)?.id ?? layerOfDrawing(timeline, d),
+			drawingsOfLayer: (id) =>
+				timeline.scenes.flatMap((sc) =>
+					sc.cuts.flatMap((cut) => (cut.tracks[id] ?? []).map((e) => e.drawing).filter((d) => d))
+				),
+			// (a drawing far from the playhead may be in the frame store: fetched back first)
+			packed: async (d) => {
+				await cache.ensure([d]);
+				return c.drawingTilesPacked(d);
+			},
+			put: (d, p) => {
+				const ok = c.putDrawingTiles(d, p);
+				if (ok) cache.touch([d]);
+				return ok;
+			},
+			timeline: () => $state.snapshot(timeline) as Timeline,
+			setTimeline: (tl) => putTimeline(JSON.stringify(tl)),
 			select: (id) => c.selectLayer(id),
 			removeLayer: (id) => c.removeLayerQuiet(id),
 			moveNextTo: (id, ref, above) => c.moveLayerQuietNextTo(id, ref, above),
@@ -1553,7 +1574,7 @@
 		};
 		const host = info.members[0]?.id;
 		if (joining && host) together.startJoin(host);
-		else together.startHost();
+		else void together.startHost();
 		togetherTick++;
 	}
 
