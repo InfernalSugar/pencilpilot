@@ -258,3 +258,43 @@ test('interface: accent colour, the colour around the canvas, tooltips off', asy
 	await expect(brush).not.toHaveAttribute('title');
 	await expect(page.getByRole('button', { name: name! })).toBeVisible();
 });
+
+test('a selection: the area outside it shaded as strongly as Settings says', async ({ page }) => {
+	await stub(page, { selectionTint: 0.5, marchingAnts: false });
+	await studio(page);
+	await page.getByRole('button', { name: 'Rectangle select (M)' }).click();
+	const b = (await canvas(page).boundingBox())!;
+	await page.mouse.move(b.x + b.width * 0.3, b.y + b.height * 0.3);
+	await page.mouse.down();
+	await page.mouse.move(b.x + b.width * 0.7, b.y + b.height * 0.7, { steps: 8 });
+	await page.mouse.up();
+	// the shade: half strength outside, none inside
+	const alpha = (fx: number, fy: number) =>
+		page
+			.locator('canvas.ants')
+			.first()
+			.evaluate(
+				(el: HTMLCanvasElement, [fx, fy]) =>
+					el
+						.getContext('2d')!
+						.getImageData(Math.round(el.width * fx), Math.round(el.height * fy), 1, 1).data[3],
+				[fx, fy]
+			);
+	await expect.poll(() => alpha(0.1, 0.1)).toBe(128);
+	expect(await alpha(0.5, 0.5)).toBe(0);
+	if (SHOTS) await page.screenshot({ path: `${SHOTS}/selection-tint.png` });
+});
+
+test('undo goes back as many steps as Settings keeps', async ({ page }) => {
+	await stub(page, { undoSteps: 10 });
+	await studio(page);
+	for (let i = 0; i < 13; i++) await scribble(page, 0.1 + i * 0.06);
+	const undo = page.getByRole('button', { name: /^Undo/ });
+	let n = 0;
+	while (await undo.isEnabled()) {
+		await undo.click();
+		n++;
+		if (n > 20) break;
+	}
+	expect(n).toBe(10);
+});
