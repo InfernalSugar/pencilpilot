@@ -96,6 +96,7 @@ export function pack(doc: ProjectDoc): Uint8Array {
 		at += b.length;
 		return r;
 	};
+	const assisted = doc.layers.filter((l) => l.assist).map((l) => l.id);
 	const header: Header = {
 		canvas: { width: doc.width, height: doc.height },
 		fps: doc.fps,
@@ -117,7 +118,8 @@ export function pack(doc: ProjectDoc): Uint8Array {
 		groups: doc.groups,
 		activeLayer: doc.activeLayer,
 		strokes: doc.strokes,
-		extra: doc.extra,
+		// drawing assist is the app's, not the file format's: kept with the app's settings
+		extra: assisted.length ? { ...doc.extra, assistLayers: assisted } : doc.extra,
 		created: doc.created ?? null,
 		thumbnail: doc.thumbnail ? put(doc.thumbnail) : null,
 		...(doc.timelapse?.length
@@ -160,6 +162,8 @@ export function unpack(packet: ArrayBuffer | Uint8Array): ProjectDoc {
 	if (8 + n > bytes.length) throw new Error('the packet ends inside its header');
 	const h = JSON.parse(new TextDecoder().decode(bytes.subarray(8, 8 + n))) as Header;
 	const blobs = bytes.subarray(8 + n);
+	const extra = h.extra ?? {};
+	const assisted = Array.isArray(extra.assistLayers) ? (extra.assistLayers as unknown[]) : [];
 	const get = ([o, len]: [number, number]) => {
 		if (o + len > blobs.length) throw new Error('a layer points past the end of the packet');
 		return blobs.slice(o, o + len);
@@ -181,12 +185,13 @@ export function unpack(packet: ArrayBuffer | Uint8Array): ProjectDoc {
 			group: l.group,
 			adjust: l.adjust ?? null,
 			rgba: get(l.rgba),
-			mask: l.mask ? get(l.mask) : undefined
+			mask: l.mask ? get(l.mask) : undefined,
+			...(assisted.includes(l.id) ? { assist: true } : {})
 		})),
 		groups: h.groups ?? [],
 		activeLayer: h.activeLayer,
 		strokes: h.strokes ?? [],
-		extra: h.extra ?? {},
+		extra,
 		created: h.created ?? undefined,
 		thumbnail: h.thumbnail ? get(h.thumbnail) : null,
 		scenes: h.scenes ?? [],

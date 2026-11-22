@@ -87,17 +87,15 @@
 				</button>
 			{/each}
 		</div>
-		{#if opts.guides.perspective.points}
+		{#if opts.guides.perspective.points || opts.guides.grid.on}
+			{@const layer = status.layers.find((l) => l.id === status.active)}
 			<button
 				type="button"
 				class="tool"
-				aria-pressed={opts.guides.perspective.assist}
-				title="Assist: lines snap to the perspective directions"
-				onclick={() =>
-					opts.setGuides({
-						...opts.guides,
-						perspective: { ...opts.guides.perspective, assist: !opts.guides.perspective.assist }
-					})}
+				aria-pressed={!!layer?.assist}
+				disabled={!layer}
+				title="Drawing assist on this layer: strokes snap to the grid, isometric or perspective directions (each layer has its own, in Layers)"
+				onclick={() => layer && canvas?.setLayerAssist(layer.id, !layer.assist)}
 			>
 				Assist
 			</button>

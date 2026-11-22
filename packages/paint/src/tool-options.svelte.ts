@@ -7,6 +7,7 @@
 import type PaintCanvas from './PaintCanvas.svelte';
 import type { CanvasStatus, ImportResult } from './PaintCanvas.svelte';
 import { defaultGuides, type GuideSettings } from './guides';
+import { smoothTool, type SmoothTool } from './stabilizer';
 import { NO_SPEC, parseSpec, specName, type AdjustSpec } from './tone';
 
 type Canvas = ReturnType<typeof PaintCanvas>;
@@ -47,6 +48,8 @@ export class ToolOptions {
 	wandContiguous = $state(true);
 	wandTolerance = $state(0.15);
 	smudgeStrength = $state(0.6);
+	/** smoothing (0–1) for each painting tool, like Procreate's StreamLine */
+	smoothing = $state<Record<SmoothTool, number>>({ brush: 0, eraser: 0, smudge: 0 });
 	/** the pen tool's path: points and whether it's closed */
 	penInfo = $state({ points: 0, closed: false });
 	penTaper = $state(true);
@@ -104,6 +107,12 @@ export class ToolOptions {
 	get fillReference() {
 		const id = this.fillRefLayer;
 		return this.host.status().layers.some((l) => l.id === id) ? id : 0;
+	}
+
+	/** the smoothing a stroke with this tool gets (0 for tools that don't paint strokes) */
+	smoothingFor(tool: string, eraser: boolean) {
+		const k = smoothTool(tool, eraser);
+		return k ? this.smoothing[k] : 0;
 	}
 
 	/** the gradient's end, as `PaintCanvas` takes it */

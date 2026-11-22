@@ -28,6 +28,8 @@
 		deleteGroup(id: number): void;
 		mergeGroup(id: number): void;
 		moveGroup(id: number, up: boolean): void;
+		/** drawing assist on a layer (strokes snap to the guides) */
+		setLayerAssist?(id: number, on: boolean): void;
 	}
 </script>
 
@@ -381,6 +383,17 @@
 				>
 					Clip to below
 				</button>
+				{#if controls?.setLayerAssist}
+					<button
+						type="button"
+						class="chip"
+						aria-pressed={!!active.assist}
+						title="Drawing assist: strokes on this layer snap to the grid, isometric or perspective guide"
+						onclick={() => controls?.setLayerAssist?.(active.id, !active.assist)}
+					>
+						Drawing assist
+					</button>
+				{/if}
 				{#if active.group}
 					<button
 						type="button"
@@ -657,6 +670,7 @@
 							<span class="meta">
 								{#if l.blend !== 'normal'}{BLENDS.find((b) => b.id === l.blend)?.label}{/if}
 								{#if l.opacity < 1}{Math.round(l.opacity * 100)}%{/if}
+								{#if l.assist}Assisted{/if}
 							</span>
 						</button>
 					{/if}
