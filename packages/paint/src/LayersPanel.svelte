@@ -1044,7 +1044,7 @@
 	}
 	.chip[aria-pressed='true'] {
 		background: var(--pp-ink);
-		color: #fff;
+		color: var(--pp-on-ink);
 	}
 	.list {
 		list-style: none;

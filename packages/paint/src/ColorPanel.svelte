@@ -277,7 +277,7 @@
 		border: 0;
 		border-radius: 999px;
 		background: var(--pp-ink);
-		color: #fff;
+		color: var(--pp-on-ink);
 		font: 600 13px var(--pp-font-body);
 		cursor: pointer;
 	}
@@ -288,7 +288,7 @@
 	}
 	.mini[aria-pressed='true'] {
 		background: var(--pp-ink);
-		color: #fff;
+		color: var(--pp-on-ink);
 	}
 	.sv {
 		position: relative;

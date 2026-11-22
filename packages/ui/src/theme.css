@@ -20,6 +20,10 @@
 	--pp-lilac: #d9d2ff;
 	--pp-lilac-ink: #4a3f8c;
 	--pp-track: #efece4;
+	--pp-paper: #fffdf6; /* dialogs and sheets */
+	--pp-error: #b3261e;
+	--pp-note: #fff4d6; /* a note's background */
+	--pp-good-bg: #e3f2ef;
 	--pp-cat-anime: #e8492f;
 	--pp-cat-real: #3d6bff;
 	--pp-cat-animals: #f2a93b;
@@ -41,6 +45,67 @@
 
 	/* motion */
 	--pp-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+
+	color-scheme: light;
+}
+
+/* Dark: for the interface only (the app sets data-theme on <html>); drawings and
+   paper keep their own colours. */
+:root[data-theme='dark'] {
+	--pp-ground: #141417;
+	--pp-surface: #212127;
+	--pp-surface-sunk: #2d2d34;
+	--pp-paper: #212127;
+	--pp-ink: #ecebf0;
+	--pp-ink-2: #c9c8d0;
+	--pp-muted: #a3a2ab;
+	--pp-on-ink: #16161a;
+	--pp-on-ink-muted: #4a4950;
+	--pp-accent-ink: #ff8a6e; /* accent text on dark grounds (passes 4.5:1) */
+	--pp-lilac: #3d3670;
+	--pp-lilac-ink: #cfc7ff;
+	--pp-track: #2a2a30;
+	--pp-error: #ff8a80;
+	--pp-note: #3a3320;
+	--pp-good-bg: #1c3934;
+
+	color-scheme: dark;
+}
+
+/* Bars that are dark in both themes (the tool rail, the options bars, the timeline):
+   inside them the light theme's colours stay, so they look the same either way. */
+.pp-ink-bar {
+	color-scheme: dark;
+}
+:root[data-theme='dark'] .pp-ink-bar {
+	--pp-ground: #f6f4ef;
+	--pp-surface: #ffffff;
+	--pp-surface-sunk: #e9e6de;
+	--pp-paper: #fffdf6;
+	--pp-ink: #16161a;
+	--pp-ink-2: #44434a;
+	--pp-muted: #6b6a70;
+	--pp-on-ink: #f6f4ef;
+	--pp-on-ink-muted: #a9a7b0;
+	--pp-accent-ink: #c2391f;
+	--pp-lilac: #d9d2ff;
+	--pp-lilac-ink: #4a3f8c;
+	--pp-track: #efece4;
+	--pp-error: #b3261e;
+	--pp-note: #fff4d6;
+	--pp-good-bg: #e3f2ef;
+}
+
+/* Lists of choices: readable in either theme, whatever the box around them looks like. */
+option,
+optgroup {
+	background-color: var(--pp-surface);
+	color: var(--pp-ink);
+}
+.pp-ink-bar option,
+.pp-ink-bar optgroup {
+	background-color: #2a2a30;
+	color: #f6f4ef;
 }
 
 *,

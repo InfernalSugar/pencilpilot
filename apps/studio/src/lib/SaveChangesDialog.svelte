@@ -75,13 +75,13 @@
 		padding: 8px 14px;
 		border: 0;
 		border-radius: 10px;
-		background: #f1ecdf;
+		background: var(--pp-surface-sunk);
 		color: inherit;
 		font: inherit;
 		cursor: pointer;
 	}
 	button.go {
 		background: var(--pp-ink, #16161a);
-		color: #fff;
+		color: var(--pp-on-ink);
 	}
 </style>

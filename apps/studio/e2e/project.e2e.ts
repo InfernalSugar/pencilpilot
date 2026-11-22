@@ -475,6 +475,8 @@ test('settings: change a key (a taken key swaps), and it works in the studio', a
 	await page.setViewportSize({ width: 1440, height: 960 });
 	await page.goto('/');
 	await page.getByRole('link', { name: 'Settings' }).click();
+	// (in sections: the keys have their own)
+	await page.getByRole('tab', { name: 'Keyboard shortcuts' }).click();
 	const brush = page.locator('li[data-action="brush"]');
 	const pen = page.locator('li[data-action="pen"]');
 	await expect(brush.locator('kbd')).toHaveText('B');
@@ -526,8 +528,13 @@ test('settings: touch and file choices are kept', async ({ page }) => {
 	await stubTauri(page);
 	await page.setViewportSize({ width: 1440, height: 960 });
 	await page.goto('/settings');
+	await page.getByRole('tab', { name: 'Pen and touch' }).click();
 	await page.getByLabel('Always moves the view (pen only for drawing)').check();
 	await page.getByLabel('Two-finger tap undoes, three-finger tap redoes').uncheck();
+	// the sections follow up and down
+	await page.getByRole('tab', { name: 'Pen and touch' }).press('ArrowDown');
+	await expect(page.getByRole('tab', { name: 'Keyboard shortcuts' })).toBeFocused();
+	await page.getByRole('tab', { name: 'Files' }).click();
 	await page.getByLabel('Keep a recovery copy of unsaved work').selectOption('60');
 	await page.getByLabel('Earlier versions kept per project').fill('5');
 	await expect
@@ -537,7 +544,187 @@ test('settings: touch and file choices are kept', async ({ page }) => {
 		})
 		.toMatchObject({ fingers: 'move', tapGestures: false, autosaveSeconds: 60, versionsKept: 5 });
 	await page.getByRole('button', { name: 'Reset all' }).click();
+	await page.getByRole('tab', { name: 'Pen and touch' }).click();
 	await expect(page.getByLabel('Draws until you use a pen, then moves the view')).toBeChecked();
+});
+
+/** what the app last kept of its settings */
+async function keptSettings(page: Page) {
+	const last = (await calls(page)).filter((c) => c.cmd === 'settings_set').at(-1);
+	return last ? JSON.parse(last.json!).settings : null;
+}
+
+test('settings open over the canvas (no leaving, no question) and apply as they change', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	await scribble(page, 0.5);
+	const drawn = await ink(page);
+	await expect(page.getByLabel('not saved')).toBeVisible();
+	// the menu sits on the left, after the back button; the project's name on the right
+	const back = (await page.getByRole('link', { name: 'Back' }).boundingBox())!;
+	const file = (await page.getByRole('button', { name: 'File', exact: true }).boundingBox())!;
+	const name = (await page.getByTestId('project-name').boundingBox())!;
+	expect(back.x).toBeLessThan(file.x);
+	expect(file.x).toBeLessThan(name.x);
+
+	await page.getByRole('button', { name: 'Settings', exact: true }).click();
+	const dialog = page.getByRole('dialog', { name: 'Settings' });
+	await expect(dialog).toBeVisible();
+	await expect(page.getByRole('dialog', { name: 'Save before leaving?' })).toHaveCount(0);
+	await expect(page).toHaveURL(/\/studio/);
+	// a new key, in use as soon as the window closes
+	await dialog.getByRole('tab', { name: 'Keyboard shortcuts' }).click();
+	await dialog.getByRole('button', { name: 'Change the key for Eraser' }).click();
+	await page.keyboard.press('Shift+E');
+	await expect(dialog.locator('li[data-action="eraser"] kbd')).toHaveText('Shift+E');
+	// (Esc while choosing a key only stops choosing; now it closes)
+	await page.keyboard.press('Escape');
+	await expect(dialog).toHaveCount(0);
+	await expect(page.getByLabel('not saved')).toBeVisible();
+	expect(await ink(page)).toBeGreaterThan(drawn * 0.9);
+	await page.keyboard.press('Shift+E');
+	await expect(page.getByRole('button', { name: 'Eraser (Shift+E)' })).toHaveAttribute(
+		'aria-pressed',
+		'true'
+	);
+	await expect.poll(async () => (await keptSettings(page))?.keys?.eraser).toBe('Shift+E');
+	// the close button closes it too
+	await page.getByRole('button', { name: 'Settings', exact: true }).click();
+	await dialog.getByRole('button', { name: 'Close the settings' }).click();
+	await expect(dialog).toHaveCount(0);
+});
+
+test('dark mode: the interface goes dark at once, the paper stays white', async ({ page }) => {
+	await stubTauri(page);
+	await ready(page);
+	const html = page.locator('html');
+	await expect(html).toHaveAttribute('data-theme', 'light');
+	const ground = () => page.evaluate(() => getComputedStyle(document.body).backgroundColor);
+	const light = await ground();
+	await page.getByRole('button', { name: 'Settings', exact: true }).click();
+	const dialog = page.getByRole('dialog', { name: 'Settings' });
+	await dialog.getByRole('tab', { name: 'Appearance' }).click();
+	await dialog.getByLabel('Dark').check();
+	await expect(html).toHaveAttribute('data-theme', 'dark');
+	expect(await ground()).not.toBe(light);
+	await page.keyboard.press('Escape');
+	// the paper is still white
+	await expect
+		.poll(() =>
+			canvas(page).evaluate((el: HTMLCanvasElement) =>
+				Array.from(el.getContext('2d')!.getImageData(el.width >> 1, 4, 1, 1).data)
+			)
+		)
+		.toEqual([255, 255, 255, 255]);
+	await expect.poll(async () => (await keptSettings(page))?.theme).toBe('dark');
+});
+
+test('bars fold away and come back; the timeline and the side panel resize', async ({ page }) => {
+	await stubTauri(page);
+	await ready(page);
+	const tl = page.getByRole('region', { name: 'Timeline' });
+	const room = () =>
+		canvas(page).evaluate((el) => el.closest('.stage')!.getBoundingClientRect().height);
+	const tall = await room();
+	await page.getByRole('button', { name: 'Hide the timeline' }).click();
+	await expect(tl).toBeHidden();
+	// the canvas takes the room
+	await expect.poll(room).toBeGreaterThan(tall + 100);
+	await expect.poll(async () => (await keptSettings(page))?.layout?.bottom).toBe(false);
+	await page.getByRole('button', { name: 'Show the timeline' }).click();
+	await expect(tl).toBeVisible();
+
+	// the brush options bar and the side panel fold the same way
+	await page.getByRole('button', { name: 'Hide the brush options' }).click();
+	await expect(page.getByRole('group', { name: 'Brush options' })).toHaveCount(0);
+	await page.getByRole('button', { name: 'Show the brush options' }).click();
+	await expect(page.getByRole('group', { name: 'Brush options' })).toBeVisible();
+	const dock = page.getByRole('complementary', { name: 'Side panel' });
+	await page.getByRole('button', { name: 'Hide the side panel' }).click();
+	await expect(dock).toBeHidden();
+	await page.getByRole('button', { name: 'Show the side panel' }).click();
+	await expect(dock).toBeVisible();
+
+	// resizing: drag the timeline's edge up, or use the arrows on the side panel's edge
+	const before = (await tl.boundingBox())!.height;
+	const grip = (await page.getByRole('separator', { name: 'Resize the timeline' }).boundingBox())!;
+	await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2);
+	await page.mouse.down();
+	await page.mouse.move(grip.x + grip.width / 2, grip.y - 120, { steps: 5 });
+	await page.mouse.up();
+	await expect.poll(async () => (await tl.boundingBox())!.height).toBeGreaterThan(before + 100);
+	const wide = (await dock.boundingBox())!.width;
+	await page.getByRole('separator', { name: 'Resize the side panel' }).focus();
+	await page.keyboard.press('Shift+ArrowLeft');
+	await expect.poll(async () => (await dock.boundingBox())!.width).toBe(wide + 64);
+	await expect
+		.poll(async () => (await keptSettings(page))?.layout?.dockWidth)
+		.toBe(Math.round(wide + 64));
+});
+
+test('the timeline’s drop-downs are readable (not white on white)', async ({ page }) => {
+	await stubTauri(page);
+	await ready(page);
+	const pick = page.getByRole('region', { name: 'Timeline' }).getByLabel('Into the next cut');
+	const [fg, bg, look] = await pick.evaluate((el) => {
+		const s = getComputedStyle(el);
+		return [s.color, s.backgroundColor, s.appearance];
+	});
+	expect(fg).not.toBe(bg);
+	// drawn by the page, not the system (whose own white ignored the bar's colours)
+	expect(look).toBe('none');
+});
+
+test('home: draw together has its own row, to host, join, or go back to a shared project', async ({
+	page
+}) => {
+	const at = new Date().toISOString();
+	const item = (path: string, shared?: { with: string[] }) => ({
+		path,
+		found: true,
+		width: 1920,
+		height: 1080,
+		fps: 24,
+		layers: 1,
+		modified: at,
+		thumbnail: null,
+		shared
+	});
+	await stubTauri(page, {
+		recent: [
+			item('/home/me/Solo.ppstudio'),
+			item('/home/me/Jam.ppstudio', { with: ['Sam', 'Ana'] })
+		]
+	});
+	await page.setViewportSize({ width: 1440, height: 960 });
+	await page.goto('/');
+	const row = page.getByRole('region', { name: 'Draw together' });
+	const recent = page.getByRole('region', { name: 'Recent' });
+	await expect(row).toContainText('With Sam, Ana');
+	await expect(row.getByRole('button', { name: 'Rejoin Jam' })).toBeVisible();
+	await expect(recent).toContainText('Solo');
+	await expect(recent).not.toContainText('Jam');
+
+	// host: a new canvas, with Draw together open
+	await row.getByRole('button', { name: /Host a session/ }).click();
+	await expect(canvas(page)).toHaveAttribute('data-ready', 'true', { timeout: 15_000 });
+	const share = page.getByRole('dialog', { name: 'Draw together' });
+	await expect(share).toBeVisible();
+	await share.getByRole('button', { name: 'Close' }).click();
+
+	// join: the code goes to the studio without going into its address
+	await page.getByRole('link', { name: 'Back' }).click();
+	await expect(row.getByRole('button', { name: 'Join', exact: true })).toBeDisabled();
+	await row.getByLabel('Join with a code').fill('here: pp1-abcDEF_123');
+	await row.getByRole('button', { name: 'Join', exact: true }).click();
+	await expect(canvas(page)).toHaveAttribute('data-ready', 'true', { timeout: 15_000 });
+	await expect(share).toBeVisible();
+	await expect
+		.poll(async () => (await calls(page)).find((c) => c.cmd === 'share_join')?.json)
+		.toContain('"code":"pp1-abcDEF_123"');
+	expect(page.url()).not.toContain('pp1-');
 });
 
 test('studio layout: each tool shows its options, as on the website', async ({ page }) => {
