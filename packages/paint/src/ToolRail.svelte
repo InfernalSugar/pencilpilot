@@ -15,7 +15,8 @@
 		| 'smudge'
 		| 'clone'
 		| 'pen'
-		| 'adjust';
+		| 'adjust'
+		| 'text';
 	export const ALL_TOOLS: ToolId[] = [
 		'brush',
 		'eraser',
@@ -306,6 +307,30 @@
 					aria-hidden="true"
 				>
 					<path d="M12 3 6 13l6 8 6-8Z" /><circle cx="12" cy="12" r="1.6" /><path d="M12 3v7" />
+				</svg>
+			</button>
+		{/if}
+		{#if has('text')}
+			<button
+				type="button"
+				class="tool"
+				aria-pressed={tool === 'text'}
+				aria-label="Text ({key('text', 'T')})"
+				title="Text ({key('text', 'T')}): click to add text, or on a text to change it"
+				onclick={() => (tool = tool === 'text' ? 'brush' : 'text')}
+			>
+				<svg
+					width="22"
+					height="22"
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="2.3"
+					stroke-linecap="round"
+					stroke-linejoin="round"
+					aria-hidden="true"
+				>
+					<path d="M5 7V4h14v3M12 4v16M9 20h6" />
 				</svg>
 			</button>
 		{/if}

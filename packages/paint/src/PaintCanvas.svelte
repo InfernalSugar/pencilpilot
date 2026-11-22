@@ -32,10 +32,21 @@
 		assist?: boolean;
 		/** stroke, drop shadow and outer glow (layer-style.ts); null: none */
 		style: LayerStyle | null;
+		/** a text layer's text (JSON, see text.ts); null for other layers */
+		text?: string | null;
 	}
 	export type LayerSettings = Omit<
 		LayerInfo,
-		'id' | 'empty' | 'mask' | 'editingMask' | 'group' | 'imported' | 'adjust' | 'drawing' | 'assist'
+		| 'id'
+		| 'empty'
+		| 'mask'
+		| 'editingMask'
+		| 'group'
+		| 'imported'
+		| 'adjust'
+		| 'drawing'
+		| 'assist'
+		| 'text'
 	>;
 
 	/** What happened to a picture brought in with `importImage`. */
@@ -126,6 +137,7 @@
 	import { recognise, resample } from './quickshape';
 	import type { PsdDoc, PsdGroup, PsdLayer } from './psd';
 	import { applyCurve } from './pressure';
+	import { renderText, textJson, type TextSpec } from './text';
 	import { customBrush, isCustom, onCustomBrushes } from './custom-brushes';
 	/** other players don't have "My brushes": they see the brush it's based on */
 	const sharedBrushId = (id: string) => (isCustom(id) ? (customBrush(id)?.base ?? id) : id);
@@ -239,7 +251,10 @@
 		onpenpath,
 		onfill,
 		cursors = [],
-		oncursor
+		oncursor,
+		ontext,
+		textFrame = null,
+		onrasterize
 	}: {
 		width?: number;
 		height?: number;
@@ -280,7 +295,8 @@
 			| 'measure'
 			| 'smudge'
 			| 'pen'
-			| 'clone';
+			| 'clone'
+			| 'text';
 		/** pictures can be dropped onto the canvas (as a new layer) */
 		allowImport?: boolean;
 		/** a dropped picture was imported (or why not) */
@@ -381,6 +397,15 @@
 		cloneAllLayers?: boolean;
 		/** the Clone tool blends what it copies into the colours where it lands (a healing brush) */
 		cloneHeal?: boolean;
+		/** the text tool: a press, drag and let-go on the canvas (canvas px) */
+		ontext?: (x: number, y: number, phase: 'down' | 'move' | 'up') => void;
+		/** the text being typed: its box's corners (canvas px), framed on the canvas */
+		textFrame?: [number, number][] | null;
+		/**
+		 * a tool was about to paint on a text layer: ask to rasterize it first (as
+		 * Procreate does). Without it, painting rasterizes the text by itself.
+		 */
+		onrasterize?: (layer: number) => void;
 		/** the canvas changed size (resized, or that undone): set `width` / `height` to this */
 		oncanvassize?: (s: { width: number; height: number }) => void;
 		/** right-click / long-press on the canvas (screen coordinates) */
@@ -2675,6 +2700,17 @@
 			return;
 		}
 		if (locked) return;
+		if (tool === 'text') {
+			capture(e);
+			textPointer = e.pointerId;
+			const [x, y] = toCanvas(e.clientX, e.clientY);
+			ontext?.(x, y, 'down');
+			return;
+		}
+		if (onrasterize && RASTERIZING.has(tool) && !paint.isEditingMask()) {
+			const l = layerList().find((x) => x.id === paint!.activeLayer);
+			if (l?.text) return onrasterize(l.id);
+		}
 		if (tool === 'transform') {
 			if (!xf) return;
 			const p = toCanvas(e.clientX, e.clientY);
@@ -2813,9 +2849,28 @@
 	}
 
 	let picking: number | null = null;
+	/** the text tool's press, while it lasts */
+	let textPointer: number | null = null;
+	/**
+	 * tools that paint on a press: on a text layer they ask first (the rest, a transform
+	 * say, rasterize it as they finish; undo brings the text back)
+	 */
+	const RASTERIZING = new Set([
+		'brush',
+		'fill',
+		'lasso-fill',
+		'liquify',
+		'gradient',
+		'smudge',
+		'clone'
+	]);
 
 	function move(e: PointerEvent) {
 		if (oncursor) oncursor(toCanvas(e.clientX, e.clientY));
+		if (textPointer === e.pointerId) {
+			const [x, y] = toCanvas(e.clientX, e.clientY);
+			return ontext?.(x, y, 'move');
+		}
 		if (penMove(e)) return;
 		if (sizeDrag && e.pointerId === sizeDrag.id) {
 			// right = bigger; the slider's range is ¼× to about 6×
@@ -2929,6 +2984,11 @@
 	}
 
 	function up(e: PointerEvent) {
+		if (textPointer === e.pointerId) {
+			textPointer = null;
+			const [x, y] = toCanvas(e.clientX, e.clientY);
+			return ontext?.(x, y, 'up');
+		}
 		if (penDrag && e.pointerId === penDrag.id) {
 			penDrag = null;
 			return;
@@ -3131,6 +3191,44 @@
 	}
 	export const undoNote = () => paint?.undoNote() ?? 0;
 	export const redoNote = () => paint?.redoNote() ?? 0;
+
+	// ---- text layers (see text.ts): typed live on the layer, one undo step ----
+
+	/** Start typing on text layer `id`, or (0) on a new layer; its id (0: locked, hidden…). */
+	export function textBegin(id: number): number {
+		if (!paint) return 0;
+		editShape = null;
+		return paint.textBegin(id, '');
+	}
+
+	/** Show the text on its layer as it is now; its box (measured), or null if not typing. */
+	export function textPreview(spec: TextSpec) {
+		if (!paint?.textLayer()) return null;
+		const r = renderText(spec, width, height);
+		paint.textPreview(textJson(spec), r.x, r.y, r.w, r.h, r.rgba);
+		schedule();
+		return r.layout;
+	}
+
+	/** Keep the text typed (one undo step). */
+	export function textCommit(label = 'Text') {
+		if (paint) changed(paint.textCommit(), undefined, label);
+	}
+
+	export function textCancel() {
+		if (!paint) return;
+		paint.textCancel();
+		schedule();
+		notify();
+	}
+
+	/** The text layer being typed on (0: none). */
+	export const textLayer = () => paint?.textLayer() ?? 0;
+
+	/** Turn a text layer into a plain one (one undo step). */
+	export function rasterizeLayer(id: number) {
+		if (paint) changed(paint.rasterizeText(id), undefined, 'Rasterize text');
+	}
 
 	// ---- drawings (animation cels) ----
 	// Each layer shows one drawing; the others are kept by the engine. A timeline
@@ -3683,6 +3781,8 @@
 		assist?: boolean;
 		/** its layer style (layer-style.ts) */
 		style?: LayerStyle | null;
+		/** a text layer's text (JSON, see text.ts) */
+		text?: string | null;
 	}
 
 	/** A small PNG of the drawing as it shows (at most `max` px on its long side). */
@@ -3730,7 +3830,8 @@
 				mask,
 				adjust: l.adjust,
 				...(assistLayers.has(l.id) ? { assist: true } : {}),
-				style: l.style
+				style: l.style,
+				...(l.text ? { text: l.text } : {})
 			};
 		});
 		return { layers, groups: groupList(), strokes: structuredClone(log.strokes) as Stroke[] };
@@ -3779,6 +3880,7 @@
 			);
 			if (l.mask) paint.restoreMask(id, l.mask);
 			if (l.assist) assistLayers.add(id);
+			if (l.text) paint.setTextSilent(id, l.text);
 		}
 		// groups: the first layer of each starts it, the rest join
 		// eslint-disable-next-line svelte/prefer-svelte-reactivity -- a local lookup, not state
@@ -3953,6 +4055,7 @@
 	class:selecting={tool.startsWith('select')}
 	class:transforming={tool === 'transform'}
 	class:liquifying={tool === 'liquify'}
+	class:texting={tool === 'text'}
 	class:editing-guides={tool === 'guides'}
 	bind:this={vp}
 	style={fill ? 'height: 100%' : `aspect-ratio: ${width} / ${height}; max-height: ${maxHeight}`}
@@ -4265,6 +4368,17 @@
 					<rect x={x - hr} y={y - hr} width={hr * 2} height={hr * 2} />
 				{/each}
 				<circle cx={xfShape.rotH[0]} cy={xfShape.rotH[1]} r={hr * 1.1} />
+			</svg>
+		{/if}
+		{#if textFrame && tool === 'text'}
+			<svg
+				class="xf"
+				viewBox="0 0 {width} {height}"
+				preserveAspectRatio="none"
+				aria-hidden="true"
+				data-testid="text-frame"
+			>
+				<polygon class="text-frame" points={textFrame.map((p) => p.join(',')).join(' ')} />
 			</svg>
 		{/if}
 		{#if marquee}
@@ -4607,6 +4721,16 @@
 	}
 	.viewport.selecting {
 		cursor: crosshair;
+	}
+	.viewport.texting {
+		cursor: text;
+	}
+	.text-frame {
+		fill: none;
+		stroke: #2f6bff;
+		stroke-width: 1.5;
+		stroke-dasharray: 6 4;
+		vector-effect: non-scaling-stroke;
 	}
 	.ants,
 	.marquee {

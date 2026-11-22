@@ -1938,3 +1938,65 @@ test('layer style: an outline, undone in one step, kept in the file', async ({ p
 		.click();
 	await expect.poll(async () => Math.abs((await red()) - outlined)).toBeLessThan(outlined * 0.02);
 });
+
+test('text: typed on the canvas, one undo step, changed later, kept in the file, rasterized', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	const layersTab = page.getByRole('tab', { name: /Layers/ });
+	await page.keyboard.press('t');
+	await expect(page.getByRole('group', { name: 'Text' })).toBeVisible();
+	const b = (await canvas(page).boundingBox())!;
+	await page.mouse.click(b.x + b.width * 0.2, b.y + b.height * 0.3);
+	const typed = page.getByRole('textbox', { name: 'Text', exact: true });
+	await expect(typed).toBeFocused();
+	await page.keyboard.type('Hello');
+	await expect(page.getByTestId('text-frame')).toBeVisible();
+	// shown on the canvas as it's typed
+	await expect.poll(() => ink(page, 0.2, 0.4)).toBeGreaterThan(100);
+	const drawn = await ink(page);
+	await page.getByRole('group', { name: 'Text' }).getByRole('button', { name: 'Done' }).click();
+	await expect(layersTab).toContainText('2 layers');
+	const badge = page.getByRole('button', { name: /Change the text of/ });
+	await expect(badge).toBeVisible();
+	expect(await ink(page)).toBe(drawn);
+
+	// one undo takes it away (layer and all), redo brings it back
+	await page.keyboard.press('Control+z');
+	await expect(layersTab).toContainText('1 layer');
+	await expect.poll(() => ink(page)).toBe(0);
+	await page.keyboard.press('Control+Shift+z');
+	await expect(layersTab).toContainText('2 layers');
+	await expect.poll(() => ink(page)).toBe(drawn);
+
+	// change it: longer
+	await badge.click();
+	await expect(typed).toHaveValue('Hello');
+	await typed.press('End');
+	await page.keyboard.type(' there');
+	await page.keyboard.press('Control+Enter');
+	await expect(page.getByTestId('text-frame')).toHaveCount(0);
+	await expect.poll(() => ink(page)).toBeGreaterThan(drawn);
+	const longer = await ink(page);
+
+	// saved and opened again: still a text layer, with its text
+	await page.keyboard.press('Control+s');
+	await expect(page.getByTestId('project-name')).toHaveText('Walk cycle', { timeout: 20_000 });
+	await page.keyboard.press('Control+o');
+	await expect.poll(() => ink(page)).toBe(longer);
+	await page.getByRole('button', { name: /Change the text of/ }).click();
+	await expect(typed).toHaveValue('Hello there');
+	await typed.press('Escape');
+
+	// painting on it asks to rasterize first
+	await page.keyboard.press('b');
+	await scribble(page, 0.3);
+	const ask = page.getByRole('alertdialog', { name: 'Rasterize the text?' });
+	await expect(ask).toBeVisible();
+	expect(await ink(page)).toBe(longer);
+	await ask.getByRole('button', { name: 'Rasterize' }).click();
+	await expect(page.getByRole('button', { name: /Change the text of/ })).toHaveCount(0);
+	await scribble(page, 0.3);
+	await expect.poll(() => ink(page)).toBeGreaterThan(longer);
+});
