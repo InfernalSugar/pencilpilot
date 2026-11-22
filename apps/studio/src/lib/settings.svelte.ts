@@ -20,6 +20,8 @@ export interface Settings {
 	autosaveSeconds: number;
 	/** earlier versions kept per project (0 = none) */
 	versionsKept: number;
+	/** the name others see when drawing together */
+	shareName: string;
 }
 
 export const AUTOSAVE_CHOICES = [0, 10, 20, 60, 300];
@@ -31,7 +33,8 @@ export const DEFAULTS: Settings = {
 	tapGestures: true,
 	projectFolder: null,
 	autosaveSeconds: 20,
-	versionsKept: 20
+	versionsKept: 20,
+	shareName: ''
 };
 
 /** Saved settings, cleaned: anything missing or wrong falls back to the default. */
@@ -50,7 +53,8 @@ export function cleanSettings(raw: unknown): Settings {
 		autosaveSeconds: AUTOSAVE_CHOICES.includes(o.autosaveSeconds as number)
 			? (o.autosaveSeconds as number)
 			: DEFAULTS.autosaveSeconds,
-		versionsKept: int(o.versionsKept, DEFAULTS.versionsKept, 0, 100)
+		versionsKept: int(o.versionsKept, DEFAULTS.versionsKept, 0, 100),
+		shareName: typeof o.shareName === 'string' ? o.shareName.slice(0, 24) : ''
 	};
 }
 

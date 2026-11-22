@@ -49,7 +49,7 @@
 		type ProjectDoc
 	} from '#lib/project.js';
 	import { beforeNavigate, goto } from '$app/navigation';
-	import { loadSettings, settings } from '#lib/settings.svelte.js';
+	import { loadSettings, saveSettings, settings } from '#lib/settings.svelte.js';
 	import { actionFor, comboOf, showKey, type ActionId } from '#lib/shortcuts.js';
 	import { page } from '$app/state';
 	import VersionsMenu from '#lib/VersionsMenu.svelte';
@@ -58,6 +58,19 @@
 	import ExportDialog from '#lib/ExportDialog.svelte';
 	import LipSyncDialog from '#lib/LipSyncDialog.svelte';
 	import FilmDialog from '#lib/FilmDialog.svelte';
+	import ShareDialog from '#lib/ShareDialog.svelte';
+	import {
+		Cursors,
+		hostSession,
+		isCursor,
+		joinSession,
+		leaveSession,
+		onShareEvent,
+		sendPresence,
+		sessionStatus,
+		Throttle,
+		type ShareInfo
+	} from '#lib/share.js';
 	import {
 		FILM_DEFAULTS,
 		FILM_FPS,
@@ -1481,6 +1494,88 @@
 	let pending = $state.raw<{ doc: ProjectDoc; unsaved: boolean } | null>(null);
 	let exportOpen = $state(false);
 
+	// ---- drawing together (S12-T03): peer to peer, in the app's Rust side ----
+	let sharing = $state<ShareInfo | null>(null);
+	let shareOpen = $state(false);
+	let shareBusy = $state(false);
+	let shareError = $state('');
+	const cursorsOf = new Cursors();
+	let cursorTick = $state(0);
+	const remoteCursors = $derived.by(() => {
+		void cursorTick;
+		return sharing ? cursorsOf.list(sharing.members) : [];
+	});
+	const cursorOut = new Throttle<{ x: number; y: number }>((c) => {
+		void sendPresence(c).catch(() => {});
+	});
+
+	async function shareStart(join?: string) {
+		shareBusy = true;
+		shareError = '';
+		try {
+			const name = settings.shareName.trim();
+			void saveSettings().catch(() => {});
+			sharing = join ? await joinSession(join, name) : await hostSession(name);
+		} catch (e) {
+			shareError = String(e);
+		} finally {
+			shareBusy = false;
+		}
+	}
+
+	async function shareLeave() {
+		shareBusy = true;
+		cursorOut.stop();
+		await leaveSession().catch(() => {});
+		sharing = null;
+		cursorsOf.clear();
+		cursorTick++;
+		shareBusy = false;
+	}
+
+	function onCursor(at: [number, number] | null) {
+		if (sharing && at) cursorOut.push({ x: Math.round(at[0]), y: Math.round(at[1]) });
+	}
+
+	onMount(() => {
+		if (!isTauri()) return;
+		let stop: (() => void) | undefined;
+		let gone = false;
+		void sessionStatus()
+			.then((s) => (sharing = s))
+			.catch(() => {});
+		void onShareEvent((e) => {
+			if (!sharing) return;
+			if (e.kind === 'presence') {
+				if (isCursor(e.body) && cursorsOf.set(e.from, e.body.x, e.body.y, performance.now()))
+					cursorTick++;
+			} else if (e.kind === 'joined') {
+				sharing.members = [...sharing.members.filter((m) => m.id !== e.member.id), e.member];
+			} else if (e.kind === 'left') {
+				sharing.members = sharing.members.filter((m) => m.id !== e.id);
+				if (cursorsOf.remove(e.id)) cursorTick++;
+			} else if (e.kind === 'closed') {
+				sharing = null;
+				cursorsOf.clear();
+				cursorTick++;
+				shareError = e.reason;
+				shareOpen = true;
+			}
+		}).then((un) => {
+			if (gone) un();
+			else stop = un;
+		});
+		const prune = setInterval(() => {
+			if (cursorsOf.prune(performance.now())) cursorTick++;
+		}, 1000);
+		return () => {
+			gone = true;
+			stop?.();
+			clearInterval(prune);
+			cursorOut.stop();
+		};
+	});
+
 	/** Everything the window knows, as a project document. */
 	/** (with `timelapse`: its pictures too; recovery copies leave them out, to stay light) */
 	async function currentDoc(timelapse = false): Promise<ProjectDoc> {
@@ -2494,6 +2589,17 @@
 					}}
 				/>
 			</div>
+			{#if isTauri()}
+				<button
+					type="button"
+					class="act"
+					class:live={!!sharing}
+					onclick={() => (shareOpen = true)}
+					title="Draw with others, live"
+				>
+					{sharing ? `Together (${sharing.members.length})` : 'Draw together'}
+				</button>
+			{/if}
 			<div class="export">
 				<button
 					type="button"
@@ -2631,6 +2737,8 @@
 			{#key canvasKey}
 				<PaintCanvas
 					bind:this={canvas}
+					cursors={remoteCursors}
+					oncursor={onCursor}
 					onfill={(f) => void carryFill(f)}
 					fill
 					width={canvasSize.width}
@@ -2803,6 +2911,21 @@
 					onclose={() => (animExport = null)}
 				/>
 			{/if}
+			{#if shareOpen}
+				<ShareDialog
+					info={sharing}
+					bind:name={settings.shareName}
+					busy={shareBusy}
+					error={shareError}
+					onhost={() => void shareStart()}
+					onjoin={(code) => void shareStart(code)}
+					onleave={() => void shareLeave()}
+					onclose={() => {
+						shareOpen = false;
+						shareError = '';
+					}}
+				/>
+			{/if}
 			{#if film}
 				<FilmDialog
 					bind:settings={filmSettings}
@@ -2903,6 +3026,10 @@
 	.act:disabled {
 		opacity: 0.4;
 		cursor: default;
+	}
+	.act.live {
+		background: #2a9d8f;
+		color: #fff;
 	}
 	.export {
 		position: relative;

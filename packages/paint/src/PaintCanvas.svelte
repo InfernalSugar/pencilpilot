@@ -90,6 +90,16 @@
 		history: { undo: [], redo: [] }
 	};
 
+	/** Someone else's pointer, drawing together (canvas pixels). */
+	export interface RemoteCursor {
+		id: string;
+		name: string;
+		/** CSS colour */
+		color: string;
+		x: number;
+		y: number;
+	}
+
 	export interface DrawingExport {
 		width: number;
 		height: number;
@@ -213,7 +223,9 @@
 		oncanvassize,
 		onquickmenu,
 		onpenpath,
-		onfill
+		onfill,
+		cursors = [],
+		oncursor
 	}: {
 		width?: number;
 		height?: number;
@@ -354,6 +366,10 @@
 		onpenpath?: (s: { points: number; closed: boolean }) => void;
 		/** a fill was made with the fill tool, at canvas point x, y (for carrying it on) */
 		onfill?: (f: { x: number; y: number; hex: string; tolerance: number }) => void;
+		/** other people's cursors (drawing together), in canvas pixels */
+		cursors?: RemoteCursor[];
+		/** this person's pointer over the canvas, in canvas pixels (null: it left) */
+		oncursor?: (at: [number, number] | null) => void;
 	} = $props();
 
 	let el: HTMLCanvasElement;
@@ -2652,6 +2668,7 @@
 	let picking: number | null = null;
 
 	function move(e: PointerEvent) {
+		if (oncursor) oncursor(toCanvas(e.clientX, e.clientY));
 		if (penMove(e)) return;
 		if (sizeDrag && e.pointerId === sizeDrag.id) {
 			// right = bigger; the slider's range is ¼× to about 6×
@@ -3563,6 +3580,7 @@
 	}}
 	onpointerenter={() => (hovering = true)}
 	onpointerleave={() => {
+		oncursor?.(null);
 		hovering = false;
 		hoverAt = null;
 		lineHover = null;
@@ -3941,6 +3959,19 @@
 				/>
 			</div>
 		{/if}
+		{#each cursors as c (c.id)}
+			<div
+				class="remote-cursor"
+				style="left: {(c.x / width) * 100}%; top: {(c.y / height) *
+					100}%; --c: {c.color}; transform: scale({1 / Math.max(0.01, fit * zoom)})"
+				aria-hidden="true"
+			>
+				<svg viewBox="0 0 16 16" width="16" height="16">
+					<path d="M1 1 L1 13 L4.5 9.5 L7 15 L9 14 L6.5 8.5 L11.5 8.5 Z" />
+				</svg>
+				<span>{c.name}</span>
+			</div>
+		{/each}
 	</div>
 	{#if dropFill}
 		<div
@@ -4393,6 +4424,34 @@
 	}
 	.sheet {
 		overflow: visible;
+	}
+	.remote-cursor {
+		position: absolute;
+		transform-origin: 0 0;
+		pointer-events: none;
+		z-index: 5;
+		display: flex;
+		align-items: flex-start;
+		gap: 2px;
+		transition:
+			left 80ms linear,
+			top 80ms linear;
+	}
+	.remote-cursor path {
+		fill: var(--c);
+		stroke: #fff;
+		stroke-width: 1.2;
+	}
+	.remote-cursor span {
+		margin-top: 12px;
+		padding: 1px 6px;
+		border-radius: 8px;
+		background: var(--c);
+		color: #fff;
+		font:
+			600 11px/1.4 system-ui,
+			sans-serif;
+		white-space: nowrap;
 	}
 	.sheet {
 		position: absolute;
