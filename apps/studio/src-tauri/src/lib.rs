@@ -498,6 +498,22 @@ async fn share_join(
     state.join(app, &data, &code, &name, relay.as_deref()).await
 }
 
+/// Come back to a shared project: join a member who's online, or host it again.
+#[tauri::command]
+async fn share_rejoin(
+    app: AppHandle,
+    state: State<'_, share::Sharing>,
+    code: String,
+    addrs: Vec<serde_json::Value>,
+    name: String,
+    relay: Option<String>,
+) -> Result<share::Info, String> {
+    let data = data_dir(&app)?;
+    state
+        .rejoin(app, &data, &code, addrs, &name, relay.as_deref())
+        .await
+}
+
 /// The session in progress, if any.
 #[tauri::command]
 async fn share_status(state: State<'_, share::Sharing>) -> Result<Option<share::Info>, String> {
@@ -608,6 +624,7 @@ pub fn run() {
             frames_stats,
             share_host,
             share_join,
+            share_rejoin,
             share_status,
             share_edit,
             share_direct,

@@ -7,6 +7,8 @@
 export interface Member {
 	id: string;
 	name: string;
+	/** how to reach them (kept for rejoining later) */
+	addr?: unknown;
 }
 
 export interface ShareInfo {
@@ -173,6 +175,9 @@ export function cleanRelay(text: string): string {
 		return '';
 	}
 }
+/** Back to a shared project: join a member who's online, or host it again. */
+export const rejoinSession = (code: string, addrs: unknown[], name: string, relay = '') =>
+	call<ShareInfo>('share_rejoin', { code, addrs, name, relay: relay || null });
 export const sessionStatus = () => call<ShareInfo | null>('share_status');
 export const sendEdit = (body: unknown) => call<void>('share_edit', { body });
 export const sendPresence = (body: unknown) => call<void>('share_presence', { body });

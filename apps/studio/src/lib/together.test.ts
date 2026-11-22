@@ -7,6 +7,7 @@ import {
 	parseEdit,
 	Shared,
 	TILE_BYTES,
+	readSavedShare,
 	Together,
 	unpack,
 	type CanvasPort,
@@ -424,5 +425,77 @@ describe('drawing together: apps', () => {
 		await session.settle();
 		expect(bc.drawings.get(track[1].drawing)!.get('2,2')?.[0]).toBe(33);
 		expect(bc.drawings.get(track[0].drawing)!.has('2,2')).toBe(false);
+	});
+
+	it('comes back after a break: own work kept, the others’ caught up', async () => {
+		const session = new FakeSession();
+		const hc = new FakeCanvas(['Sky']);
+		const host = new Together(A, 'Ana', hc, session.net(A));
+		session.apps.set(A, host);
+		await host.startHost();
+		await session.settle();
+		const bc = new FakeCanvas();
+		let bo = new Together(B, 'Bo', bc, session.net(B));
+		session.apps.set(B, bo);
+		bo.startJoin(A);
+		await session.settle();
+		const boLayer = bc.byName('Bo’s layer').id;
+		bc.paint(boLayer, 0, 0, 1);
+		bo.timelineChanged();
+		await bo.localChanged();
+		await session.settle();
+
+		// Bo saves (the file keeps the session) and leaves
+		const saved = readSavedShare(
+			JSON.parse(JSON.stringify(bo.save('pp1-code', [{ id: A, name: 'Ana', addr: {} }])))
+		)!;
+		expect(saved.ids.length).toBe(2);
+		session.apps.delete(B);
+
+		// apart: Ana draws on her sky, Bo on his layer
+		const sky = hc.byName('Sky').id;
+		hc.paint(sky, 5, 5, 55);
+		await host.localChanged();
+		await session.settle();
+		bc.paint(boLayer, 6, 6, 66);
+
+		// Bo comes back
+		bo = new Together(B, 'Bo', bc, session.net(B));
+		session.apps.set(B, bo);
+		bo.restore(saved);
+		bo.rejoin(A);
+		await session.settle();
+		expect(bo.synced).toBe(true);
+		expect(bc.pixel(bc.byName('Sky').id, 5, 5)).toBe(55);
+		// his work from the break is still his, and Ana got it
+		expect(bc.pixel(boLayer, 6, 6)).toBe(66);
+		expect(hc.pixel(hc.byName('Bo’s layer').id, 6, 6)).toBe(66);
+		// no extra layer for him
+		expect(bc.layerList.filter((l) => l.name === 'Bo’s layer').length).toBe(1);
+	});
+
+	it('the first one back hosts the project from their copy', async () => {
+		const session = new FakeSession();
+		const hc = new FakeCanvas(['Sky']);
+		hc.paint(1, 1, 1, 9);
+		const ana = new Together(A, 'Ana', hc, session.net(A));
+		session.apps.set(A, ana);
+		await ana.startHost();
+		await session.settle();
+		const saved = readSavedShare(JSON.parse(JSON.stringify(ana.save('pp1-code', []))))!;
+		session.apps.delete(A);
+
+		// next day: Ana alone hosts it again, Cy joins and gets it
+		const again = new Together(A, 'Ana', hc, session.net(A));
+		session.apps.set(A, again);
+		again.restore(saved);
+		await again.resumeHost();
+		const cc = new FakeCanvas();
+		const cy = new Together(C, 'Cy', cc, session.net(C));
+		session.apps.set(C, cy);
+		cy.startJoin(A);
+		await session.settle();
+		expect(cc.pixel(cc.byName('Sky').id, 1, 1)).toBe(9);
+		expect(readSavedShare({ code: 'nope' })).toBeNull();
 	});
 });

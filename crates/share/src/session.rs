@@ -160,6 +160,24 @@ impl Session {
         Ok(Self { core, events })
     }
 
+    /// Host an existing shared project again (its secret from a saved invite): the first one
+    /// back from a break, when no one else is online. Members who come back find this app
+    /// among the members they know.
+    pub async fn host_again(
+        id: &Identity,
+        invite: &Invite,
+        name: &str,
+        relays: Relays,
+    ) -> Result<Self> {
+        let (core, events) = Core::start(id, name, &relays, invite.key).await?;
+        {
+            let mut st = core.st.lock().unwrap();
+            st.hosting = true;
+            st.members = vec![core.me.clone()];
+        }
+        Ok(Self { core, events })
+    }
+
     /// Join the session an invite points to (through any member in it).
     pub async fn join(id: &Identity, invite: &Invite, name: &str, relays: Relays) -> Result<Self> {
         let (core, events) = Core::start(id, name, &relays, invite.key).await?;
@@ -1040,6 +1058,40 @@ mod tests {
         for s in [h, a, b] {
             s.close().await;
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_first_one_back_hosts_the_project_again() {
+        let h = host().await;
+        let code = h.invite().encode();
+        let a_id = Identity::generate();
+        let a = Session::join(&a_id, &Invite::decode(&code).unwrap(), "Ana", Relays::Off)
+            .await
+            .unwrap();
+        let project = a.invite().project();
+        // everyone leaves
+        a.close().await;
+        h.close().await;
+        // Ana comes back first: no one answers, so she hosts the same project
+        let saved = Invite::decode(&code).unwrap();
+        assert!(
+            Session::join(&a_id, &saved, "Ana", Relays::Off)
+                .await
+                .is_err()
+        );
+        let a2 = Session::host_again(&a_id, &saved, "Ana", Relays::Off)
+            .await
+            .unwrap();
+        assert_eq!(a2.invite().project(), project);
+        // someone with the old code plus Ana's address finds her
+        let mut back = saved.clone();
+        back.addrs.insert(0, a2.me().addr.clone());
+        let b = Session::join(&Identity::generate(), &back, "Bo", Relays::Off)
+            .await
+            .unwrap();
+        assert_eq!(b.members().len(), 2);
+        a2.close().await;
+        b.close().await;
     }
 
     fn code_from(s: &Session) -> String {

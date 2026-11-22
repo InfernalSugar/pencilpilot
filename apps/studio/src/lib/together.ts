@@ -360,6 +360,52 @@ type Snap =
 const key = (lid: string, did: string) => `${lid}|${did}`;
 
 /**
+ * A shared project's session, kept in the project file (`extra.share`), so it can be
+ * rejoined after a break: the invite, who was in it, the shared layers and drawings.
+ */
+export interface SavedShare {
+	/** the invite code (it holds the project's secret: anyone with the file can rejoin) */
+	code: string;
+	members: { id: string; name: string; addr: unknown }[];
+	layers: SharedLayer[];
+	asks: { lid: string; from: string }[];
+	/** shared layer → its id in this document */
+	ids: [string, number][];
+	/** shared drawing → its id in this document */
+	dids: [string, number][];
+	n: number;
+}
+
+/** A saved session from a file, checked (null if it isn't one). */
+export function readSavedShare(raw: unknown): SavedShare | null {
+	const s = raw as SavedShare;
+	if (!s || typeof s !== 'object' || typeof s.code !== 'string' || !s.code.startsWith('pp1-'))
+		return null;
+	const pairs = (v: unknown, ok: RegExp) =>
+		Array.isArray(v)
+			? v.filter(
+					(p): p is [string, number] =>
+						Array.isArray(p) && typeof p[0] === 'string' && ok.test(p[0]) && Number.isInteger(p[1])
+				)
+			: [];
+	return {
+		code: s.code,
+		members: Array.isArray(s.members)
+			? s.members
+					.filter((m) => m && typeof m.id === 'string')
+					.map((m) => ({ id: m.id, name: String(m.name ?? ''), addr: m.addr }))
+			: [],
+		layers: Array.isArray(s.layers)
+			? s.layers.filter((l) => l && LID.test(l.lid) && Array.isArray(l.writers))
+			: [],
+		asks: Array.isArray(s.asks) ? s.asks : [],
+		ids: pairs(s.ids, LID),
+		dids: pairs(s.dids, DID),
+		n: Number.isInteger(s.n) ? s.n : 0
+	};
+}
+
+/**
  * One app's side of drawing together: turns the session's edits into canvas and
  * timeline changes, and this app's changes into edits.
  */
@@ -390,6 +436,8 @@ export class Together {
 	#again = false;
 	/** a layer made here, to select when the session numbers it */
 	#mine = new Set<string>();
+	/** coming back after a break: this app's own layers keep what was drawn meanwhile */
+	#rejoining = false;
 	/** someone's tiles arrived (their live stroke previews can go) */
 	ontiles: (from: string) => void = () => {};
 
@@ -459,6 +507,52 @@ export class Together {
 			}
 		this.net.edit({ k: 'timeline', tl: this.#sharedTimeline() });
 		this.#synced = true;
+	}
+
+	/** The session, to keep in the project file. */
+	save(code: string, members: { id: string; name: string; addr?: unknown }[]): SavedShare {
+		const s = this.shared.snapshot();
+		return {
+			code,
+			members: members.map((m) => ({ id: m.id, name: m.name, addr: m.addr })),
+			layers: s.layers,
+			asks: s.asks,
+			ids: [...this.ids],
+			dids: [...this.#dids],
+			n: this.#n
+		};
+	}
+
+	/** Back to a saved session (its layer ids already this document's). */
+	restore(saved: SavedShare) {
+		this.shared.load({ layers: saved.layers, asks: saved.asks });
+		const here = new Set(this.canvas.layers().map((l) => l.id));
+		this.ids = new Map(saved.ids.filter(([, id]) => here.has(id)));
+		for (const [did, d] of saved.dids) {
+			this.#dids.set(did, d);
+			this.#didOf.set(d, did);
+		}
+		this.#n = Math.max(this.#n, saved.n + 1);
+		// layers here that aren't shared (from before joining) stay out of it
+		const shared = new Set(this.ids.values());
+		for (const l of this.canvas.layers()) if (!shared.has(l.id)) this.#local.add(l.id);
+	}
+
+	/** After `restore`, alone: the copy here is the project (others coming back get it). */
+	async resumeHost() {
+		for (const [lid, id] of this.ids)
+			for (const d of new Set([this.canvas.drawingOf(id), ...this.canvas.drawingsOfLayer(id)]))
+				this.cache.set(key(lid, this.didOf(d)), unpack(await this.canvas.packed(d)));
+		for (const lid of this.ids.keys()) this.#refreshLock(lid);
+		this.#synced = true;
+		this.onchange();
+	}
+
+	/** After `restore`, with others online: get the project from `host`; this app's own
+	 * layers keep what was drawn here meanwhile (it's sent once the project is in). */
+	rejoin(host: string) {
+		this.#rejoining = true;
+		this.net.direct(host, { k: 'snap.req' });
 	}
 
 	/** Joining: ask the host for the project; this app's own layers are put aside. */
@@ -603,14 +697,32 @@ export class Together {
 				if (px) t.set(`${x},${y}`, px);
 			}
 		} else if (m.k === 'snap.end' && !this.#synced) {
-			for (const lid of this.shared.order) this.#makeLayer(lid);
-			for (const k of this.cache.keys()) this.#put(k);
+			// back from a break: layers deleted meanwhile go
+			for (const [lid, id] of [...this.ids])
+				if (!this.shared.layers.has(lid)) {
+					this.ids.delete(lid);
+					this.#later(() => this.canvas.removeLayer(id));
+				}
+			for (const lid of this.shared.order) {
+				this.#makeLayer(lid);
+				this.#refreshLock(lid);
+			}
+			const own = (k: string) =>
+				this.#rejoining && this.shared.layers.get(k.split('|')[0])?.owner === this.me;
+			for (const k of this.cache.keys()) if (!own(k)) this.#put(k);
 			if (this.#snapTl) this.canvas.setTimeline(this.#fromShared(this.#snapTl));
 			this.#synced = true;
 			const later = this.#buffer.filter((b) => b.seq > this.#snapSeq);
 			this.#buffer = [];
 			for (const b of later) await this.onEdit(b.seq, b.from, b.body);
-			this.addOwnLayer();
+			if (this.#rejoining) {
+				// this app's own drawings, as drawn here (compared with the session's): sent
+				for (const [lid, id] of this.ids)
+					if (this.shared.layers.get(lid)?.owner === this.me)
+						this.touch([this.canvas.drawingOf(id), ...this.canvas.drawingsOfLayer(id)]);
+				this.#rejoining = false;
+				await this.localChanged();
+			} else this.addOwnLayer();
 			this.onchange();
 		}
 	}
