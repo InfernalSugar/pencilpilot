@@ -18,6 +18,8 @@
 
 	let {
 		info,
+		canRejoin = false,
+		onrejoin = () => {},
 		layers = [],
 		synced = true,
 		onask = () => {},
@@ -34,6 +36,9 @@
 	}: {
 		/** the session in progress */
 		info: ShareInfo | null;
+		/** this project was shared: it can be rejoined */
+		canRejoin?: boolean;
+		onrejoin?: () => void;
 		/** the shared layers, bottom → top */
 		layers?: LayerRow[];
 		/** the project has arrived (joining) */
@@ -163,6 +168,18 @@
 			<span>Your name</span>
 			<input bind:value={name} maxlength="24" placeholder="What others see" />
 		</label>
+		{#if canRejoin}
+			<section class="rejoin">
+				<h3>This project is shared</h3>
+				<p>
+					Rejoin it: you’ll join whoever of its members is online, or, if no one is, open it for
+					them. What you drew on your own layers meanwhile is kept.
+				</p>
+				<button type="button" class="go" disabled={busy || !name.trim()} onclick={onrejoin}>
+					Rejoin
+				</button>
+			</section>
+		{/if}
 		<div class="ways">
 			<section>
 				<h3>Start a session</h3>
@@ -229,6 +246,18 @@
 	.name {
 		display: grid;
 		gap: 4px;
+	}
+	.rejoin {
+		display: grid;
+		gap: 8px;
+		margin-top: 12px;
+		padding: 12px;
+		border-radius: 12px;
+		background: #e3f2ef;
+	}
+	.rejoin h3,
+	.rejoin p {
+		margin: 0;
 	}
 	.ways {
 		display: grid;
