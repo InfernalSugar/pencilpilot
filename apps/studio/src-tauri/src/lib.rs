@@ -513,6 +513,16 @@ async fn share_edit(
     state.edit(body).await
 }
 
+/// Send a message to one member (e.g. the project for someone who just joined).
+#[tauri::command]
+async fn share_direct(
+    state: State<'_, share::Sharing>,
+    to: String,
+    body: serde_json::Value,
+) -> Result<(), String> {
+    state.direct(to, body).await
+}
+
 /// Send this app's cursor (may be lost; send the newest often).
 #[tauri::command]
 async fn share_presence(
@@ -600,6 +610,7 @@ pub fn run() {
             share_join,
             share_status,
             share_edit,
+            share_direct,
             share_presence,
             share_leave,
             ai_allowed

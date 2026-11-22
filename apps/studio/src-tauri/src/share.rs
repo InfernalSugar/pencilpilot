@@ -49,6 +49,7 @@ fn info_of(s: &Session) -> Info {
 
 enum Cmd {
     Edit(Value),
+    Direct(String, Value),
     Presence(Value),
     Leave(oneshot::Sender<()>),
 }
@@ -144,6 +145,10 @@ impl Sharing {
         self.send(Cmd::Edit(body)).await
     }
 
+    pub async fn direct(&self, to: String, body: Value) -> Result<(), String> {
+        self.send(Cmd::Direct(to, body)).await
+    }
+
     pub async fn presence(&self, body: Value) -> Result<(), String> {
         self.send(Cmd::Presence(body)).await
     }
@@ -180,6 +185,10 @@ enum WindowEvent {
         from: String,
         body: Value,
     },
+    Direct {
+        from: String,
+        body: Value,
+    },
     Joined {
         member: Member,
     },
@@ -202,6 +211,7 @@ fn window_event(e: Event, s: &Session) -> WindowEvent {
     match e {
         Event::Edit { seq, from, body } => WindowEvent::Edit { seq, from, body },
         Event::Presence { from, body } => WindowEvent::Presence { from, body },
+        Event::Direct { from, body } => WindowEvent::Direct { from, body },
         Event::Joined(member) => WindowEvent::Joined { member },
         Event::Left { id } => WindowEvent::Left { id },
         Event::HostChanged { host, members } => WindowEvent::HostChanged {
@@ -229,6 +239,9 @@ async fn pump(
                         let _ = app.emit("share-event", WindowEvent::Closed { reason: e.to_string() });
                         break;
                     }
+                }
+                Some(Cmd::Direct(to, body)) => {
+                    let _ = s.direct(&to, body);
                 }
                 Some(Cmd::Presence(body)) => s.presence(body),
                 Some(Cmd::Leave(done)) => {

@@ -3216,6 +3216,40 @@
 		);
 	}
 
+	// ---- drawing together: silent changes (never undo steps) ----
+
+	/** A new layer on top, not an undo step (a shared layer). Returns its id (0: no room). */
+	export function addLayerQuiet(name: string): number {
+		if (!paint) return 0;
+		const id = paint.addLayerSilent(name);
+		if (id) notify();
+		return id;
+	}
+	/** Change layer settings without an undo step (locking someone else's layer). */
+	export function setLayerQuiet(id: number, patch: Partial<LayerSettings>) {
+		const cur = paint && settings(id);
+		if (!cur) return;
+		if (setRaw(id, { ...cur, ...patch }, false)) {
+			schedule();
+			notify();
+		}
+	}
+	/** The drawing a layer shows, starting one if it has none yet. */
+	export function layerDrawingOf(id: number): number {
+		if (!paint) return 0;
+		let d = paint.layerDrawing(id);
+		if (!d) {
+			d = paint.newDrawing();
+			paint.showDrawings(new Uint32Array([id, d]));
+		}
+		return d;
+	}
+	/** Paint layers now, bottom → top (not adjustment layers). */
+	export const paintLayers = () =>
+		layerList()
+			.filter((l) => !l.adjust)
+			.map((l) => ({ id: l.id, name: l.name }));
+
 	/** Change layer settings as one undo step. */
 	export function setLayer(id: number, patch: Partial<LayerSettings>) {
 		const cur = paint && settings(id);

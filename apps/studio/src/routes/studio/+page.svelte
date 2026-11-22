@@ -14,7 +14,8 @@
 	import { anyGuide, defaultGuides, type GuideSettings } from '@pencilpilot/paint/guides';
 	import PaintCanvas, {
 		BLANK_STATUS,
-		type CanvasStatus
+		type CanvasStatus,
+		type LayerSettings
 	} from '@pencilpilot/paint/PaintCanvas.svelte';
 	import LayersPanel from '@pencilpilot/paint/LayersPanel.svelte';
 	import BrushPicker from '@pencilpilot/paint/BrushPicker.svelte';
@@ -59,6 +60,7 @@
 	import LipSyncDialog from '#lib/LipSyncDialog.svelte';
 	import FilmDialog from '#lib/FilmDialog.svelte';
 	import ShareDialog from '#lib/ShareDialog.svelte';
+	import { Together, type CanvasPort } from '#lib/together.js';
 	import {
 		cleanRelay,
 		Cursors,
@@ -67,6 +69,8 @@
 		joinSession,
 		leaveSession,
 		onShareEvent,
+		sendDirect,
+		sendEdit,
 		sendPresence,
 		sessionStatus,
 		Throttle,
@@ -210,6 +214,7 @@
 
 	function canvasChanged(s: CanvasStatus) {
 		status = s;
+		togetherChanged();
 		if (quiet) return;
 		docVersion++;
 		// what changed: the drawings showing, or one undo / redo just changed
@@ -1510,6 +1515,57 @@
 		void sendPresence(c).catch(() => {});
 	});
 
+	/** the drawing side: shared layers, access, tiles (lib/together.ts) */
+	let together = $state.raw<Together | null>(null);
+	let togetherTick = $state(0);
+	let togetherTimer: ReturnType<typeof setTimeout> | undefined;
+
+	function canvasPort(c: PaintCanvas): CanvasPort {
+		return {
+			addLayer: (name) => c.addLayerQuiet(name),
+			setLayer: (id, patch) => c.setLayerQuiet(id, patch),
+			drawingOf: (id) => c.layerDrawingOf(id),
+			packed: (d) => c.drawingTilesPacked(d),
+			put: (d, p) => c.putDrawingTiles(d, p),
+			select: (id) => c.selectLayer(id),
+			layers: () => c.paintLayers()
+		};
+	}
+
+	function startTogether(info: ShareInfo, joining: boolean) {
+		if (!canvas) return;
+		together = new Together(
+			info.me.id,
+			info.me.name,
+			canvasPort(canvas),
+			{
+				edit: (body) => void sendEdit(body).catch(() => {}),
+				direct: (to, body) => void sendDirect(to, body).catch(() => {})
+			},
+			() => togetherTick++
+		);
+		const host = info.members[0]?.id;
+		if (joining && host) together.startJoin(host);
+		else together.startHost();
+		togetherTick++;
+	}
+
+	/** after the session: the layers stay (everyone keeps a full copy), unlocked */
+	function stopTogether() {
+		clearTimeout(togetherTimer);
+		if (together && canvas)
+			for (const id of together.ids.values()) canvas.setLayerQuiet(id, { locked: false });
+		together = null;
+		togetherTick++;
+	}
+
+	/** the canvas changed: send this app's changes a moment later (one batch per pause) */
+	function togetherChanged() {
+		if (!together) return;
+		clearTimeout(togetherTimer);
+		togetherTimer = setTimeout(() => void together?.localChanged(), 120);
+	}
+
 	async function shareStart(join?: string) {
 		shareBusy = true;
 		shareError = '';
@@ -1518,6 +1574,7 @@
 			void saveSettings().catch(() => {});
 			const relay = cleanRelay(settings.shareRelay);
 			sharing = join ? await joinSession(join, name, relay) : await hostSession(name, relay);
+			startTogether(sharing, !!join);
 		} catch (e) {
 			shareError = String(e);
 		} finally {
@@ -1530,10 +1587,72 @@
 		cursorOut.stop();
 		await leaveSession().catch(() => {});
 		sharing = null;
+		stopTogether();
 		cursorsOf.clear();
 		cursorTick++;
 		shareBusy = false;
 	}
+
+	/** what the layers panel does while drawing together */
+	const layerControls = $derived.by(() => {
+		void togetherTick;
+		const c = canvas;
+		if (!c || !sharing || !together) return c;
+		const t = together;
+		const notNow = () =>
+			note('Not while drawing together yet: it changes the layers for everyone.');
+		return new Proxy(c, {
+			get(target, prop, recv) {
+				if (prop === 'addLayer') return (name?: string) => t.addOwnLayer(name);
+				if (
+					[
+						'deleteLayer',
+						'moveLayer',
+						'moveLayerTo',
+						'mergeDown',
+						'addGroup',
+						'ungroup',
+						'deleteGroup',
+						'mergeGroup',
+						'moveGroup'
+					].includes(String(prop))
+				)
+					return notNow;
+				if (prop === 'setLayer')
+					return (id: number, patch: Partial<LayerSettings>) => {
+						target.setLayer(id, patch);
+						const lid = t.lidOf(id);
+						if (lid && patch.name && t.shared.canDraw(lid, t.me))
+							void sendEdit({ k: 'rename', lid, name: patch.name }).catch(() => {});
+					};
+				return Reflect.get(target, prop, recv);
+			}
+		});
+	});
+
+	/** shared layers, for the Draw together dialog */
+	const sharedLayers = $derived.by(() => {
+		void togetherTick;
+		const t = together;
+		if (!t || !sharing) return [];
+		const name = (id: string) => sharing?.members.find((m) => m.id === id)?.name ?? 'Someone';
+		return t.shared.order.map((lid) => {
+			const l = t.shared.layers.get(lid)!;
+			return {
+				lid,
+				name: l.name,
+				owner: name(l.owner),
+				mine: l.owner === t.me,
+				canDraw: l.writers.includes(t.me),
+				asked: t.shared.asks.some((a) => a.lid === lid && a.from === t.me),
+				writers: l.writers.filter((w) => w !== l.owner).map((id) => ({ id, name: name(id) })),
+				asks: t.shared.asks
+					.filter((a) => a.lid === lid && l.owner === t.me)
+					.map((a) => ({ id: a.from, name: name(a.from) }))
+			};
+		});
+	});
+	const asksForMe = $derived(sharedLayers.reduce((n, l) => n + l.asks.length, 0));
 
 	function onCursor(at: [number, number] | null) {
 		if (sharing && at) cursorOut.push({ x: Math.round(at[0]), y: Math.round(at[1]) });
@@ -1561,8 +1680,13 @@
 				for (const id of cursorsOf.list([]).map((c) => c.id))
 					if (!e.members.some((m) => m.id === id)) cursorsOf.remove(id);
 				cursorTick++;
+			} else if (e.kind === 'edit') {
+				void together?.onEdit(e.seq, e.from, e.body);
+			} else if (e.kind === 'direct') {
+				void together?.onDirect(e.from, e.body);
 			} else if (e.kind === 'closed') {
 				sharing = null;
+				stopTogether();
 				cursorsOf.clear();
 				cursorTick++;
 				shareError = e.reason;
@@ -2604,7 +2728,9 @@
 					onclick={() => (shareOpen = true)}
 					title="Draw with others, live"
 				>
-					{sharing ? `Together (${sharing.members.length})` : 'Draw together'}
+					{sharing
+						? `Together (${sharing.members.length})${asksForMe ? ' • asks' : ''}`
+						: 'Draw together'}
 				</button>
 			{/if}
 			<div class="export">
@@ -2790,12 +2916,17 @@
 						tool = 'brush';
 						if (r === 'empty') note('Nothing to move on this layer (or it’s locked).');
 					}}
-					onblocked={(why) =>
+					onblocked={(why) => {
+						const lid = together && status ? together.lidOf(status.active) : null;
+						const l = lid ? sharedLayers.find((x) => x.lid === lid) : null;
 						note(
-							why === 'hidden'
-								? 'This layer is hidden. Show it or pick another layer to draw.'
-								: 'This layer is locked. Unlock it or pick another layer to draw.'
-						)}
+							l && !l.canDraw
+								? `This is ${l.owner}’s layer. Ask to draw on it in Draw together, or pick your own.`
+								: why === 'hidden'
+									? 'This layer is hidden. Show it or pick another layer to draw.'
+									: 'This layer is locked. Unlock it or pick another layer to draw.'
+						);
+					}}
 					onquickmenu={(x, y) => (quickMenu = { x, y })}
 					onchange={canvasChanged}
 					locked={switching}
@@ -2862,7 +2993,7 @@
 			{#if t === 'layers' && status}
 				<LayersPanel
 					{status}
-					controls={canvas}
+					controls={layerControls}
 					aspect={canvasSize.width / canvasSize.height}
 					onadjustment={(id) => toolOpts.adjustmentLayer(id)}
 				/>
@@ -2921,6 +3052,12 @@
 			{#if shareOpen}
 				<ShareDialog
 					info={sharing}
+					layers={sharedLayers}
+					synced={!!together?.synced}
+					onask={(lid) => together?.ask(lid)}
+					ongrant={(lid, to, handover) => together?.grant(lid, to, handover)}
+					ondeny={(lid, to) => together?.deny(lid, to)}
+					onrevoke={(lid, to) => together?.revoke(lid, to)}
 					bind:name={settings.shareName}
 					busy={shareBusy}
 					error={shareError}

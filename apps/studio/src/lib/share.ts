@@ -20,6 +20,7 @@ export interface ShareInfo {
 export type ShareEvent =
 	| { kind: 'edit'; seq: number; from: string; body: unknown }
 	| { kind: 'presence'; from: string; body: unknown }
+	| { kind: 'direct'; from: string; body: unknown }
 	| { kind: 'joined'; member: Member }
 	| { kind: 'left'; id: string }
 	/** the host left and `host` took over (`you`: this app); who's here; the new code */
@@ -175,6 +176,7 @@ export function cleanRelay(text: string): string {
 export const sessionStatus = () => call<ShareInfo | null>('share_status');
 export const sendEdit = (body: unknown) => call<void>('share_edit', { body });
 export const sendPresence = (body: unknown) => call<void>('share_presence', { body });
+export const sendDirect = (to: string, body: unknown) => call<void>('share_direct', { to, body });
 export const leaveSession = () => call<void>('share_leave');
 
 /**

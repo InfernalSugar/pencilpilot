@@ -1,0 +1,270 @@
+import { describe, expect, it } from 'vitest';
+import {
+	decodeTile,
+	diffTiles,
+	encodeTile,
+	pack,
+	parseEdit,
+	Shared,
+	TILE_BYTES,
+	Together,
+	unpack,
+	type CanvasPort,
+	type TileMap
+} from './together';
+
+const A = 'a'.repeat(64);
+const B = 'b'.repeat(64);
+const C = 'c'.repeat(64);
+
+function tile(v: number) {
+	return new Uint8Array(TILE_BYTES).fill(v);
+}
+
+/** A canvas: layers with drawings of tiles. */
+class FakeCanvas implements CanvasPort {
+	layerList: { id: number; name: string; locked: boolean; visible: boolean; drawing: number }[] =
+		[];
+	drawings = new Map<number, TileMap>();
+	selected = 0;
+	busy = false;
+	#next = 1;
+	constructor(names: string[] = ['Layer 1']) {
+		for (const n of names) this.addLayer(n);
+	}
+	addLayer(name: string) {
+		const id = this.#next++;
+		this.layerList.push({ id, name, locked: false, visible: true, drawing: 0 });
+		return id;
+	}
+	setLayer(id: number, patch: { name?: string; locked?: boolean; visible?: boolean }) {
+		Object.assign(
+			this.layerList.find((l) => l.id === id)!,
+			patch
+		);
+	}
+	drawingOf(id: number) {
+		const l = this.layerList.find((l) => l.id === id)!;
+		if (!l.drawing) {
+			l.drawing = 1000 + id;
+			this.drawings.set(l.drawing, new Map());
+		}
+		return l.drawing;
+	}
+	packed(d: number) {
+		return pack(this.drawings.get(d) ?? new Map());
+	}
+	put(d: number, p: Uint8Array) {
+		if (this.busy) return false;
+		this.drawings.set(d, unpack(p));
+		return true;
+	}
+	select(id: number) {
+		this.selected = id;
+	}
+	layers() {
+		return this.layerList.map((l) => ({ id: l.id, name: l.name }));
+	}
+	/** draw: set a tile on a layer, if it isn't locked */
+	paint(id: number, x: number, y: number, v: number) {
+		const l = this.layerList.find((l) => l.id === id)!;
+		if (l.locked) return false;
+		this.drawings.get(this.drawingOf(id))!.set(`${x},${y}`, tile(v));
+		return true;
+	}
+	pixel(id: number, x: number, y: number) {
+		const l = this.layerList.find((l) => l.id === id)!;
+		return this.drawings.get(l.drawing)?.get(`${x},${y}`)?.[0];
+	}
+	byName(name: string) {
+		return this.layerList.find((l) => l.name === name)!;
+	}
+}
+
+/** A session: numbers edits and hands them to every app, in order. */
+class FakeSession {
+	seq = 0;
+	apps = new Map<string, Together>();
+	queue: (() => Promise<void>)[] = [];
+	net(me: string) {
+		return {
+			edit: (body: unknown) => {
+				const seq = ++this.seq;
+				const copy = structuredClone(body);
+				for (const t of this.apps.values()) this.queue.push(() => t.onEdit(seq, me, copy));
+			},
+			direct: (to: string, body: unknown) => {
+				const copy = structuredClone(body);
+				this.queue.push(async () => this.apps.get(to)?.onDirect(me, copy));
+			}
+		};
+	}
+	async settle() {
+		while (this.queue.length) await this.queue.shift()!();
+	}
+}
+
+describe('drawing together: the shared layers', () => {
+	it('takes only the listed edits (no AI, nothing else)', () => {
+		expect(parseEdit({ k: 'layer', lid: 'aaaaaaaaaaaa:1', name: 'Hi' })).toEqual({
+			k: 'layer',
+			lid: 'aaaaaaaaaaaa:1',
+			name: 'Hi'
+		});
+		expect(parseEdit({ k: 'ai-image', lid: 'aaaaaaaaaaaa:1', png: '...' })).toBeNull();
+		expect(parseEdit({ k: 'layer', lid: '../etc' })).toBeNull();
+		expect(parseEdit({ k: 'grant', lid: 'aaaaaaaaaaaa:1', to: 'nope' })).toBeNull();
+		expect(parseEdit(null)).toBeNull();
+	});
+
+	it('lets only writers change a layer, and only owners give access', () => {
+		const s = new Shared();
+		const lid = 'aaaaaaaaaaaa:1';
+		expect(s.apply(B, { k: 'layer', lid, name: 'x' })).toBe(false); // not B's id
+		expect(s.apply(A, { k: 'layer', lid, name: 'A' })).toBe(true);
+		const t = { k: 'tiles' as const, lid, set: [], clear: [] };
+		expect(s.apply(B, t)).toBe(false);
+		expect(s.apply(B, { k: 'ask', lid })).toBe(true);
+		expect(s.asks).toEqual([{ lid, from: B }]);
+		expect(s.apply(B, { k: 'grant', lid, to: B, handover: false })).toBe(false); // not owner
+		expect(s.apply(A, { k: 'grant', lid, to: B, handover: false })).toBe(true);
+		expect(s.asks).toEqual([]);
+		expect(s.apply(B, t)).toBe(true);
+		expect(s.apply(A, { k: 'revoke', lid, to: B })).toBe(true);
+		expect(s.apply(B, t)).toBe(false);
+		// handing over: B owns it, A can't draw any more
+		expect(s.apply(A, { k: 'grant', lid, to: B, handover: true })).toBe(true);
+		expect(s.layers.get(lid)!.owner).toBe(B);
+		expect(s.canDraw(lid, A)).toBe(false);
+		expect(s.apply(A, { k: 'revoke', lid, to: B })).toBe(false);
+	});
+});
+
+describe('drawing together: tiles', () => {
+	it('packs, diffs and travels compressed', async () => {
+		const m: TileMap = new Map([
+			['0,0', tile(1)],
+			['-1,2', tile(2)]
+		]);
+		expect(unpack(pack(m))).toEqual(m);
+		const next: TileMap = new Map([
+			['0,0', tile(1)],
+			['3,3', tile(9)]
+		]);
+		const d = diffTiles(m, next);
+		expect(d.set.map((s) => [s[0], s[1]])).toEqual([[3, 3]]);
+		expect(d.clear).toEqual([[-1, 2]]);
+		const enc = await encodeTile(tile(7));
+		expect(enc.length).toBeLessThan(200); // a flat tile compresses to almost nothing
+		expect(await decodeTile(enc)).toEqual(tile(7));
+		expect(await decodeTile('z:garbage!')).toBeNull();
+	});
+});
+
+describe('drawing together: apps', () => {
+	it('shares the host’s drawing with a joiner, then each draws on their own layer', async () => {
+		const session = new FakeSession();
+		const hc = new FakeCanvas(['Sky']);
+		const host = new Together(A, 'Ana', hc, session.net(A));
+		session.apps.set(A, host);
+		hc.paint(hc.byName('Sky').id, 0, 0, 50);
+		host.startHost();
+		await session.settle();
+
+		// Bo joins: gets the project
+		const bc = new FakeCanvas(['Bo’s old work']);
+		bc.paint(1, 5, 5, 99);
+		const bo = new Together(B, 'Bo', bc, session.net(B));
+		session.apps.set(B, bo);
+		bo.startJoin(A);
+		await session.settle();
+		expect(bo.synced).toBe(true);
+		const sky = bc.byName('Sky');
+		expect(bc.pixel(sky.id, 0, 0)).toBe(50);
+		expect(sky.locked).toBe(true);
+		// Bo's own work before joining stays here, hidden, not shared
+		expect(bc.layerList[0]).toMatchObject({ visible: false, locked: true });
+		// Bo got a layer of his own, selected, and the host has it too
+		const boLayer = bc.byName('Bo’s layer');
+		expect(bc.selected).toBe(boLayer.id);
+		expect(boLayer.locked).toBe(false);
+		expect(hc.byName('Bo’s layer').locked).toBe(true);
+
+		// Bo draws on his layer: the host sees it
+		bc.paint(boLayer.id, 1, 1, 77);
+		await bo.localChanged();
+		await session.settle();
+		expect(hc.pixel(hc.byName('Bo’s layer').id, 1, 1)).toBe(77);
+		// Bo can't draw on the host's layer
+		expect(bc.paint(sky.id, 2, 2, 1)).toBe(false);
+
+		// the same layer order everywhere
+		expect(hc.layers().map((l) => l.name)).toEqual(['Sky', 'Bo’s layer']);
+		expect(
+			bc
+				.layers()
+				.slice(1)
+				.map((l) => l.name)
+		).toEqual(['Sky', 'Bo’s layer']);
+	});
+
+	it('asks, grants and takes back access to a layer', async () => {
+		const session = new FakeSession();
+		const hc = new FakeCanvas(['Sky']);
+		const host = new Together(A, 'Ana', hc, session.net(A));
+		session.apps.set(A, host);
+		host.startHost();
+		await session.settle();
+		const bc = new FakeCanvas();
+		const bo = new Together(B, 'Bo', bc, session.net(B));
+		session.apps.set(B, bo);
+		bo.startJoin(A);
+		await session.settle();
+		const skyLid = host.lidOf(hc.byName('Sky').id)!;
+
+		bo.ask(skyLid);
+		await session.settle();
+		expect(host.shared.asks).toEqual([{ lid: skyLid, from: B }]);
+		host.grant(skyLid, B);
+		await session.settle();
+		const sky = bc.byName('Sky');
+		expect(sky.locked).toBe(false);
+		bc.paint(sky.id, 3, 3, 33);
+		await bo.localChanged();
+		await session.settle();
+		expect(hc.pixel(hc.byName('Sky').id, 3, 3)).toBe(33);
+
+		host.revoke(skyLid, B);
+		await session.settle();
+		expect(bc.byName('Sky').locked).toBe(true);
+	});
+
+	it('ignores tiles from someone who may not draw there, and retries when busy', async () => {
+		const session = new FakeSession();
+		const hc = new FakeCanvas(['Sky']);
+		const host = new Together(A, 'Ana', hc, session.net(A));
+		session.apps.set(A, host);
+		host.startHost();
+		await session.settle();
+		const skyLid = host.lidOf(hc.byName('Sky').id)!;
+		// a forged change from C (not a writer)
+		const evil = { k: 'tiles', lid: skyLid, set: [[0, 0, await encodeTile(tile(1))]], clear: [] };
+		await host.onEdit(99, C, evil);
+		expect(hc.pixel(hc.byName('Sky').id, 0, 0)).toBeUndefined();
+
+		// a joiner whose canvas is busy (mid-stroke) gets the tiles once it's free
+		const bc = new FakeCanvas();
+		const bo = new Together(B, 'Bo', bc, session.net(B));
+		session.apps.set(B, bo);
+		bo.startJoin(A);
+		await session.settle();
+		hc.paint(hc.byName('Sky').id, 4, 4, 44);
+		bc.busy = true;
+		await host.localChanged();
+		await session.settle();
+		expect(bc.pixel(bc.byName('Sky').id, 4, 4)).toBeUndefined();
+		bc.busy = false;
+		await bo.localChanged();
+		expect(bc.pixel(bc.byName('Sky').id, 4, 4)).toBe(44);
+	});
+});
