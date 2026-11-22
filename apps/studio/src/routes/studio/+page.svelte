@@ -15,7 +15,8 @@
 	import PaintCanvas, {
 		BLANK_STATUS,
 		type CanvasStatus,
-		type LayerSettings
+		type LayerSettings,
+		type LiveEvent
 	} from '@pencilpilot/paint/PaintCanvas.svelte';
 	import LayersPanel from '@pencilpilot/paint/LayersPanel.svelte';
 	import BrushPicker from '@pencilpilot/paint/BrushPicker.svelte';
@@ -1546,15 +1547,74 @@
 			},
 			() => togetherTick++
 		);
+		together.ontiles = (from) => {
+			// their real pixels arrived: the live preview can go (unless they're mid-stroke)
+			if (!liveStrokes.get(from)) canvas?.remoteClear(`live:${from}`);
+		};
 		const host = info.members[0]?.id;
 		if (joining && host) together.startJoin(host);
 		else together.startHost();
 		togetherTick++;
 	}
 
+	// ---- live strokes: others' strokes drawn as they draw them, until the real pixels come
+	/** member → their preview layer here */
+	// eslint-disable-next-line svelte/prefer-svelte-reactivity -- bookkeeping, never rendered
+	const livePreview = new Map<string, number>();
+	/** member → strokes they have going */
+	// eslint-disable-next-line svelte/prefer-svelte-reactivity -- bookkeeping, never rendered
+	const liveStrokes = new Map<string, number>();
+
+	/** this app's stroke, as it's drawn: to the others (fast and lossy, like cursors) */
+	function onLive(ev: LiveEvent) {
+		const t = together;
+		if (!t || !status || !t.synced) return;
+		const lid = t.lidOf(status.active);
+		if (!lid || !t.shared.canDraw(lid, t.me)) return;
+		if (ev.type === 'points' && ev.pts.length > 96) {
+			// datagrams stay small: long batches go in pieces (4 numbers a point)
+			for (let i = 0; i < ev.pts.length; i += 96)
+				void sendPresence({ live: { ...ev, pts: ev.pts.slice(i, i + 96) } }).catch(() => {});
+		} else void sendPresence({ live: ev }).catch(() => {});
+	}
+
+	function takeLive(from: string, ev: LiveEvent) {
+		const c = canvas;
+		if (!c || !together?.synced) return;
+		const key = `live:${from}`;
+		const name = sharing?.members.find((m) => m.id === from)?.name ?? 'Someone';
+		if (ev.type === 'begin') {
+			if (!livePreview.has(from)) {
+				const id = c.remoteJoin(key, `${name} (drawing now)`);
+				if (!id) return;
+				together.exclude(id);
+				c.setLayerQuiet(id, { locked: true });
+				livePreview.set(from, id);
+			}
+			liveStrokes.set(from, (liveStrokes.get(from) ?? 0) + 1);
+			c.remoteBegin(key, ev.k, ev.style, name);
+		} else if (ev.type === 'points') c.remotePoints(key, ev.k, ev.pts);
+		else {
+			c.remoteEnd(key, ev.k);
+			liveStrokes.set(from, Math.max(0, (liveStrokes.get(from) ?? 1) - 1));
+			if (ev.type === 'cancel') c.remoteClear(key);
+		}
+	}
+
+	function dropLive() {
+		if (canvas)
+			for (const [from, id] of livePreview) {
+				canvas.removeLayerQuiet(id);
+				canvas.remoteForget(`live:${from}`);
+			}
+		livePreview.clear();
+		liveStrokes.clear();
+	}
+
 	/** after the session: the layers stay (everyone keeps a full copy), unlocked */
 	function stopTogether() {
 		clearTimeout(togetherTimer);
+		dropLive();
 		if (together && canvas)
 			for (const id of together.ids.values()) canvas.setLayerQuiet(id, { locked: false });
 		together = null;
@@ -1687,7 +1747,10 @@
 		void onShareEvent((e) => {
 			if (!sharing) return;
 			if (e.kind === 'presence') {
-				if (isCursor(e.body) && cursorsOf.set(e.from, e.body.x, e.body.y, performance.now()))
+				const live = (e.body as { live?: LiveEvent } | null)?.live;
+				if (live && typeof live === 'object' && typeof live.type === 'string')
+					takeLive(e.from, live);
+				else if (isCursor(e.body) && cursorsOf.set(e.from, e.body.x, e.body.y, performance.now()))
 					cursorTick++;
 			} else if (e.kind === 'joined') {
 				sharing.members = [...sharing.members.filter((m) => m.id !== e.member.id), e.member];
@@ -2891,6 +2954,7 @@
 					bind:this={canvas}
 					cursors={remoteCursors}
 					oncursor={onCursor}
+					onlive={sharing ? onLive : undefined}
 					onfill={(f) => void carryFill(f)}
 					fill
 					width={canvasSize.width}

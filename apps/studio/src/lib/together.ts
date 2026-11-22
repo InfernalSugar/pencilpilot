@@ -403,6 +403,14 @@ export class Together {
 		this.net.edit({ k: 'revoke', lid, to });
 	}
 
+	/** A layer of this app's own that isn't shared (e.g. live stroke previews). */
+	exclude(id: number) {
+		this.#local.add(id);
+	}
+
+	/** Someone's tiles arrived (their live stroke previews can go). */
+	ontiles: (from: string) => void = () => {};
+
 	/** The shared layer an engine layer is, if any. */
 	lidOf(id: number): string | null {
 		for (const [lid, i] of this.ids) if (i === id) return lid;
@@ -442,7 +450,10 @@ export class Together {
 				break;
 			case 'tiles':
 				// this app's own changes are on its canvas already
-				if (from !== this.me) await this.#takeTiles(e.lid, e.set, e.clear);
+				if (from !== this.me) {
+					await this.#takeTiles(e.lid, e.set, e.clear);
+					this.ontiles(from);
+				}
 				break;
 			case 'grant':
 			case 'revoke':

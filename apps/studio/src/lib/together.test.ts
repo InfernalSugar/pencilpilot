@@ -189,6 +189,8 @@ describe('drawing together: apps', () => {
 		bc.paint(1, 5, 5, 99);
 		const bo = new Together(B, 'Bo', bc, session.net(B));
 		session.apps.set(B, bo);
+		const tilesFrom: string[] = [];
+		host.ontiles = (from) => tilesFrom.push(from);
 		bo.startJoin(A);
 		await session.settle();
 		expect(bo.synced).toBe(true);
@@ -208,6 +210,8 @@ describe('drawing together: apps', () => {
 		await bo.localChanged();
 		await session.settle();
 		expect(hc.pixel(hc.byName('Bo’s layer').id, 1, 1)).toBe(77);
+		// (and the host was told Bo's real pixels came, for clearing his live preview)
+		expect(tilesFrom).toEqual([B]);
 		// Bo can't draw on the host's layer
 		expect(bc.paint(sky.id, 2, 2, 1)).toBe(false);
 
