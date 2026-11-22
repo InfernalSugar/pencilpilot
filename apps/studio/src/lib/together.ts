@@ -32,6 +32,8 @@ export interface SharedLayer {
 export type TogetherEdit =
 	| { k: 'layer'; lid: string; name: string }
 	| { k: 'rename'; lid: string; name: string }
+	| { k: 'remove'; lid: string }
+	| { k: 'move'; lid: string; to: number }
 	| { k: 'tiles'; lid: string; set: [number, number, string][]; clear: [number, number][] }
 	| { k: 'ask'; lid: string }
 	| { k: 'grant'; lid: string; to: string; handover: boolean }
@@ -61,6 +63,10 @@ export function parseEdit(body: unknown): TogetherEdit | null {
 			return { k: 'layer', lid, name: name || 'Layer' };
 		case 'rename':
 			return name ? { k: 'rename', lid, name } : null;
+		case 'remove':
+			return { k: 'remove', lid };
+		case 'move':
+			return int(b.to) && (b.to as number) >= 0 ? { k: 'move', lid, to: b.to as number } : null;
 		case 'tiles': {
 			if (!Array.isArray(b.set) || !Array.isArray(b.clear)) return null;
 			if (b.set.length + b.clear.length > 4 * TILES_PER_EDIT) return null;
@@ -108,6 +114,19 @@ export class Shared {
 				this.layers.set(e.lid, { lid: e.lid, owner: from, name: e.name, writers: [from] });
 				this.order.push(e.lid);
 				return true;
+			case 'remove':
+				if (!l || l.owner !== from) return false;
+				this.layers.delete(e.lid);
+				this.order = this.order.filter((x) => x !== e.lid);
+				this.asks = this.asks.filter((a) => a.lid !== e.lid);
+				return true;
+			case 'move': {
+				if (!l || l.owner !== from) return false;
+				const rest = this.order.filter((x) => x !== e.lid);
+				rest.splice(Math.min(e.to, rest.length), 0, e.lid);
+				this.order = rest;
+				return true;
+			}
 			case 'rename':
 			case 'tiles':
 				if (!l || !l.writers.includes(from)) return false;
@@ -274,6 +293,10 @@ export interface CanvasPort {
 	/** false when the canvas is busy (mid-stroke): try again later */
 	put(drawing: number, packed: Uint8Array): boolean;
 	select(id: number): void;
+	/** remove a layer (false: busy, try later); clears undo */
+	removeLayer(id: number): boolean;
+	/** move a layer right above / below another (false: busy, try later); clears undo */
+	moveNextTo(id: number, ref: number, above: boolean): boolean;
 	/** paint layers, bottom → top */
 	layers(): { id: number; name: string }[];
 }
@@ -301,6 +324,8 @@ export class Together {
 	cache = new Map<string, TileMap>();
 	/** layers whose tiles couldn't go in yet (the canvas was busy) */
 	#pending = new Set<string>();
+	/** layer removals and moves that couldn't happen yet (the canvas was busy) */
+	#structure: { f: () => boolean; tries: number }[] = [];
 	/** this app's layers from before joining: hidden, not shared */
 	#local = new Set<number>();
 	#synced = false;
@@ -356,6 +381,15 @@ export class Together {
 		this.net.edit({ k: 'layer', lid, name: name || `${this.myName}’s layer` });
 	}
 
+	/** Delete a shared layer of this app's own, for everyone. */
+	removeOwn(lid: string) {
+		if (this.shared.layers.get(lid)?.owner === this.me) this.net.edit({ k: 'remove', lid });
+	}
+	/** Move a shared layer of this app's own to `to` in the shared order (0 = bottom). */
+	moveOwn(lid: string, to: number) {
+		if (this.shared.layers.get(lid)?.owner === this.me) this.net.edit({ k: 'move', lid, to });
+	}
+
 	ask(lid: string) {
 		this.net.edit({ k: 'ask', lid });
 	}
@@ -395,6 +429,17 @@ export class Together {
 				if (id) this.canvas.setLayer(id, { name: e.name });
 				break;
 			}
+			case 'remove': {
+				const id = this.ids.get(e.lid);
+				this.ids.delete(e.lid);
+				this.cache.delete(e.lid);
+				this.#pending.delete(e.lid);
+				if (id) this.#later(() => this.canvas.removeLayer(id));
+				break;
+			}
+			case 'move':
+				this.#place(e.lid);
+				break;
 			case 'tiles':
 				// this app's own changes are on its canvas already
 				if (from !== this.me) await this.#takeTiles(e.lid, e.set, e.clear);
@@ -449,6 +494,12 @@ export class Together {
 		try {
 			do {
 				this.#again = false;
+				// (one that keeps failing, e.g. the last layer can't go, is given up after a while)
+				while (this.#structure.length) {
+					const op = this.#structure[0];
+					if (!op.f() && ++op.tries < 50) break;
+					this.#structure.shift();
+				}
 				for (const lid of [...this.#pending]) this.#put(lid);
 				// a layer made here outside the session's way (duplicate, paste, import)
 				const known = new Set(this.ids.values());
@@ -533,6 +584,22 @@ export class Together {
 		this.ids.set(lid, id);
 		if (!this.cache.has(lid)) this.cache.set(lid, new Map());
 		this.#refreshLock(lid);
+	}
+
+	/** Put a shared layer next to its neighbour in the shared order. */
+	#place(lid: string) {
+		const id = this.ids.get(lid);
+		const i = this.shared.order.indexOf(lid);
+		if (!id || i < 0) return;
+		const below = this.ids.get(this.shared.order[i - 1]);
+		const above = this.ids.get(this.shared.order[i + 1]);
+		if (below) this.#later(() => this.canvas.moveNextTo(id, below, true));
+		else if (above) this.#later(() => this.canvas.moveNextTo(id, above, false));
+	}
+
+	/** Do it now, or (the canvas busy mid-stroke) after the next change. */
+	#later(f: () => boolean) {
+		if (this.#structure.length || !f()) this.#structure.push({ f, tries: 0 });
 	}
 
 	#refreshLock(lid: string) {
