@@ -103,7 +103,18 @@ export class Replayer {
 		this.#layers.forEach((l, i) => {
 			const id = i === 0 ? this.paint.activeLayer : this.paint.addLayer('');
 			this.#ids.set(l.id, id);
-			this.paint.setLayer(id, '', true, l.opacity, l.blend, false, false, !!l.clip, false);
+			this.paint.setLayer(
+				id,
+				'',
+				true,
+				l.opacity,
+				l.blend,
+				false,
+				false,
+				!!l.clip,
+				false,
+				new Float32Array()
+			);
 		});
 	}
 

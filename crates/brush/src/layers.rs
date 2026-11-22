@@ -91,6 +91,8 @@ pub struct LayerProps {
     pub adjust: Option<Box<crate::adjust::ColourAdjust>>,
     /// the app's description of the adjustment (curve points etc.), kept as given
     pub adjust_spec: String,
+    /// stroke, drop shadow and outer glow (see [`crate::style`])
+    pub style: crate::style::LayerStyle,
 }
 
 impl LayerProps {
@@ -106,6 +108,7 @@ impl LayerProps {
             imported: false,
             adjust: None,
             adjust_spec: String::new(),
+            style: Default::default(),
         }
     }
 }

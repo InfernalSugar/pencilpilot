@@ -5,6 +5,7 @@
 	 * measure and lasso fill. The settings live in a `ToolOptions` (tool-options.svelte.ts).
 	 */
 	import ToneEditor from './ToneEditor.svelte';
+	import FilterEditor from './FilterEditor.svelte';
 	import type PaintCanvas from './PaintCanvas.svelte';
 	import type { CanvasStatus } from './PaintCanvas.svelte';
 	import { SYMMETRY_MODES, symmetryOn } from './guides';
@@ -163,14 +164,17 @@
 {#if opts.adjustOpen}
 	<div class="fill-opts adjust-opts" role="group" aria-label="Adjust layer">
 		<div class="seg" role="radiogroup" aria-label="Adjustment">
-			{#each [['colour', 'Colour'], ['curves', 'Curves'], ['levels', 'Levels'], ['map', 'Gradient map']] as [id, label] (id)}
+			{#each [['colour', 'Colour'], ['curves', 'Curves'], ['levels', 'Levels'], ['map', 'Gradient map'], ...(opts.adjustLayer ? [] : [['filters', 'Filters']])] as [id, label] (id)}
 				<button
 					type="button"
 					class="tool"
 					role="radio"
 					aria-checked={opts.adjustKind === id}
 					onclick={() => {
+						// filters show on their own: switching to or from them shows the other again
+						const swap = (id === 'filters') !== (opts.adjustKind === 'filters');
 						opts.adjustKind = id as typeof opts.adjustKind;
+						if (swap) opts.previewAdjust();
 						if (id === 'map' && !opts.tone.map) {
 							opts.tone = { ...opts.tone, map: MAP_PRESETS[0].stops };
 							opts.previewAdjust();
@@ -216,6 +220,8 @@
 					Recolour
 				</button>
 			{/if}
+		{:else if opts.adjustKind === 'filters'}
+			<FilterEditor bind:spec={opts.filter} onchange={() => opts.previewAdjust()} />
 		{:else}
 			<ToneEditor
 				kind={opts.adjustKind}
@@ -223,7 +229,7 @@
 				onchange={() => opts.previewAdjust()}
 			/>
 		{/if}
-		{#if opts.adjustLayerNew || !opts.adjustLayer}
+		{#if (opts.adjustLayerNew || !opts.adjustLayer) && opts.adjustKind !== 'filters'}
 			<button
 				type="button"
 				class="tool"

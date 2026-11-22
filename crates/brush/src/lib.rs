@@ -22,8 +22,10 @@ use hokusai::{Brush, BrushSetting, BrushState, TILE_SIZE, TilePixels, TiledSurfa
 
 pub mod adjust;
 mod clone;
+pub mod filters;
 pub mod layers;
 mod select;
+pub mod style;
 pub mod texture;
 
 pub use layers::{Blend, LayerProps};
@@ -180,6 +182,15 @@ pub struct Layer {
     /// the drawing (animation cel) showing on this layer; 0 = none yet (the first
     /// change gives it one). Other drawings wait in [`Painter::cels`].
     drawing: u32,
+    /// the layer as it shows with its style, kept up to date by `Painter::flush`
+    styled: Option<Box<Styled>>,
+}
+
+/// A layer's pixels with its style drawn in (see [`style`]), and the style they're for.
+#[derive(Clone)]
+struct Styled {
+    style: style::LayerStyle,
+    tiles: TileMap,
 }
 
 /// A layer group ("pass-through": its visibility and opacity apply to each of its layers).
@@ -201,6 +212,7 @@ impl Layer {
             editing_mask: false,
             group: 0,
             drawing: 0,
+            styled: None,
         }
     }
 
@@ -600,7 +612,96 @@ impl Painter {
         if let Some(m) = &l.mask {
             keys.extend(m.tiles.keys().copied());
         }
+        // a style reaches beyond the paint
+        if let Some(st) = &l.styled {
+            keys.extend(st.tiles.keys().copied());
+        }
         self.dirty.extend(keys);
+    }
+
+    /// Forget a layer's styled pixels (its mask or paint changed without the tiles
+    /// saying so): `flush` draws them again.
+    fn unstyle(&mut self, idx: usize) {
+        if let Some(st) = self.layers[idx].styled.take() {
+            self.dirty.extend(st.tiles.keys().copied());
+        }
+    }
+
+    /// Bring every layer's styled pixels up to date: around the tiles that changed, or
+    /// all of a layer whose style changed (or that has none kept yet).
+    fn restyle(&mut self) {
+        let last = (
+            self.width.div_ceil(TILE_SIZE as u32) as i32 - 1,
+            self.height.div_ceil(TILE_SIZE as u32) as i32 - 1,
+        );
+        // a transform or liquify changes its layer's tiles directly
+        let busy = self
+            .transform
+            .as_ref()
+            .map(|t| t.layer)
+            .or(self.liquify.as_ref().map(|l| l.0));
+        for i in 0..self.layers.len() {
+            let l = &self.layers[i];
+            let style = l.props.style;
+            if !style.any() || l.props.adjust.is_some() {
+                self.unstyle(i);
+                continue;
+            }
+            let colour = &l.colour().tiles;
+            let mask = l.mask_surface().map(|m| &m.tiles);
+            let kept = l.styled.as_ref().is_some_and(|st| st.style == style);
+            let mut changed: Vec<TileKey> = l.surface.dirty.iter().copied().collect();
+            if let Some(m) = &l.mask {
+                changed.extend(m.dirty.iter().copied());
+            }
+            if busy == Some(l.id) {
+                changed.extend(self.dirty.iter().copied());
+            }
+            if kept && changed.is_empty() {
+                continue;
+            }
+            let around: Vec<TileKey> = if kept {
+                changed
+            } else {
+                colour.keys().copied().collect()
+            };
+            let r = style.reach_tiles();
+            let span = around
+                .iter()
+                .fold(None, |b: Option<(i32, i32, i32, i32)>, &(x, y)| {
+                    Some(b.map_or((x, y, x, y), |b| {
+                        (b.0.min(x), b.1.min(y), b.2.max(x), b.3.max(y))
+                    }))
+                });
+            let span = span.map(|b| {
+                (
+                    (b.0 - r).max(0),
+                    (b.1 - r).max(0),
+                    (b.2 + r).min(last.0),
+                    (b.3 + r).min(last.1),
+                )
+            });
+            let fresh = span.map_or_else(TileMap::new, |b| style::render(colour, mask, &style, b));
+            if !kept {
+                self.unstyle(i);
+            }
+            let st = self.layers[i].styled.get_or_insert_with(|| {
+                Box::new(Styled {
+                    style,
+                    tiles: TileMap::new(),
+                })
+            });
+            if let Some((x0, y0, x1, y1)) = span {
+                let inside = |&(x, y): &TileKey| x >= x0 && x <= x1 && y >= y0 && y <= y1;
+                let gone: Vec<TileKey> = st.tiles.keys().filter(|k| inside(k)).copied().collect();
+                for k in gone {
+                    st.tiles.remove(&k);
+                    self.dirty.insert(k);
+                }
+            }
+            self.dirty.extend(fresh.keys().copied());
+            st.tiles.extend(fresh);
+        }
     }
 
     /// Recomposite every tile of the canvas.
@@ -780,7 +881,7 @@ impl Painter {
         let mut base: Option<TileMap> = None;
         for &i in &m {
             let l = &self.layers[i];
-            let baked = bake(&l.surface.tiles, l.mask.as_ref().map(|mk| &mk.tiles));
+            let baked = self.styled_tiles(l, &l.surface.tiles);
             if !l.props.clip {
                 base = Some(baked.clone());
             }
@@ -1097,6 +1198,7 @@ impl Painter {
                 let l = &mut self.layers[idx];
                 l.set_editing(false);
                 let old = std::mem::replace(&mut l.mask, mask.map(|b| *b));
+                self.unstyle(idx);
                 self.mark_layer(idx);
                 Edit::SetMask {
                     layer,
@@ -1159,6 +1261,9 @@ impl Painter {
                 self.height = height;
                 self.rgba = vec![255; (width * height * 4) as usize];
                 self.selection = None;
+                for l in &mut self.layers {
+                    l.styled = None;
+                }
                 self.mark_all();
                 Edit::Canvas {
                     width: ow,
@@ -1276,6 +1381,9 @@ impl Painter {
         props.imported = self.layers[idx].props.imported; // not the caller's to change
         props.adjust = self.layers[idx].props.adjust.clone();
         props.adjust_spec = self.layers[idx].props.adjust_spec.clone();
+        if props.adjust.is_some() {
+            props.style = Default::default();
+        }
         props.opacity = props.opacity.clamp(0.0, 1.0);
         props.name = props.name.chars().take(60).collect();
         if props.name.trim().is_empty() {
@@ -1300,6 +1408,9 @@ impl Painter {
         before.imported = self.layers[idx].props.imported;
         before.adjust = self.layers[idx].props.adjust.clone();
         before.adjust_spec = self.layers[idx].props.adjust_spec.clone();
+        if before.adjust.is_some() {
+            before.style = Default::default();
+        }
         if self.layers[idx].props == before {
             return false;
         }
@@ -1348,12 +1459,11 @@ impl Painter {
             return true;
         }
         let (opacity, blend, clipped) = (upper.props.opacity, upper.props.blend, upper.props.clip);
-        // masks are baked in: the merged layer looks the same and has none
-        let upper_tiles = bake(&upper.surface.tiles, upper.mask.as_ref().map(|m| &m.tiles));
-        let lower_baked = lower
-            .mask
-            .as_ref()
-            .map(|m| bake(&lower.surface.tiles, Some(&m.tiles)));
+        // masks and styles are baked in: the merged layer looks the same and has neither
+        let upper_tiles = self.styled_tiles(upper, &upper.surface.tiles);
+        let lower_styled = lower.props.style.any();
+        let lower_baked = (lower.mask.is_some() || lower_styled)
+            .then(|| self.styled_tiles(lower, &lower.surface.tiles));
         let lower_tiles = lower_baked.as_ref().unwrap_or(&lower.surface.tiles);
         let mut merged = Snapshot::new();
         if lower_baked.is_some() {
@@ -1376,7 +1486,8 @@ impl Painter {
         let lower_masked = lower.mask.is_some();
         let taint = upper.props.imported && !lower.props.imported;
         let lower_props = LayerProps {
-            imported: true,
+            imported: lower.props.imported || upper.props.imported,
+            style: style::LayerStyle::default(),
             ..lower.props.clone()
         };
         let mut edits = vec![Edit::Tiles {
@@ -1391,7 +1502,7 @@ impl Painter {
                 mask: None,
             });
         }
-        if taint {
+        if taint || lower_styled {
             edits.push(Edit::Props {
                 layer: lower_id,
                 props: lower_props,
@@ -2817,6 +2928,7 @@ impl Painter {
             tiles,
             ..UndoSurface::default()
         });
+        self.unstyle(idx);
         self.mark_layer(idx);
         true
     }
@@ -2981,6 +3093,11 @@ impl Painter {
         self.adjust_show(|o, area| adjust::adjust_tiles(o, &a, area));
     }
 
+    /// Show the layer with a filter applied (from the original each time).
+    pub fn filter_preview(&mut self, f: filters::Filter) {
+        self.adjust_show(|o, area| filters::filter_tiles(o, &f, area));
+    }
+
     /// Show the layer with this gradient painted over it.
     pub fn gradient_preview(&mut self, g: adjust::Gradient) {
         self.adjust_show(|o, area| adjust::gradient_tiles(o, &g, area));
@@ -3084,6 +3201,7 @@ impl Painter {
     pub fn clear_layer_silent(&mut self, id: u32) {
         if let Some(idx) = self.index_of(id) {
             self.mark_layer(idx);
+            self.unstyle(idx);
             self.layers[idx].colour_mut().tiles.clear();
         }
     }
@@ -3469,6 +3587,7 @@ impl Painter {
             let l = &mut self.layers[idx];
             l.set_editing(false);
             l.mask = None;
+            self.unstyle(idx);
             self.mark_layer(idx);
             return true;
         }
@@ -3482,6 +3601,7 @@ impl Painter {
             tiles,
             ..UndoSurface::default()
         });
+        self.unstyle(idx);
         self.mark_layer(idx);
         true
     }
@@ -3668,14 +3788,16 @@ impl Painter {
         key: TileKey,
         over: Option<&HashMap<u32, Option<&TileMap>>>,
     ) -> Option<ComposedTile> {
-        self.composite_tile_on(key, over, [1.0; 3])
+        self.composite_tile_on(key, over, None, [1.0; 3])
     }
 
     /// One tile composited over a paper of colour `paper` (white for the canvas).
+    /// `restyled`: styled pixels for layers showing other drawings (layer id → them).
     fn composite_tile_on(
         &self,
         (tx, ty): TileKey,
         over: Option<&HashMap<u32, Option<&TileMap>>>,
+        restyled: Option<&HashMap<u32, TileMap>>,
         paper_rgb: [f32; 3],
     ) -> Option<ComposedTile> {
         let ts = TILE_SIZE as i32;
@@ -3702,8 +3824,18 @@ impl Painter {
                 let opacity = l.props.opacity * go;
                 let visible = l.props.visible && gv && opacity > 0.0;
                 let adjust = l.props.adjust.as_deref();
+                // a styled layer shows its styled pixels (its mask is in them)
+                let styled = if adjust.is_some() || !l.props.style.any() {
+                    None
+                } else {
+                    restyled
+                        .and_then(|r| r.get(&l.id))
+                        .or(l.styled.as_ref().map(|st| &st.tiles))
+                };
                 let tile = if adjust.is_some() {
                     None
+                } else if let Some(st) = styled {
+                    st.get(&(tx, ty))
                 } else {
                     match over.and_then(|o| o.get(&l.id)) {
                         Some(tiles) => tiles.and_then(|t| t.get(&(tx, ty))),
@@ -3718,9 +3850,12 @@ impl Painter {
                         blend: l.props.blend,
                         visible,
                         clip: l.props.clip,
-                        mask: l
-                            .mask_surface()
-                            .map(|m| m.tiles.get(&(tx, ty)).map(|t| &**t)),
+                        mask: if styled.is_some() {
+                            None
+                        } else {
+                            l.mask_surface()
+                                .map(|m| m.tiles.get(&(tx, ty)).map(|t| &**t))
+                        },
                     }
                 })
             })
@@ -3748,6 +3883,7 @@ impl Painter {
     }
 
     pub fn flush(&mut self) -> Option<Rect> {
+        self.restyle();
         for l in &mut self.layers {
             self.dirty.extend(l.surface.dirty.drain());
             if let Some(m) = l.mask.as_mut() {
@@ -3798,6 +3934,43 @@ impl Painter {
 
     pub fn rgba(&self) -> &[u8] {
         &self.rgba
+    }
+
+    /// The layer's kept styled pixels match it (nothing changed since `flush`).
+    fn style_fresh(&self, l: &Layer) -> bool {
+        l.styled
+            .as_ref()
+            .is_some_and(|st| st.style == l.props.style)
+            && l.surface.dirty.is_empty()
+            && l.mask.as_ref().is_none_or(|m| m.dirty.is_empty())
+            && self.transform.is_none()
+            && self.liquify.is_none()
+    }
+
+    /// A layer's pixels with its style (and mask) drawn in.
+    fn styled_tiles(&self, l: &Layer, tiles: &TileMap) -> TileMap {
+        let mask = l.mask_surface().map(|m| &m.tiles);
+        if l.props.style.any() && l.props.adjust.is_none() {
+            style::render_all(tiles, mask, &l.props.style, self.width, self.height)
+        } else {
+            bake(tiles, mask)
+        }
+    }
+
+    /// A layer as it shows, at full size (straight-alpha sRGB RGBA8): its mask and
+    /// style baked in. With `drawing` (not 0), that drawing on the layer instead. For
+    /// exporting to files that can't keep the style.
+    pub fn layer_styled_rgba(&self, id: u32, drawing: u32) -> Vec<u8> {
+        let Some(l) = self.layers.iter().find(|l| l.id == id) else {
+            return Vec::new();
+        };
+        let empty = TileMap::new();
+        let tiles = if drawing == 0 {
+            &l.colour().tiles
+        } else {
+            self.drawing_tiles(drawing).unwrap_or(&empty)
+        };
+        self.tiles_rgba(&self.styled_tiles(l, tiles))
     }
 
     /// Onion skin: drawings as tinted lines over each other, on transparency, for showing
@@ -3927,6 +4100,32 @@ impl Painter {
             .iter()
             .map(|&[l, d]| (l, self.drawing_tiles(d)))
             .collect();
+        // styled layers showing another drawing (or not drawn yet) are styled for this frame
+        let restyled: HashMap<u32, TileMap> = self
+            .layers
+            .iter()
+            .filter(|l| l.props.style.any() && l.props.adjust.is_none())
+            .filter_map(|l| {
+                let shows = pairs
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .find(|p| p[0] == l.id)
+                    .map(|p| p[1]);
+                let tiles = match shows {
+                    Some(d) if d == 0 || d != l.drawing => self.drawing_tiles(d),
+                    _ if self.style_fresh(l) => return None,
+                    _ => Some(&l.colour().tiles),
+                };
+                let mask = l.mask_surface().map(|m| &m.tiles);
+                Some((
+                    l.id,
+                    tiles.map_or_else(TileMap::new, |t| {
+                        style::render_all(t, mask, &l.props.style, self.width, self.height)
+                    }),
+                ))
+            })
+            .collect();
         let ts = TILE_SIZE;
         let (w, h) = (self.width as usize, self.height as usize);
         let keys: Vec<TileKey> = (0..h.div_ceil(ts))
@@ -3936,13 +4135,13 @@ impl Painter {
         let done: Vec<ComposedTile> = {
             use rayon::prelude::*;
             keys.par_iter()
-                .filter_map(|&key| self.composite_tile_on(key, Some(&over), paper))
+                .filter_map(|&key| self.composite_tile_on(key, Some(&over), Some(&restyled), paper))
                 .collect()
         };
         #[cfg(target_arch = "wasm32")]
         let done: Vec<ComposedTile> = keys
             .iter()
-            .filter_map(|&key| self.composite_tile_on(key, Some(&over), paper))
+            .filter_map(|&key| self.composite_tile_on(key, Some(&over), Some(&restyled), paper))
             .collect();
         let (ow, oh) = (w.div_ceil(k), h.div_ceil(k));
         let mut sum = vec![[0u32; 4]; ow * oh];
@@ -4106,7 +4305,7 @@ impl Painter {
             .map(|l| {
                 let p = &l.props;
                 format!(
-                    r#"{{"id":{},"name":{},"visible":{},"opacity":{},"blend":"{}","locked":{},"alphaLock":{},"clip":{},"mask":{},"editingMask":{},"group":{},"imported":{},"empty":{},"drawing":{},"adjust":{}}}"#,
+                    r#"{{"id":{},"name":{},"visible":{},"opacity":{},"blend":"{}","locked":{},"alphaLock":{},"clip":{},"mask":{},"editingMask":{},"group":{},"imported":{},"empty":{},"drawing":{},"adjust":{},"style":{}}}"#,
                     l.id,
                     json_str(&p.name),
                     p.visible,
@@ -4125,6 +4324,11 @@ impl Painter {
                         json_str(&p.adjust_spec)
                     } else {
                         "null".into()
+                    },
+                    if p.style == style::LayerStyle::default() {
+                        "null".into()
+                    } else {
+                        p.style.json()
                     }
                 )
             })
@@ -6295,6 +6499,104 @@ mod tests {
         assert_eq!(p.layers().len(), 4);
     }
 
+    /// a red outline, `size` px
+    fn outline(p: &mut Painter, id: u32, size: f32) {
+        let before = props(p, id);
+        let mut st = before.clone();
+        st.style.stroke.on = true;
+        st.style.stroke.size = size;
+        st.style.stroke.colour = [1.0, 0.0, 0.0];
+        assert!(p.set_layer_props(id, st, false));
+        assert!(p.commit_layer_props(id, before));
+    }
+
+    #[test]
+    fn layer_styles_show_follow_the_paint_and_undo() {
+        let mut p = Painter::new(256, 128);
+        let id = p.active_layer();
+        let b = pen();
+        line(&mut p, &b, 40.0);
+        let first = p.layer_drawing(id);
+        p.flush();
+        let plain = p.rgba().to_vec();
+        outline(&mut p, id, 6.0);
+        p.flush();
+        let c = px(&p, 100, 30);
+        assert!(c[0] > 200 && c[1] < 60, "red above the line: {c:?}");
+        assert!(px(&p, 100, 40)[0] < 40, "the line stays black");
+        assert!(
+            p.layers_json()
+                .contains(r#""style":{"stroke":{"on":true,"size":6"#)
+        );
+        // more paint: the outline follows it
+        line(&mut p, &b, 90.0);
+        p.flush();
+        assert!(px(&p, 100, 80)[0] > 200);
+        // ...just as styling it all from scratch would
+        let live = p.rgba().to_vec();
+        p.layers[0].styled = None;
+        p.mark_all();
+        p.flush();
+        assert_eq!(p.rgba(), &live[..]);
+        // another frame: its own drawing, outlined
+        assert!(p.show_drawings(&[id, 0]));
+        line(&mut p, &b, 60.0);
+        p.flush();
+        assert!(px(&p, 100, 50)[0] > 200 && px(&p, 100, 30)[0] == 255);
+        let f = p.render_frame(&[id, first], 1);
+        let at = |x: usize, y: usize| &f[(y * 256 + x) * 4..(y * 256 + x) * 4 + 3];
+        assert!(
+            at(100, 30)[0] > 200 && at(100, 30)[1] < 60,
+            "{:?}",
+            at(100, 30)
+        );
+        assert_eq!(at(100, 65), &[255, 255, 255], "not frame 2's line");
+        assert!(p.show_drawings(&[id, first]));
+        // undo: both strokes, then the style
+        assert!(p.undo() && p.undo() && p.undo());
+        p.flush();
+        assert_eq!(p.rgba(), &plain[..]);
+        assert!(p.layers_json().contains(r#""style":null"#));
+        assert!(p.redo());
+        p.flush();
+        assert!(px(&p, 100, 30)[0] > 200);
+    }
+
+    #[test]
+    fn merging_bakes_layer_styles() {
+        let mut p = Painter::new(256, 128);
+        let lower = p.active_layer();
+        let b = pen();
+        line(&mut p, &b, 30.0);
+        let upper = p.add_layer("Ink");
+        line(&mut p, &b, 90.0);
+        outline(&mut p, upper, 4.0);
+        outline(&mut p, lower, 3.0);
+        p.flush();
+        let shown = p.rgba().to_vec();
+        assert!(px(&p, 100, 81)[0] > 200 && px(&p, 100, 21)[0] > 200);
+        assert!(p.merge_down(upper));
+        p.flush();
+        assert_eq!(props(&p, lower).style, style::LayerStyle::default());
+        let near = p
+            .rgba()
+            .iter()
+            .zip(&shown)
+            .all(|(a, b)| a.abs_diff(*b) <= 2);
+        assert!(near, "looks the same after merging");
+        // the outline is paint now: layer_rgba has it
+        let rgba = p.layer_rgba(lower);
+        let i = (81 * 256 + 100) * 4;
+        assert!(rgba[i] > 200 && rgba[i + 3] == 255);
+        // undo brings both layers and their styles back
+        assert!(p.undo());
+        assert!(props(&p, lower).style.stroke.on && props(&p, upper).style.stroke.on);
+        // exporting bakes the style in
+        let rgba = p.layer_styled_rgba(upper, 0);
+        assert!(rgba[i] > 200 && rgba[i + 3] == 255);
+        assert_eq!(p.layer_rgba(upper)[i + 3], 0);
+    }
+
     #[test]
     fn adjustments_preview_commit_cancel_and_undo() {
         let mut p = Painter::new(256, 128);
@@ -6345,6 +6647,32 @@ mod tests {
         assert!(px(&p, 4, 10)[2] > 200 && px(&p, 4, 10)[0] < 40);
         assert!(px(&p, 250, 10)[0] > 240);
         assert!(!p.adjust_commit());
+    }
+
+    #[test]
+    fn filters_preview_and_undo_in_one_step() {
+        let mut p = Painter::new(256, 128);
+        let mut fat = pen();
+        fat.get_mut(BrushSetting::Radius).base_value = 2.5;
+        line(&mut p, &fat, 60.0);
+        p.flush();
+        let before = p.rgba().to_vec();
+        assert!(p.adjust_begin());
+        p.filter_preview(filters::Filter::MotionBlur {
+            angle: 90.0,
+            distance: 30.0,
+        });
+        p.filter_preview(filters::Filter::Glitch {
+            amount: 0.8,
+            block: 6.0,
+            seed: 1,
+        });
+        assert!(p.adjust_commit());
+        p.flush();
+        assert_ne!(p.rgba(), &before[..]);
+        assert!(p.undo());
+        p.flush();
+        assert_eq!(p.rgba(), &before[..]);
     }
 
     #[test]

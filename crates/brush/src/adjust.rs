@@ -280,7 +280,7 @@ fn blur_map(orig: &TileMap, radius: f32, w: u32, h: u32) -> TileMap {
 
 /// Run `f(x, y, original pixel, new pixel) → pixel` over `keys`; tiles that end up
 /// empty are dropped. Outside the selection the original stays.
-fn finish(
+pub(crate) fn finish(
     orig: &TileMap,
     src: &TileMap,
     keys: impl Iterator<Item = TileKey>,
