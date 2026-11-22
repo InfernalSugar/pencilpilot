@@ -73,3 +73,7 @@
 .pp-prefs code {
 	font-size: 12px;
 }
+.pp-prefs input[type='checkbox'],
+.pp-prefs input[type='radio'] {
+	accent-color: var(--pp-accent-strong);
+}

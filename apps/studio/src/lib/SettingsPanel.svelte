@@ -57,12 +57,12 @@
 	const SECTIONS: { id: SettingsSection; label: string }[] = [
 		{ id: 'look', label: 'Appearance' },
 		{ id: 'pen', label: 'Pen and touch' },
+		{ id: 'keys', label: 'Keyboard shortcuts' },
 		// the preferences (each group its own component); Interface is part of Appearance
 		...PREFERENCE_GROUPS.filter((g) => g.id !== 'interface').map((g) => ({
 			id: g.id as SettingsSection,
 			label: g.title
 		})),
-		{ id: 'keys', label: 'Keyboard shortcuts' },
 		{ id: 'files', label: 'Files' },
 		{ id: 'together', label: 'Drawing together' }
 	];
@@ -250,7 +250,7 @@
 					</button>
 				</div>
 
-				<h3>Interface</h3>
+				<h3>Size, colours and hands</h3>
 				<Interface />
 			{:else if section === 'pen'}
 				<h2>Pen and touch</h2>

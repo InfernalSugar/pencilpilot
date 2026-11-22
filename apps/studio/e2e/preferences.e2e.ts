@@ -63,8 +63,17 @@ test('settings: the preference groups change and are kept', async ({ page }) => 
 	await stub(page);
 	await page.setViewportSize({ width: 1280, height: 900 });
 	await page.goto('/settings');
+	const tab = (name: string) => page.getByRole('tab', { name, exact: true });
+	const shot = async (name: string) => {
+		if (SHOTS)
+			await page.locator('#settings-panel').screenshot({ path: `${SHOTS}/settings-${name}.png` });
+	};
+	// the interface group is part of Appearance, with the theme
+	await tab('Appearance').click();
+	await expect(page.getByRole('heading', { name: 'Size, colours and hands' })).toBeVisible();
+	await page.getByLabel('Left-handed: tools on the right, panels on the left').check();
+	await shot('appearance');
 	for (const h of [
-		'Interface',
 		'Cursor',
 		'Brushes',
 		'Canvas and zoom',
@@ -73,14 +82,22 @@ test('settings: the preference groups change and are kept', async ({ page }) => 
 		'History and memory',
 		'Exports and start-up',
 		'Questions and sounds'
-	])
+	]) {
+		await tab(h).click();
 		await expect(page.getByRole('heading', { name: h, exact: true, level: 2 })).toBeVisible();
-	await page.getByLabel('Left-handed: tools on the right, panels on the left').check();
+	}
+	await tab('Cursor').click();
 	await page.getByLabel('A crosshair', { exact: true }).check();
+	await shot('cursor');
+	await tab('Canvas and zoom').click();
 	await page.getByLabel('Units').selectOption('cm');
+	await shot('canvas');
+	await tab('History and memory').click();
 	await page.getByLabel('Undo steps').fill('200');
 	await page.getByLabel('Undo steps').blur();
 	await page.getByLabel('Memory for frames, at most').fill('16');
+	await shot('performance');
+	await tab('Questions and sounds').click();
 	await page.getByLabel('Ask “Save before…?” when unsaved work would be left').uncheck();
 	await expect
 		.poll(async () => {
@@ -100,15 +117,18 @@ test('settings: the preference groups change and are kept', async ({ page }) => 
 			askToSave: false
 		});
 	// a number out of range comes back into it once typed
+	await tab('History and memory').click();
 	await page.getByLabel('Undo steps').fill('5000');
 	await page.getByLabel('Undo steps').blur();
 	await expect(page.getByLabel('Undo steps')).toHaveValue('500');
-	if (SHOTS) {
-		for (const g of ['interface', 'cursor', 'canvas', 'guides', 'performance', 'exports'])
-			await page
-				.locator(`section[data-group="${g}"]`)
-				.screenshot({ path: `${SHOTS}/settings-${g}.png` });
+	for (const g of ['Guides and new projects', 'Exports and start-up']) {
+		await tab(g).click();
+		await shot(g.split(' ')[0].toLowerCase());
 	}
+	// dark, as the rest of Settings
+	await tab('Appearance').click();
+	await page.getByLabel('Dark', { exact: true }).check();
+	await shot('appearance-dark');
 });
 
 test('left-handed: the tools are on the right of the canvas', async ({ page }) => {
