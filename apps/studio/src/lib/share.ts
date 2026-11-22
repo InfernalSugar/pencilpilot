@@ -155,9 +155,23 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
 	return invoke<T>(cmd, args);
 }
 
-export const hostSession = (name: string) => call<ShareInfo>('share_host', { name });
-export const joinSession = (code: string, name: string) =>
-	call<ShareInfo>('share_join', { code, name });
+/** `relay`: our own relay's URL (Settings), or empty for the default */
+export const hostSession = (name: string, relay = '') =>
+	call<ShareInfo>('share_host', { name, relay: relay || null });
+export const joinSession = (code: string, name: string, relay = '') =>
+	call<ShareInfo>('share_join', { code, name, relay: relay || null });
+
+/** A relay URL as typed: https only, no spaces; '' when empty or not a URL. */
+export function cleanRelay(text: string): string {
+	const t = text.trim();
+	if (!t) return '';
+	try {
+		const u = new URL(t.includes('://') ? t : `https://${t}`);
+		return u.protocol === 'https:' && u.hostname.includes('.') ? u.origin : '';
+	} catch {
+		return '';
+	}
+}
 export const sessionStatus = () => call<ShareInfo | null>('share_status');
 export const sendEdit = (body: unknown) => call<void>('share_edit', { body });
 export const sendPresence = (body: unknown) => call<void>('share_presence', { body });

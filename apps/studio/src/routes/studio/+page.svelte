@@ -60,6 +60,7 @@
 	import FilmDialog from '#lib/FilmDialog.svelte';
 	import ShareDialog from '#lib/ShareDialog.svelte';
 	import {
+		cleanRelay,
 		Cursors,
 		hostSession,
 		isCursor,
@@ -1515,7 +1516,8 @@
 		try {
 			const name = settings.shareName.trim();
 			void saveSettings().catch(() => {});
-			sharing = join ? await joinSession(join, name) : await hostSession(name);
+			const relay = cleanRelay(settings.shareRelay);
+			sharing = join ? await joinSession(join, name, relay) : await hostSession(name, relay);
 		} catch (e) {
 			shareError = String(e);
 		} finally {

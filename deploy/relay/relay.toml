@@ -1,0 +1,30 @@
+# PencilPilot's own relay (iroh-relay 1.5), for drawing together. See README.md.
+#
+# It only introduces members' apps to each other and carries traffic for the few that
+# can't connect directly. Everything it carries is encrypted end to end; it stores nothing.
+
+enable_relay = true
+# HTTP on 80 (Let's Encrypt's check, and a plain status page); HTTPS on 443
+http_bind_addr = "[::]:80"
+# helps apps learn their public address (QUIC, UDP 7842)
+enable_quic_addr_discovery = true
+# Prometheus metrics, only on this machine
+enable_metrics = true
+metrics_bind_addr = "127.0.0.1:9090"
+
+[tls]
+cert_mode = "LetsEncrypt"
+hostname = ["relay.example.com"]          # ← your relay's domain (an A/AAAA record to the VPS)
+contact = "you@example.com"               # ← an email for Let's Encrypt notices
+cert_dir = "/var/lib/iroh-relay/certs"
+prod_tls = true
+
+[limits]
+# new connections: 20 a second, bursts of 60
+accept_conn_limit = 20.0
+accept_conn_burst = 60
+
+[limits.client.rx]
+# per app: 4 MB/s steady, 16 MB bursts (a big drawing change goes through in a moment)
+bytes_per_second = 4_000_000
+max_burst_bytes = 16_000_000
