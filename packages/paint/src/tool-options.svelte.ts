@@ -47,6 +47,16 @@ export class ToolOptions {
 	/** magic wand: joined-up area only, or every similar colour (Color Range) */
 	wandContiguous = $state(true);
 	wandTolerance = $state(0.15);
+	/** magic wand and Select colour: what you see, or only the current layer */
+	wandAllLayers = $state(true);
+	/** grow / shrink the selection by this much (canvas px) */
+	growPx = $state(4);
+	/** the Clone tool: later strokes keep the first one's offset (Photoshop's Aligned) */
+	cloneAligned = $state(true);
+	/** the Clone tool copies what you see (false: the current layer) */
+	cloneAllLayers = $state(false);
+	/** the Clone tool blends what it copies into where it lands (a healing brush) */
+	cloneHeal = $state(false);
 	smudgeStrength = $state(0.6);
 	/** smoothing (0–1) for each painting tool, like Procreate's StreamLine */
 	smoothing = $state<Record<SmoothTool, number>>({ brush: 0, eraser: 0, smudge: 0 });

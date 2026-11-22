@@ -13,6 +13,7 @@ export type ActionId =
 	| 'lasso-fill'
 	| 'measure'
 	| 'smudge'
+	| 'clone'
 	| 'pen'
 	| 'transform'
 	| 'liquify'
@@ -74,6 +75,7 @@ export const ACTIONS: Action[] = [
 	{ id: 'lasso-fill', label: 'Lasso fill', group: 'Tools', key: 'F' },
 	{ id: 'measure', label: 'Measure', group: 'Tools', key: 'U' },
 	{ id: 'smudge', label: 'Smudge', group: 'Tools', key: 'S' },
+	{ id: 'clone', label: 'Clone / heal', group: 'Tools', key: 'J' },
 	{ id: 'pen', label: 'Pen path', group: 'Tools', key: 'P' },
 	{ id: 'transform', label: 'Transform', group: 'Tools', key: 'V' },
 	{ id: 'liquify', label: 'Liquify', group: 'Tools', key: 'K' },

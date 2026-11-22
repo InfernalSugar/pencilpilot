@@ -1,7 +1,7 @@
 <script lang="ts">
 	/**
 	 * The current tool's options, in a row under the studio's options bar: guides, the
-	 * Adjust panel, gradient, liquify, transform, selection, fill, smudge, pen path,
+	 * Adjust panel, gradient, liquify, transform, selection, fill, smudge, clone, pen path,
 	 * measure and lasso fill. The settings live in a `ToolOptions` (tool-options.svelte.ts).
 	 */
 	import ToneEditor from './ToneEditor.svelte';
@@ -391,8 +391,33 @@
 			>
 				Colour range
 			</button>
+			<button
+				type="button"
+				class="tool"
+				aria-pressed={opts.wandAllLayers}
+				title="Look at what you see (all layers), or only this layer's own pixels"
+				onclick={() => (opts.wandAllLayers = !opts.wandAllLayers)}
+			>
+				All layers
+			</button>
+			<button
+				type="button"
+				class="tool"
+				title="Select the current colour wherever it is (Colour range with your colour)"
+				onclick={() => canvas?.selectColour()}
+			>
+				Select colour
+			</button>
 		{/if}
 		<button type="button" class="tool" onclick={() => canvas?.selectAll()}>All</button>
+		<button
+			type="button"
+			class="tool"
+			title="Select what's on this layer (or Ctrl+click a layer's picture in Layers)"
+			onclick={() => canvas?.selectLayerContents()}
+		>
+			Layer contents
+		</button>
 		<button type="button" class="tool" title="Copy (Ctrl+C)" onclick={() => opts.copyCut(false)}>
 			Copy
 		</button>
@@ -419,6 +444,26 @@
 				onclick={() => canvas?.featherSelection(opts.featherPx)}
 			>
 				Feather
+			</button>
+			<label class="slider">
+				<span>Grow / shrink <b>{opts.growPx}px</b></span>
+				<input type="range" min="1" max="100" step="1" bind:value={opts.growPx} />
+			</label>
+			<button
+				type="button"
+				class="tool"
+				title="Make the selection bigger all round (Expand)"
+				onclick={() => canvas?.growSelection(opts.growPx)}
+			>
+				Grow
+			</button>
+			<button
+				type="button"
+				class="tool"
+				title="Make the selection smaller all round (Contract)"
+				onclick={() => canvas?.growSelection(-opts.growPx)}
+			>
+				Shrink
 			</button>
 			<button
 				type="button"
@@ -495,6 +540,52 @@
 			<input type="range" min="0" max="1" step="0.05" bind:value={opts.smudgeStrength} />
 		</label>
 		<span class="adjust-msg plain">Smudges with the shape of the brush you picked.</span>
+	</div>
+{/if}
+{#if tool === 'clone'}
+	<div class="fill-opts" role="group" aria-label="Clone">
+		<button
+			type="button"
+			class="tool"
+			title="Tap the canvas next to set where to copy from (or Alt+click it)"
+			onclick={() => canvas?.cloneSetSource()}
+		>
+			Set source
+		</button>
+		<button
+			type="button"
+			class="tool"
+			aria-pressed={opts.cloneAligned}
+			title="Aligned: every stroke keeps the same distance to the source. Off: each stroke starts at the source again."
+			onclick={() => (opts.cloneAligned = !opts.cloneAligned)}
+		>
+			Aligned
+		</button>
+		<div class="seg" role="radiogroup" aria-label="Copy from">
+			{#each [[false, 'This layer'], [true, 'All layers']] as const as [all, label] (label)}
+				<button
+					type="button"
+					class="tool"
+					role="radio"
+					aria-checked={opts.cloneAllLayers === all}
+					onclick={() => (opts.cloneAllLayers = all)}
+				>
+					{label}
+				</button>
+			{/each}
+		</div>
+		<button
+			type="button"
+			class="tool"
+			aria-pressed={opts.cloneHeal}
+			title="Heal: what's copied takes on the colour and brightness around where you paint (for mending spots)"
+			onclick={() => (opts.cloneHeal = !opts.cloneHeal)}
+		>
+			Heal
+		</button>
+		<span class="adjust-msg plain">
+			Alt+click where to copy from, then paint with the brush you picked.
+		</span>
 	</div>
 {/if}
 {#if tool === 'pen'}

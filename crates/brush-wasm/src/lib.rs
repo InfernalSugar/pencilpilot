@@ -92,6 +92,13 @@ impl PaintCanvas {
         self.inner.begin_stroke()
     }
 
+    /// Start a clone stroke (the Clone tool): it copies from (dx, dy) away,
+    /// from this layer or what you see; `heal` blends it into where it lands.
+    #[wasm_bindgen(js_name = beginCloneStroke)]
+    pub fn begin_clone_stroke(&mut self, dx: f32, dy: f32, all_layers: bool, heal: bool) -> bool {
+        self.inner.begin_clone_stroke(dx, dy, all_layers, heal)
+    }
+
     #[wasm_bindgen(js_name = strokeTo)]
     #[allow(clippy::too_many_arguments)]
     pub fn stroke_to(
@@ -745,6 +752,34 @@ impl PaintCanvas {
     ) -> bool {
         self.inner
             .select_colour_range(x, y, tolerance, all_layers, op)
+    }
+
+    /// Select a colour (sRGB) wherever it is, on this layer or in what you see.
+    #[wasm_bindgen(js_name = selectColour)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn select_colour(
+        &mut self,
+        r: u8,
+        g: u8,
+        b: u8,
+        tolerance: f32,
+        all_layers: bool,
+        op: u8,
+    ) -> bool {
+        self.inner
+            .select_colour([r, g, b], tolerance, all_layers, op)
+    }
+
+    /// Select what's on a layer (soft where it's see-through).
+    #[wasm_bindgen(js_name = selectLayer)]
+    pub fn select_layer(&mut self, id: u32, op: u8) -> bool {
+        self.inner.select_layer(id, op)
+    }
+
+    /// Grow the selection by `px` (shrink it with a negative `px`).
+    #[wasm_bindgen(js_name = growSelection)]
+    pub fn grow_selection(&mut self, px: i32) -> bool {
+        self.inner.grow_selection(px)
     }
 
     /// New canvas size (one undo step): moved by (dx, dy), or with `scale` resized to fit.

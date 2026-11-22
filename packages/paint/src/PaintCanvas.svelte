@@ -151,6 +151,7 @@
 	} from './shape-edit';
 	import { smudgeSource } from './smudge';
 	import { Stabilizer, stringLength } from './stabilizer';
+	import { cloneBrushSource, cloneOffset } from './clone';
 	import { textureById, type BrushTexture } from './brush-textures';
 	import { Timelapse } from './timelapse';
 	import { mapTable, parseSpec, specName, toneTables, type AdjustSpec } from './tone';
@@ -223,6 +224,10 @@
 		smudgeStrength = 0.6,
 		brushTexture = null,
 		wandContiguous = true,
+		wandAllLayers = true,
+		cloneAligned = true,
+		cloneAllLayers = false,
+		cloneHeal = false,
 		oncanvassize,
 		onquickmenu,
 		onpenpath,
@@ -268,7 +273,8 @@
 			| 'lasso-fill'
 			| 'measure'
 			| 'smudge'
-			| 'pen';
+			| 'pen'
+			| 'clone';
 		/** pictures can be dropped onto the canvas (as a new layer) */
 		allowImport?: boolean;
 		/** a dropped picture was imported (or why not) */
@@ -361,6 +367,14 @@
 		brushTexture?: BrushTexture | null;
 		/** magic wand: only the joined-up area (false: every similar colour, like Color Range) */
 		wandContiguous?: boolean;
+		/** magic wand and Select colour: look at what you see (false: the current layer only) */
+		wandAllLayers?: boolean;
+		/** the Clone tool: later strokes keep the first one's offset (false: each starts at the source) */
+		cloneAligned?: boolean;
+		/** the Clone tool copies what you see (false: the current layer only) */
+		cloneAllLayers?: boolean;
+		/** the Clone tool blends what it copies into the colours where it lands (a healing brush) */
+		cloneHeal?: boolean;
 		/** the canvas changed size (resized, or that undone): set `width` / `height` to this */
 		oncanvassize?: (s: { width: number; height: number }) => void;
 		/** right-click / long-press on the canvas (screen coordinates) */
@@ -431,10 +445,14 @@
 		const id = brushId;
 		void (isCustom(id) && brushVersion);
 		const smudging = tool === 'smudge';
+		const cloning = tool === 'clone';
 		const strength = smudgeStrength;
 		if (!ready) return;
 		let cancelled = false;
-		loadBrush(id, smudging ? (src) => smudgeSource(src, strength) : undefined)
+		loadBrush(
+			id,
+			smudging ? (src) => smudgeSource(src, strength) : cloning ? cloneBrushSource : undefined
+		)
 			.then((b) => {
 				if (cancelled) return b.free();
 				brush?.free();
@@ -459,7 +477,7 @@
 		brush.setOpacity(o);
 		const n = parseInt(c.slice(1), 16);
 		brush.setColor((n >> 16) & 255, (n >> 8) & 255, n & 255);
-		brush.setEraser(er && tool !== 'smudge');
+		brush.setEraser(er && tool !== 'smudge' && tool !== 'clone');
 		brushR = brush.radius();
 		editShape = null;
 	}
@@ -579,7 +597,9 @@
 
 	/** the stroke in progress paints a layer mask (not shared, not in the stroke log) */
 	let maskStroke = false;
-	const sendLive = () => !!onlive && !maskStroke;
+	/** the stroke in progress is a clone stroke (others get its pixels, not a live preview) */
+	let cloneStroke = false;
+	const sendLive = () => !!onlive && !maskStroke && !cloneStroke;
 
 	/** run an engine change, keep the history in step, then redraw */
 	function changed(recorded: boolean, logIt: () => void = () => log.layerChange(), label?: string) {
@@ -724,7 +744,8 @@
 			/** Draw stroke `i` up to (not including) point `n`; `n` past its end finishes it. */
 			drawTo(i: number, n: number) {
 				const st = strokes[i];
-				if (!st || done[i] < 0) return;
+				// (a clone stroke copies the picture: it arrives with the finished frame)
+				if (!st || done[i] < 0 || st.clone) return;
 				const b = styled(brushes[i], style(st));
 				let key = keys.get(i);
 				if (key === undefined) {
@@ -1025,7 +1046,12 @@
 	let spaceHeld = $state(false);
 	/** the outline only belongs to the brush (it would linger after switching tools) */
 	const showOutline = $derived(
-		!!cursorAt && brushR > 0 && tool === 'brush' && !spaceHeld && !adjustOverlay && !locked
+		!!cursorAt &&
+			brushR > 0 &&
+			(tool === 'brush' || tool === 'clone') &&
+			!spaceHeld &&
+			!adjustOverlay &&
+			!locked
 	);
 	let hovering = false;
 	/** once a pen has been used, fingers only move the view (palm rejection) */
@@ -1188,6 +1214,38 @@
 		if (types.includes('application/x-pp-color') || (allowImport && types.includes('Files')))
 			e.preventDefault();
 	}
+	/**
+	 * ColorDrop at a client position: into the selection (dropped inside it) or a
+	 * fill there, as the Fill tool does (its reference layer too), with the spread
+	 * slider to follow.
+	 */
+	function dropAt(clientX: number, clientY: number, hex: string) {
+		if (!paint) return;
+		const at = toCanvas(clientX, clientY);
+		const [x, y] = [Math.floor(at[0]), Math.floor(at[1])];
+		if (x < 0 || y < 0 || x >= width || y >= height) return;
+		const sel = paint.selectionMask();
+		if (sel.length && sel[y * width + x] >= 128) {
+			const l = shownLayers().find((q) => q.id === paint!.activeLayer);
+			if (l && (l.locked || !l.visible)) return onblocked?.(l.visible ? 'locked' : 'hidden');
+			const [r, g, b] = rgbOf(hex);
+			changed(paint.fillSelection(r, g, b, opacity), undefined, 'Fill selection');
+			return;
+		}
+		if (fillAtCanvas(at[0], at[1], hex, fillTolerance)) {
+			const r = vp.getBoundingClientRect();
+			dropFill = { at, screen: [clientX - r.left, clientY - r.top], hex, tol: fillTolerance };
+			keepDropFill();
+		}
+	}
+
+	/** after a ColorDrop, "Continue filling": taps fill with this colour until another tool */
+	let dropContinue = $state<string | null>(null);
+	$effect(() => {
+		void tool;
+		untrack(() => (dropContinue = null));
+	});
+
 	function drop(e: DragEvent) {
 		const file = allowImport
 			? [...(e.dataTransfer?.files ?? [])].find((f) => f.type.startsWith('image/'))
@@ -1200,12 +1258,7 @@
 		const hex = e.dataTransfer?.getData('application/x-pp-color');
 		if (!hex || !/^#[0-9a-f]{6}$/i.test(hex) || locked) return;
 		e.preventDefault();
-		const at = toCanvas(e.clientX, e.clientY);
-		if (fillAtCanvas(at[0], at[1], hex, fillTolerance)) {
-			const r = vp.getBoundingClientRect();
-			dropFill = { at, screen: [e.clientX - r.left, e.clientY - r.top], hex, tol: fillTolerance };
-			keepDropFill();
-		}
+		dropAt(e.clientX, e.clientY, hex);
 	}
 
 	// ---- QuickShape: hold still at the end of a stroke ----
@@ -1218,7 +1271,7 @@
 	let snappedShape: EditShape | null = null;
 
 	function armShape(e: PointerEvent) {
-		if (!quickShape || snapped || !current) return;
+		if (!quickShape || snapped || !current || current.clone) return;
 		if (holdAnchor && Math.hypot(e.clientX - holdAnchor.x, e.clientY - holdAnchor.y) < 4) return;
 		holdAnchor = { x: e.clientX, y: e.clientY };
 		clearTimeout(shapeTimer);
@@ -1636,6 +1689,56 @@
 	export function selectAll() {
 		paint?.selectAll();
 		refreshAnts();
+	}
+
+	/** how new selections combine, from the selection mode */
+	const modeOp = () => ({ replace: 0, add: 1, subtract: 2, intersect: 3 })[selectMode];
+
+	/** Grow the selection by `px` canvas px, or shrink it with a negative `px`. */
+	export function growSelection(px: number) {
+		if (!paint) return;
+		paint.growSelection(Math.round(px));
+		refreshAnts();
+	}
+
+	/**
+	 * Select a colour (the current one unless given) wherever it is, on this layer or
+	 * in what you see, combined as the selection mode says (Photoshop's Color Range).
+	 */
+	export function selectColour(hex = color, tolerance = wandTolerance, allLayers = wandAllLayers) {
+		if (!paint) return;
+		const [r, g, b] = rgbOf(hex);
+		const op = modeOp();
+		paint.selectColour(r, g, b, tolerance, allLayers, op);
+		selected(op);
+	}
+
+	/**
+	 * Select what's on a layer (the current one unless given): soft where it's
+	 * see-through. `op` as the selection mode says unless given (Ctrl+click a thumbnail).
+	 */
+	export function selectLayerContents(id = paint?.activeLayer ?? 0, op = modeOp()) {
+		if (!paint) return;
+		paint.selectLayer(id, op);
+		selected(op);
+	}
+
+	// ---- the Clone tool's source ----
+
+	/** where the Clone tool copies from (canvas px) */
+	let cloneFrom = $state<[number, number] | null>(null);
+	/** the offset aligned strokes keep (source − brush), once a stroke has set it */
+	let cloneKept = $state<[number, number] | null>(null);
+	/** the next press sets the source (touch has no Alt key) */
+	let cloneSetting = $state(false);
+	/** the source mark: where the brush copies from now */
+	const cloneMark = $derived<[number, number] | null>(
+		cloneKept && cursorAt ? [cursorAt[0] + cloneKept[0], cursorAt[1] + cloneKept[1]] : cloneFrom
+	);
+
+	/** The Clone tool: the next press on the canvas sets where to copy from. */
+	export function cloneSetSource() {
+		cloneSetting = true;
 	}
 	export function deselect() {
 		paint?.deselect();
@@ -2457,7 +2560,7 @@
 
 	function down(e: PointerEvent) {
 		if (!paint || !brush) return;
-		if ((e.target as HTMLElement).closest('.drop-tol')) return;
+		if ((e.target as HTMLElement).closest('.drop-tol, .canvas-note')) return;
 		dropFill = null;
 		// the view toolbar sits on top of the canvas area: its buttons aren't strokes
 		if ((e.target as HTMLElement).closest('.view, .shape-bar')) return;
@@ -2539,6 +2642,18 @@
 				return;
 			}
 		}
+		// ColorDrop, carried on: each tap fills with the same colour
+		if (dropContinue && !e.altKey) {
+			dropAt(e.clientX, e.clientY, dropContinue);
+			return;
+		}
+		// clone: Alt+click (or a tap after "Set source") picks where to copy from
+		if (tool === 'clone' && (cloneSetting || (e.altKey && e.pointerType !== 'touch'))) {
+			cloneFrom = toCanvas(e.clientX, e.clientY);
+			cloneKept = null;
+			cloneSetting = false;
+			return;
+		}
 		// eyedropper: the tool, or Alt+click with the brush
 		if (tool === 'picker' || (e.altKey && e.pointerType !== 'touch')) {
 			capture(e);
@@ -2593,8 +2708,8 @@
 			if (cx >= 0 && cy >= 0 && cx < width && cy < height) {
 				const [x, y] = [Math.floor(cx), Math.floor(cy)];
 				const op = opOf(e);
-				if (wandContiguous) paint.selectWand(x, y, wandTolerance, true, op);
-				else paint.selectColourRange(x, y, wandTolerance, true, op);
+				if (wandContiguous) paint.selectWand(x, y, wandTolerance, wandAllLayers, op);
+				else paint.selectColourRange(x, y, wandTolerance, wandAllLayers, op);
 				return selected(op);
 			}
 			return refreshAnts();
@@ -2628,7 +2743,16 @@
 			moving = { id: e.pointerId, cx, cy };
 			return;
 		}
-		if (!paint.beginStroke()) {
+		// the Clone tool copies from its source (none yet: the hint says how to set one)
+		const off =
+			tool === 'clone'
+				? cloneOffset(cloneFrom, toCanvas(e.clientX, e.clientY), cloneAligned, cloneKept)
+				: null;
+		if (tool === 'clone' && !off) return;
+		const began = off
+			? paint.beginCloneStroke(off[0], off[1], cloneAllLayers, cloneHeal)
+			: paint.beginStroke();
+		if (!began) {
 			const l = shownLayers().find((x) => x.id === paint!.activeLayer);
 			onblocked?.(l && !l.visible ? 'hidden' : 'locked');
 			return;
@@ -2637,6 +2761,12 @@
 		editShape = null;
 		strokePointer = e.pointerId;
 		current = { brushId, eraser, layer: paint.activeLayer, color, size, opacity, points: [] };
+		cloneStroke = !!off;
+		if (off) {
+			cloneKept = off;
+			current.eraser = false;
+			current.clone = { dx: off[0], dy: off[1], heal: cloneHeal, all: cloneAllLayers };
+		}
 		lastT = e.timeStamp;
 		stab.reset();
 		startSnap(toCanvas(e.clientX, e.clientY));
@@ -2698,7 +2828,7 @@
 				? toCanvas(e.clientX, e.clientY)
 				: null;
 		cursorAt =
-			tool === 'brush' && e.pointerType !== 'touch' && !adjustOverlay
+			(tool === 'brush' || tool === 'clone') && e.pointerType !== 'touch' && !adjustOverlay
 				? toCanvas(e.clientX, e.clientY)
 				: null;
 		hoverHandle =
@@ -2863,13 +2993,20 @@
 		snapped = false;
 		snappedShape = null;
 		paint.endStroke(brush);
+		if (current.clone && !cloneAligned) cloneKept = null;
 		const end = current.points.at(-1);
 		if (end) lastEnd = { x: end.x, y: end.y, p: end.pressure };
 		if (maskStroke) log.layerChange();
 		else {
 			log.add(current);
 			if (lineStroke) log.labelLast('Straight line');
-			else if (closeFill && !current.eraser && !onlive && fillClosed(current.points))
+			else if (
+				closeFill &&
+				!current.eraser &&
+				!current.clone &&
+				!onlive &&
+				fillClosed(current.points)
+			)
 				log.labelLast('Close and fill');
 		}
 		current = null;
@@ -4045,6 +4182,21 @@
 				/>
 			</svg>
 		{/if}
+		{#if tool === 'clone' && cloneMark}
+			{@const k = 1 / Math.max(0.01, fit * zoom)}
+			{@const [mx, my] = cloneMark}
+			<svg
+				class="xf"
+				viewBox="0 0 {width} {height}"
+				preserveAspectRatio="none"
+				aria-hidden="true"
+				data-testid="clone-source"
+			>
+				{#each ['cur-out', 'cur-in'] as c (c)}
+					<path class={c} d="M{mx - 8 * k} {my}H{mx + 8 * k}M{mx} {my - 8 * k}V{my + 8 * k}" />
+				{/each}
+			</svg>
+		{/if}
 		{#if shiftHeld && lineHover && lastEnd}
 			<svg
 				class="xf"
@@ -4214,7 +4366,33 @@
 					onchange={(e) => refillDrop(+e.currentTarget.value)}
 				/>
 			</label>
+			{#if !dropContinue}
+				<button
+					type="button"
+					class="wide"
+					title="Tap other areas to fill them with this colour too"
+					onclick={() => {
+						dropContinue = dropFill?.hex ?? null;
+						dropFill = null;
+					}}
+				>
+					Continue filling
+				</button>
+			{/if}
 			<button type="button" aria-label="Done" onclick={() => (dropFill = null)}>✓</button>
+		</div>
+	{/if}
+	{#if dropContinue}
+		<div class="canvas-note" role="status" data-testid="colordrop-continue">
+			<span class="swatch" style="background: {dropContinue}"></span>
+			Tap to fill with this colour
+			<button type="button" onclick={() => (dropContinue = null)}>Done</button>
+		</div>
+	{:else if tool === 'clone' && (!cloneFrom || cloneSetting)}
+		<div class="canvas-note" role="status" data-testid="clone-hint">
+			{cloneSetting
+				? 'Tap where to copy from'
+				: 'Alt+click (⌥+click) where to copy from, then paint'}
 		</div>
 	{/if}
 	{#if editShape && tool === 'brush' && ready}
@@ -4737,6 +4915,45 @@
 		border-radius: 50%;
 		background: var(--pp-accent, #2f6bff);
 		color: #fff;
+		cursor: pointer;
+	}
+	.drop-tol button.wide {
+		width: auto;
+		padding: 0 14px;
+		border-radius: 18px;
+		background: #3a3a46;
+	}
+	/* a short note at the top of the canvas (ColorDrop carried on, the clone source) */
+	.canvas-note {
+		position: absolute;
+		z-index: 5;
+		top: 10px;
+		left: 50%;
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 6px 8px 6px 12px;
+		transform: translateX(-50%);
+		border-radius: 999px;
+		background: #23232b;
+		color: #fff;
+		font: 600 13px var(--pp-font-body, sans-serif);
+		box-shadow: 0 6px 18px rgba(0, 0, 0, 0.3);
+		white-space: nowrap;
+	}
+	.canvas-note .swatch {
+		width: 16px;
+		height: 16px;
+		border: 2px solid #fff;
+		border-radius: 50%;
+	}
+	.canvas-note button {
+		padding: 4px 12px;
+		border: 0;
+		border-radius: 999px;
+		background: var(--pp-accent, #2f6bff);
+		color: #fff;
+		font: inherit;
 		cursor: pointer;
 	}
 	.view {
