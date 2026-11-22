@@ -520,6 +520,14 @@ async fn share_presence(
     state.presence(body).await
 }
 
+/// Whether AI tools may run: an error while drawing together (AI is solo only, ADR-0013).
+/// Every AI feature checks this, in the window before showing itself and in the shell
+/// before running.
+#[tauri::command]
+async fn ai_allowed(state: State<'_, share::Sharing>) -> Result<(), String> {
+    state.solo_only().await
+}
+
 /// Leave the session.
 #[tauri::command]
 async fn share_leave(state: State<'_, share::Sharing>) -> Result<(), String> {
@@ -591,7 +599,8 @@ pub fn run() {
             share_status,
             share_edit,
             share_presence,
-            share_leave
+            share_leave,
+            ai_allowed
         ])
         .run(tauri::generate_context!())
         .expect("error while running PencilPilot");

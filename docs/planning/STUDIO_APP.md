@@ -208,6 +208,8 @@ colour flats and lip-sync are free (local).
 Two kinds of project: **solo** (private, on your computer, as today) and **shared** (several
 people drawing live, the work and the credits belong to everyone), peer to peer over iroh. Design:
 [ADR-0013](adr/0013-solo-and-shared-projects.md).
+- **S12-T00** AI is solo only: hidden and refused while drawing together (`aiAllowed`, `ai_allowed`); a session carries no AI edits; Share a copy leaves AI layers in the private original `ai` `app`
+  ✅ The rule, the guard in the shell and the window, and the director plugin's rule
 - **S12-T01** Solo stays private, provably: start screen with **My projects** / **Shared projects**; a test that fails if the window's CSP gains a network origin; the shell opens no connection for a solo project; **Share a copy…** leaves the private original untouched `app`
 - **S12-T02** The peer-to-peer connection (`crates/share`): a key per computer, invite codes, the session over iroh (the host numbers edits, cursors as datagrams, joins and leaves), tested locally and through iroh's public relays `infra`
   ✅ First version: identity, invites, host ordering, presence, refusals; an app joined through the public relay in 1.4 s

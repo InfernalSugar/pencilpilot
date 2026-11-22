@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { cleanInvite, Cursors, isCursor, memberColour, Throttle } from './share';
+import { aiAllowed, cleanInvite, Cursors, isCursor, memberColour, Throttle } from './share';
 
 describe('drawing together', () => {
 	it('gives each member the same colour everywhere', () => {
@@ -10,6 +10,13 @@ describe('drawing together', () => {
 	it('finds the invite code in pasted text', () => {
 		expect(cleanInvite('join me:\n pp1-eyJw_b3-xyz  thanks!')).toBe('pp1-eyJw_b3-xyz');
 		expect(cleanInvite('hello')).toBeNull();
+	});
+
+	it('keeps AI to solo work', () => {
+		expect(aiAllowed(null)).toBe(true);
+		expect(
+			aiAllowed({ invite: 'pp1-x', me: { id: 'a', name: 'A' }, members: [], host: true })
+		).toBe(false);
 	});
 
 	it('checks cursor messages', () => {

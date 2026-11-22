@@ -161,6 +161,12 @@ export const sendEdit = (body: unknown) => call<void>('share_edit', { body });
 export const sendPresence = (body: unknown) => call<void>('share_presence', { body });
 export const leaveSession = () => call<void>('share_leave');
 
+/**
+ * AI generation is a solo act (ADR-0013): AI tools stay hidden and refuse to run while
+ * drawing together. The shell checks again before running any AI job.
+ */
+export const aiAllowed = (sharing: ShareInfo | null) => sharing === null;
+
 /** Listen to the session's events; returns the function that stops listening. */
 export async function onShareEvent(f: (e: ShareEvent) => void): Promise<() => void> {
 	const { listen } = await import('@tauri-apps/api/event');
