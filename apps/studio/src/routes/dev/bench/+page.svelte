@@ -96,7 +96,18 @@
 		c.flush();
 		const tc = performance.now();
 		for (let i = 0; i < 20; i++) {
-			c.setLayer(bottom, 'Layer 1', i % 2 === 1, 1, 'normal', false, false, false, false);
+			c.setLayer(
+				bottom,
+				'Layer 1',
+				i % 2 === 1,
+				1,
+				'normal',
+				false,
+				false,
+				false,
+				false,
+				new Float32Array()
+			);
 			c.flush();
 		}
 		const compositeMs = (performance.now() - tc) / 20;

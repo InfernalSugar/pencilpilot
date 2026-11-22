@@ -993,6 +993,7 @@
 			l.mask,
 			l.group,
 			l.adjust,
+			l.style,
 			l.drawing ? 0 : l.empty
 		]);
 		return JSON.stringify([

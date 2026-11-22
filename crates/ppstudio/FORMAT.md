@@ -29,7 +29,11 @@ This crate (`pencilpilot-ppstudio`) reads and writes it.
       "locked": false, "alphaLock": false, "clip": false,
       "imported": false,         // holds an imported picture
       "group": 0,                // its group's id (0 = none); a group's layers are next to each other
-      "adjust": null             // an adjustment layer's settings (the app's JSON string)
+      "adjust": null,            // an adjustment layer's settings (the app's JSON string)
+      "style": {                 // optional: its layer style (each effect keeps its settings while off)
+        "stroke": { "on": true, "size": 4, "colour": "#000000", "position": "outside", "opacity": 1 },
+        "shadow": { "on": false, "colour": "#000000", "opacity": 0.5, "angle": 120, "distance": 10, "blur": 8 },
+        "glow": { "on": false, "colour": "#ffed87", "size": 12, "opacity": 0.75 } }
     }
   ],
   "groups": [ { "id": 1, "name": "Character", "visible": true, "opacity": 1.0 } ],

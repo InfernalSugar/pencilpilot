@@ -23,6 +23,7 @@
  *   dropped on arrival. AI is solo only.
  */
 
+import { readStyle, sameStyle, type LayerStyle } from '@pencilpilot/paint/layer-style';
 import {
 	DRAWING_KINDS,
 	MOUTH_SHAPES,
@@ -91,6 +92,9 @@ export interface Look {
 	blend: string;
 	alphaLock: boolean;
 	clip: boolean;
+	/** stroke, drop shadow and outer glow (null: none; missing: from an app without them,
+	 * leaving the style as it is) */
+	style?: LayerStyle | null;
 }
 
 function readLook(v: unknown): Look | null {
@@ -103,7 +107,8 @@ function readLook(v: unknown): Look | null {
 		opacity: Math.min(1, Math.max(0, l.opacity)),
 		blend: l.blend,
 		alphaLock: l.alphaLock === true,
-		clip: l.clip === true
+		clip: l.clip === true,
+		...(l.style !== undefined ? { style: readStyle(l.style) } : {})
 	};
 }
 
@@ -114,7 +119,8 @@ const sameLook = (a: Look | undefined, b: Look | undefined) =>
 	Math.abs(a.opacity - b.opacity) < 1e-3 &&
 	a.blend === b.blend &&
 	a.alphaLock === b.alphaLock &&
-	a.clip === b.clip;
+	a.clip === b.clip &&
+	sameStyle(a.style, b.style);
 
 export type TogetherEdit =
 	| { k: 'layer'; lid: string; name: string; adjust?: string }

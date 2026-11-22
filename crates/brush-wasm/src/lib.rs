@@ -177,7 +177,9 @@ impl PaintCanvas {
     }
 
     /// Change a layer's settings. `record` = false previews (no undo step);
-    /// then call `commitLayer` with the settings from before the preview.
+    /// then call `commitLayer` with the settings from before the preview. `style`:
+    /// its layer style as numbers (see `brush::style::LayerStyle::from_numbers`;
+    /// empty = none).
     #[wasm_bindgen(js_name = setLayer)]
     #[allow(clippy::too_many_arguments)]
     pub fn set_layer(
@@ -191,8 +193,11 @@ impl PaintCanvas {
         alpha_lock: bool,
         clip: bool,
         record: bool,
+        style: &[f32],
     ) -> bool {
-        let props = layer_props(name, visible, opacity, blend, locked, alpha_lock, clip);
+        let props = layer_props(
+            name, visible, opacity, blend, locked, alpha_lock, clip, style,
+        );
         self.inner.set_layer_props(id, props, record)
     }
 
@@ -209,8 +214,11 @@ impl PaintCanvas {
         locked: bool,
         alpha_lock: bool,
         clip: bool,
+        style: &[f32],
     ) -> bool {
-        let before = layer_props(name, visible, opacity, blend, locked, alpha_lock, clip);
+        let before = layer_props(
+            name, visible, opacity, blend, locked, alpha_lock, clip, style,
+        );
         self.inner.commit_layer_props(id, before)
     }
 
@@ -277,6 +285,28 @@ impl PaintCanvas {
             recolour: recolour.then_some([r, g, b]),
             ..colour_adjust(hue, saturation, brightness, contrast, tone, map)
         });
+    }
+
+    /// Preview a filter: `kind` is sharpen (a amount, b radius), motion (a angle,
+    /// b distance), noise (a amount, `mono`, `seed`), halftone (a size, `mono`),
+    /// chromatic (a amount), bloom (a threshold, b size, c strength) or glitch (a
+    /// amount, b block size, `seed`). False for an unknown kind.
+    #[allow(clippy::too_many_arguments)]
+    #[wasm_bindgen(js_name = filterPreview)]
+    pub fn filter_preview(
+        &mut self,
+        kind: &str,
+        a: f32,
+        b: f32,
+        c: f32,
+        mono: bool,
+        seed: u32,
+    ) -> bool {
+        let Some(f) = brush::filters::Filter::from_parts(kind, a, b, c, mono, seed) else {
+            return false;
+        };
+        self.inner.filter_preview(f);
+        true
     }
 
     /// Add an adjustment layer above the active one: hue (degrees), saturation /
@@ -510,6 +540,13 @@ impl PaintCanvas {
     #[wasm_bindgen(js_name = layerRgba)]
     pub fn layer_rgba(&self, id: u32) -> Vec<u8> {
         self.inner.layer_rgba(id)
+    }
+
+    /// A layer as it shows, full size (straight-alpha sRGB RGBA8): its mask and style
+    /// baked in. With `drawing` (not 0), that drawing on the layer instead.
+    #[wasm_bindgen(js_name = layerStyledRgba)]
+    pub fn layer_styled_rgba(&self, id: u32, drawing: u32) -> Vec<u8> {
+        self.inner.layer_styled_rgba(id, drawing)
     }
 
     /// Greyscale RGBA8 preview of a layer's mask (empty if it has none).
@@ -1034,6 +1071,7 @@ impl PaintCanvas {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn layer_props(
     name: &str,
     visible: bool,
@@ -1042,6 +1080,7 @@ fn layer_props(
     locked: bool,
     alpha_lock: bool,
     clip: bool,
+    style: &[f32],
 ) -> LayerProps {
     LayerProps {
         name: name.to_string(),
@@ -1055,6 +1094,7 @@ fn layer_props(
         imported: false,
         adjust: None,
         adjust_spec: String::new(),
+        style: brush::style::LayerStyle::from_numbers(style).unwrap_or_default(),
     }
 }
 

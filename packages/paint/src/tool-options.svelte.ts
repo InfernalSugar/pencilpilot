@@ -9,6 +9,7 @@ import type { CanvasStatus, ImportResult } from './PaintCanvas.svelte';
 import { defaultGuides, type GuideSettings } from './guides';
 import { smoothTool, type SmoothTool } from './stabilizer';
 import { NO_SPEC, parseSpec, specName, type AdjustSpec } from './tone';
+import { pickFilter, type FilterSpec } from './filters';
 
 type Canvas = ReturnType<typeof PaintCanvas>;
 
@@ -94,7 +95,9 @@ export class ToolOptions {
 	recolour = $state(false);
 	adjustMsg = $state('');
 	/** which part of the Adjust panel shows */
-	adjustKind = $state<'colour' | 'curves' | 'levels' | 'map'>('colour');
+	adjustKind = $state<'colour' | 'curves' | 'levels' | 'map' | 'filters'>('colour');
+	/** the filter on the Filters part (on the layer's pixels only) */
+	filter = $state<FilterSpec>(pickFilter('sharpen'));
 	/** curves, levels and gradient map (and, for adjustment layers, everything) */
 	tone = $state<AdjustSpec>({ ...NO_SPEC });
 	/** an adjustment layer being made or changed (0: adjusting the layer's pixels) */
@@ -166,6 +169,8 @@ export class ToolOptions {
 		this.adjust = { ...NO_ADJUST };
 		this.recolour = false;
 		this.tone = { ...NO_SPEC };
+		this.filter = pickFilter('sharpen');
+		if (this.adjustKind === 'filters') this.adjustKind = 'colour';
 		this.adjustMsg = '';
 		const status = this.host.status();
 		// an adjustment layer: change its settings
@@ -200,6 +205,7 @@ export class ToolOptions {
 	previewAdjust() {
 		const canvas = this.host.canvas();
 		if (this.adjustLayer) canvas?.adjustmentPreview(this.adjustLayer, this.#specNow());
+		else if (this.adjustKind === 'filters') canvas?.filterPreview(this.filter);
 		else
 			canvas?.adjustPreview({
 				...this.adjust,

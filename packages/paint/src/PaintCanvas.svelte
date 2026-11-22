@@ -1,4 +1,6 @@
 <script lang="ts" module>
+	import type { LayerStyle } from './layer-style';
+
 	export type BlendMode =
 		'normal' | 'multiply' | 'screen' | 'overlay' | 'darken' | 'lighten' | 'add';
 
@@ -28,6 +30,8 @@
 		adjust: string | null;
 		/** drawing assist: strokes on it snap to the guides (kept by the canvas, not the engine) */
 		assist?: boolean;
+		/** stroke, drop shadow and outer glow (layer-style.ts); null: none */
+		style: LayerStyle | null;
 	}
 	export type LayerSettings = Omit<
 		LayerInfo,
@@ -155,6 +159,8 @@
 	import { textureById, type BrushTexture } from './brush-textures';
 	import { Timelapse } from './timelapse';
 	import { mapTable, parseSpec, specName, toneTables, type AdjustSpec } from './tone';
+	import { hasStyle, styleNumbers } from './layer-style';
+	import type { FilterSpec } from './filters';
 	import {
 		corner,
 		dragPart,
@@ -2327,6 +2333,13 @@
 		schedule();
 	}
 
+	/** Preview a filter (sharpen, noise, glitch…) on the layer being adjusted. */
+	export function filterPreview(f: FilterSpec) {
+		if (!paint?.isAdjusting()) return;
+		paint.filterPreview(f.kind, f.a, f.b, f.c, f.mono, f.seed);
+		schedule();
+	}
+
 	// ---- adjustment layers (Photoshop's): they change what's below, and stay editable ----
 
 	/** Add an adjustment layer above the current one; its id (0 = not possible). */
@@ -3342,8 +3355,8 @@
 	function settings(id: number): LayerSettings | null {
 		const l = layerList().find((x) => x.id === id);
 		if (!l) return null;
-		const { name, visible, opacity, blend, locked, alphaLock, clip } = l;
-		return { name, visible, opacity, blend, locked, alphaLock, clip: !!clip };
+		const { name, visible, opacity, blend, locked, alphaLock, clip, style } = l;
+		return { name, visible, opacity, blend, locked, alphaLock, clip: !!clip, style };
 	}
 
 	function setRaw(id: number, s: LayerSettings, record: boolean) {
@@ -3356,7 +3369,8 @@
 			s.locked,
 			s.alphaLock,
 			s.clip,
-			record
+			record,
+			styleNumbers(s.style)
 		);
 	}
 
@@ -3549,7 +3563,8 @@
 				opacity: l.opacity,
 				blend: l.blend as string,
 				alphaLock: l.alphaLock,
-				clip: !!l.clip
+				clip: !!l.clip,
+				style: l.style
 			}
 		}));
 	/** Paint layers now, bottom → top (not adjustment layers). */
@@ -3564,7 +3579,8 @@
 					opacity: l.opacity,
 					blend: l.blend as string,
 					alphaLock: l.alphaLock,
-					clip: !!l.clip
+					clip: !!l.clip,
+					style: l.style
 				}
 			}));
 
@@ -3593,7 +3609,17 @@
 		previewing = null;
 		const b = before;
 		changed(
-			paint.commitLayer(id, b.name, b.visible, b.opacity, b.blend, b.locked, b.alphaLock, b.clip)
+			paint.commitLayer(
+				id,
+				b.name,
+				b.visible,
+				b.opacity,
+				b.blend,
+				b.locked,
+				b.alphaLock,
+				b.clip,
+				styleNumbers(b.style)
+			)
 		);
 	}
 
@@ -3655,6 +3681,8 @@
 		adjust?: string | null;
 		/** drawing assist is on */
 		assist?: boolean;
+		/** its layer style (layer-style.ts) */
+		style?: LayerStyle | null;
 	}
 
 	/** A small PNG of the drawing as it shows (at most `max` px on its long side). */
@@ -3701,7 +3729,8 @@
 				rgba: paint!.layerRgba(l.id),
 				mask,
 				adjust: l.adjust,
-				...(assistLayers.has(l.id) ? { assist: true } : {})
+				...(assistLayers.has(l.id) ? { assist: true } : {}),
+				style: l.style
 			};
 		});
 		return { layers, groups: groupList(), strokes: structuredClone(log.strokes) as Stroke[] };
@@ -3743,7 +3772,8 @@
 					blend: l.blend as BlendMode,
 					locked: l.locked,
 					alphaLock: l.alphaLock,
-					clip: l.clip
+					clip: l.clip,
+					style: l.style ?? null
 				},
 				false
 			);
@@ -3797,13 +3827,20 @@
 		const groups = new Map(groupList().map((g) => [g.id, g]));
 		const shown = frame ? new Map(frame.pairs) : null;
 		const pixels = (l: LayerInfo) => {
+			// a style has no place in the file: drawn into the pixels (with the mask)
+			if (hasStyle(l.style)) {
+				const d = shown ? (shown.get(l.id) ?? 0) : 0;
+				if (shown && !d) return new Uint8Array(width * height * 4);
+				return paint!.layerStyledRgba(l.id, d);
+			}
 			if (!shown) return paint!.layerRgba(l.id);
 			const d = shown.get(l.id) ?? 0;
 			const rgba = d ? paint!.drawingRgba(d) : null;
 			return rgba && rgba.length === width * height * 4 ? rgba : new Uint8Array(width * height * 4);
 		};
 		const toLayer = (l: LayerInfo): PsdLayer => {
-			const maskRgba = l.mask && !frame ? paint!.maskThumbnail(l.id, width, height) : null;
+			const maskRgba =
+				l.mask && !frame && !hasStyle(l.style) ? paint!.maskThumbnail(l.id, width, height) : null;
 			let mask: Uint8Array | undefined;
 			if (maskRgba && maskRgba.length) {
 				mask = new Uint8Array(width * height);

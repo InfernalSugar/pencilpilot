@@ -113,6 +113,9 @@ pub struct Layer {
     /// an adjustment layer's settings (the app's JSON); none for paint layers
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adjust: Option<String>,
+    /// its layer style: stroke, drop shadow and outer glow (the app's JSON object)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -882,6 +885,7 @@ mod tests {
             imported: false,
             group: 0,
             adjust: None,
+            style: None,
         }
     }
 

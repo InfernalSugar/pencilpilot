@@ -1901,3 +1901,40 @@ test('clone: Alt+click where to copy from, paint the copy, undo it', async ({ pa
 	await page.keyboard.press('Control+z');
 	await expect.poll(() => ink(page, 0.5, 0.8)).toBe(0);
 });
+
+test('layer style: an outline, undone in one step, kept in the file', async ({ page }) => {
+	await stubTauri(page);
+	await ready(page);
+	for (let i = 0; i < 4; i++) await page.keyboard.press(']');
+	await scribble(page, 0.4);
+	/** red pixels on the canvas */
+	const red = () =>
+		canvas(page).evaluate((el: HTMLCanvasElement) => {
+			const d = el.getContext('2d')!.getImageData(0, 0, el.width, el.height).data;
+			let n = 0;
+			for (let i = 0; i < d.length; i += 4) if (d[i] > 200 && d[i + 1] < 60) n++;
+			return n;
+		});
+	expect(await red()).toBe(0);
+	await page.getByRole('tab', { name: /Layers/ }).click();
+	await page.getByText('Layer style').click();
+	await page.getByRole('button', { name: 'Stroke', exact: true }).click();
+	await page.getByLabel('Stroke colour').fill('#ff0000');
+	await page.getByLabel('Stroke colour').blur();
+	await expect.poll(red).toBeGreaterThan(200);
+	// the colour change is one step, turning it on another
+	await page.keyboard.press('Control+z');
+	await expect.poll(red).toBe(0);
+	await page.keyboard.press('Control+Shift+z');
+	await expect.poll(red).toBeGreaterThan(200);
+	const outlined = await red();
+	await page.keyboard.press('Control+s');
+	await expect(page.getByTestId('project-name')).toHaveText('Walk cycle', { timeout: 20_000 });
+	await scribble(page, 0.8);
+	await page.keyboard.press('Control+o');
+	await page
+		.getByRole('dialog', { name: 'Save before opening another project?' })
+		.getByRole('button', { name: 'No' })
+		.click();
+	await expect.poll(async () => Math.abs((await red()) - outlined)).toBeLessThan(outlined * 0.02);
+});
