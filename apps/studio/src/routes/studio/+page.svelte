@@ -65,6 +65,8 @@
 	import FilmDialog from '#lib/FilmDialog.svelte';
 	import ShareDialog from '#lib/ShareDialog.svelte';
 	import SaveChangesDialog from '#lib/SaveChangesDialog.svelte';
+	import SettingsPanel from '#lib/SettingsPanel.svelte';
+	import { takeTogether } from '#lib/together-start.js';
 	import {
 		readSavedShare,
 		Together,
@@ -1530,6 +1532,23 @@
 	// ---- drawing together (S12-T03): peer to peer, in the app's Rust side ----
 	let sharing = $state<ShareInfo | null>(null);
 	let shareOpen = $state(false);
+	/** Settings, as a window over the canvas */
+	let settingsOpen = $state(false);
+	/** from home: join with this code once the canvas is ready */
+	let joinOnReady = $state<string | null>(null);
+	/** from home: offer this project's session again once it's open */
+	let rejoinOnOpen = $state(false);
+	$effect(() => {
+		if (!joinOnReady || !canvas || !status) return;
+		const code = joinOnReady;
+		joinOnReady = null;
+		void shareStart(code);
+	});
+	$effect(() => {
+		if (!rejoinOnOpen || !savedShare) return;
+		rejoinOnOpen = false;
+		shareOpen = true;
+	});
 	let shareBusy = $state(false);
 	let shareError = $state('');
 	const cursorsOf = new Cursors();
@@ -2800,6 +2819,15 @@
 	onMount(() => {
 		void loadSettings();
 		if (!isTauri()) return;
+		// home's Draw together: host, join or rejoin (the dialog shows how it goes)
+		const ask = takeTogether();
+		if (ask) shareOpen = true;
+		if (ask?.what === 'join') joinOnReady = ask.code;
+		if (ask?.what === 'rejoin') {
+			// (it opens once the project's session is read from its file)
+			shareOpen = false;
+			rejoinOnOpen = true;
+		}
 		// what home asked for
 		if (start.kind === 'open') {
 			const file = start.path;
@@ -2876,6 +2904,8 @@
 	};
 
 	function onkey(e: KeyboardEvent) {
+		// Settings over the canvas has the keys (it may be choosing a new one)
+		if (settingsOpen) return;
 		if ((e.target as HTMLElement).closest('input, textarea, select')) return;
 		// keys that belong to the tool in use
 		if (tool === 'transform' && e.key === 'Enter') return canvas?.transformCommit();
@@ -2961,7 +2991,7 @@
 />
 
 <div class="app">
-	<Studio backHref={resolve('/')} tabs={TABS} bind:tab bind:dockOpen>
+	<Studio backHref={resolve('/')} tabs={TABS} bind:tab bind:dockOpen bind:layout={settings.layout}>
 		{#snippet title()}
 			<div class="brand">
 				<Logo /><span data-testid="project-name">{projectName(path)}</span>
@@ -2970,6 +3000,8 @@
 		{/snippet}
 		{#snippet actions()}
 			{#if fileNote}<span class="note" role="alert">{fileNote}</span>{/if}
+		{/snippet}
+		{#snippet menu()}
 			<div class="export">
 				<button
 					type="button"
@@ -3180,7 +3212,17 @@
 			>
 				Redo
 			</button>
-			<a class="act" href={resolve('/settings')}>Settings</a>
+			<button
+				type="button"
+				class="act"
+				aria-haspopup="dialog"
+				onclick={() => {
+					fileOpen = exportOpen = importOpen = false;
+					settingsOpen = true;
+				}}
+			>
+				Settings
+			</button>
 		{/snippet}
 		{#snippet rail()}
 			<ToolRail
@@ -3461,6 +3503,9 @@
 					onanswer={(c) => saveAsk?.answer(c)}
 				/>
 			{/if}
+			{#if settingsOpen}
+				<SettingsPanel onclose={() => (settingsOpen = false)} />
+			{/if}
 			{#if shareOpen}
 				<ShareDialog
 					info={sharing}
@@ -3606,7 +3651,7 @@
 		position: absolute;
 		z-index: 30;
 		top: calc(100% + 8px);
-		right: 0;
+		left: 0;
 		display: grid;
 		gap: 4px;
 		width: 260px;

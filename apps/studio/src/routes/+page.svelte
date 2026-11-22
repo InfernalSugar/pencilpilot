@@ -1,7 +1,8 @@
 <script lang="ts">
 	/**
-	 * Home: start something new (templates, or any size), open a recent project or any
-	 * file, and recover work left unsaved when the app last closed.
+	 * Home: start something new (templates, or any size), draw together (host, join, or
+	 * go back to a shared project), open a recent project or any file, and recover work
+	 * left unsaved when the app last closed.
 	 */
 	import { resolve } from '$app/paths';
 	import { goto } from '$app/navigation';
@@ -25,8 +26,17 @@
 		type RecoveryItem,
 		type StudioStart
 	} from '#lib/project.js';
+	import { cleanInvite } from '#lib/share.js';
+	import { askTogether } from '#lib/together-start.js';
 
 	let recent = $state<RecentItem[] | null>(null);
+	/** projects drawn together get their own row; the others stay in Recent */
+	const shared = $derived((recent ?? []).filter((r) => r.shared));
+	const solo = $derived(recent && recent.filter((r) => !r.shared));
+	/** Draw together is the desktop app's (it connects peer to peer) */
+	const together = isTauri();
+	let invite = $state('');
+	const inviteCode = $derived(cleanInvite(invite));
 	let recovery = $state<RecoveryItem[]>([]);
 	let customOpen = $state(false);
 	let custom = $state({ width: 1920, height: 1080, fps: 24 });
@@ -58,6 +68,27 @@
 		const path = await askOpenPath(settings.projectFolder);
 		if (path) await go({ kind: 'open', path });
 	}
+
+	/** a new canvas (HD), then Draw together hosts or joins */
+	function host() {
+		askTogether({ what: 'host' });
+		void go({ kind: 'new', width: 1920, height: 1080, fps: 24 });
+	}
+	function join() {
+		if (!inviteCode) return;
+		askTogether({ what: 'join', code: inviteCode });
+		void go({ kind: 'new', width: 1920, height: 1080, fps: 24 });
+	}
+	function rejoin(item: RecentItem) {
+		askTogether({ what: 'rejoin' });
+		void go({ kind: 'open', path: item.path });
+	}
+	const names = (w: string[]) =>
+		!w.length
+			? 'Shared'
+			: w.length <= 3
+				? `With ${w.join(', ')}`
+				: `With ${w.slice(0, 2).join(', ')} and ${w.length - 2} more`;
 
 	async function forget(item: RecentItem) {
 		recent = (recent ?? []).filter((r) => r.path !== item.path);
@@ -171,15 +202,97 @@
 		{/if}
 	</section>
 
+	{#if together}
+		<section aria-labelledby="together-h">
+			<h2 id="together-h">Draw together</h2>
+			<ul class="recent">
+				<li>
+					<button type="button" class="card start" onclick={host}>
+						<span class="blank big" aria-hidden="true">
+							<svg viewBox="0 0 24 24">
+								<circle cx="9" cy="8" r="3.2" /><path d="M3.5 19a5.5 5.5 0 0 1 11 0" /><path
+									d="M17 8v6M14 11h6"
+								/>
+							</svg>
+						</span>
+						<b>Host a session</b>
+						<small>A new canvas, and a code to invite others</small>
+					</button>
+				</li>
+				<li>
+					<form
+						class="card start join"
+						onsubmit={(e) => {
+							e.preventDefault();
+							join();
+						}}
+					>
+						<label for="invite"><b>Join with a code</b></label>
+						<small>Paste the code someone sent you</small>
+						<input
+							id="invite"
+							placeholder="pp1-…"
+							autocomplete="off"
+							spellcheck="false"
+							aria-invalid={!!invite.trim() && !inviteCode}
+							bind:value={invite}
+						/>
+						<button type="submit" class="primary" disabled={!inviteCode}>Join</button>
+					</form>
+				</li>
+				{#each shared as item (item.path)}
+					<li class:gone={!item.found}>
+						<button
+							type="button"
+							class="card"
+							disabled={!item.found}
+							title={item.path}
+							onclick={() => go({ kind: 'open', path: item.path })}
+						>
+							{#if item.thumbnail}
+								<img src="data:image/png;base64,{item.thumbnail}" alt="" />
+							{:else}
+								<span class="blank" aria-hidden="true"></span>
+							{/if}
+							<b>{projectName(item.path)}</b>
+							<small>
+								{names(item.shared?.with ?? [])}{item.found ? ` · ${ago(item.modified)}` : ''}
+							</small>
+						</button>
+						{#if item.found}
+							<button
+								type="button"
+								class="primary rejoin"
+								aria-label="Rejoin {projectName(item.path)}"
+								onclick={() => rejoin(item)}
+							>
+								Rejoin
+							</button>
+						{/if}
+						<button
+							type="button"
+							class="forget"
+							aria-label="Remove {projectName(item.path)} from the list"
+							title="Remove from the list (the file stays)"
+							onclick={() => forget(item)}
+						>
+							×
+						</button>
+					</li>
+				{/each}
+			</ul>
+		</section>
+	{/if}
+
 	<section aria-labelledby="recent-h">
 		<h2 id="recent-h">Recent</h2>
-		{#if recent === null}
+		{#if solo === null}
 			<p class="muted">Loading…</p>
-		{:else if !recent.length}
+		{:else if !solo.length}
 			<p class="muted">Projects you save or open show up here.</p>
 		{:else}
 			<ul class="recent">
-				{#each recent as item (item.path)}
+				{#each solo as item (item.path)}
 					<li class:gone={!item.found}>
 						<button
 							type="button"
@@ -400,6 +513,59 @@
 	.card small {
 		color: var(--pp-muted);
 	}
+	.start {
+		align-content: start;
+		min-height: 100%;
+	}
+	.blank.big {
+		display: grid;
+		place-items: center;
+		color: var(--pp-accent);
+		background: var(--pp-lilac);
+		outline: 0;
+	}
+	.blank.big svg {
+		width: 56px;
+		height: 56px;
+		fill: none;
+		stroke: currentColor;
+		stroke-width: 1.8;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+	}
+	.join {
+		grid-template-columns: minmax(0, 1fr);
+		cursor: default;
+		gap: 6px;
+		padding: 14px;
+	}
+	.join input {
+		width: 100%;
+		min-width: 0;
+		min-height: 44px;
+		margin-top: auto;
+		padding: 0 12px;
+		border: 2px solid var(--pp-surface-sunk);
+		border-radius: 12px;
+		background: var(--pp-ground);
+		color: var(--pp-ink);
+		font: 15px var(--pp-font-body);
+	}
+	.join input[aria-invalid='true'] {
+		border-color: var(--pp-accent);
+	}
+	li:has(.rejoin) .card b,
+	li:has(.rejoin) .card small {
+		padding-right: 84px;
+	}
+	.rejoin {
+		position: absolute;
+		right: 16px;
+		bottom: 14px;
+		min-height: 36px;
+		padding: 0 14px;
+		font-size: 14px;
+	}
 	.forget {
 		position: absolute;
 		top: 16px;
@@ -424,6 +590,11 @@
 		padding: 16px 20px;
 		border-radius: 20px;
 		background: var(--pp-yellow);
+		/* yellow in both themes: dark words on it */
+		color: #16161a;
+	}
+	.recover li {
+		color: var(--pp-ink);
 	}
 	.recover h2 {
 		margin-top: 0;

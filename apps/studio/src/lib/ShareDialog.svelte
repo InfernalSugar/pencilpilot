@@ -270,9 +270,9 @@
 		width: 100%;
 		box-sizing: border-box;
 		padding: 8px 10px;
-		border: 1px solid #d9d2c3;
+		border: 1px solid var(--pp-surface-sunk);
 		border-radius: 10px;
-		background: #fff;
+		background: var(--pp-surface);
 		font: inherit;
 	}
 	.name {
@@ -285,7 +285,7 @@
 		margin-top: 12px;
 		padding: 12px;
 		border-radius: 12px;
-		background: #e3f2ef;
+		background: var(--pp-good-bg);
 	}
 	.rejoin h3,
 	.rejoin p {
@@ -303,7 +303,7 @@
 		align-content: start;
 		padding: 12px;
 		border-radius: 12px;
-		background: #f1ecdf;
+		background: var(--pp-surface-sunk);
 	}
 	.ways h3,
 	.ways p {
@@ -321,7 +321,7 @@
 		display: block;
 		margin: 10px auto 0;
 		border-radius: 8px;
-		background: #fff;
+		background: var(--pp-surface);
 	}
 	.members {
 		margin: 0;
@@ -349,7 +349,7 @@
 	.layers li {
 		padding: 6px 8px;
 		border-radius: 10px;
-		background: #f1ecdf;
+		background: var(--pp-surface-sunk);
 	}
 	.lrow,
 	.ask {
@@ -366,7 +366,7 @@
 		font-weight: 600;
 	}
 	.owner {
-		color: #6b6559;
+		color: var(--pp-muted);
 		font-size: 13px;
 		flex: 1;
 	}
@@ -377,18 +377,18 @@
 	button.small {
 		padding: 4px 10px;
 		font-size: 13px;
-		background: #fff;
+		background: var(--pp-surface);
 	}
 	button.small.go {
 		background: var(--pp-ink, #16161a);
-		color: #fff;
+		color: var(--pp-on-ink);
 	}
 	.about,
 	.note {
 		margin: 10px 0 0;
 	}
 	.note {
-		color: #6b6559;
+		color: var(--pp-muted);
 		font-size: 13px;
 	}
 	.status {
@@ -396,7 +396,7 @@
 	}
 	.error {
 		margin: 10px 0 0;
-		color: #b3261e;
+		color: var(--pp-error);
 	}
 	.actions {
 		display: flex;
@@ -408,14 +408,14 @@
 		padding: 8px 14px;
 		border: 0;
 		border-radius: 10px;
-		background: #f1ecdf;
+		background: var(--pp-surface-sunk);
 		color: inherit;
 		font: inherit;
 		cursor: pointer;
 	}
 	button.go {
 		background: var(--pp-ink, #16161a);
-		color: #fff;
+		color: var(--pp-on-ink);
 	}
 	button:disabled {
 		opacity: 0.5;

@@ -182,7 +182,7 @@
 		padding: 10px 12px;
 		border: 2px solid transparent;
 		border-radius: 12px;
-		background: #f1ecdf;
+		background: var(--pp-surface-sunk);
 		color: inherit;
 		font: inherit;
 		text-align: left;
@@ -190,11 +190,11 @@
 	}
 	.formats button span {
 		font-size: 12px;
-		color: #6b6b74;
+		color: var(--pp-muted);
 	}
 	.formats button[aria-checked='true'] {
 		border-color: var(--pp-accent-strong, #e8492f);
-		background: #fff;
+		background: var(--pp-surface);
 	}
 	.formats button:disabled {
 		opacity: 0.45;
@@ -204,7 +204,7 @@
 		margin: 10px 0 0;
 		padding: 8px 10px;
 		border-radius: 10px;
-		background: #fff4d6;
+		background: var(--pp-note);
 		font-size: 13px;
 	}
 	.grid {
@@ -222,15 +222,15 @@
 	}
 	.grid select {
 		height: 34px;
-		border: 1px solid rgba(0, 0, 0, 0.15);
+		border: 1px solid color-mix(in srgb, currentColor 15%, transparent);
 		border-radius: 10px;
-		background: #fff;
+		background: var(--pp-surface);
 		font: inherit;
 	}
 	.size {
 		grid-column: 1 / -1;
 		margin: 0;
-		color: #6b6b74;
+		color: var(--pp-muted);
 		font-size: 12px;
 	}
 	.checks {
@@ -263,7 +263,7 @@
 		padding: 0 16px;
 		border: 0;
 		border-radius: 12px;
-		background: #e9e4d6;
+		background: var(--pp-track);
 		font: 600 14px var(--pp-font-body);
 		cursor: pointer;
 	}

@@ -381,6 +381,8 @@ export interface RecentItem {
 	layers: number;
 	modified: string;
 	thumbnail: string | null;
+	/** drawn together: who with (the invite code stays in the file) */
+	shared?: { with: string[] };
 }
 
 export const listRecent = () => call<RecentItem[]>('recent_list');

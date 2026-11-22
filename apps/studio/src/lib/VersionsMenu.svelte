@@ -98,7 +98,7 @@
 		position: absolute;
 		z-index: 30;
 		top: calc(100% + 8px);
-		right: 0;
+		left: 0;
 		width: 320px;
 		max-height: 60vh;
 		overflow: auto;
