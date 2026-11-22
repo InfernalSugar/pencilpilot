@@ -2,12 +2,13 @@
 //!
 //! The studio runs in the window (the paint engine as WebAssembly for now). Here: saving
 //! and opening `.ppstudio` projects (see [`project`]), recovery copies and version
-//! history ([`store`]), exports, and later the native engine (crates/brush) and the
+//! history ([`store`]), drawing together peer to peer ([`share`]), exports, and later the native engine (crates/brush) and the
 //! animation core (crates/anim).
 
 mod export;
 mod lipsync;
 mod project;
+mod share;
 mod store;
 mod video_in;
 
@@ -472,12 +473,67 @@ fn bench_report(app: AppHandle, report: String) {
     }
 }
 
+/// Host a drawing-together session: the invite to share, who's here.
+#[tauri::command]
+async fn share_host(
+    app: AppHandle,
+    state: State<'_, share::Sharing>,
+    name: String,
+) -> Result<share::Info, String> {
+    let data = data_dir(&app)?;
+    state.host(app, &data, &name).await
+}
+
+/// Join a session from an invite code.
+#[tauri::command]
+async fn share_join(
+    app: AppHandle,
+    state: State<'_, share::Sharing>,
+    code: String,
+    name: String,
+) -> Result<share::Info, String> {
+    let data = data_dir(&app)?;
+    state.join(app, &data, &code, &name).await
+}
+
+/// The session in progress, if any.
+#[tauri::command]
+async fn share_status(state: State<'_, share::Sharing>) -> Result<Option<share::Info>, String> {
+    Ok(state.status().await)
+}
+
+/// Send an edit: it comes back numbered as a "share-event", for everyone.
+#[tauri::command]
+async fn share_edit(
+    state: State<'_, share::Sharing>,
+    body: serde_json::Value,
+) -> Result<(), String> {
+    state.edit(body).await
+}
+
+/// Send this app's cursor (may be lost; send the newest often).
+#[tauri::command]
+async fn share_presence(
+    state: State<'_, share::Sharing>,
+    body: serde_json::Value,
+) -> Result<(), String> {
+    state.presence(body).await
+}
+
+/// Leave the session.
+#[tauri::command]
+async fn share_leave(state: State<'_, share::Sharing>) -> Result<(), String> {
+    state.leave().await;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .manage(Exporting::default())
         .manage(LipSync::default())
         .manage(VideoIn::default())
+        .manage(share::Sharing::default())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // PP_BENCH=1: open the engine benchmark straight away
@@ -529,7 +585,13 @@ pub fn run() {
             frames_put,
             frames_get,
             frames_retain,
-            frames_stats
+            frames_stats,
+            share_host,
+            share_join,
+            share_status,
+            share_edit,
+            share_presence,
+            share_leave
         ])
         .run(tauri::generate_context!())
         .expect("error while running PencilPilot");
