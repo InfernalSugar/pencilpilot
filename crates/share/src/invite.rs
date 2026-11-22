@@ -19,6 +19,13 @@ const PREFIX: &str = "pp1-";
 const VERSION: u8 = 2;
 /// addresses per code at most (the code stays short)
 const MAX_ADDRS: usize = 4;
+/// iroh's public relays, named in a code by their place in this list (a byte, not a URL)
+const KNOWN_RELAYS: [&str; 4] = [
+    "https://use1-1.relay.n0.iroh.link.",
+    "https://usw1-1.relay.n0.iroh.link.",
+    "https://euc1-1.relay.n0.iroh.link.",
+    "https://aps1-1.relay.n0.iroh.link.",
+];
 
 /// A shared project's invite: the project's secret, and members to ask to join (any
 /// member passes a joiner on to the host). Anyone holding it can join, like a house key.
@@ -58,6 +65,11 @@ impl Invite {
             if let Some(r) = relays.first() {
                 let url = r.to_string();
                 let url = url.trim_end_matches('/');
+                if let Some(i) = KNOWN_RELAYS.iter().position(|k| *k == url) {
+                    b.push(2);
+                    b.push(i as u8);
+                    continue;
+                }
                 b.push(0);
                 b.push(url.len().min(255) as u8);
                 b.extend_from_slice(&url.as_bytes()[..url.len().min(255)]);
@@ -119,6 +131,11 @@ impl Invite {
                 0 => {
                     let len = r.u8()? as usize;
                     let url = std::str::from_utf8(r.take(len)?).map_err(|_| damaged())?;
+                    let url: RelayUrl = url.parse().map_err(|_| damaged())?;
+                    via.push(TransportAddr::Relay(url));
+                }
+                2 => {
+                    let url = KNOWN_RELAYS.get(r.u8()? as usize).ok_or_else(damaged)?;
                     let url: RelayUrl = url.parse().map_err(|_| damaged())?;
                     via.push(TransportAddr::Relay(url));
                 }
@@ -202,9 +219,7 @@ mod tests {
         let host = SecretKey::generate().public();
         let maker = SecretKey::generate().public();
         let joiner = SecretKey::generate().public();
-        let relay: RelayUrl = "https://euc1-1.relay.n0.iroh-canary.iroh.link./"
-            .parse()
-            .unwrap();
+        let relay: RelayUrl = "https://relay.example.org./".parse().unwrap();
         let lan = "192.168.1.20:5000".parse::<SocketAddr>().unwrap();
         let v6 = "[fe80::1]:5001".parse::<SocketAddr>().unwrap();
         let inv = Invite::new(
@@ -260,5 +275,21 @@ mod tests {
         let code = inv.encode();
         println!("{code}");
         assert!(code.len() < 140, "{} characters", code.len());
+    }
+
+    #[test]
+    fn iroh_relays_take_a_byte() {
+        let relay: RelayUrl = "https://euc1-1.relay.n0.iroh.link./".parse().unwrap();
+        let inv = Invite::new(
+            [3; 32],
+            vec![EndpointAddr::from_parts(
+                SecretKey::generate().public(),
+                [TransportAddr::Relay(relay.clone())],
+            )],
+        );
+        let code = inv.encode();
+        assert!(code.len() < 100, "{} characters", code.len());
+        let back = Invite::decode(&code).unwrap();
+        assert_eq!(back.addrs[0].relay_urls().next(), Some(&relay));
     }
 }

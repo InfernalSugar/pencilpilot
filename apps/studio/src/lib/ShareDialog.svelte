@@ -3,7 +3,7 @@
 	 * Draw together (peer to peer): host a session and share its invite code, or join one
 	 * with a friend's code. Shows who's here. Nothing connects until Host or Join.
 	 */
-	import { cleanInvite, memberColour, type ShareInfo } from './share';
+	import { cleanInvite, inviteQr, memberColour, type ShareInfo } from './share';
 
 	interface LayerRow {
 		lid: string;
@@ -62,6 +62,16 @@
 		if (el && !el.open) el.showModal();
 	});
 	let code = $state('');
+	/** the invite as a QR code (an image), to scan with a phone or another screen */
+	let qr = $state('');
+	$effect(() => {
+		const invite = info?.invite;
+		qr = '';
+		if (invite)
+			inviteQr(invite)
+				.then((svg) => (qr = `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`))
+				.catch(() => {});
+	});
 	let copied = $state(false);
 	const cleaned = $derived(cleanInvite(code));
 
@@ -102,6 +112,9 @@
 			/>
 			<button type="button" onclick={() => void copy()}>{copied ? 'Copied' : 'Copy'}</button>
 		</div>
+		{#if qr}
+			<img class="qr" src={qr} alt="The invite code as a QR code" width="140" height="140" />
+		{/if}
 		<h3>Here now ({info.members.length})</h3>
 		<ul class="members">
 			{#each info.members as m (m.id)}
@@ -284,6 +297,12 @@
 	.code input {
 		font-family: ui-monospace, monospace;
 		font-size: 12px;
+	}
+	.qr {
+		display: block;
+		margin: 10px auto 0;
+		border-radius: 8px;
+		background: #fff;
 	}
 	.members {
 		margin: 0;
