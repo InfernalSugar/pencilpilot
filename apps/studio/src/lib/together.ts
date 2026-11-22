@@ -6,6 +6,12 @@
  *   allowed to draw on it ("writers"). Only their changes to it count; everyone else sees
  *   it locked. Asking for access: `ask` → the owner's `grant` (let them draw, or hand it
  *   over), `deny`, or later `revoke`.
+ * - **Groups** are shared the same way: a group has an owner and people who may change it
+ *   (its name, eye and opacity, and which layers are in it).
+ * - **Merging and grouping others' layers** asks first: what's missing is asked for (say
+ *   why: to merge, to group, to delete), and the change happens once it's granted. Merging
+ *   a layer away needs it handed over; merging into a layer, or grouping it, needs leave to
+ *   draw on it.
  * - **Pixels travel as tiles** (64×64, as in `.ppstudio`): after each change, the drawer's
  *   app sends the tiles of their layers that changed (compressed); the others put them
  *   in. Fills, transforms and imports travel the same way as strokes.
@@ -44,6 +50,36 @@ export interface SharedLayer {
 	look?: Look;
 	/** an adjustment layer: its settings (the app's JSON) */
 	adjust?: string;
+	/** the group it's in */
+	group?: string;
+}
+
+/** A shared group of layers (its id is made like a layer's, so ids never clash). */
+export interface SharedGroup {
+	gid: string;
+	owner: string;
+	name: string;
+	/** who may change it: its settings, and which of their layers are in it */
+	writers: string[];
+	visible: boolean;
+	/** 0–1 */
+	opacity: number;
+}
+
+/** why someone asks: to draw, or for a change that needs the owner's leave */
+export type Why = 'draw' | 'merge' | 'group' | 'delete';
+const WHYS: Why[] = ['draw', 'merge', 'group', 'delete'];
+
+/** An ask waiting for a layer's (or group's) owner. */
+export interface Ask {
+	/** the layer or group asked for */
+	lid: string;
+	from: string;
+	why?: Why;
+	/** asks for it to be handed over (merging or deleting it), not just to draw on it */
+	own?: boolean;
+	/** the other layer of a merge (to show what's merged with what) */
+	with?: string;
 }
 
 /** A layer's settings that everyone sees the same (its lock stays each app's own: it's how
@@ -104,7 +140,17 @@ export type TogetherEdit =
 	  }
 	| { k: 'timeline'; lid: string; tl: SharedTimeline }
 	| { k: 'sound'; lid: string; file: string; name: string; i: number; n: number; data: string }
-	| { k: 'ask'; lid: string }
+	| { k: 'ask'; lid: string; why: Why; own: boolean; with?: string }
+	/** a new group (id `gid`) holding these layers, in their places */
+	| { k: 'group'; lid: string; gid: string; name: string; lids: string[] }
+	/** a group's settings (`lid`: the group) */
+	| { k: 'gset'; lid: string; name: string; visible: boolean; opacity: number }
+	/** a layer to `to` in the shared order and into a group ('' = none) */
+	| { k: 'place'; lid: string; to: number; gid: string }
+	/** take a group's layers out of it and remove it (`lid`: the group) */
+	| { k: 'ungroup'; lid: string }
+	/** move a group's layers together, so the lowest is at `to` among the others (`lid`: the group) */
+	| { k: 'block'; lid: string; to: number }
 	| { k: 'grant'; lid: string; to: string; handover: boolean }
 	| { k: 'deny'; lid: string; to: string }
 	| { k: 'revoke'; lid: string; to: string };
@@ -206,8 +252,38 @@ export function parseEdit(body: unknown): TogetherEdit | null {
 			const t = readTiles(b);
 			return did && t ? { k: 'tiles', lid, did, ...t } : null;
 		}
-		case 'ask':
-			return { k: 'ask', lid };
+		case 'ask': {
+			const why = WHYS.includes(b.why as Why) ? (b.why as Why) : 'draw';
+			const other = typeof b.with === 'string' && LID.test(b.with) ? b.with : undefined;
+			return { k: 'ask', lid, why, own: b.own === true, ...(other ? { with: other } : {}) };
+		}
+		case 'group': {
+			const gid = typeof b.gid === 'string' && LID.test(b.gid) ? b.gid : null;
+			const lids = Array.isArray(b.lids)
+				? b.lids.filter((x): x is string => typeof x === 'string' && LID.test(x)).slice(0, 500)
+				: [];
+			return gid && lids.length ? { k: 'group', lid, gid, name: name || 'Group', lids } : null;
+		}
+		case 'gset':
+			return Number.isFinite(b.opacity)
+				? {
+						k: 'gset',
+						lid,
+						name: name || 'Group',
+						visible: b.visible !== false,
+						opacity: Math.min(1, Math.max(0, b.opacity as number))
+					}
+				: null;
+		case 'place': {
+			const gid = b.gid === '' ? '' : typeof b.gid === 'string' && LID.test(b.gid) ? b.gid : null;
+			return gid !== null && int(b.to) && (b.to as number) >= 0
+				? { k: 'place', lid, to: b.to as number, gid }
+				: null;
+		}
+		case 'ungroup':
+			return { k: 'ungroup', lid };
+		case 'block':
+			return int(b.to) && (b.to as number) >= 0 ? { k: 'block', lid, to: b.to as number } : null;
 		case 'grant':
 			return to ? { k: 'grant', lid, to, handover: b.handover === true } : null;
 		case 'deny':
@@ -224,23 +300,46 @@ export class Shared {
 	layers = new Map<string, SharedLayer>();
 	/** bottom → top: the order they were made */
 	order: string[] = [];
+	groups = new Map<string, SharedGroup>();
 	/** asks waiting for the owner */
-	asks: { lid: string; from: string }[] = [];
+	asks: Ask[] = [];
 
+	/** whether `who` may draw on a layer (or change a group) */
 	canDraw(lid: string, who: string): boolean {
-		return this.layers.get(lid)?.writers.includes(who) ?? false;
+		return (this.layers.get(lid) ?? this.groups.get(lid))?.writers.includes(who) ?? false;
+	}
+
+	/** whether `who` owns a layer (or group) */
+	owns(lid: string, who: string): boolean {
+		return (this.layers.get(lid) ?? this.groups.get(lid))?.owner === who;
+	}
+
+	/** a group's layers, bottom → top */
+	members(gid: string): string[] {
+		return this.order.filter((x) => this.layers.get(x)?.group === gid);
+	}
+
+	/** groups left with no layers go */
+	#dropEmpty() {
+		for (const gid of [...this.groups.keys()])
+			if (!this.members(gid).length) {
+				this.groups.delete(gid);
+				this.asks = this.asks.filter((a) => a.lid !== gid);
+			}
 	}
 
 	/** Take an edit in; false when it isn't allowed (and changes nothing). */
 	apply(from: string, e: TogetherEdit): boolean {
 		const l = this.layers.get(e.lid);
+		/** the layer or group an ask (or its answer) is about */
+		const thing = l ?? this.groups.get(e.lid);
 		switch (e.k) {
 			case 'timeline':
 			case 'sound':
 				return true;
 			case 'layer':
 				// only the member whose id starts the layer's id can make it, once
-				if (l || !e.lid.startsWith(from.slice(0, 12) + ':')) return false;
+				if (l || this.groups.has(e.lid) || !e.lid.startsWith(from.slice(0, 12) + ':')) return false;
 				this.layers.set(e.lid, {
 					lid: e.lid,
 					owner: from,
@@ -254,7 +353,8 @@ export class Shared {
 				if (!l || l.owner !== from) return false;
 				this.layers.delete(e.lid);
 				this.order = this.order.filter((x) => x !== e.lid);
-				this.asks = this.asks.filter((a) => a.lid !== e.lid);
+				this.asks = this.asks.filter((a) => a.lid !== e.lid && a.with !== e.lid);
+				this.#dropEmpty();
 				return true;
 			case 'move': {
 				if (!l || l.owner !== from) return false;
@@ -275,53 +375,143 @@ export class Shared {
 				if (!l || !l.adjust || !l.writers.includes(from)) return false;
 				l.adjust = e.spec;
 				return true;
-			case 'ask':
-				if (!l || l.writers.includes(from)) return false;
-				if (!this.asks.some((a) => a.lid === e.lid && a.from === from))
-					this.asks.push({ lid: e.lid, from });
+			case 'ask': {
+				if (!thing || (e.own ? thing.owner === from : thing.writers.includes(from))) return false;
+				const ask: Ask = {
+					lid: e.lid,
+					from,
+					why: e.why,
+					...(e.own ? { own: true } : {}),
+					...(e.with ? { with: e.with } : {})
+				};
+				// (asked again: the newer reason counts)
+				this.asks = [...this.asks.filter((a) => !(a.lid === e.lid && a.from === from)), ask];
 				return true;
+			}
 			case 'grant':
-				if (!l || l.owner !== from) return false;
+				if (!thing || thing.owner !== from) return false;
 				this.asks = this.asks.filter((a) => !(a.lid === e.lid && a.from === e.to));
 				if (e.handover) {
-					l.owner = e.to;
-					l.writers = [e.to, ...l.writers.filter((w) => w !== e.to && w !== from)];
-				} else if (!l.writers.includes(e.to)) l.writers.push(e.to);
+					thing.owner = e.to;
+					thing.writers = [e.to, ...thing.writers.filter((w) => w !== e.to && w !== from)];
+				} else if (!thing.writers.includes(e.to)) thing.writers.push(e.to);
 				return true;
 			case 'deny':
-				if (!l || l.owner !== from) return false;
+				if (!thing || thing.owner !== from) return false;
 				this.asks = this.asks.filter((a) => !(a.lid === e.lid && a.from === e.to));
 				return true;
 			case 'revoke':
-				if (!l || l.owner !== from || e.to === l.owner) return false;
-				l.writers = l.writers.filter((w) => w !== e.to);
+				if (!thing || thing.owner !== from || e.to === thing.owner) return false;
+				thing.writers = thing.writers.filter((w) => w !== e.to);
 				return true;
+			case 'group': {
+				// a new id, the maker's; every layer one the maker may draw on, in one group or none
+				if (this.layers.has(e.gid) || this.groups.has(e.gid)) return false;
+				if (!e.gid.startsWith(from.slice(0, 12) + ':')) return false;
+				const lids = [...new Set(e.lids)];
+				for (const x of lids) {
+					const m = this.layers.get(x);
+					if (!m || !m.writers.includes(from)) return false;
+					if (m.group && !this.canDraw(m.group, from)) return false;
+				}
+				this.groups.set(e.gid, {
+					gid: e.gid,
+					owner: from,
+					name: e.name,
+					writers: [from],
+					visible: true,
+					opacity: 1
+				});
+				for (const x of lids) this.layers.get(x)!.group = e.gid;
+				this.#dropEmpty();
+				return true;
+			}
+			case 'gset': {
+				const g = this.groups.get(e.lid);
+				if (!g || !g.writers.includes(from)) return false;
+				g.name = e.name;
+				g.visible = e.visible;
+				g.opacity = e.opacity;
+				return true;
+			}
+			case 'place': {
+				if (!l || !l.writers.includes(from)) return false;
+				if (e.gid && !this.canDraw(e.gid, from)) return false;
+				if (l.group && l.group !== e.gid && !this.canDraw(l.group, from)) return false;
+				const rest = this.order.filter((x) => x !== e.lid);
+				rest.splice(Math.min(e.to, rest.length), 0, e.lid);
+				this.order = rest;
+				if (e.gid) l.group = e.gid;
+				else delete l.group;
+				this.#dropEmpty();
+				return true;
+			}
+			case 'ungroup': {
+				const g = this.groups.get(e.lid);
+				if (!g || g.owner !== from) return false;
+				for (const x of this.members(e.lid)) delete this.layers.get(x)!.group;
+				this.groups.delete(e.lid);
+				this.asks = this.asks.filter((a) => a.lid !== e.lid);
+				return true;
+			}
+			case 'block': {
+				const g = this.groups.get(e.lid);
+				if (!g || !g.writers.includes(from)) return false;
+				const m = this.members(e.lid);
+				const rest = this.order.filter((x) => !m.includes(x));
+				rest.splice(Math.min(e.to, rest.length), 0, ...m);
+				this.order = rest;
+				return true;
+			}
 		}
 	}
 
 	snapshot() {
 		return {
 			layers: this.order.map((lid) => structuredClone(this.layers.get(lid)!)),
+			groups: [...this.groups.values()].map((g) => structuredClone(g)),
 			asks: structuredClone(this.asks)
 		};
 	}
 
-	load(s: { layers: SharedLayer[]; asks: { lid: string; from: string }[] }) {
+	load(s: { layers: SharedLayer[]; groups?: SharedGroup[]; asks: Ask[] }) {
 		this.layers.clear();
+		this.groups.clear();
 		this.order = [];
+		for (const g of Array.isArray(s.groups) ? s.groups : []) {
+			if (!g || !LID.test(g.gid) || !Array.isArray(g.writers)) continue;
+			this.groups.set(g.gid, {
+				gid: g.gid,
+				owner: String(g.owner),
+				name: String(g.name).slice(0, 60),
+				writers: g.writers.map(String),
+				visible: g.visible !== false,
+				opacity: Number.isFinite(g.opacity) ? Math.min(1, Math.max(0, g.opacity)) : 1
+			});
+		}
 		for (const l of s.layers) {
-			if (!LID.test(l.lid) || this.layers.has(l.lid)) continue;
+			if (!LID.test(l.lid) || this.layers.has(l.lid) || this.groups.has(l.lid)) continue;
 			this.layers.set(l.lid, {
 				lid: l.lid,
 				owner: String(l.owner),
 				name: String(l.name).slice(0, 60),
 				writers: l.writers.map(String),
 				...(readLook(l.look) ? { look: readLook(l.look)! } : {}),
-				...(readSpec(l.adjust) ? { adjust: l.adjust } : {})
+				...(readSpec(l.adjust) ? { adjust: l.adjust } : {}),
+				...(typeof l.group === 'string' && this.groups.has(l.group) ? { group: l.group } : {})
 			});
 			this.order.push(l.lid);
 		}
-		this.asks = s.asks.filter((a) => this.layers.has(a.lid));
+		this.#dropEmpty();
+		this.asks = (Array.isArray(s.asks) ? s.asks : [])
+			.filter((a) => a && (this.layers.has(a.lid) || this.groups.has(a.lid)))
+			.map((a) => ({
+				lid: a.lid,
+				from: String(a.from),
+				why: WHYS.includes(a.why as Why) ? a.why : 'draw',
+				...(a.own ? { own: true } : {}),
+				...(typeof a.with === 'string' && LID.test(a.with) ? { with: a.with } : {})
+			}));
 	}
 }
 
@@ -453,9 +643,24 @@ export interface CanvasPort {
 	removeLayer(id: number): boolean;
 	/** move a layer right above / below another (false: busy, try later); clears undo */
 	moveNextTo(id: number, ref: number, above: boolean): boolean;
-	/** paint layers, bottom → top */
-	/** every layer, bottom → top (`adjust`: an adjustment layer's settings) */
-	layers(): { id: number; name: string; look?: Look; adjust?: string | null }[];
+	/** move a layer right above / below `ref` (0: where it is) and into a group (0: none);
+	 * false: busy, try later; clears undo */
+	place(id: number, ref: number, above: boolean, group: number): boolean;
+	/** a new group holding a layer: its id (0: busy, try later); clears undo */
+	addGroup(layer: number): number;
+	/** a group's settings (not an undo step) */
+	setGroup(id: number, s: { name: string; visible: boolean; opacity: number }): void;
+	/** take a group's layers out and remove it (false: busy); clears undo */
+	ungroup(id: number): boolean;
+	/** merge a layer into the one below (false: couldn't); clears undo */
+	mergeDown(id: number): boolean;
+	/** flatten a group into its lowest layer: that layer (0: couldn't); clears undo */
+	mergeGroup(id: number): number;
+	/** the groups now */
+	groups(): { id: number; name: string; visible: boolean; opacity: number }[];
+	/** every layer, bottom → top (`adjust`: an adjustment layer's settings; `group`: its
+	 * group, 0 = none) */
+	layers(): { id: number; name: string; look?: Look; adjust?: string | null; group?: number }[];
 	/** a sound file the studio has (by key), or null */
 	sound(file: string): { bytes: Uint8Array; name: string } | null;
 	/** add a sound file under its key (decoded for playing) */
@@ -479,7 +684,8 @@ type Snap =
 			k: 'snap.begin';
 			seq: number;
 			layers: SharedLayer[];
-			asks: { lid: string; from: string }[];
+			groups?: SharedGroup[];
+			asks: Ask[];
 			tl: SharedTimeline | null;
 	  }
 	| { k: 'snap.tiles'; lid: string; did: string; set: [number, number, string][] }
@@ -496,9 +702,12 @@ export interface SavedShare {
 	code: string;
 	members: { id: string; name: string; addr: unknown }[];
 	layers: SharedLayer[];
-	asks: { lid: string; from: string }[];
+	groups?: SharedGroup[];
+	asks: Ask[];
 	/** shared layer → its id in this document */
 	ids: [string, number][];
+	/** shared group → its id in this document */
+	gids?: [string, number][];
 	/** shared drawing → its id in this document */
 	dids: [string, number][];
 	n: number;
@@ -526,8 +735,10 @@ export function readSavedShare(raw: unknown): SavedShare | null {
 		layers: Array.isArray(s.layers)
 			? s.layers.filter((l) => l && LID.test(l.lid) && Array.isArray(l.writers))
 			: [],
+		groups: Array.isArray(s.groups) ? s.groups : [],
 		asks: Array.isArray(s.asks) ? s.asks : [],
 		ids: pairs(s.ids, LID),
+		gids: pairs(s.gids, LID),
 		dids: pairs(s.dids, DID),
 		n: Number.isInteger(s.n) ? s.n : 0
 	};
@@ -578,6 +789,18 @@ export class Together {
 	#rejoining = false;
 	/** someone's tiles arrived (their live stroke previews can go) */
 	ontiles: (from: string) => void = () => {};
+	/** something to tell this person (a change asked for went ahead, or was refused) */
+	onnote: (text: string) => void = () => {};
+	/** shared group → the engine's group here */
+	gids = new Map<string, number>();
+	/** groups the session has had */
+	#groupsSeen = new Set<string>();
+	/** each group's settings as last synced */
+	#groupSent = new Map<string, { name: string; visible: boolean; opacity: number }>();
+	/** changes waiting for owners to say yes: what they need, and what to do then */
+	#waiting: { needs: { lid: string; own: boolean }[]; run: () => Promise<void> | void }[] = [];
+	/** edits to send once this app's changed tiles have gone (a merged layer's removal) */
+	#afterSend: (() => void)[] = [];
 
 	constructor(
 		readonly me: string,
@@ -652,6 +875,7 @@ export class Together {
 			if (l.adjust) adjusts.add(l.id);
 			this.net.edit({ k: 'layer', lid, name: l.name, ...(l.adjust ? { adjust: l.adjust } : {}) });
 		}
+		this.#shareGroups();
 		for (const [lid, id] of this.ids)
 			if (!adjusts.has(id))
 				for (const d of new Set([this.canvas.drawingOf(id), ...this.canvas.drawingsOfLayer(id)])) {
@@ -670,6 +894,24 @@ export class Together {
 		this.#synced = true;
 	}
 
+	/** This app's groups, shared (hosting): each with its layers, then its settings. */
+	#shareGroups() {
+		const layers = this.canvas.layers();
+		for (const g of this.canvas.groups()) {
+			const lids = layers
+				.filter((l) => l.group === g.id)
+				.map((l) => this.lidOf(l.id))
+				.filter((x): x is string => !!x);
+			if (!lids.length) continue;
+			const gid = this.#newLid();
+			this.gids.set(gid, g.id);
+			this.net.edit({ k: 'group', lid: lids[0], gid, name: g.name, lids });
+			const s = { name: g.name, visible: g.visible, opacity: g.opacity };
+			this.#groupSent.set(gid, s);
+			this.net.edit({ k: 'gset', lid: gid, ...s });
+		}
+	}
+
 	/** The session, to keep in the project file. */
 	save(code: string, members: { id: string; name: string; addr?: unknown }[]): SavedShare {
 		const s = this.shared.snapshot();
@@ -677,8 +919,10 @@ export class Together {
 			code,
 			members: members.map((m) => ({ id: m.id, name: m.name, addr: m.addr })),
 			layers: s.layers,
+			groups: s.groups,
 			asks: s.asks,
 			ids: [...this.ids],
+			gids: [...this.gids],
 			dids: [...this.#dids],
 			n: this.#n
 		};
@@ -686,9 +930,16 @@ export class Together {
 
 	/** Back to a saved session (its layer ids already this document's). */
 	restore(saved: SavedShare) {
-		this.shared.load({ layers: saved.layers, asks: saved.asks });
+		this.shared.load({ layers: saved.layers, groups: saved.groups, asks: saved.asks });
 		const here = new Set(this.canvas.layers().map((l) => l.id));
 		this.ids = new Map(saved.ids.filter(([, id]) => here.has(id)));
+		const groupsHere = new Set(this.canvas.groups().map((g) => g.id));
+		this.gids = new Map((saved.gids ?? []).filter(([, id]) => groupsHere.has(id)));
+		for (const [gid] of this.gids) this.#groupsSeen.add(gid);
+		for (const [gid] of this.gids) {
+			const g = this.shared.groups.get(gid);
+			if (g) this.#groupSent.set(gid, { name: g.name, visible: g.visible, opacity: g.opacity });
+		}
 		for (const [did, d] of saved.dids) {
 			this.#dids.set(did, d);
 			this.#didOf.set(d, did);
@@ -747,7 +998,235 @@ export class Together {
 	}
 
 	ask(lid: string) {
-		this.net.edit({ k: 'ask', lid });
+		this.net.edit({ k: 'ask', lid, why: 'draw', own: false });
+	}
+
+	/** The group an engine group is, if any. */
+	gidOf(id: number): string | null {
+		for (const [gid, i] of this.gids) if (i === id) return gid;
+		return null;
+	}
+
+	#ok(n: { lid: string; own: boolean }) {
+		return n.own ? this.shared.owns(n.lid, this.me) : this.shared.canDraw(n.lid, this.me);
+	}
+
+	/**
+	 * Do `run` once this app may: it needs `needs` (a layer or group handed over, `own`, or
+	 * leave to draw on / change it). What's missing is asked for, saying `why`. Returns the
+	 * owners asked (none: it went ahead now).
+	 */
+	request(
+		why: Why,
+		needs: { lid: string; own: boolean; with?: string }[],
+		run: () => Promise<void> | void
+	): string[] {
+		const missing = needs.filter((n) => !this.#ok(n));
+		if (!missing.length) {
+			void run();
+			return [];
+		}
+		for (const n of missing)
+			this.net.edit({ k: 'ask', lid: n.lid, why, own: n.own, ...(n.with ? { with: n.with } : {}) });
+		this.#waiting.push({ needs, run });
+		return [
+			...new Set(
+				missing.map((n) => (this.shared.layers.get(n.lid) ?? this.shared.groups.get(n.lid))!.owner)
+			)
+		];
+	}
+
+	/** Changes waiting for a yes: those that may go ahead now do. */
+	async #tryWaiting() {
+		const ready = this.#waiting.filter((w) => w.needs.every((n) => this.#ok(n)));
+		this.#waiting = this.#waiting.filter((w) => !ready.includes(w));
+		for (const w of ready) await w.run();
+	}
+
+	/** The layer below a layer here, if shared. */
+	#below(id: number): string | null {
+		const all = this.canvas.layers();
+		const i = all.findIndex((l) => l.id === id);
+		return i > 0 ? this.lidOf(all[i - 1].id) : null;
+	}
+
+	/** Merge a shared layer into the one below it: it needs the layer handed over (it goes)
+	 * and leave to draw on the one below. Owners asked (none: merged now); null: can't. */
+	mergeDown(id: number): string[] | null {
+		const a = this.lidOf(id);
+		const b = this.#below(id);
+		if (!a || !b) return null;
+		return this.request(
+			'merge',
+			[
+				{ lid: a, own: true, with: b },
+				{ lid: b, own: false, with: a }
+			],
+			async () => {
+				const idA = this.ids.get(a);
+				// meanwhile moved apart, or gone: nothing merged
+				if (!idA || this.#below(idA) !== b) {
+					this.onnote('The layers moved meanwhile: merge again.');
+					return;
+				}
+				if (!this.canvas.mergeDown(idA)) {
+					this.onnote('Couldn’t merge those layers.');
+					return;
+				}
+				this.#forget(a);
+				this.#afterSend.push(() => this.net.edit({ k: 'remove', lid: a }));
+				await this.localChanged();
+			}
+		);
+	}
+
+	/** Forget a layer merged away here (its removal is sent after the merged pixels). */
+	#forget(lid: string) {
+		this.ids.delete(lid);
+		for (const k of [...this.cache.keys()])
+			if (k.startsWith(lid + '|')) {
+				this.cache.delete(k);
+				this.#pending.delete(k);
+			}
+	}
+
+	/** Delete a shared layer: needs it handed over. */
+	deleteLayer(id: number): string[] | null {
+		const lid = this.lidOf(id);
+		if (!lid) return null;
+		return this.request('delete', [{ lid, own: true }], () => this.net.edit({ k: 'remove', lid }));
+	}
+
+	/** Put a shared layer in a new group: needs leave to draw on it (and on the group it's
+	 * in now). Owners asked; null: not a shared layer. */
+	addGroup(id: number): string[] | null {
+		const lid = this.lidOf(id);
+		if (!lid) return null;
+		const now = this.shared.layers.get(lid)?.group;
+		return this.request(
+			'group',
+			[{ lid, own: false }, ...(now ? [{ lid: now, own: false }] : [])],
+			() => {
+				const gid = this.#newLid();
+				this.net.edit({ k: 'group', lid, gid, name: 'Group', lids: [lid] });
+			}
+		);
+	}
+
+	/** Move a shared layer to `to` (the shared order) and into a group (engine id, 0: none):
+	 * needs leave to draw on it, on that group, and on the group it leaves. */
+	moveLayerTo(id: number, to: number, group: number): string[] | null {
+		const lid = this.lidOf(id);
+		const gid = group ? this.gidOf(group) : '';
+		if (!lid || gid === null) return null;
+		const now = this.shared.layers.get(lid)?.group;
+		const needs = [{ lid, own: false }];
+		if (gid) needs.push({ lid: gid, own: false });
+		if (now && now !== gid) needs.push({ lid: now, own: false });
+		return this.request('group', needs, () => this.net.edit({ k: 'place', lid, to, gid }));
+	}
+
+	/** Change a shared group's settings (`run` changes them here, once allowed). */
+	changeGroup(group: number, run: () => void): string[] | null {
+		const gid = this.gidOf(group);
+		if (!gid) return null;
+		return this.request('group', [{ lid: gid, own: false }], async () => {
+			run();
+			await this.localChanged();
+		});
+	}
+
+	/** Take a group's layers out of it: needs the group handed over. */
+	ungroup(group: number): string[] | null {
+		const gid = this.gidOf(group);
+		if (!gid) return null;
+		return this.request('group', [{ lid: gid, own: true }], () =>
+			this.net.edit({ k: 'ungroup', lid: gid })
+		);
+	}
+
+	/** Delete a group and its layers: needs each layer handed over. */
+	deleteGroup(group: number): string[] | null {
+		const gid = this.gidOf(group);
+		if (!gid) return null;
+		const m = this.shared.members(gid);
+		return this.request(
+			'delete',
+			m.map((lid) => ({ lid, own: true })),
+			() => {
+				for (const lid of this.shared.members(gid)) this.net.edit({ k: 'remove', lid });
+			}
+		);
+	}
+
+	/** Flatten a group into its lowest layer: needs the others handed over, and leave to draw
+	 * on the lowest and to change the group. */
+	mergeGroup(group: number): string[] | null {
+		const gid = this.gidOf(group);
+		if (!gid) return null;
+		const m = this.shared.members(gid);
+		if (!m.length) return null;
+		return this.request(
+			'merge',
+			[
+				{ lid: gid, own: false },
+				{ lid: m[0], own: false },
+				...m.slice(1).map((lid) => ({ lid, own: true }))
+			],
+			async () => {
+				const now = this.shared.members(gid);
+				const local = this.gids.get(gid);
+				if (!local || now.join() !== m.join()) {
+					this.onnote('The group changed meanwhile: merge again.');
+					return;
+				}
+				const g = this.shared.groups.get(gid)!;
+				if (!this.canvas.mergeGroup(local)) {
+					this.onnote('Couldn’t merge that group.');
+					return;
+				}
+				for (const lid of m.slice(1)) this.#forget(lid);
+				this.gids.delete(gid);
+				this.#groupSent.delete(gid);
+				const bottom = m[0];
+				this.#afterSend.push(() => {
+					this.net.edit({ k: 'rename', lid: bottom, name: g.name });
+					this.net.edit({
+						k: 'place',
+						lid: bottom,
+						to: this.shared.order.indexOf(bottom),
+						gid: ''
+					});
+					for (const lid of m.slice(1)) this.net.edit({ k: 'remove', lid });
+				});
+				await this.localChanged();
+			}
+		);
+	}
+
+	/** Move a group's layers together, up or down past the next layer (or group). */
+	moveGroup(group: number, up: boolean): string[] | null {
+		const gid = this.gidOf(group);
+		if (!gid) return null;
+		return this.request('group', [{ lid: gid, own: false }], () => {
+			const m = this.shared.members(gid);
+			if (!m.length) return;
+			const rest = this.shared.order.filter((x) => !m.includes(x));
+			let p = this.shared.order.indexOf(m[0]);
+			const groupOf = (x: string | undefined) => (x ? this.shared.layers.get(x)?.group : undefined);
+			if (up) {
+				if (p >= rest.length) return;
+				const h = groupOf(rest[p]);
+				p++;
+				while (h && p < rest.length && groupOf(rest[p]) === h) p++;
+			} else {
+				if (p === 0) return;
+				const h = groupOf(rest[p - 1]);
+				p--;
+				while (h && p > 0 && groupOf(rest[p - 1]) === h) p--;
+			}
+			this.net.edit({ k: 'block', lid: gid, to: p });
+		});
 	}
 	grant(lid: string, to: string, handover = false) {
 		this.net.edit({ k: 'grant', lid, to, handover });
@@ -839,8 +1318,22 @@ export class Together {
 				break;
 			}
 			case 'move':
+			case 'place':
 				this.#place(e.lid);
 				break;
+			case 'block':
+				for (const lid of this.shared.members(e.lid)) this.#place(lid);
+				break;
+			case 'group':
+				this.#makeGroup(e.gid);
+				break;
+			case 'gset': {
+				const s = { name: e.name, visible: e.visible, opacity: e.opacity };
+				this.#groupSent.set(e.lid, s);
+				const g = this.gids.get(e.lid);
+				if (g && from !== this.me) this.canvas.setGroup(g, s);
+				break;
+			}
 			case 'tiles':
 				// this app's own changes are on its canvas already
 				if (from !== this.me) {
@@ -858,9 +1351,49 @@ export class Together {
 			case 'grant':
 			case 'revoke':
 				this.#refreshLock(e.lid);
+				if (e.k === 'grant' && e.to === this.me) await this.#tryWaiting();
+				break;
+			case 'deny':
+				if (e.to === this.me) {
+					const was = this.#waiting.length;
+					this.#waiting = this.#waiting.filter((w) => !w.needs.some((n) => n.lid === e.lid));
+					if (this.#waiting.length < was) this.onnote('They said no: nothing was changed.');
+				}
 				break;
 		}
+		this.#dropGroups();
 		this.onchange();
+	}
+
+	/** Groups the session no longer has: taken apart here too. */
+	#dropGroups() {
+		// (a group made here counts once the session has it: until then it's on its way)
+		for (const gid of this.shared.groups.keys()) this.#groupsSeen.add(gid);
+		for (const [gid, g] of [...this.gids])
+			if (this.#groupsSeen.has(gid) && !this.shared.groups.has(gid)) {
+				this.gids.delete(gid);
+				this.#groupSent.delete(gid);
+				this.#later(() => this.canvas.ungroup(g));
+			}
+	}
+
+	/** Make a shared group here (its layers first), and put its layers in it. */
+	#makeGroup(gid: string) {
+		if (this.gids.has(gid)) return;
+		const g = this.shared.groups.get(gid);
+		const m = this.shared.members(gid).filter((lid) => this.ids.has(lid));
+		if (!g || !m.length) return;
+		this.#later(() => {
+			if (this.gids.has(gid) || !this.shared.groups.has(gid)) return true;
+			const local = this.canvas.addGroup(this.ids.get(m[0])!);
+			if (!local) return false;
+			this.gids.set(gid, local);
+			const s = { name: g.name, visible: g.visible, opacity: g.opacity };
+			this.canvas.setGroup(local, s);
+			this.#groupSent.set(gid, s);
+			for (const lid of this.shared.members(gid)) this.#place(lid);
+			return true;
+		});
 	}
 
 	/** A piece of a sound file; once all are here, the studio gets the file. */
@@ -936,6 +1469,17 @@ export class Together {
 				this.#makeLayer(lid);
 				this.#refreshLock(lid);
 			}
+			// groups: those this app has (back from a break) put right, the others made
+			this.#dropGroups();
+			for (const gid of this.shared.groups.keys()) {
+				const g = this.gids.get(gid);
+				const sg = this.shared.groups.get(gid)!;
+				if (g) {
+					this.canvas.setGroup(g, { name: sg.name, visible: sg.visible, opacity: sg.opacity });
+					for (const lid of this.shared.members(gid)) this.#place(lid);
+				} else this.#makeGroup(gid);
+			}
+			for (const [lid] of this.ids) if (!this.shared.layers.get(lid)?.group) this.#place(lid);
 			const own = (k: string) =>
 				this.#rejoining && this.shared.layers.get(k.split('|')[0])?.owner === this.me;
 			for (const k of this.cache.keys()) if (!own(k)) this.#put(k);
@@ -982,7 +1526,9 @@ export class Together {
 						// it goes on top, here as for everyone (the same stack everywhere)
 						const top = [...this.shared.order].reverse().find((x) => this.ids.has(x));
 						const topId = top && this.ids.get(top);
-						if (topId && all.at(-1)?.id !== l.id) this.canvas.moveNextTo(l.id, topId, true);
+						if (topId && (all.at(-1)?.id !== l.id || l.group))
+							this.canvas.place(l.id, topId, true, 0);
+						else if (l.group) this.canvas.place(l.id, 0, true, 0);
 						const lid = this.#newLid();
 						this.ids.set(lid, l.id);
 						this.net.edit({
@@ -1025,6 +1571,22 @@ export class Together {
 					this.#lookSent.set(lid, look);
 					this.net.edit({ k: 'look', lid, look });
 				}
+				// group settings changed here, on groups this app may change
+				for (const g of this.canvas.groups()) {
+					const gid = this.gidOf(g.id);
+					if (!gid || !this.shared.canDraw(gid, this.me)) continue;
+					const s = { name: g.name, visible: g.visible, opacity: g.opacity };
+					const was = this.#groupSent.get(gid);
+					if (
+						was &&
+						was.name === s.name &&
+						was.visible === s.visible &&
+						Math.abs(was.opacity - s.opacity) < 1e-3
+					)
+						continue;
+					this.#groupSent.set(gid, s);
+					this.net.edit({ k: 'gset', lid: gid, ...s });
+				}
 				// what may have changed: each drawable layer's drawing showing, and drawings
 				// touched elsewhere (an undo on another frame)
 				const look = new Map<number, number>();
@@ -1051,6 +1613,8 @@ export class Together {
 					this.cache.set(key(lid, did), next);
 					await this.#sendTiles(lid, did, diff.set, diff.clear);
 				}
+				// (a merged layer's removal: after the merged pixels)
+				for (const f of this.#afterSend.splice(0)) f();
 			} while (this.#again);
 		} finally {
 			this.#sending = false;
@@ -1156,8 +1720,11 @@ export class Together {
 		if (!id || i < 0) return;
 		const below = this.ids.get(this.shared.order[i - 1]);
 		const above = this.ids.get(this.shared.order[i + 1]);
-		if (below) this.#later(() => this.canvas.moveNextTo(id, below, true));
-		else if (above) this.#later(() => this.canvas.moveNextTo(id, above, false));
+		const gid = this.shared.layers.get(lid)?.group;
+		const group = () => (gid ? (this.gids.get(gid) ?? 0) : 0);
+		if (below) this.#later(() => this.canvas.place(id, below, true, group()));
+		else if (above) this.#later(() => this.canvas.place(id, above, false, group()));
+		else this.#later(() => this.canvas.place(id, 0, true, group()));
 	}
 
 	/** Do it now, or (the canvas busy mid-stroke) after the next change. */

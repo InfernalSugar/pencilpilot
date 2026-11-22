@@ -15,6 +15,7 @@
 	import PaintCanvas, {
 		BLANK_STATUS,
 		type CanvasStatus,
+		type GroupSettings,
 		type LayerSettings,
 		type LiveEvent
 	} from '@pencilpilot/paint/PaintCanvas.svelte';
@@ -62,7 +63,15 @@
 	import FilmDialog from '#lib/FilmDialog.svelte';
 	import ShareDialog from '#lib/ShareDialog.svelte';
 	import SaveChangesDialog from '#lib/SaveChangesDialog.svelte';
-	import { readSavedShare, Together, type CanvasPort, type SavedShare } from '#lib/together.js';
+	import {
+		readSavedShare,
+		Together,
+		type Ask,
+		type CanvasPort,
+		type SavedShare,
+		type SharedGroup,
+		type SharedLayer
+	} from '#lib/together.js';
 	import {
 		cleanRelay,
 		Cursors,
@@ -1568,6 +1577,13 @@
 			select: (id) => c.selectLayer(id),
 			removeLayer: (id) => c.removeLayerQuiet(id),
 			moveNextTo: (id, ref, above) => c.moveLayerQuietNextTo(id, ref, above),
+			place: (id, ref, above, group) => c.placeLayerQuiet(id, ref, above, group),
+			addGroup: (id) => c.addGroupQuiet(id),
+			setGroup: (id, s) => void c.setGroupQuiet(id, s),
+			ungroup: (id) => c.ungroupQuiet(id),
+			mergeDown: (id) => c.mergeDownQuiet(id),
+			mergeGroup: (id) => c.mergeGroupQuiet(id),
+			groups: () => c.groupsNow(),
 			layers: () => c.sharedLayerList()
 		};
 	}
@@ -1584,6 +1600,7 @@
 			},
 			() => togetherTick++
 		);
+		together.onnote = (text) => note(text, 4000);
 		together.ontiles = (from) => {
 			// their real pixels arrived: the live preview can go (unless they're mid-stroke)
 			if (!liveStrokes.get(from)) canvas?.remoteClear(`live:${from}`);
@@ -1698,6 +1715,7 @@
 				},
 				() => togetherTick++
 			);
+			together.onnote = (text) => note(text, 4000);
 			together.ontiles = (from) => {
 				if (!liveStrokes.get(from)) canvas?.remoteClear(`live:${from}`);
 			};
@@ -1741,28 +1759,25 @@
 		shareBusy = false;
 	}
 
+	/** a change to someone else's group, from its slider, to ask for when it's let go */
+	let groupWish: { id: number; patch: Partial<GroupSettings> } | null = null;
+	const memberName = (id: string) => sharing?.members.find((m) => m.id === id)?.name ?? 'someone';
+
 	/** what the layers panel does while drawing together */
 	const layerControls = $derived.by(() => {
 		void togetherTick;
 		const c = canvas;
 		if (!c || !sharing || !together) return c;
 		const t = together;
-		const notNow = () =>
-			note('Not while drawing together yet: it changes the layers for everyone.');
 		return new Proxy(c, {
 			get(target, prop, recv) {
 				if (prop === 'addLayer') return (name?: string) => t.addOwnLayer(name);
 				const own = (id: number) => {
 					const lid = t.lidOf(id);
 					if (lid && t.shared.layers.get(lid)?.owner === t.me) return lid;
-					note('Only the person who made a shared layer can delete or move it.');
+					note('Only the person who made a shared layer can move it.');
 					return null;
 				};
-				if (prop === 'deleteLayer')
-					return (id: number) => {
-						const lid = own(id);
-						if (lid) t.removeOwn(lid);
-					};
 				if (prop === 'moveLayer')
 					return (id: number, to: number) => {
 						const lid = own(id);
@@ -1771,19 +1786,54 @@
 						const at = there ? t.shared.order.indexOf(t.lidOf(there) ?? '') : -1;
 						if (lid && at >= 0) t.moveOwn(lid, at);
 					};
-				if (
-					[
-						'duplicateLayer',
-						'moveLayerTo',
-						'mergeDown',
-						'addGroup',
-						'ungroup',
-						'deleteGroup',
-						'mergeGroup',
-						'moveGroup'
-					].includes(String(prop))
-				)
-					return notNow;
+				/** what a change that needs others' leave did: asked them, or went ahead */
+				const asked = (owners: string[] | null) => {
+					if (owners === null)
+						note('Only shared layers and groups can change while drawing together.');
+					else if (owners.length) {
+						const who = owners.map(memberName).join(' and ');
+						note(`Asked ${who}: it happens when they say yes (Together).`, 4000);
+					}
+				};
+				if (prop === 'mergeDown') return (id: number) => asked(t.mergeDown(id));
+				if (prop === 'deleteLayer') return (id: number) => asked(t.deleteLayer(id));
+				if (prop === 'addGroup')
+					return (id: number) => {
+						asked(t.addGroup(id));
+						return 0;
+					};
+				if (prop === 'moveLayerTo')
+					return (id: number, to: number, group: number) => {
+						const there = status?.layers[to]?.id;
+						const at = there ? t.shared.order.indexOf(t.lidOf(there) ?? '') : -1;
+						if (at < 0) return;
+						asked(t.moveLayerTo(id, at, group));
+					};
+				if (prop === 'ungroup') return (id: number) => asked(t.ungroup(id));
+				if (prop === 'deleteGroup') return (id: number) => asked(t.deleteGroup(id));
+				if (prop === 'mergeGroup') return (id: number) => asked(t.mergeGroup(id));
+				if (prop === 'moveGroup') return (id: number, up: boolean) => asked(t.moveGroup(id, up));
+				const mayChangeGroup = (id: number) => {
+					const gid = t.gidOf(id);
+					return !gid || t.shared.canDraw(gid, t.me);
+				};
+				if (prop === 'setGroup')
+					return (id: number, patch: Partial<GroupSettings>) => {
+						if (mayChangeGroup(id)) target.setGroup(id, patch);
+						else asked(t.changeGroup(id, () => target.setGroup(id, patch)));
+					};
+				if (prop === 'previewGroup')
+					return (id: number, patch: Partial<GroupSettings>) => {
+						if (mayChangeGroup(id)) target.previewGroup(id, patch);
+						else groupWish = { id, patch: { ...groupWish?.patch, ...patch } };
+					};
+				if (prop === 'commitGroup')
+					return () => {
+						const w = groupWish;
+						groupWish = null;
+						if (!w) return target.commitGroup();
+						asked(t.changeGroup(w.id, () => target.setGroup(w.id, w.patch)));
+					};
 				if (prop === 'setLayer')
 					return (id: number, patch: Partial<LayerSettings>) => {
 						target.setLayer(id, patch);
@@ -1808,23 +1858,56 @@
 		const t = together;
 		if (!t || !sharing) return [];
 		const name = (id: string) => sharing?.members.find((m) => m.id === id)?.name ?? 'Someone';
-		return t.shared.order.map((lid) => {
-			const l = t.shared.layers.get(lid)!;
-			return {
-				lid,
-				name: l.name,
-				owner: name(l.owner),
-				mine: l.owner === t.me,
-				canDraw: l.writers.includes(t.me),
-				asked: t.shared.asks.some((a) => a.lid === lid && a.from === t.me),
-				writers: l.writers.filter((w) => w !== l.owner).map((id) => ({ id, name: name(id) })),
-				asks: t.shared.asks
-					.filter((a) => a.lid === lid && l.owner === t.me)
-					.map((a) => ({ id: a.from, name: name(a.from) }))
-			};
+		const nameOf = (lid: string | undefined) =>
+			(lid && (t.shared.layers.get(lid) ?? t.shared.groups.get(lid))?.name) || 'a layer';
+		/** what someone asks for, in words */
+		const what = (a: Ask, group: boolean) => {
+			if (a.why === 'merge')
+				return a.own
+					? `asks for it, to merge it into “${nameOf(a.with)}”`
+					: group
+						? 'asks to merge this group into one layer'
+						: `asks to merge “${nameOf(a.with)}” into it`;
+			if (a.why === 'delete') return 'asks for it, to delete it';
+			if (a.why === 'group')
+				return a.own
+					? 'asks for this group, to take it apart'
+					: group
+						? 'asks to change this group'
+						: 'asks to put it in a group';
+			return 'asks to draw here';
+		};
+		const row = (lid: string, l: SharedLayer | SharedGroup, group: boolean) => ({
+			lid,
+			name: group ? `Group: ${l.name}` : l.name,
+			group,
+			owner: name(l.owner),
+			mine: l.owner === t.me,
+			canDraw: l.writers.includes(t.me),
+			asked: t.shared.asks.some((a) => a.lid === lid && a.from === t.me),
+			writers: l.writers.filter((w) => w !== l.owner).map((id) => ({ id, name: name(id) })),
+			asks: t.shared.asks
+				.filter((a) => a.lid === lid && l.owner === t.me)
+				.map((a) => ({
+					id: a.from,
+					name: name(a.from),
+					text: what(a, group),
+					own: !!a.own,
+					draw: (a.why ?? 'draw') === 'draw'
+				}))
 		});
+		return [
+			...t.shared.order.map((lid) => row(lid, t.shared.layers.get(lid)!, false)),
+			...[...t.shared.groups.values()].map((g) => row(g.gid, g, true))
+		];
 	});
 	const asksForMe = $derived(sharedLayers.reduce((n, l) => n + l.asks.length, 0));
+	/** a new ask for this person: said, so it isn't missed */
+	let asksSeen = 0;
+	$effect(() => {
+		if (asksForMe > asksSeen) note('Someone is asking you about a layer: see Together.', 4000);
+		asksSeen = asksForMe;
+	});
 
 	function onCursor(at: [number, number] | null) {
 		if (sharing && at) cursorOut.push({ x: Math.round(at[0]), y: Math.round(at[1]) });
