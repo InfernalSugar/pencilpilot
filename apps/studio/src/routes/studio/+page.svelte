@@ -1554,6 +1554,14 @@
 				if (ok) cache.touch([d]);
 				return ok;
 			},
+			sound: (file) => {
+				const snd = sounds.get(file);
+				return snd ? { bytes: snd.bytes, name: snd.name } : null;
+			},
+			putSound: async (file, bytes, name) => {
+				await sounds.put(file, bytes, name);
+				soundTick++;
+			},
 			timeline: () => $state.snapshot(timeline) as Timeline,
 			setTimeline: (tl) => putTimeline(JSON.stringify(tl)),
 			select: (id) => c.selectLayer(id),

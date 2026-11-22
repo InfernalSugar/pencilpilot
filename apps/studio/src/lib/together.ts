@@ -103,6 +103,7 @@ export type TogetherEdit =
 			clear: [number, number][];
 	  }
 	| { k: 'timeline'; lid: string; tl: SharedTimeline }
+	| { k: 'sound'; lid: string; file: string; name: string; i: number; n: number; data: string }
 	| { k: 'ask'; lid: string }
 	| { k: 'grant'; lid: string; to: string; handover: boolean }
 	| { k: 'deny'; lid: string; to: string }
@@ -145,6 +146,27 @@ export function parseEdit(body: unknown): TogetherEdit | null {
 	if (b.k === 'timeline')
 		return b.tl && typeof b.tl === 'object' && Array.isArray((b.tl as SharedTimeline).scenes)
 			? { k: 'timeline', lid: '', tl: b.tl as SharedTimeline }
+			: null;
+	// a piece of a sound file (anyone's; the timeline says where it plays)
+	if (b.k === 'sound')
+		return typeof b.file === 'string' &&
+			SOUND_KEY.test(b.file) &&
+			Number.isInteger(b.i) &&
+			Number.isInteger(b.n) &&
+			(b.n as number) > 0 &&
+			(b.n as number) <= Math.ceil(SOUND_MAX / SOUND_CHUNK) &&
+			(b.i as number) >= 0 &&
+			(b.i as number) < (b.n as number) &&
+			typeof b.data === 'string'
+			? {
+					k: 'sound',
+					lid: '',
+					file: b.file,
+					name: String(b.name ?? b.file).slice(0, 100),
+					i: b.i as number,
+					n: b.n as number,
+					data: b.data
+				}
 			: null;
 	const lid = typeof b.lid === 'string' && LID.test(b.lid) ? b.lid : null;
 	if (!lid) return null;
@@ -214,6 +236,7 @@ export class Shared {
 		const l = this.layers.get(e.lid);
 		switch (e.k) {
 			case 'timeline':
+			case 'sound':
 				return true;
 			case 'layer':
 				// only the member whose id starts the layer's id can make it, once
@@ -433,6 +456,10 @@ export interface CanvasPort {
 	/** paint layers, bottom → top */
 	/** every layer, bottom → top (`adjust`: an adjustment layer's settings) */
 	layers(): { id: number; name: string; look?: Look; adjust?: string | null }[];
+	/** a sound file the studio has (by key), or null */
+	sound(file: string): { bytes: Uint8Array; name: string } | null;
+	/** add a sound file under its key (decoded for playing) */
+	putSound(file: string, bytes: Uint8Array, name: string): Promise<void>;
 	/** the app's timeline now */
 	timeline(): Timeline;
 	/** put the session's timeline in (not an undo step; shows the frame again) */
@@ -537,6 +564,10 @@ export class Together {
 	#again = false;
 	/** a layer made here, to select when the session numbers it */
 	#mine = new Set<string>();
+	/** sound files the session has (sent from here, or arrived) */
+	#soundsShared = new Set<string>();
+	/** sound files arriving in pieces: key → pieces so far */
+	#soundParts = new Map<string, { name: string; parts: (string | undefined)[] }>();
 	/** whether each shared layer has a mask, as last synced */
 	#maskOn = new Map<string, boolean>();
 	/** adjustment settings last sent per layer */
@@ -586,6 +617,24 @@ export class Together {
 		return d;
 	}
 
+	/** Send the sound files the timeline plays that the session doesn't have yet. */
+	#shareSounds(tl: SharedTimeline, to?: string) {
+		for (const sc of tl.scenes)
+			for (const a of sc.audio ?? []) {
+				if (!to && this.#soundsShared.has(a.file)) continue;
+				const snd = this.canvas.sound(a.file);
+				if (!snd || snd.bytes.length > SOUND_MAX) continue;
+				if (!to) this.#soundsShared.add(a.file);
+				const n = Math.max(1, Math.ceil(snd.bytes.length / SOUND_CHUNK));
+				for (let i = 0; i < n; i++) {
+					const data = toBase64(snd.bytes.subarray(i * SOUND_CHUNK, (i + 1) * SOUND_CHUNK));
+					const piece = { k: 'sound', file: a.file, name: snd.name, i, n, data };
+					if (to) this.net.direct(to, { ...piece, k: 'snap.sound' });
+					else this.net.edit(piece);
+				}
+			}
+	}
+
 	#sharedTimeline(): SharedTimeline {
 		return toShared(
 			this.canvas.timeline(),
@@ -615,7 +664,9 @@ export class Together {
 					});
 					if (set.length) await this.#sendTiles(lid, did, set, []);
 				}
-		this.net.edit({ k: 'timeline', tl: this.#sharedTimeline() });
+		const tl = this.#sharedTimeline();
+		this.#shareSounds(tl);
+		this.net.edit({ k: 'timeline', tl });
 		this.#synced = true;
 	}
 
@@ -710,7 +761,10 @@ export class Together {
 
 	/** The timeline changed here (a step of this app's): everyone gets it. */
 	timelineChanged() {
-		if (this.#synced) this.net.edit({ k: 'timeline', tl: this.#sharedTimeline() });
+		if (!this.#synced) return;
+		const tl = this.#sharedTimeline();
+		this.#shareSounds(tl);
+		this.net.edit({ k: 'timeline', tl });
 	}
 
 	/** These drawings may have changed here (e.g. an undo on another frame). */
@@ -794,6 +848,9 @@ export class Together {
 					this.ontiles(from);
 				}
 				break;
+			case 'sound':
+				if (from !== this.me) await this.#takeSound(e.file, e.name, e.i, e.n, e.data);
+				break;
 			case 'timeline':
 				// everyone's, this app's too, in the session's order: all end the same
 				this.canvas.setTimeline(this.#fromShared(e.tl));
@@ -803,6 +860,30 @@ export class Together {
 				this.#refreshLock(e.lid);
 				break;
 		}
+		this.onchange();
+	}
+
+	/** A piece of a sound file; once all are here, the studio gets the file. */
+	async #takeSound(file: string, name: string, i: number, n: number, data: string) {
+		this.#soundsShared.add(file);
+		if (this.canvas.sound(file)) return;
+		const got = this.#soundParts.get(file) ?? {
+			name,
+			parts: Array.from({ length: n }, (): string | undefined => undefined)
+		};
+		if (got.parts.length !== n) return;
+		got.parts[i] = data;
+		this.#soundParts.set(file, got);
+		if (got.parts.some((p) => p === undefined)) return;
+		this.#soundParts.delete(file);
+		const chunks = got.parts.map((p) => fromBase64(p!));
+		const bytes = new Uint8Array(chunks.reduce((t, c) => t + c.length, 0));
+		let at = 0;
+		for (const c of chunks) {
+			bytes.set(c, at);
+			at += c.length;
+		}
+		await this.canvas.putSound(file, bytes, got.name).catch(() => {});
 		this.onchange();
 	}
 
@@ -841,6 +922,9 @@ export class Together {
 				const px = await decodeTile(s);
 				if (px) t.set(`${x},${y}`, px);
 			}
+		} else if ((m as { k: string }).k === 'snap.sound' && !this.#synced) {
+			const p = parseEdit({ ...(m as object), k: 'sound' });
+			if (p?.k === 'sound') await this.#takeSound(p.file, p.name, p.i, p.n, p.data);
 		} else if (m.k === 'snap.end' && !this.#synced) {
 			// back from a break: layers deleted meanwhile go
 			for (const [lid, id] of [...this.ids])
@@ -1009,6 +1093,7 @@ export class Together {
 			...s,
 			tl: this.#sharedTimeline()
 		});
+		this.#shareSounds(this.#sharedTimeline(), to);
 		for (const [k, t] of this.cache) {
 			const [lid, did] = k.split('|');
 			if (!this.shared.layers.has(lid)) continue;
@@ -1117,6 +1202,8 @@ export interface SharedTimeline {
 	scenes: {
 		name: string;
 		markers?: Marker[];
+		/** sound clips; their files travel as 'sound' edits */
+		audio?: { name: string; file: string; start: number; gain: number; muted: boolean }[];
 		cuts: {
 			name: string;
 			camera?: Camera;
@@ -1132,6 +1219,12 @@ export interface SharedTimeline {
 }
 
 const DID = /^[0-9a-f]{12}:[0-9]{1,12}$/;
+/** a sound file's key, as the studio makes them (`s3-lq2x9f.mp3`) */
+const SOUND_KEY = /^[A-Za-z0-9._-]{1,80}$/;
+/** sound files travel in pieces of this many bytes */
+const SOUND_CHUNK = 256 * 1024;
+/** the largest sound file shared */
+const SOUND_MAX = 20 * 1024 * 1024;
 
 /** This app's timeline, for the session (only shared layers). */
 export function toShared(
@@ -1144,6 +1237,17 @@ export function toShared(
 		scenes: tl.scenes.map((s) => ({
 			name: s.name,
 			...(s.markers?.length ? { markers: s.markers.map((m) => ({ ...m })) } : {}),
+			...(s.audio?.length
+				? {
+						audio: s.audio.map((a) => ({
+							name: a.name,
+							file: a.file,
+							start: a.start,
+							gain: a.gain,
+							muted: a.muted
+						}))
+					}
+				: {}),
 			cuts: s.cuts.map((c) => ({
 				name: c.name,
 				...(c.camera ? { camera: { ...c.camera } } : {}),
@@ -1201,7 +1305,21 @@ export function fromShared(
 		return {
 			id: si + 1,
 			name: String(sc?.name ?? `Scene ${si + 1}`).slice(0, 100),
-			...(mine?.audio?.length ? { audio: mine.audio } : {}),
+			...(Array.isArray(sc?.audio) && sc.audio.length
+				? {
+						audio: sc.audio
+							.filter((a) => typeof a?.file === 'string' && SOUND_KEY.test(a.file))
+							.slice(0, 200)
+							.map((a, i) => ({
+								id: i + 1,
+								name: String(a.name ?? 'Sound').slice(0, 100),
+								file: a.file,
+								start: Number.isFinite(a.start) ? Math.round(a.start) : 0,
+								gain: Number.isFinite(a.gain) ? Math.min(16, Math.max(0, a.gain)) : 1,
+								muted: !!a.muted
+							}))
+					}
+				: {}),
 			...(Array.isArray(sc?.markers) && sc.markers.length
 				? {
 						markers: sc.markers
