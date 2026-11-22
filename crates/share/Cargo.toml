@@ -16,5 +16,6 @@ data-encoding = "2"
 rand = "0.9"
 
 [dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # an in-process relay server for tests (self-signed: test builds skip its certificate check)
 iroh = { version = "1.5", features = ["test-utils"] }

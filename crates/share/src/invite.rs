@@ -94,10 +94,16 @@ impl Invite {
             .decode(body.as_bytes())
             .map_err(|_| damaged())?;
         let mut r = Reader(&b);
-        if r.u8()? != VERSION {
-            return Err(Error(
-                "That invite is from another version of PencilPilot: update both apps.".into(),
-            ));
+        match r.u8()? {
+            VERSION => {}
+            // a plausible version number: a code from an older or newer app
+            1..=15 => {
+                return Err(Error(
+                    "That invite is from another version of PencilPilot: update both apps.".into(),
+                ));
+            }
+            // anything else: a mistyped code (e.g. its capitals lost)
+            _ => return Err(damaged()),
         }
         let key: [u8; 32] = r.take(32)?.try_into().map_err(|_| damaged())?;
         let n = r.u8()? as usize;
@@ -236,6 +242,9 @@ mod tests {
         assert!(Invite::decode("hello").is_err());
         assert!(Invite::decode("pp1-@@@").is_err());
         assert!(Invite::decode(&code[..code.len() - 4]).is_err());
+        // a code whose capitals were lost says it's damaged, not from another version
+        let e = Invite::decode(&code.to_lowercase()).unwrap_err();
+        assert!(e.0.contains("damaged"), "{e}");
     }
 
     #[test]
