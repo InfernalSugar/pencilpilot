@@ -177,9 +177,12 @@ How they sync:
 - **Identity is a key per computer** (`Identity`): made on first use, kept readable only
   by the user, never sent. Its public half is the member's id; every change and credit
   is tied to it. Your name is what you type the first time.
-- **Inviting:** the host's app shows an **invite code** (`pp1-…`, or as a QR code) to send
-  however you like. It holds the project id, the host's address (relay and direct) and the
-  project's secret. A joiner proves it holds the secret with a keyed hash bound to both
+- **Inviting:** any member's app shows an **invite code** (`pp1-…`, about 140 characters)
+  to send however you like. It holds the project's secret (the project's id is derived
+  from it) and who to ask: the code's maker, then the host, each by id and relay. Home IP
+  addresses stay out of codes. Any member passes a joiner on to the host.
+- **Edits are signed** by their author's key and numbered by the author, so no one can pass
+  one on as someone else's, and none is applied twice (also across a host hand-over). A joiner proves it holds the secret with a keyed hash bound to both
   ids, so the secret itself never crosses the network and a proof can't be reused.
 - **Removing a member:** the project's creator makes a new secret (old codes stop
   working) and the apps stop accepting that member's id. Their layers stay, since the work

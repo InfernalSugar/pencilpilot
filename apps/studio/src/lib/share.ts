@@ -22,6 +22,8 @@ export type ShareEvent =
 	| { kind: 'presence'; from: string; body: unknown }
 	| { kind: 'joined'; member: Member }
 	| { kind: 'left'; id: string }
+	/** the host left and `host` took over (`you`: this app); who's here; the new code */
+	| { kind: 'host_changed'; host: string; you: boolean; members: Member[]; invite: string }
 	| { kind: 'closed'; reason: string };
 
 /** What a cursor message carries. */

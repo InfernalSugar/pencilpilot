@@ -23,7 +23,9 @@ mod wire;
 
 pub use identity::Identity;
 pub use invite::Invite;
+pub use iroh::{EndpointAddr, SecretKey};
 pub use session::{Event, Member, Relays, Session};
+pub use wire::Signed;
 
 /// The protocol's name in the connection handshake. Apps with another version don't connect.
 pub const ALPN: &[u8] = b"pencilpilot/share/1";
