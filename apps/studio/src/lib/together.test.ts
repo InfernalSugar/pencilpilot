@@ -96,6 +96,13 @@ class FakeCanvas implements CanvasPort {
 		return pack(this.drawings.get(d) ?? new Map());
 	}
 	tl: Timeline = newTimeline([]);
+	sounds = new Map<string, { bytes: Uint8Array; name: string }>();
+	sound(file: string) {
+		return this.sounds.get(file) ?? null;
+	}
+	async putSound(file: string, bytes: Uint8Array, name: string) {
+		this.sounds.set(file, { bytes, name });
+	}
 	#nextDrawing = 5000;
 	newDrawing() {
 		const d = this.#nextDrawing++;
@@ -625,5 +632,47 @@ describe('drawing together: apps', () => {
 		await session.settle();
 		expect(cc.byName('Sky').mask?.get('1,1')?.[0]).toBe(99);
 		expect(cc.byName('Warm').adjust).toBe('{"hue":30}');
+	});
+
+	it('shares sound clips and their files (big ones in pieces)', async () => {
+		const session = new FakeSession();
+		const hc = new FakeCanvas(['Sky']);
+		const host = new Together(A, 'Ana', hc, session.net(A));
+		session.apps.set(A, host);
+		await host.startHost();
+		await session.settle();
+		const bc = new FakeCanvas();
+		const bo = new Together(B, 'Bo', bc, session.net(B));
+		session.apps.set(B, bo);
+		bo.startJoin(A);
+		await session.settle();
+
+		// Ana adds a 600 KB song to the scene (three pieces on the way)
+		const song = new Uint8Array(600 * 1024).map((_, i) => i % 251);
+		hc.sounds.set('s1-abc.mp3', { bytes: song, name: 'song.mp3' });
+		hc.tl.scenes[0].audio = [
+			{ id: 1, name: 'song.mp3', file: 's1-abc.mp3', start: 4, gain: 0.8, muted: false }
+		];
+		host.timelineChanged();
+		await session.settle();
+		expect(bc.tl.scenes[0].audio?.[0]).toMatchObject({ file: 's1-abc.mp3', start: 4, gain: 0.8 });
+		expect(bc.sounds.get('s1-abc.mp3')?.bytes).toEqual(song);
+
+		// sent once: moving the clip doesn't send the file again
+		const before = session.seq;
+		hc.tl.scenes[0].audio![0].start = 8;
+		host.timelineChanged();
+		await session.settle();
+		expect(session.seq - before).toBe(1);
+		expect(bc.tl.scenes[0].audio?.[0].start).toBe(8);
+
+		// a joiner later gets the song with the project
+		const cc = new FakeCanvas();
+		const cy = new Together(C, 'Cy', cc, session.net(C));
+		session.apps.set(C, cy);
+		cy.startJoin(A);
+		await session.settle();
+		expect(cc.sounds.get('s1-abc.mp3')?.bytes).toEqual(song);
+		expect(cc.tl.scenes[0].audio?.[0].start).toBe(8);
 	});
 });

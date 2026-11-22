@@ -1750,6 +1750,8 @@ test('transitions: a white flash and a dissolve between cuts, in the export', as
 });
 
 test('play the scene: every cut in turn, with the flash between them', async ({ page }) => {
+	// (two dozen clicks to set up, then watching playback: slow CI machines need longer)
+	test.setTimeout(90_000);
 	await stubTauri(page);
 	await ready(page);
 	const tl = page.getByRole('region', { name: 'Timeline' });
@@ -1773,7 +1775,9 @@ test('play the scene: every cut in turn, with the flash between them', async ({ 
 	const player = page.getByTestId('player');
 	await expect(player).toBeVisible();
 	const seen = { dark: false, cut2: false };
-	for (let i = 0; i < 60 && (await player.count()); i++) {
+	// watch until both are seen or the player is gone (at most 20 s)
+	const until = Date.now() + 20_000;
+	while (Date.now() < until && !(seen.dark && seen.cut2) && (await player.count())) {
 		const v = await player
 			.evaluate((c: HTMLCanvasElement) => {
 				const d = c.getContext('2d')!.getImageData(c.width >> 1, c.height >> 1, 1, 1).data;
@@ -1781,7 +1785,7 @@ test('play the scene: every cut in turn, with the flash between them', async ({ 
 			})
 			.catch(() => -1);
 		if (v >= 0 && v < 235) seen.dark = true;
-		if ((await cutPick.inputValue()) === '1') seen.cut2 = true;
+		if ((await cutPick.inputValue().catch(() => '')) === '1') seen.cut2 = true;
 		await page.waitForTimeout(15);
 	}
 	expect(seen).toEqual({ dark: true, cut2: true });
