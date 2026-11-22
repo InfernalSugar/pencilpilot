@@ -84,6 +84,18 @@ pub struct Header {
     /// the timelapse: JPEG pictures and when each was taken (ms since 1970)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub timelapse: Vec<PacketTimelapse>,
+    /// font files imported for text layers
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fonts: Vec<PacketFont>,
+}
+
+/// A font file text layers use: the family name they know it by, the file's name as
+/// imported (for its extension; saved, it's named by its content), and its bytes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PacketFont {
+    pub family: String,
+    pub file: String,
+    pub bytes: [usize; 2],
 }
 
 /// A timelapse picture: when it was taken, and its JPEG bytes in the blobs.
@@ -232,6 +244,11 @@ pub fn to_project(
         p.manifest.timeline.mouth_charts = h.mouth_charts;
         p.manifest.timeline.drawing_kinds = h.drawing_kinds;
     }
+    for f in &h.fonts {
+        let ext = f.file.rsplit_once('.').map_or("ttf", |(_, e)| e);
+        p.put_font(&f.family, slice(blobs, f.bytes)?, ext)
+            .map_err(|e| e.to_string())?;
+    }
     p.manifest.layers = h.layers.iter().map(|l| l.layer.clone()).collect();
     p.manifest.groups = h.groups;
     p.manifest.active_layer = h.active_layer;
@@ -343,6 +360,18 @@ pub fn from_project(p: &Project, mut frames: Option<&mut FrameStore>) -> Result<
             });
         }
     }
+    let fonts = m
+        .fonts
+        .iter()
+        .filter_map(|f| {
+            let bytes = p.fonts.get(&f.file)?;
+            Some(PacketFont {
+                family: f.family.clone(),
+                file: f.file.clone(),
+                bytes: put(bytes),
+            })
+        })
+        .collect();
     let header = Header {
         canvas: m.canvas.clone(),
         fps: m.timeline.fps,
@@ -360,6 +389,7 @@ pub fn from_project(p: &Project, mut frames: Option<&mut FrameStore>) -> Result<
         mouth_charts: m.timeline.mouth_charts.clone(),
         drawing_kinds: m.timeline.drawing_kinds.clone(),
         timelapse,
+        fonts,
     };
     encode(&header, &blobs)
 }
@@ -452,6 +482,7 @@ mod tests {
             group: 0,
             adjust: None,
             style: None,
+            text: None,
         }
     }
 
@@ -490,6 +521,7 @@ mod tests {
             mouth_charts: vec![],
             drawing_kinds: Default::default(),
             timelapse: vec![],
+            fonts: vec![],
         };
         (encode(&header, &blobs).unwrap(), rgba, mask)
     }
@@ -575,6 +607,25 @@ mod tests {
         let (ha2, ba2) = decode(&pk_a).unwrap();
         assert_eq!(ha2.audio[0].file, *file);
         assert_eq!(slice(ba2, ha2.audio[0].bytes).unwrap(), b"RIFF....WAVE");
+
+        // a text layer and its imported font: kept, and back
+        let mut ht = h.clone();
+        let mut blobs_t = blobs.clone();
+        let at = blobs_t.len();
+        blobs_t.extend_from_slice(b"wOF2 fake");
+        ht.layers[0].layer.text = Some(r#"{"text":"Hi","font":"Hand"}"#.into());
+        ht.fonts = vec![PacketFont {
+            family: "Hand".into(),
+            file: "hand.woff2".into(),
+            bytes: [at, 9],
+        }];
+        let pt = to_project(&encode(&ht, &blobs_t).unwrap(), "test", "now", None).unwrap();
+        let pk_t = from_project(&pt, None).unwrap();
+        let (ht2, bt2) = decode(&pk_t).unwrap();
+        assert_eq!(ht2.layers[0].layer.text, ht.layers[0].layer.text);
+        assert_eq!(ht2.fonts[0].family, "Hand");
+        assert!(ht2.fonts[0].file.ends_with(".woff2"));
+        assert_eq!(slice(bt2, ht2.fonts[0].bytes).unwrap(), b"wOF2 fake");
 
         // a static layer: one drawing all cut long, so one frame; kept through the file
         let mut hs = h.clone();

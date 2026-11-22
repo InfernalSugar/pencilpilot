@@ -94,6 +94,17 @@ describe('project packets', () => {
 		expect(back.extra).toEqual({ color: '#ff0000', assistLayers: [1] });
 	});
 
+	it('round-trip text layers and the fonts they use', () => {
+		const d = doc();
+		d.layers[0].text = '{"text":"Hello","font":"My Hand","size":40}';
+		d.fonts = [
+			{ family: 'My Hand', file: 'MyHand.woff2', bytes: Uint8Array.from([119, 79, 70, 50]) }
+		];
+		const back = unpack(pack(d));
+		expect(back).toEqual(d);
+		expect(back.layers[1].text).toBeUndefined();
+	});
+
 	it('start with the magic word and the header length', () => {
 		const p = pack(doc());
 		expect([...p.subarray(0, 4)]).toEqual([0x50, 0x50, 0x53, 0x31]);

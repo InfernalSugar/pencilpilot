@@ -10,6 +10,7 @@ import { defaultGuides, type GuideSettings } from './guides';
 import { smoothTool, type SmoothTool } from './stabilizer';
 import { NO_SPEC, parseSpec, specName, type AdjustSpec } from './tone';
 import { pickFilter, type FilterSpec } from './filters';
+import { TextTool } from './text-tool.svelte';
 
 type Canvas = ReturnType<typeof PaintCanvas>;
 
@@ -107,7 +108,12 @@ export class ToolOptions {
 	/** the layer's settings when the panel opened (Cancel goes back to them) */
 	#adjustLayerWas: AdjustSpec | null = null;
 
-	constructor(private host: ToolHost) {}
+	/** the text tool */
+	text: TextTool;
+
+	constructor(private host: ToolHost) {
+		this.text = new TextTool(host);
+	}
 
 	/** for `PaintCanvas`: the guides were moved on the canvas */
 	onguides = (g: GuideSettings) => this.setGuides(g);

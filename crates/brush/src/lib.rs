@@ -26,6 +26,7 @@ pub mod filters;
 pub mod layers;
 mod select;
 pub mod style;
+mod text;
 pub mod texture;
 
 pub use layers::{Blend, LayerProps};
@@ -475,6 +476,8 @@ pub struct Painter {
     style: Option<std::sync::Arc<texture::DabStyle>>,
     /// an adjustment layer being changed live: (layer, its settings before)
     adjust_layer_before: Option<(u32, LayerProps)>,
+    /// text being typed on a text layer (see `text_begin`)
+    text_editing: Option<text::TextEdit>,
 }
 
 impl Painter {
@@ -509,6 +512,7 @@ impl Painter {
             textures: HashMap::new(),
             style: None,
             adjust_layer_before: None,
+            text_editing: None,
         }
     }
 
@@ -1050,6 +1054,7 @@ impl Painter {
             && self.transform.is_none()
             && self.liquify.is_none()
             && self.adjusting.is_none()
+            && self.text_editing.is_none()
     }
 
     fn stop_mask_editing(&mut self) {
@@ -1384,6 +1389,7 @@ impl Painter {
         if props.adjust.is_some() {
             props.style = Default::default();
         }
+        props.text = self.layers[idx].props.text.clone();
         props.opacity = props.opacity.clamp(0.0, 1.0);
         props.name = props.name.chars().take(60).collect();
         if props.name.trim().is_empty() {
@@ -1411,6 +1417,7 @@ impl Painter {
         if before.adjust.is_some() {
             before.style = Default::default();
         }
+        before.text = self.layers[idx].props.text.clone();
         if self.layers[idx].props == before {
             return false;
         }
@@ -1692,6 +1699,13 @@ impl Painter {
     }
 
     fn push_undo(&mut self, mut e: Edit) {
+        // paint on a text layer makes it a plain one (undo brings the text back)
+        self.rasterize_painted(&mut e);
+        self.push_step(e);
+    }
+
+    /// [`Self::push_undo`] without that (the text tool's own steps).
+    fn push_step(&mut self, mut e: Edit) {
         self.edits += 1;
         self.tag_drawings(&mut e);
         self.undo.push(e);
@@ -3735,6 +3749,11 @@ impl Painter {
 
     pub fn undo(&mut self) -> bool {
         self.adjust_cancel();
+        if self.text_editing.is_some() {
+            // undo while typing drops the change
+            self.text_cancel();
+            return false;
+        }
         if self.stroking.is_some() {
             return false;
         }
@@ -3754,6 +3773,9 @@ impl Painter {
 
     pub fn redo(&mut self) -> bool {
         self.adjust_cancel();
+        if self.text_editing.is_some() {
+            return false;
+        }
         if self.stroking.is_some() {
             return false;
         }
@@ -4305,7 +4327,7 @@ impl Painter {
             .map(|l| {
                 let p = &l.props;
                 format!(
-                    r#"{{"id":{},"name":{},"visible":{},"opacity":{},"blend":"{}","locked":{},"alphaLock":{},"clip":{},"mask":{},"editingMask":{},"group":{},"imported":{},"empty":{},"drawing":{},"adjust":{},"style":{}}}"#,
+                    r#"{{"id":{},"name":{},"visible":{},"opacity":{},"blend":"{}","locked":{},"alphaLock":{},"clip":{},"mask":{},"editingMask":{},"group":{},"imported":{},"empty":{},"drawing":{},"adjust":{},"style":{},"text":{}}}"#,
                     l.id,
                     json_str(&p.name),
                     p.visible,
@@ -4329,6 +4351,11 @@ impl Painter {
                         "null".into()
                     } else {
                         p.style.json()
+                    },
+                    if p.text.is_empty() {
+                        "null".into()
+                    } else {
+                        json_str(&p.text)
                     }
                 )
             })
