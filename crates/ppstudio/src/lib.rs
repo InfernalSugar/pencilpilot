@@ -9,6 +9,7 @@
 //! | `strokes.json` | the app's stroke log (kept as given) |
 //! | `thumbnail.png` | a small picture for the project browser (optional) |
 //! | `audio/<hash>.<ext>` | a sound file a scene plays (as imported: WAV, MP3, OGG…) |
+//! | `fonts/<hash>.<ext>` | a font file text layers use (as imported: TTF, OTF, WOFF2) |
 //! | `timelapse/<n>.jpg` | the timelapse: a small picture after each change (optional) |
 //!
 //! Pixels are cut into 64×64 tiles. Empty tiles (fully transparent, or a mask that
@@ -116,6 +117,9 @@ pub struct Layer {
     /// its layer style: stroke, drop shadow and outer glow (the app's JSON object)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub style: Option<serde_json::Value>,
+    /// a text layer's text (the app's JSON: words, font, size…); none for other layers
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -351,6 +355,17 @@ pub struct Manifest {
     /// when each timelapse picture was taken (ms since 1970), in order: `timelapse/<n>.jpg`
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub timelapse: Vec<u64>,
+    /// font files imported for text layers: `fonts/<file>`
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fonts: Vec<FontFile>,
+}
+
+/// A font file kept in the project, and the family name text layers know it by.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FontFile {
+    pub family: String,
+    /// the file in the archive: `fonts/<file>`
+    pub file: String,
 }
 
 /// The most timelapse pictures a project keeps, and the most bytes each may have.
@@ -371,12 +386,17 @@ pub struct Project {
     pub audio: HashMap<String, Vec<u8>>,
     /// the timelapse pictures (JPEG), in order; `manifest.timelapse` says when each was taken
     pub timelapse: Vec<Vec<u8>>,
+    /// font files: name (`<hash>.<ext>`) → bytes
+    pub fonts: HashMap<String, Vec<u8>>,
 }
+
+/// Font files may be this big (each).
+pub const FONT_MAX: usize = 64 << 20;
 
 /// Sound files may be this big (each).
 pub const AUDIO_MAX: usize = 512 << 20;
 
-/// A safe audio file name: `<hex hash>.<ext>`, no folders.
+/// A safe sound or font file name: `<hex hash>.<ext>`, no folders.
 fn audio_name_ok(name: &str) -> bool {
     let Some((h, ext)) = name.split_once('.') else {
         return false;
@@ -416,12 +436,14 @@ impl Project {
                 drawings: BTreeMap::new(),
                 extra: serde_json::Value::Null,
                 timelapse: Vec::new(),
+                fonts: Vec::new(),
             },
             tiles: HashMap::new(),
             strokes: b"[]".to_vec(),
             thumbnail: None,
             audio: HashMap::new(),
             timelapse: Vec::new(),
+            fonts: HashMap::new(),
         }
     }
 
@@ -445,6 +467,36 @@ impl Project {
             .entry(name.clone())
             .or_insert_with(|| bytes.to_vec());
         Ok(name)
+    }
+
+    /// Keep a font file for text layers (stored once, by its content) under the family
+    /// name they use for it.
+    pub fn put_font(&mut self, family: &str, bytes: &[u8], ext: &str) -> Result<()> {
+        let ext: String = ext
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .take(5)
+            .collect::<String>()
+            .to_ascii_lowercase();
+        let file = format!(
+            "{}.{}",
+            hash(bytes),
+            if ext.is_empty() { "ttf" } else { &ext }
+        );
+        if bytes.len() > FONT_MAX {
+            return Err(Error::Invalid(format!("font file {file} is too big")));
+        }
+        let family: String = family.trim().chars().take(100).collect();
+        if family.is_empty() {
+            return Err(Error::Invalid("a font with no name".into()));
+        }
+        self.fonts
+            .entry(file.clone())
+            .or_insert_with(|| bytes.to_vec());
+        if !self.manifest.fonts.iter().any(|f| f.family == family) {
+            self.manifest.fonts.push(FontFile { family, file });
+        }
+        Ok(())
     }
 
     fn cut(&mut self, px: &[u8], channels: usize, skip: impl Fn(&[u8]) -> bool) -> Vec<TileRef> {
@@ -584,6 +636,15 @@ impl Project {
                 }
             }
         }
+        for f in &m.fonts {
+            if !audio_name_ok(&f.file)
+                || !self.fonts.contains_key(&f.file)
+                || f.family.trim().is_empty()
+                || f.family.chars().count() > 100
+            {
+                return Err(Error::Invalid(format!("font {}", f.file)));
+            }
+        }
         if m.timelapse.len() != self.timelapse.len()
             || self.timelapse.len() > TIMELAPSE_MAX
             || self.timelapse.iter().any(|j| j.len() > TIMELAPSE_FRAME_MAX)
@@ -720,6 +781,18 @@ impl Project {
             z.start_file(format!("audio/{name}"), stored)?;
             z.write_all(bytes)?;
         }
+        // the font files text layers use (compressed already, mostly: stored)
+        let mut fonts: Vec<&String> = self.manifest.fonts.iter().map(|f| &f.file).collect();
+        fonts.sort();
+        fonts.dedup();
+        for name in fonts {
+            let bytes = self
+                .fonts
+                .get(name)
+                .ok_or_else(|| Error::Invalid(format!("missing font file {name}")))?;
+            z.start_file(format!("fonts/{name}"), stored)?;
+            z.write_all(bytes)?;
+        }
         // the timelapse (JPEG: stored)
         for (i, jpeg) in self.timelapse.iter().enumerate() {
             z.start_file(format!("timelapse/{i:06}.jpg"), stored)?;
@@ -756,6 +829,7 @@ impl Project {
         let thumbnail = read_all("thumbnail.png", 16 << 20)?;
         let mut tiles = HashMap::new();
         let mut audio = HashMap::new();
+        let mut fonts = HashMap::new();
         let mut timelapse: BTreeMap<usize, Vec<u8>> = BTreeMap::new();
         for i in 0..z.len() {
             let mut f = z.by_index(i)?;
@@ -781,6 +855,15 @@ impl Project {
                     return Err(Error::Invalid(format!("sound file {name}")));
                 }
                 audio.insert(name, v);
+                continue;
+            }
+            if let Some(name) = f.name()?.strip_prefix("fonts/").map(str::to_owned) {
+                let mut v = Vec::new();
+                (&mut f).take(FONT_MAX as u64 + 1).read_to_end(&mut v)?;
+                if v.len() > FONT_MAX || !audio_name_ok(&name) {
+                    return Err(Error::Invalid(format!("font file {name}")));
+                }
+                fonts.insert(name, v);
                 continue;
             }
             let Some(h) = f.name()?.strip_prefix("tiles/").map(str::to_owned) else {
@@ -815,6 +898,7 @@ impl Project {
             thumbnail,
             audio,
             timelapse: pictures,
+            fonts,
         };
         p.validate()?;
         Ok(p)
@@ -886,6 +970,7 @@ mod tests {
             group: 0,
             adjust: None,
             style: None,
+            text: None,
         }
     }
 
@@ -1157,6 +1242,23 @@ mod tests {
         assert_eq!(back.audio.get(&file).unwrap(), b"RIFF fake wav");
         assert_eq!(back.timelapse, p.timelapse);
         assert_eq!(back.manifest.timelapse, p.manifest.timelapse);
+        // a text layer and the font it uses
+        let mut q = p.clone();
+        q.manifest.layers[0].text = Some(r#"{"text":"Hi","font":"Comic"}"#.into());
+        q.put_font("Comic", b"OTTO fake font", "OTF").unwrap();
+        q.put_font("Comic", b"OTTO fake font", "otf").unwrap();
+        assert_eq!(q.manifest.fonts.len(), 1, "kept once");
+        let mut buf = std::io::Cursor::new(Vec::new());
+        q.write(&mut buf).unwrap();
+        let back = Project::read(std::io::Cursor::new(buf.into_inner())).unwrap();
+        assert_eq!(back.manifest.layers, q.manifest.layers);
+        assert_eq!(back.manifest.fonts, q.manifest.fonts);
+        let file = &back.manifest.fonts[0].file;
+        assert!(file.ends_with(".otf"));
+        assert_eq!(back.fonts.get(file).unwrap(), b"OTTO fake font");
+        // a font the file names but doesn't hold
+        q.fonts.clear();
+        assert!(q.validate().is_err());
         // more times than pictures: the timelapse is cut short, the project still opens
         let mut q = p.clone();
         q.manifest.timelapse.push(1_700_000_009_000);

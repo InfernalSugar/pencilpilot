@@ -415,6 +415,7 @@ mod tests {
                     group: 0,
                     adjust: None,
                     style: None,
+                    text: None,
                 },
                 rgba: [0, rgba.len()],
                 mask: None,
@@ -432,6 +433,7 @@ mod tests {
             mouth_charts: vec![],
             drawing_kinds: Default::default(),
             timelapse: vec![],
+            fonts: vec![],
         };
         encode(&header, &rgba).unwrap()
     }

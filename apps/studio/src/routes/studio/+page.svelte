@@ -6,7 +6,7 @@
 	 * Ctrl+S saves (.ppstudio), Ctrl+Shift+S saves as, Ctrl+O opens.
 	 */
 	import Studio from '@pencilpilot/paint/Studio.svelte';
-	import ToolRail, { type ToolId } from '@pencilpilot/paint/ToolRail.svelte';
+	import ToolRail, { ALL_TOOLS, type ToolId } from '@pencilpilot/paint/ToolRail.svelte';
 	import ToolOptionsBar from '@pencilpilot/paint/ToolOptionsBar.svelte';
 	import QuickMenu, { type QuickAction } from '@pencilpilot/paint/QuickMenu.svelte';
 	import TimelapsePlayer from '@pencilpilot/paint/TimelapsePlayer.svelte';
@@ -27,6 +27,7 @@
 	import HistoryPanel from '@pencilpilot/paint/HistoryPanel.svelte';
 	import Swatches from '@pencilpilot/paint/Swatches.svelte';
 	import { brushTexture, onTextures, textureOn } from '@pencilpilot/paint/brush-textures';
+	import { addFont, fontsUsed, parseText } from '@pencilpilot/paint/text';
 	import {
 		brushLabel,
 		DEFAULT_BRUSH,
@@ -2036,6 +2037,7 @@
 				return snd ? [{ file, bytes: snd.bytes }] : [];
 			}),
 			...(timelapse ? { timelapse: await c.timelapse().saved() } : {}),
+			fonts: fontsUsed(snap.layers.map((l) => parseText(l.text))),
 			drawings
 		};
 	}
@@ -2690,6 +2692,11 @@
 		const doc = p.doc;
 		const anim = !!doc.scenes?.length;
 		const c = canvas;
+		// its text layers' fonts (their pixels are there already: needed to change them)
+		if (doc.fonts?.length)
+			void Promise.all(doc.fonts.map((f) => addFont(f.family, f.file, f.bytes))).then(() =>
+				toolOpts.text.listFonts()
+			);
 		untrack(() => {
 			// an animation's layers start empty: their drawings come next
 			c.restoreLayers(
@@ -2864,7 +2871,8 @@
 		'select-rect': 'select-rect',
 		'select-lasso': 'select-lasso',
 		'select-wand': 'select-wand',
-		gradient: 'gradient'
+		gradient: 'gradient',
+		text: 'text'
 	};
 
 	function onkey(e: KeyboardEvent) {
@@ -2877,6 +2885,7 @@
 			return;
 		}
 		if (tool === 'pen' && e.key === 'Escape') return canvas?.penClear();
+		if (tool === 'text' && e.key === 'Escape') return toolOpts.text.cancel();
 		if (tool === 'pen' && e.key === 'Backspace') {
 			e.preventDefault();
 			return canvas?.penBack();
@@ -3175,6 +3184,7 @@
 		{/snippet}
 		{#snippet rail()}
 			<ToolRail
+				tools={[...ALL_TOOLS, 'text']}
 				bind:tool
 				bind:eraser
 				bind:size
@@ -3315,6 +3325,9 @@
 									: 'This layer is locked. Unlock it or pick another layer to draw.'
 						);
 					}}
+					ontext={toolOpts.text.ontext}
+					textFrame={toolOpts.text.frame}
+					onrasterize={toolOpts.text.onrasterize}
 					onquickmenu={(x, y) => (quickMenu = { x, y })}
 					onchange={canvasChanged}
 					locked={switching}
@@ -3384,6 +3397,10 @@
 					controls={layerControls}
 					aspect={canvasSize.width / canvasSize.height}
 					onadjustment={(id) => toolOpts.adjustmentLayer(id)}
+					ontext={(id) => {
+						tool = 'text';
+						toolOpts.text.open(id);
+					}}
 				/>
 			{:else if t === 'brushes'}
 				{#if manifest}
