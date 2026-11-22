@@ -29,8 +29,10 @@ use crate::{ALPN, Error, Identity, Result, err};
 const HANDSHAKE: Duration = Duration::from_secs(15);
 /// How long to keep trying to reach a member who should take over as host.
 const TAKEOVER: Duration = Duration::from_secs(12);
-/// Recent numbered edits kept, to catch up members after a hand-over.
+/// Recent numbered edits kept, to catch up members after a hand-over: at most this many,
+/// and at most this many bytes (edits can carry pictures).
 const LOG: usize = 1024;
+const LOG_BYTES: usize = 32 << 20;
 
 /// Which relays introduce members and carry traffic they can't send directly.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,6 +74,11 @@ pub enum Event {
     Left {
         id: String,
     },
+    /// A message from one member to this one (see [`Session::direct`]).
+    Direct {
+        from: String,
+        body: Value,
+    },
     /// The host left and `host` took over (it may be you); who is here now.
     HostChanged {
         host: String,
@@ -112,6 +119,7 @@ struct St {
     members: Vec<Member>,
     seq: u64,
     log: VecDeque<Ordered>,
+    log_bytes: usize,
     /// per author, the last edit number applied
     seen: HashMap<String, u64>,
     my_n: u64,
@@ -207,6 +215,31 @@ impl Session {
             self.core.order(signed);
         } else if let Some(out) = out {
             let _ = out.send(Frame::Edit { edit: signed });
+        }
+        Ok(())
+    }
+
+    /// Send a message to one member (`to`: their id), e.g. the project for someone who just
+    /// joined. It arrives as [`Event::Direct`]; it isn't numbered or kept.
+    pub fn direct(&self, to: &str, body: Value) -> Result<()> {
+        let body = serde_json::to_string(&body).map_err(err)?;
+        let st = self.core.st.lock().unwrap();
+        let frame = Frame::Direct {
+            to: to.to_string(),
+            from: self.core.me.id.clone(),
+            body,
+        };
+        if st.hosting {
+            let peer = to
+                .parse::<EndpointId>()
+                .ok()
+                .and_then(|id| st.peers.get(&id))
+                .ok_or_else(|| Error("They aren't in the session.".into()))?;
+            let _ = peer.out.send(frame);
+        } else if let Some(l) = &st.link {
+            let _ = l.out.send(frame);
+        } else {
+            return Err(Error("Not connected right now.".into()));
         }
         Ok(())
     }
@@ -324,9 +357,12 @@ impl Core {
             from: e.from.clone(),
             body,
         });
+        st.log_bytes += o.edit.body.len();
         st.log.push_back(o);
-        while st.log.len() > LOG {
-            st.log.pop_front();
+        while st.log.len() > LOG || (st.log_bytes > LOG_BYTES && st.log.len() > 1) {
+            if let Some(old) = st.log.pop_front() {
+                st.log_bytes -= old.edit.body.len();
+            }
         }
     }
 
@@ -461,6 +497,12 @@ impl Core {
                 Ok(Some(Frame::Left { id })) => {
                     st.members.retain(|x| x.id != id);
                     self.emit(Event::Left { id });
+                }
+                Ok(Some(Frame::Direct { from, body, .. })) => {
+                    self.emit(Event::Direct {
+                        from,
+                        body: serde_json::from_str(&body).unwrap_or(Value::Null),
+                    });
                 }
                 Ok(Some(_)) => {}
                 Ok(None) | Err(_) => break,
@@ -711,8 +753,27 @@ async fn serve(conn: Connection, core: Arc<Core>) -> Result<()> {
 
     // their edits (and, after a hand-over, others' this app missed), until they leave
     while let Ok(Some(frame)) = wire::read(&mut recv).await {
-        if let Frame::Edit { edit } = frame {
-            core.order(edit);
+        match frame {
+            Frame::Edit { edit } => core.order(edit),
+            Frame::Direct { to, body, .. } => {
+                let from = remote.to_string();
+                if to == core.me.id {
+                    core.emit(Event::Direct {
+                        from,
+                        body: serde_json::from_str(&body).unwrap_or(Value::Null),
+                    });
+                } else if let Some(p) = to.parse::<EndpointId>().ok().and_then(|id| {
+                    core.st
+                        .lock()
+                        .unwrap()
+                        .peers
+                        .get(&id)
+                        .map(|p| p.out.clone())
+                }) {
+                    let _ = p.send(Frame::Direct { to, from, body });
+                }
+            }
+            _ => {}
         }
     }
 
@@ -950,6 +1011,33 @@ mod tests {
         assert_eq!(next_edit(&mut a).await.0, 5);
         assert_eq!(next_edit(&mut c).await.0, 5);
         for s in [a, b, c] {
+            s.close().await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn direct_messages_go_to_one_member_with_the_real_sender() {
+        let mut h = host().await;
+        let code = h.invite().encode();
+        let mut a = join(&code, "Ana").await;
+        let mut b = join(&code, "Bo").await;
+        let (h_id, a_id, b_id) = (h.me().id.clone(), a.me().id.clone(), b.me().id.clone());
+        // guest → guest (through the host), guest → host, host → guest
+        a.direct(&b_id, json!({"k": "hi b"})).unwrap();
+        a.direct(&h_id, json!({"k": "hi host"})).unwrap();
+        h.direct(&a_id, json!({"k": "hi a"})).unwrap();
+        async fn direct(s: &mut Session) -> (String, Value) {
+            loop {
+                if let Event::Direct { from, body } = next_change(s).await {
+                    return (from, body);
+                }
+            }
+        }
+        assert_eq!(direct(&mut b).await, (a_id.clone(), json!({"k": "hi b"})));
+        assert_eq!(direct(&mut h).await, (a_id, json!({"k": "hi host"})));
+        assert_eq!(direct(&mut a).await, (h_id, json!({"k": "hi a"})));
+        assert!(h.direct("nobody", json!(1)).is_err());
+        for s in [h, a, b] {
             s.close().await;
         }
     }

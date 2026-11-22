@@ -106,6 +106,14 @@ pub enum Frame {
     },
     /// host → everyone: edit number `seq`
     Ordered(Ordered),
+    /// one member to another, through the host (which sets `from`): e.g. the project for
+    /// someone who just joined. Not numbered, not kept.
+    Direct {
+        to: String,
+        #[serde(default)]
+        from: String,
+        body: String,
+    },
     /// host → everyone
     Joined {
         member: Member,
