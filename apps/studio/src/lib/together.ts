@@ -42,6 +42,8 @@ export interface SharedLayer {
 	writers: string[];
 	/** how it shows (set by whoever may draw on it) */
 	look?: Look;
+	/** an adjustment layer: its settings (the app's JSON) */
+	adjust?: string;
 }
 
 /** A layer's settings that everyone sees the same (its lock stays each app's own: it's how
@@ -79,7 +81,16 @@ const sameLook = (a: Look | undefined, b: Look | undefined) =>
 	a.clip === b.clip;
 
 export type TogetherEdit =
-	| { k: 'layer'; lid: string; name: string }
+	| { k: 'layer'; lid: string; name: string; adjust?: string }
+	| { k: 'adjust'; lid: string; spec: string }
+	| {
+			k: 'mask';
+			lid: string;
+			/** false: the layer has no mask (any more) */
+			on: boolean;
+			set: [number, number, string][];
+			clear: [number, number][];
+	  }
 	| { k: 'rename'; lid: string; name: string }
 	| { k: 'look'; lid: string; look: Look }
 	| { k: 'remove'; lid: string }
@@ -101,6 +112,31 @@ const LID = /^[0-9a-f]{12}:[0-9]{1,12}$/;
 const MEMBER = /^[0-9a-f]{64}$/;
 const int = (v: unknown) => Number.isInteger(v) && Math.abs(v as number) < 1e6;
 
+/** An adjustment layer's settings: JSON, a few kilobytes at most. */
+function readSpec(v: unknown): string | null {
+	if (typeof v !== 'string' || v.length > 8000) return null;
+	try {
+		const o = JSON.parse(v);
+		return o && typeof o === 'object' && !Array.isArray(o) ? v : null;
+	} catch {
+		return null;
+	}
+}
+
+/** Tiles to set and clear, checked. */
+function readTiles(b: Record<string, unknown>) {
+	if (!Array.isArray(b.set) || !Array.isArray(b.clear)) return null;
+	if (b.set.length + b.clear.length > 4 * TILES_PER_EDIT) return null;
+	const set = b.set.filter(
+		(t): t is [number, number, string] =>
+			Array.isArray(t) && int(t[0]) && int(t[1]) && typeof t[2] === 'string'
+	);
+	const clear = b.clear.filter(
+		(t): t is [number, number] => Array.isArray(t) && int(t[0]) && int(t[1])
+	);
+	return { set, clear };
+}
+
 /** An edit from the session, checked; null for anything not on the list. */
 export function parseEdit(body: unknown): TogetherEdit | null {
 	if (!body || typeof body !== 'object') return null;
@@ -121,8 +157,18 @@ export function parseEdit(body: unknown): TogetherEdit | null {
 			: '';
 	const to = typeof b.to === 'string' && MEMBER.test(b.to) ? b.to : null;
 	switch (b.k) {
-		case 'layer':
-			return { k: 'layer', lid, name: name || 'Layer' };
+		case 'layer': {
+			const adjust = readSpec(b.adjust);
+			return { k: 'layer', lid, name: name || 'Layer', ...(adjust ? { adjust } : {}) };
+		}
+		case 'adjust': {
+			const spec = readSpec(b.spec);
+			return spec ? { k: 'adjust', lid, spec } : null;
+		}
+		case 'mask': {
+			const t = readTiles(b);
+			return t ? { k: 'mask', lid, on: b.on !== false, ...t } : null;
+		}
 		case 'rename':
 			return name ? { k: 'rename', lid, name } : null;
 		case 'look': {
@@ -135,16 +181,8 @@ export function parseEdit(body: unknown): TogetherEdit | null {
 			return int(b.to) && (b.to as number) >= 0 ? { k: 'move', lid, to: b.to as number } : null;
 		case 'tiles': {
 			const did = typeof b.did === 'string' && DID.test(b.did) ? b.did : null;
-			if (!did || !Array.isArray(b.set) || !Array.isArray(b.clear)) return null;
-			if (b.set.length + b.clear.length > 4 * TILES_PER_EDIT) return null;
-			const set = b.set.filter(
-				(t): t is [number, number, string] =>
-					Array.isArray(t) && int(t[0]) && int(t[1]) && typeof t[2] === 'string'
-			);
-			const clear = b.clear.filter(
-				(t): t is [number, number] => Array.isArray(t) && int(t[0]) && int(t[1])
-			);
-			return { k: 'tiles', lid, did, set, clear };
+			const t = readTiles(b);
+			return did && t ? { k: 'tiles', lid, did, ...t } : null;
 		}
 		case 'ask':
 			return { k: 'ask', lid };
@@ -180,7 +218,13 @@ export class Shared {
 			case 'layer':
 				// only the member whose id starts the layer's id can make it, once
 				if (l || !e.lid.startsWith(from.slice(0, 12) + ':')) return false;
-				this.layers.set(e.lid, { lid: e.lid, owner: from, name: e.name, writers: [from] });
+				this.layers.set(e.lid, {
+					lid: e.lid,
+					owner: from,
+					name: e.name,
+					writers: [from],
+					...(e.adjust ? { adjust: e.adjust } : {})
+				});
 				this.order.push(e.lid);
 				return true;
 			case 'remove':
@@ -199,9 +243,14 @@ export class Shared {
 			case 'rename':
 			case 'look':
 			case 'tiles':
+			case 'mask':
 				if (!l || !l.writers.includes(from)) return false;
 				if (e.k === 'rename') l.name = e.name;
 				if (e.k === 'look') l.look = e.look;
+				return true;
+			case 'adjust':
+				if (!l || !l.adjust || !l.writers.includes(from)) return false;
+				l.adjust = e.spec;
 				return true;
 			case 'ask':
 				if (!l || l.writers.includes(from)) return false;
@@ -244,7 +293,8 @@ export class Shared {
 				owner: String(l.owner),
 				name: String(l.name).slice(0, 60),
 				writers: l.writers.map(String),
-				...(readLook(l.look) ? { look: readLook(l.look)! } : {})
+				...(readLook(l.look) ? { look: readLook(l.look)! } : {}),
+				...(readSpec(l.adjust) ? { adjust: l.adjust } : {})
 			});
 			this.order.push(l.lid);
 		}
@@ -357,7 +407,13 @@ export async function decodeTile(s: string): Promise<Uint8Array | null> {
 /** What the sync needs from the app (silent: none of it is an undo step). */
 export interface CanvasPort {
 	/** a new layer on top; its engine id (0: couldn't) */
-	addLayer(name: string): number;
+	addLayer(name: string, adjust?: string): number;
+	/** change an adjustment layer's settings (false: busy, try later) */
+	setAdjust(id: number, spec: string): boolean;
+	/** a layer's mask as packed tiles; empty when it has none */
+	maskPacked(id: number): Uint8Array;
+	/** put a layer's mask (empty bytes: none); false when busy */
+	putMask(id: number, packed: Uint8Array): boolean;
 	setLayer(id: number, patch: { name?: string; locked?: boolean } & Partial<Look>): void;
 	/** the drawing the layer shows now (made if it has none) */
 	drawingOf(id: number): number;
@@ -375,7 +431,8 @@ export interface CanvasPort {
 	/** move a layer right above / below another (false: busy, try later); clears undo */
 	moveNextTo(id: number, ref: number, above: boolean): boolean;
 	/** paint layers, bottom → top */
-	layers(): { id: number; name: string; look?: Look }[];
+	/** every layer, bottom → top (`adjust`: an adjustment layer's settings) */
+	layers(): { id: number; name: string; look?: Look; adjust?: string | null }[];
 	/** the app's timeline now */
 	timeline(): Timeline;
 	/** put the session's timeline in (not an undo step; shows the frame again) */
@@ -480,6 +537,10 @@ export class Together {
 	#again = false;
 	/** a layer made here, to select when the session numbers it */
 	#mine = new Set<string>();
+	/** whether each shared layer has a mask, as last synced */
+	#maskOn = new Map<string, boolean>();
+	/** adjustment settings last sent per layer */
+	#adjustSent = new Map<string, string>();
 	/** the settings last sent for each layer (so a change goes once) */
 	#lookSent = new Map<string, Look>();
 	/** coming back after a break: this app's own layers keep what was drawn meanwhile */
@@ -535,22 +596,25 @@ export class Together {
 
 	/** Hosting: share what's on the canvas (every layer, every frame, the timeline). */
 	async startHost() {
+		const adjusts = new Set<number>();
 		for (const l of this.canvas.layers()) {
 			const lid = this.#newLid();
 			this.ids.set(lid, l.id);
-			this.net.edit({ k: 'layer', lid, name: l.name });
+			if (l.adjust) adjusts.add(l.id);
+			this.net.edit({ k: 'layer', lid, name: l.name, ...(l.adjust ? { adjust: l.adjust } : {}) });
 		}
 		for (const [lid, id] of this.ids)
-			for (const d of new Set([this.canvas.drawingOf(id), ...this.canvas.drawingsOfLayer(id)])) {
-				const tiles = unpack(await this.canvas.packed(d));
-				const did = this.didOf(d);
-				this.cache.set(key(lid, did), tiles);
-				const set: [number, number, Uint8Array][] = [...tiles].map(([k, px]) => {
-					const [x, y] = k.split(',').map(Number);
-					return [x, y, px];
-				});
-				if (set.length) await this.#sendTiles(lid, did, set, []);
-			}
+			if (!adjusts.has(id))
+				for (const d of new Set([this.canvas.drawingOf(id), ...this.canvas.drawingsOfLayer(id)])) {
+					const tiles = unpack(await this.canvas.packed(d));
+					const did = this.didOf(d);
+					this.cache.set(key(lid, did), tiles);
+					const set: [number, number, Uint8Array][] = [...tiles].map(([k, px]) => {
+						const [x, y] = k.split(',').map(Number);
+						return [x, y, px];
+					});
+					if (set.length) await this.#sendTiles(lid, did, set, []);
+				}
 		this.net.edit({ k: 'timeline', tl: this.#sharedTimeline() });
 		this.#synced = true;
 	}
@@ -687,6 +751,28 @@ export class Together {
 				if (id && from !== this.me) this.canvas.setLayer(id, e.look);
 				break;
 			}
+			case 'adjust': {
+				const id = this.ids.get(e.lid);
+				this.#adjustSent.set(e.lid, e.spec);
+				if (id && from !== this.me) this.#later(() => this.canvas.setAdjust(id, e.spec));
+				break;
+			}
+			case 'mask':
+				if (from !== this.me) {
+					this.#maskOn.set(e.lid, e.on);
+					if (!e.on) this.cache.delete(key(e.lid, 'mask'));
+					else {
+						const t = this.cache.get(key(e.lid, 'mask')) ?? new Map();
+						this.cache.set(key(e.lid, 'mask'), t);
+						for (const [x, y] of e.clear) t.delete(`${x},${y}`);
+						for (const [x, y, s] of e.set) {
+							const px = await decodeTile(s);
+							if (px) t.set(`${x},${y}`, px);
+						}
+					}
+					this.#put(key(e.lid, 'mask'));
+				}
+				break;
 			case 'remove': {
 				const id = this.ids.get(e.lid);
 				this.ids.delete(e.lid);
@@ -742,7 +828,13 @@ export class Together {
 			this.#snapSeq = m.seq;
 			this.#snapTl = m.tl && typeof m.tl === 'object' ? m.tl : null;
 		} else if (m.k === 'snap.tiles' && !this.#synced) {
-			if (!this.shared.layers.has(m.lid) || typeof m.did !== 'string' || !DID.test(m.did)) return;
+			if (
+				!this.shared.layers.has(m.lid) ||
+				typeof m.did !== 'string' ||
+				!(DID.test(m.did) || m.did === 'mask')
+			)
+				return;
+			if (m.did === 'mask') this.#maskOn.set(m.lid, true);
 			const t = this.cache.get(key(m.lid, m.did)) ?? new Map();
 			this.cache.set(key(m.lid, m.did), t);
 			for (const [x, y, s] of m.set) {
@@ -800,12 +892,45 @@ export class Together {
 				for (const k of [...this.#pending]) this.#put(k);
 				// a layer made here outside the session's way (duplicate, paste, import)
 				const known = new Set(this.ids.values());
-				for (const l of this.canvas.layers())
+				const all = this.canvas.layers();
+				for (const l of all)
 					if (!known.has(l.id) && !this.#local.has(l.id)) {
+						// it goes on top, here as for everyone (the same stack everywhere)
+						const top = [...this.shared.order].reverse().find((x) => this.ids.has(x));
+						const topId = top && this.ids.get(top);
+						if (topId && all.at(-1)?.id !== l.id) this.canvas.moveNextTo(l.id, topId, true);
 						const lid = this.#newLid();
 						this.ids.set(lid, l.id);
-						this.net.edit({ k: 'layer', lid, name: l.name });
+						this.net.edit({
+							k: 'layer',
+							lid,
+							name: l.name,
+							...(l.adjust ? { adjust: l.adjust } : {})
+						});
+						if (l.adjust) this.#adjustSent.set(lid, l.adjust);
 					}
+				// adjustment settings and masks changed here, on layers this app may change
+				for (const l of all) {
+					const lid = this.lidOf(l.id);
+					if (!lid || !this.shared.canDraw(lid, this.me)) continue;
+					if (
+						l.adjust &&
+						l.adjust !== (this.#adjustSent.get(lid) ?? this.shared.layers.get(lid)?.adjust)
+					) {
+						this.#adjustSent.set(lid, l.adjust);
+						this.net.edit({ k: 'adjust', lid, spec: l.adjust });
+					}
+					const packed = this.canvas.maskPacked(l.id);
+					const on = packed.length > 0;
+					const next = on ? unpack(packed) : new Map<string, Uint8Array>();
+					const prev = this.cache.get(key(lid, 'mask')) ?? new Map();
+					const d = diffTiles(prev, next);
+					if (on === (this.#maskOn.get(lid) ?? false) && !d.set.length && !d.clear.length) continue;
+					this.#maskOn.set(lid, on);
+					if (on) this.cache.set(key(lid, 'mask'), next);
+					else this.cache.delete(key(lid, 'mask'));
+					await this.#sendMask(lid, on, d.set, d.clear);
+				}
 				// layer settings changed here (opacity, blend…) on layers this app may change
 				const now = new Map(this.canvas.layers().map((l) => [l.id, l.look]));
 				for (const [lid, id] of this.ids) {
@@ -819,7 +944,9 @@ export class Together {
 				// what may have changed: each drawable layer's drawing showing, and drawings
 				// touched elsewhere (an undo on another frame)
 				const look = new Map<number, number>();
-				for (const [, id] of this.ids) look.set(this.canvas.drawingOf(id), id);
+				const adjusts = new Set(all.filter((l) => l.adjust).map((l) => l.id));
+				for (const [, id] of this.ids)
+					if (!adjusts.has(id)) look.set(this.canvas.drawingOf(id), id);
 				for (const d of this.#touched) {
 					const id = this.canvas.layerOfDrawing(d);
 					if (id !== null && this.lidOf(id)) look.set(d, id);
@@ -857,6 +984,20 @@ export class Together {
 			const enc: [number, number, string][] = [];
 			for (const [x, y, px] of part) enc.push([x, y, await encodeTile(px)]);
 			this.net.edit({ k: 'tiles', lid, did, set: enc, clear: i === 0 ? clear : [] });
+		}
+	}
+
+	async #sendMask(
+		lid: string,
+		on: boolean,
+		set: [number, number, Uint8Array][],
+		clear: [number, number][]
+	) {
+		for (let i = 0; i < Math.max(set.length, 1); i += TILES_PER_EDIT) {
+			const enc: [number, number, string][] = [];
+			for (const [x, y, px] of set.slice(i, i + TILES_PER_EDIT))
+				enc.push([x, y, await encodeTile(px)]);
+			this.net.edit({ k: 'mask', lid, on, set: enc, clear: i === 0 ? clear : [] });
 		}
 	}
 
@@ -915,9 +1056,10 @@ export class Together {
 		if (this.ids.has(lid)) return;
 		const l = this.shared.layers.get(lid);
 		if (!l) return;
-		const id = this.canvas.addLayer(l.name);
+		const id = this.canvas.addLayer(l.name, l.adjust);
 		if (!id) return;
 		this.ids.set(lid, id);
+		if (l.adjust) this.#adjustSent.set(lid, l.adjust);
 		if (l.look) this.canvas.setLayer(id, l.look);
 		this.#refreshLock(lid);
 	}
@@ -945,9 +1087,20 @@ export class Together {
 
 	/** Put a shared drawing's synced tiles into the engine ("lid|did"). */
 	#put(k: string) {
+		const [lid, did] = k.split('|');
+		if (did === 'mask') {
+			const id = this.ids.get(lid);
+			if (!id) return;
+			const t = this.cache.get(k);
+			const on = this.#maskOn.get(lid) ?? !!t;
+			if (this.canvas.putMask(id, on ? pack(t ?? new Map()) : new Uint8Array()))
+				this.#pending.delete(k);
+			else this.#pending.add(k);
+			return;
+		}
 		const t = this.cache.get(k);
 		if (!t) return;
-		const d = this.localOf(k.split('|')[1]);
+		const d = this.localOf(did);
 		if (this.canvas.put(d, pack(t))) this.#pending.delete(k);
 		else this.#pending.add(k);
 	}
