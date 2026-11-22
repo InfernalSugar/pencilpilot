@@ -26,10 +26,12 @@
 		drawing: number;
 		/** an adjustment layer's settings (JSON, see tone.ts); null for paint layers */
 		adjust: string | null;
+		/** drawing assist: strokes on it snap to the guides (kept by the canvas, not the engine) */
+		assist?: boolean;
 	}
 	export type LayerSettings = Omit<
 		LayerInfo,
-		'id' | 'empty' | 'mask' | 'editingMask' | 'group' | 'imported' | 'adjust' | 'drawing'
+		'id' | 'empty' | 'mask' | 'editingMask' | 'group' | 'imported' | 'adjust' | 'drawing' | 'assist'
 	>;
 
 	/** What happened to a picture brought in with `importImage`. */
@@ -148,6 +150,7 @@
 		type EditShape
 	} from './shape-edit';
 	import { smudgeSource } from './smudge';
+	import { Stabilizer, stringLength } from './stabilizer';
 	import { textureById, type BrushTexture } from './brush-textures';
 	import { Timelapse } from './timelapse';
 	import { mapTable, parseSpec, specName, toneTables, type AdjustSpec } from './tone';
@@ -328,7 +331,7 @@
 		closeFill?: boolean;
 		/** a stroke snapped to a shape */
 		onshape?: (kind: string) => void;
-		/** 0–1: steadies strokes (lazy brush, like Procreate's StreamLine) */
+		/** 0–1: steadies strokes (a pulled string, like Procreate's StreamLine) */
 		smoothing?: number;
 		/** a colour was picked (eyedropper tool, Alt+click, or a finger held still) */
 		onpick?: (hex: string) => void;
@@ -548,7 +551,7 @@
 		if (!paint) return;
 		if (paint.width !== width || paint.height !== height)
 			oncanvassize?.({ width: paint.width, height: paint.height });
-		const layers = layerList();
+		const layers = layerList().map((l) => ({ ...l, assist: assistLayers.has(l.id) }));
 		onchange?.({
 			canUndo: paint.canUndo(),
 			canRedo: paint.canRedo(),
@@ -561,6 +564,17 @@
 			selection: paint.hasSelection(),
 			history: log.history()
 		});
+	}
+
+	/** layers with drawing assist on (Procreate keeps it per layer) */
+	// eslint-disable-next-line svelte/prefer-svelte-reactivity -- the status carries it out
+	const assistLayers = new Set<number>();
+
+	/** Drawing assist on a layer: its strokes snap to the guides. Not an undo step (a drawing aid). */
+	export function setLayerAssist(id: number, on: boolean) {
+		if (on) assistLayers.add(id);
+		else assistLayers.delete(id);
+		notify();
 	}
 
 	/** the stroke in progress paints a layer mask (not shared, not in the stroke log) */
@@ -1213,6 +1227,8 @@
 
 	function snapShape() {
 		if (!paint || !brush || !current || snapped) return;
+		// a held pen: a smoothed line catches up first, so the shape reaches the pen
+		catchUp();
 		const pts = current.points.map((p) => [p.x, p.y] as [number, number]);
 		const shape = recognise(pts);
 		if (!shape) return;
@@ -2065,7 +2081,8 @@
 			snapLine = r;
 			return;
 		}
-		const dirs = snapDirections(guides, p);
+		// drawing assist is the active layer's (as in Procreate)
+		const dirs = assistLayers.has(paint?.activeLayer ?? 0) ? snapDirections(guides, p) : [];
 		if (dirs.length) snapPending = { start: p, dirs };
 	}
 
@@ -2275,37 +2292,34 @@
 	/** where the liquify brush circle is drawn (canvas px) */
 	let hoverAt = $state<[number, number] | null>(null);
 
-	// ---- smoothing (lazy brush): the pen point follows the pointer on a short leash ----
+	// ---- smoothing (pulled string): the brush tip trails the pointer on a string ----
 
-	let smooth: { x: number; y: number; p: number } | null = null;
-	let lastRaw: { x: number; y: number; p: number; t: number } | null = null;
+	const stab = new Stabilizer();
+	/** when the pointer last moved (for the catch-up's time) */
+	let lastRawT = 0;
+
+	/** one point of the stroke: painted, sent to others drawing along and logged */
+	function paintAt(x: number, y: number, p: number, tx: number, ty: number, dt: number, t: number) {
+		if (!paint || !brush || !current) return;
+		paint.strokeTo(brush, x, y, p, tx, ty, dt);
+		if (sendLive())
+			livePts.push(
+				Math.round(x * 10) / 10,
+				Math.round(y * 10) / 10,
+				Math.round(p * 1000) / 1000,
+				Math.round(dt * 1000)
+			);
+		current.points.push({
+			x: Math.round(x * 10) / 10,
+			y: Math.round(y * 10) / 10,
+			pressure: Math.round(p * 1000) / 1000,
+			t: Math.round(t - t0)
+		});
+	}
 
 	/** at the end of a smoothed stroke, carry the line on to where the pen actually stopped */
 	function catchUp() {
-		if (!paint || !brush || !current || !smooth || !lastRaw || smoothing <= 0) return;
-		const steps = 6;
-		const from = { ...smooth };
-		for (let k = 1; k <= steps; k++) {
-			const t = k / steps;
-			const x = from.x + (lastRaw.x - from.x) * t;
-			const y = from.y + (lastRaw.y - from.y) * t;
-			const p = from.p + (lastRaw.p - from.p) * t;
-			paint.strokeTo(brush, x, y, p, 0, 0, 0.004);
-			if (sendLive())
-				livePts.push(
-					Math.round(x * 10) / 10,
-					Math.round(y * 10) / 10,
-					Math.round(p * 1000) / 1000,
-					4
-				);
-			current.points.push({
-				x: Math.round(x * 10) / 10,
-				y: Math.round(y * 10) / 10,
-				pressure: Math.round(p * 1000) / 1000,
-				t: Math.round(lastRaw.t - t0)
-			});
-		}
-		smooth = { x: lastRaw.x, y: lastRaw.y, p: lastRaw.p };
+		for (const q of stab.catchUp()) paintAt(q.x, q.y, q.p, 0, 0, 0.004, lastRawT);
 	}
 
 	// ---- touch taps: two fingers = undo, three = redo ----
@@ -2318,8 +2332,6 @@
 		view: { zoom: number; rot: number; panX: number; panY: number };
 	} | null = null;
 	let holdTimer: ReturnType<typeof setTimeout> | undefined;
-	/** follow factor per sample: 1 = raw input, small = very steady */
-	const follow = () => 1 - Math.min(0.92, Math.max(0, smoothing) * 0.92);
 
 	interface RawPoint {
 		x: number;
@@ -2382,8 +2394,8 @@
 			});
 		}
 		// carry on from the click as a normal stroke (drag on, or Shift+click again)
-		smooth = { x: bx, y: by, p: pb };
-		lastRaw = { x: bx, y: by, p: pb, t: e.timeStamp };
+		stab.reset({ x: bx, y: by, p: pb });
+		lastRawT = e.timeStamp;
 		lastT = e.timeStamp;
 	}
 
@@ -2419,33 +2431,14 @@
 	function feedPoint(r: RawPoint) {
 		if (!paint || !brush || !current) return;
 		const [rx, ry] = guided([r.x, r.y]);
-		const rp = r.p;
-		const a = follow();
-		smooth = smooth
-			? {
-					x: smooth.x + (rx - smooth.x) * a,
-					y: smooth.y + (ry - smooth.y) * a,
-					p: smooth.p + (rp - smooth.p) * a
-				}
-			: { x: rx, y: ry, p: rp };
-		lastRaw = { x: rx, y: ry, p: rp, t: r.time };
-		const { x, y, p: pressure } = smooth;
+		// the string is set in screen px, so it feels the same at any zoom
+		stab.length = stringLength(smoothing) / Math.max(0.01, fit * zoom);
+		lastRawT = r.time;
+		const tip = stab.push(rx, ry, r.p);
+		if (!tip) return; // the string is still slack
 		const dt = Math.max(0, (r.time - lastT) / 1000);
 		lastT = r.time;
-		paint.strokeTo(brush, x, y, pressure, r.tx, r.ty, dt);
-		if (sendLive())
-			livePts.push(
-				Math.round(x * 10) / 10,
-				Math.round(y * 10) / 10,
-				Math.round(pressure * 1000) / 1000,
-				Math.round(dt * 1000)
-			);
-		current.points.push({
-			x: Math.round(x * 10) / 10,
-			y: Math.round(y * 10) / 10,
-			pressure: Math.round(pressure * 1000) / 1000,
-			t: Math.round(r.time - t0)
-		});
+		paintAt(tip.x, tip.y, tip.p, r.tx, r.ty, dt, r.time);
 	}
 
 	/** capture the pointer (some synthetic / stylus edge cases can't be captured: then just don't) */
@@ -2645,8 +2638,7 @@
 		strokePointer = e.pointerId;
 		current = { brushId, eraser, layer: paint.activeLayer, color, size, opacity, points: [] };
 		lastT = e.timeStamp;
-		smooth = null;
-		lastRaw = null;
+		stab.reset();
 		startSnap(toCanvas(e.clientX, e.clientY));
 		snapped = false;
 		holdAnchor = null;
@@ -3115,7 +3107,10 @@
 	}
 
 	export function duplicateLayer(id: number) {
-		if (paint) changed(paint.duplicateLayer(id) !== 0, undefined, 'Duplicate layer');
+		if (!paint) return;
+		const copy = paint.duplicateLayer(id);
+		if (copy && assistLayers.has(id)) assistLayers.add(copy);
+		changed(copy !== 0, undefined, 'Duplicate layer');
 	}
 
 	export function deleteLayer(id: number) {
@@ -3521,6 +3516,8 @@
 		mask?: Uint8Array;
 		/** an adjustment layer's settings (JSON, see tone.ts) */
 		adjust?: string | null;
+		/** drawing assist is on */
+		assist?: boolean;
 	}
 
 	/** A small PNG of the drawing as it shows (at most `max` px on its long side). */
@@ -3566,7 +3563,8 @@
 				group: l.group,
 				rgba: paint!.layerRgba(l.id),
 				mask,
-				adjust: l.adjust
+				adjust: l.adjust,
+				...(assistLayers.has(l.id) ? { assist: true } : {})
 			};
 		});
 		return { layers, groups: groupList(), strokes: structuredClone(log.strokes) as Stroke[] };
@@ -3613,6 +3611,7 @@
 				false
 			);
 			if (l.mask) paint.restoreMask(id, l.mask);
+			if (l.assist) assistLayers.add(id);
 		}
 		// groups: the first layer of each starts it, the rest join
 		// eslint-disable-next-line svelte/prefer-svelte-reactivity -- a local lookup, not state
@@ -3632,7 +3631,10 @@
 				paint.moveLayerTo(id, at, known);
 			}
 		}
-		for (const id of before) paint.deleteLayer(id);
+		for (const id of before) {
+			paint.deleteLayer(id);
+			assistLayers.delete(id);
+		}
 		log.reset(
 			strokes
 				.filter((st) => st.layer === undefined || ids.has(st.layer))

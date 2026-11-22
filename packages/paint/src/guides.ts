@@ -1,7 +1,7 @@
 /**
  * Drawing guides: a grid, perspective (1/2/3 point) and a ruler, plus the
  * "assist" that keeps a stroke on a guide direction (like Procreate's
- * Drawing Assist). All positions are canvas pixels.
+ * Drawing Assist, turned on per layer). All positions are canvas pixels.
  */
 export type Pt = [number, number];
 
@@ -12,8 +12,6 @@ export interface GuideSettings {
 		points: 0 | 1 | 2 | 3;
 		/** vanishing points (the first `points` are used) */
 		vps: Pt[];
-		/** strokes snap to the perspective directions */
-		assist: boolean;
 	};
 	ruler: { on: boolean; a: Pt; b: Pt };
 	/** strokes mirrored / rotated live about `c` */
@@ -31,8 +29,7 @@ export function defaultGuides(w: number, h: number): GuideSettings {
 				[w * 0.5, h * 0.4],
 				[w * 1.1, h * 0.4],
 				[w * 0.5, h * 1.6]
-			],
-			assist: true
+			]
 		},
 		ruler: { on: false, a: [w * 0.2, h * 0.5], b: [w * 0.8, h * 0.5] },
 		symmetry: { mode: 'off', n: 6, c: [w / 2, h / 2] }
@@ -78,11 +75,20 @@ export function symmetryAxes(
 	}
 }
 
-/** Unit directions a stroke starting at `p` may snap to (perspective assist). */
+const ISO_X = Math.cos(Math.PI / 6);
+const ISO_Y = Math.sin(Math.PI / 6);
+
+/**
+ * Unit directions a stroke starting at `p` may snap to, on a layer with drawing assist:
+ * a square grid's across and down, an isometric grid's three axes (upright and ±30°),
+ * and the lines to the vanishing points.
+ */
 export function snapDirections(g: GuideSettings, p: Pt): Pt[] {
 	const out: Pt[] = [];
+	if (g.grid.on && g.grid.kind === 'square') out.push([1, 0], [0, 1]);
+	if (g.grid.on && g.grid.kind === 'isometric') out.push([0, 1], [ISO_X, -ISO_Y], [ISO_X, ISO_Y]);
 	const n = g.perspective.points;
-	if (n > 0 && g.perspective.assist) {
+	if (n > 0) {
 		for (const vp of g.perspective.vps.slice(0, n)) {
 			const [dx, dy] = [vp[0] - p[0], vp[1] - p[1]];
 			const l = Math.hypot(dx, dy);
@@ -92,7 +98,8 @@ export function snapDirections(g: GuideSettings, p: Pt): Pt[] {
 		if (n === 1) out.push([1, 0], [0, 1]);
 		if (n === 2) out.push([0, 1]);
 	}
-	return out;
+	// the same direction twice (a square grid and one-point perspective) only once
+	return out.filter((u, i) => out.findIndex((v) => v[0] === u[0] && v[1] === u[1]) === i);
 }
 
 /** The direction (of `dirs`, either way along it) closest to the movement `d`. */
