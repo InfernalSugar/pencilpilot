@@ -1554,6 +1554,11 @@
 			} else if (e.kind === 'left') {
 				sharing.members = sharing.members.filter((m) => m.id !== e.id);
 				if (cursorsOf.remove(e.id)) cursorTick++;
+			} else if (e.kind === 'host_changed') {
+				sharing = { ...sharing, members: e.members, host: e.you, invite: e.invite };
+				for (const id of cursorsOf.list([]).map((c) => c.id))
+					if (!e.members.some((m) => m.id === id)) cursorsOf.remove(id);
+				cursorTick++;
 			} else if (e.kind === 'closed') {
 				sharing = null;
 				cursorsOf.clear();

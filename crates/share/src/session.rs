@@ -1,21 +1,36 @@
 //! The live session: the host numbers edits and passes them on; cursors go as datagrams.
+//!
+//! - **Any member lets a joiner in:** a member that isn't the host passes the joiner on to
+//!   the host, so an invite from anyone keeps working after the host changes.
+//! - **Edits are signed and numbered by their author** ([`Signed`]): no one can pass one on
+//!   as someone else's, and none is applied twice.
+//! - **Host hand-over:** when the host leaves, the member who has been in longest takes over
+//!   (everyone works it out the same way from the member list, which is in the order people
+//!   came). The others reconnect to it, it sends them the edits they missed, they send it the
+//!   edits it missed (their own not yet numbered, and others' it hadn't seen), and the session
+//!   carries on, numbering from where it was.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
 use iroh::endpoint::{Connection, presets};
-use iroh::{Endpoint, EndpointId, RelayMap, RelayMode, RelayUrl};
+use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, RelayUrl, SecretKey};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-use crate::wire::{self, Frame, Presence};
-use crate::{ALPN, Error, Identity, Invite, Result, err};
+use crate::invite::{self, Invite};
+use crate::wire::{self, Frame, Ordered, Presence, Resume, Signed};
+use crate::{ALPN, Error, Identity, Result, err};
 
-/// How long a joiner has to say hello, and a host to answer.
+/// How long a joiner has to say hello, and a member to answer.
 const HANDSHAKE: Duration = Duration::from_secs(15);
+/// How long to keep trying to reach a member who should take over as host.
+const TAKEOVER: Duration = Duration::from_secs(12);
+/// Recent numbered edits kept, to catch up members after a hand-over.
+const LOG: usize = 1024;
 
 /// Which relays introduce members and carry traffic they can't send directly.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,13 +49,15 @@ pub struct Member {
     /// their [`Identity::id`]
     pub id: String,
     pub name: String,
+    /// how to reach them (their relay; IP addresses only without relays)
+    pub addr: EndpointAddr,
 }
 
 /// What happens in the session, in the order the app should apply it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
-    /// Edit number `seq` (counting from 1), by member `from`. Your own edits come back here
-    /// too, numbered: apply edits in this order and everyone ends up the same.
+    /// Edit number `seq`, by member `from`. Your own edits come back here too, numbered:
+    /// apply edits in this order. An edit is never delivered twice.
     Edit {
         seq: u64,
         from: String,
@@ -55,153 +72,158 @@ pub enum Event {
     Left {
         id: String,
     },
-    /// The session ended (for a joiner: the host left or the connection dropped).
+    /// The host left and `host` took over (it may be you); who is here now.
+    HostChanged {
+        host: String,
+        members: Vec<Member>,
+    },
+    /// The session ended (the host left and no one could take over, or you left).
     Closed {
         reason: String,
     },
 }
 
-/// A live shared session, as the host or as a joiner.
+/// A live shared session.
 pub struct Session {
-    endpoint: Endpoint,
-    me: Member,
-    invite: Invite,
-    members: Arc<Mutex<Vec<Member>>>,
-    role: Role,
+    core: Arc<Core>,
     events: UnboundedReceiver<Event>,
 }
 
-enum Role {
-    Host(Arc<Hub>),
-    Guest {
-        conn: Connection,
-        out: UnboundedSender<Frame>,
-    },
+struct Core {
+    endpoint: Endpoint,
+    secret: SecretKey,
+    me: Member,
+    key: [u8; 32],
+    project: String,
+    events: UnboundedSender<Event>,
+    st: Mutex<St>,
+}
+
+#[derive(Default)]
+struct St {
+    hosting: bool,
+    /// the host (when not hosting)
+    host: Option<EndpointAddr>,
+    peers: HashMap<EndpointId, Peer>,
+    next_conn: u64,
+    link: Option<Link>,
+    next_link: u64,
+    /// in the order they came (the host first)
+    members: Vec<Member>,
+    seq: u64,
+    log: VecDeque<Ordered>,
+    /// per author, the last edit number applied
+    seen: HashMap<String, u64>,
+    my_n: u64,
+    /// this app's edits not yet seen numbered
+    unacked: Vec<Signed>,
+    closed: bool,
+}
+
+struct Peer {
+    n: u64,
+    conn: Connection,
+    out: UnboundedSender<Frame>,
+}
+
+struct Link {
+    n: u64,
+    host: EndpointId,
+    conn: Connection,
+    out: UnboundedSender<Frame>,
+}
+
+enum Answer {
+    In,
+    Redirect(EndpointAddr),
+    Refused(String),
 }
 
 impl Session {
     /// Start a new shared session with this app as the host. The invite (see
     /// [`Session::invite`]) is what others join with.
     pub async fn host(id: &Identity, name: &str, relays: Relays) -> Result<Self> {
-        let endpoint = bind(id, &relays).await?;
-        if relays != Relays::Off {
-            // reachable through the relay before handing out an address
-            let _ = tokio::time::timeout(Duration::from_secs(10), endpoint.online()).await;
+        let (core, events) = Core::start(id, name, &relays, Invite::random_key()).await?;
+        {
+            let mut st = core.st.lock().unwrap();
+            st.hosting = true;
+            st.members = vec![core.me.clone()];
         }
-        let invite = Invite::new(endpoint.addr());
-        Self::host_with(endpoint, invite, name)
+        Ok(Self { core, events })
     }
 
-    fn host_with(endpoint: Endpoint, invite: Invite, name: &str) -> Result<Self> {
-        let me = Member {
-            id: endpoint.id().to_string(),
-            name: clean_name(name),
-        };
-        let (tx, events) = unbounded_channel();
-        let members = Arc::new(Mutex::new(vec![me.clone()]));
-        let hub = Arc::new(Hub {
-            me: me.clone(),
-            invite: invite.clone(),
-            host_id: endpoint.id(),
-            events: tx,
-            members: members.clone(),
-            state: Mutex::new(HubState::default()),
-        });
-        tokio::spawn(accept_loop(endpoint.clone(), hub.clone()));
-        Ok(Self {
-            endpoint,
-            me,
-            invite,
-            members,
-            role: Role::Host(hub),
-            events,
-        })
-    }
-
-    /// Join the session an invite points to.
+    /// Join the session an invite points to (through any member in it).
     pub async fn join(id: &Identity, invite: &Invite, name: &str, relays: Relays) -> Result<Self> {
-        let endpoint = bind(id, &relays).await?;
-        let me = Member {
-            id: endpoint.id().to_string(),
-            name: clean_name(name),
-        };
-        let host = invite.host.id;
-        let conn = tokio::time::timeout(HANDSHAKE, endpoint.connect(invite.host.clone(), ALPN))
-            .await
-            .map_err(|_| Error("Couldn't reach the host: is their app open?".into()))?
-            .map_err(|e| err(format!("Couldn't reach the host: {e}")))?;
-        let (mut send, mut recv) = conn.open_bi().await.map_err(err)?;
-        let hello = Frame::Hello {
-            project: invite.project.clone(),
-            proof: invite.proof(endpoint.id(), host)?,
-            name: me.name.clone(),
-        };
-        wire::write(&mut send, &hello).await?;
-        let answer = tokio::time::timeout(HANDSHAKE, wire::read(&mut recv))
-            .await
-            .map_err(|_| Error("The host didn't answer.".into()))??;
-        let (list, _seq) = match answer {
-            Some(Frame::Welcome { members, seq }) => (members, seq),
-            Some(Frame::Refused { reason }) => return Err(Error(reason)),
-            _ => return Err(Error("The host answered something unexpected.".into())),
-        };
-        let members = Arc::new(Mutex::new(list));
-        let (tx, events) = unbounded_channel();
-        let (out, out_rx) = unbounded_channel();
-        tokio::spawn(writer(send, out_rx));
-        tokio::spawn(guest_reader(recv, tx.clone(), members.clone()));
-        tokio::spawn(guest_datagrams(conn.clone(), tx, me.id.clone()));
-        Ok(Self {
-            endpoint,
-            me,
-            invite: invite.clone(),
-            members,
-            role: Role::Guest { conn, out },
-            events,
-        })
+        let (core, events) = Core::start(id, name, &relays, invite.key).await?;
+        let mut last = Error("The invite has no one to ask.".into());
+        for addr in &invite.addrs {
+            match core.clone().enter(addr.clone(), None).await {
+                Ok(()) => return Ok(Self { core, events }),
+                Err(e) => last = e,
+            }
+        }
+        core.endpoint.close().await;
+        Err(last)
     }
 
-    /// The code others join with (the host's, also for joiners).
-    pub fn invite(&self) -> &Invite {
-        &self.invite
+    /// The code others can join with: this app, then the host.
+    pub fn invite(&self) -> Invite {
+        let st = self.core.st.lock().unwrap();
+        let mut addrs = vec![self.core.me.addr.clone()];
+        if let Some(h) = st.host.as_ref().filter(|h| h.id != self.core.me.addr.id) {
+            addrs.push(h.clone());
+        }
+        Invite::new(self.core.key, addrs)
     }
 
     pub fn me(&self) -> &Member {
-        &self.me
+        &self.core.me
     }
 
     pub fn is_host(&self) -> bool {
-        matches!(self.role, Role::Host(_))
+        self.core.st.lock().unwrap().hosting
     }
 
-    /// Who is here now (this app included).
+    /// Who is here now (this app included), in the order they came.
     pub fn members(&self) -> Vec<Member> {
-        self.members.lock().unwrap().clone()
+        self.core.st.lock().unwrap().members.clone()
     }
 
-    /// Send an edit. It comes back as an [`Event::Edit`] with its number once the host
-    /// has ordered it.
+    /// Send an edit. It comes back as an [`Event::Edit`] with its number once the host has
+    /// ordered it. If the host is changing, it waits and goes to the new host.
     pub fn edit(&self, body: Value) -> Result<()> {
-        match &self.role {
-            Role::Host(hub) => {
-                hub.order(hub.me.id.clone(), body);
-                Ok(())
+        let body = serde_json::to_string(&body).map_err(err)?;
+        let (signed, hosting, out) = {
+            let mut st = self.core.st.lock().unwrap();
+            if st.closed {
+                return Err(Error("The session has ended.".into()));
             }
-            Role::Guest { out, .. } => out
-                .send(Frame::Edit { body })
-                .map_err(|_| Error("Not connected to the host.".into())),
+            st.my_n += 1;
+            let s = Signed::make(&self.core.secret, &self.core.project, st.my_n, body);
+            st.unacked.push(s.clone());
+            (s, st.hosting, st.link.as_ref().map(|l| l.out.clone()))
+        };
+        if hosting {
+            self.core.order(signed);
+        } else if let Some(out) = out {
+            let _ = out.send(Frame::Edit { edit: signed });
         }
+        Ok(())
     }
 
     /// Send passing state (a cursor). It may be lost; send the newest often instead.
     pub fn presence(&self, body: Value) {
         let p = Presence {
-            from: self.me.id.clone(),
+            from: self.core.me.id.clone(),
             body,
         };
-        match &self.role {
-            Role::Host(hub) => hub.spread_presence(&p, None),
-            Role::Guest { conn, .. } => send_datagram(conn, &p),
+        let st = self.core.st.lock().unwrap();
+        if st.hosting {
+            for peer in st.peers.values() {
+                send_datagram(&peer.conn, &p);
+            }
+        } else if let Some(l) = &st.link {
+            send_datagram(&l.conn, &p);
         }
     }
 
@@ -217,7 +239,288 @@ impl Session {
 
     /// Leave (closes every connection of this app's session).
     pub async fn close(self) {
-        self.endpoint.close().await;
+        self.core.st.lock().unwrap().closed = true;
+        self.core.endpoint.close().await;
+    }
+}
+
+impl Core {
+    async fn start(
+        id: &Identity,
+        name: &str,
+        relays: &Relays,
+        key: [u8; 32],
+    ) -> Result<(Arc<Self>, UnboundedReceiver<Event>)> {
+        let endpoint = bind(id, relays).await?;
+        if *relays != Relays::Off {
+            // reachable through the relay before handing out an address
+            let _ = tokio::time::timeout(Duration::from_secs(10), endpoint.online()).await;
+        }
+        let full = endpoint.addr();
+        let addr = if *relays == Relays::Off || full.relay_urls().next().is_none() {
+            full
+        } else {
+            // a relay is enough to be found; home addresses stay private
+            EndpointAddr::from_parts(
+                full.id,
+                full.relay_urls().cloned().map(iroh::TransportAddr::Relay),
+            )
+        };
+        let me = Member {
+            id: endpoint.id().to_string(),
+            name: clean_name(name),
+            addr,
+        };
+        let (events, rx) = unbounded_channel();
+        let core = Arc::new(Core {
+            endpoint: endpoint.clone(),
+            secret: id.secret(),
+            me,
+            key,
+            project: invite::project_of(&key),
+            events,
+            st: Mutex::new(St::default()),
+        });
+        tokio::spawn(accept_loop(core.clone()));
+        Ok((core, rx))
+    }
+
+    fn emit(&self, e: Event) {
+        let _ = self.events.send(e);
+    }
+
+    /// As host: number an edit and pass it to everyone (in the same order to each).
+    fn order(&self, edit: Signed) {
+        if !edit.verify(&self.project) {
+            return;
+        }
+        let mut st = self.st.lock().unwrap();
+        if !st.hosting || st.seen.get(&edit.from).is_some_and(|&n| edit.n <= n) {
+            return;
+        }
+        st.seq += 1;
+        let o = Ordered { seq: st.seq, edit };
+        for p in st.peers.values() {
+            let _ = p.out.send(Frame::Ordered(o.clone()));
+        }
+        self.apply(&mut st, o);
+    }
+
+    /// Take a numbered edit in (unless it's here already) and tell the app.
+    fn apply(&self, st: &mut St, o: Ordered) {
+        st.seq = st.seq.max(o.seq);
+        let e = &o.edit;
+        if st.seen.get(&e.from).is_some_and(|&n| e.n <= n) {
+            return;
+        }
+        st.seen.insert(e.from.clone(), e.n);
+        if e.from == self.me.id {
+            let n = e.n;
+            st.unacked.retain(|u| u.n > n);
+        }
+        let body = serde_json::from_str(&e.body).unwrap_or(Value::Null);
+        self.emit(Event::Edit {
+            seq: o.seq,
+            from: e.from.clone(),
+            body,
+        });
+        st.log.push_back(o);
+        while st.log.len() > LOG {
+            st.log.pop_front();
+        }
+    }
+
+    /// Become the host (the old one left and this app is next).
+    fn take_over(&self) {
+        let members = {
+            let mut st = self.st.lock().unwrap();
+            if st.hosting || st.closed {
+                return;
+            }
+            st.hosting = true;
+            st.host = None;
+            st.link = None;
+            st.members = vec![self.me.clone()];
+            st.members.clone()
+        };
+        self.emit(Event::HostChanged {
+            host: self.me.id.clone(),
+            members,
+        });
+        // edits this app made that the old host never numbered
+        let pending = std::mem::take(&mut self.st.lock().unwrap().unacked);
+        for e in pending {
+            self.order(e);
+        }
+    }
+
+    /// Ask the member at `addr` to let this app in (following one redirect to the host).
+    /// (Boxed: a reader that loses its host enters again, which starts a new reader.)
+    fn enter(
+        self: Arc<Self>,
+        addr: EndpointAddr,
+        resume: Option<Resume>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>> {
+        Box::pin(async move {
+            let mut to = addr;
+            for _ in 0..3 {
+                match self.clone().dial(to.clone(), resume.clone()).await? {
+                    Answer::In => return Ok(()),
+                    Answer::Redirect(h) => to = h,
+                    Answer::Refused(reason) => return Err(Error(reason)),
+                }
+            }
+            Err(Error("Couldn't find the session's host.".into()))
+        })
+    }
+
+    async fn dial(self: Arc<Self>, addr: EndpointAddr, resume: Option<Resume>) -> Result<Answer> {
+        let target = addr.id;
+        let conn = tokio::time::timeout(HANDSHAKE, self.endpoint.connect(addr.clone(), ALPN))
+            .await
+            .map_err(|_| Error("Couldn't reach the session: is someone in it online?".into()))?
+            .map_err(|e| err(format!("Couldn't reach the session: {e}")))?;
+        let (mut send, mut recv) = conn.open_bi().await.map_err(err)?;
+        let hello = Frame::Hello {
+            project: self.project.clone(),
+            proof: invite::proof(&self.key, self.endpoint.id(), target),
+            name: self.me.name.clone(),
+            addr: self.me.addr.clone(),
+            resume,
+        };
+        wire::write(&mut send, &hello).await?;
+        let answer = tokio::time::timeout(HANDSHAKE, wire::read(&mut recv))
+            .await
+            .map_err(|_| Error("The session didn't answer.".into()))??;
+        let (members, seq, host_seen, missed) = match answer {
+            Some(Frame::Welcome {
+                members,
+                seq,
+                seen,
+                missed,
+            }) => (members, seq, seen, missed),
+            Some(Frame::Redirect { host }) => return Ok(Answer::Redirect(host)),
+            Some(Frame::Refused { reason }) => return Ok(Answer::Refused(reason)),
+            _ => return Err(Error("The session answered something unexpected.".into())),
+        };
+        let (out, out_rx) = unbounded_channel();
+        let n = {
+            let mut st = self.st.lock().unwrap();
+            if st.closed {
+                return Err(Error("The session has ended.".into()));
+            }
+            st.next_link += 1;
+            let n = st.next_link;
+            st.link = Some(Link {
+                n,
+                host: target,
+                conn: conn.clone(),
+                out: out.clone(),
+            });
+            st.host = Some(addr);
+            st.members = members;
+            for o in missed {
+                self.apply(&mut st, o);
+            }
+            st.seq = st.seq.max(seq);
+            // what the host hasn't seen: this app's edits it never numbered, and others'
+            // edits this app has but the host doesn't (signed by their authors)
+            let unseen = |e: &Signed| host_seen.get(&e.from).is_none_or(|&h| e.n > h);
+            for o in st.log.iter().filter(|o| unseen(&o.edit)) {
+                let _ = out.send(Frame::Edit {
+                    edit: o.edit.clone(),
+                });
+            }
+            for e in st.unacked.iter().filter(|e| unseen(e)) {
+                let _ = out.send(Frame::Edit { edit: e.clone() });
+            }
+            n
+        };
+        tokio::spawn(writer(send, out_rx));
+        let reader: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+            Box::pin(self.clone().guest_reader(recv, n));
+        tokio::spawn(reader);
+        tokio::spawn(guest_datagrams(self.clone(), conn));
+        Ok(Answer::In)
+    }
+
+    async fn guest_reader(self: Arc<Self>, mut recv: iroh::endpoint::RecvStream, n: u64) {
+        loop {
+            let frame = wire::read(&mut recv).await;
+            let mut st = self.st.lock().unwrap();
+            if st.closed || st.link.as_ref().is_none_or(|l| l.n != n) {
+                return;
+            }
+            match frame {
+                Ok(Some(Frame::Ordered(o))) => self.apply(&mut st, o),
+                Ok(Some(Frame::Joined { member })) => {
+                    st.members.retain(|x| x.id != member.id);
+                    st.members.push(member.clone());
+                    self.emit(Event::Joined(member));
+                }
+                Ok(Some(Frame::Left { id })) => {
+                    st.members.retain(|x| x.id != id);
+                    self.emit(Event::Left { id });
+                }
+                Ok(Some(_)) => {}
+                Ok(None) | Err(_) => break,
+            }
+        }
+        // the host is gone: hand over
+        let (old, candidates, seen) = {
+            let mut st = self.st.lock().unwrap();
+            let Some(old) = st.link.take().map(|l| l.host) else {
+                return;
+            };
+            let old_id = old.to_string();
+            let candidates: Vec<Member> = st
+                .members
+                .iter()
+                .filter(|m| m.id != old_id)
+                .cloned()
+                .collect();
+            (old_id, candidates, st.seen.clone())
+        };
+        self.emit(Event::Left { id: old.clone() });
+        for c in candidates {
+            if c.id == self.me.id {
+                self.take_over();
+                return;
+            }
+            let resume = Resume {
+                from_host: old.clone(),
+                seen: seen.clone(),
+            };
+            let deadline = tokio::time::Instant::now() + TAKEOVER;
+            while tokio::time::Instant::now() < deadline {
+                if self.st.lock().unwrap().closed {
+                    return;
+                }
+                if self
+                    .clone()
+                    .enter(c.addr.clone(), Some(resume.clone()))
+                    .await
+                    .is_ok()
+                {
+                    let members = self.st.lock().unwrap().members.clone();
+                    let host = self
+                        .st
+                        .lock()
+                        .unwrap()
+                        .link
+                        .as_ref()
+                        .map(|l| l.host.to_string())
+                        .unwrap_or(c.id.clone());
+                    self.emit(Event::HostChanged { host, members });
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(700)).await;
+            }
+        }
+        self.st.lock().unwrap().closed = true;
+        self.emit(Event::Closed {
+            reason: "The host left, and no one else could carry the session on.".into(),
+        });
     }
 }
 
@@ -278,77 +581,19 @@ async fn writer(mut send: iroh::endpoint::SendStream, mut rx: UnboundedReceiver<
     let _ = send.finish();
 }
 
-// ---- the host ----
-
-struct Hub {
-    me: Member,
-    invite: Invite,
-    host_id: EndpointId,
-    events: UnboundedSender<Event>,
-    members: Arc<Mutex<Vec<Member>>>,
-    state: Mutex<HubState>,
-}
-
-#[derive(Default)]
-struct HubState {
-    seq: u64,
-    /// connection number (to tell a rejoin from the connection it replaces)
-    next: u64,
-    peers: HashMap<EndpointId, Peer>,
-}
-
-struct Peer {
-    n: u64,
-    member: Member,
-    conn: Connection,
-    out: UnboundedSender<Frame>,
-}
-
-impl Hub {
-    /// Number an edit and pass it to everyone (in the same order to each).
-    fn order(&self, from: String, body: Value) {
-        let mut s = self.state.lock().unwrap();
-        s.seq += 1;
-        let seq = s.seq;
-        for p in s.peers.values() {
-            let _ = p.out.send(Frame::Ordered {
-                seq,
-                from: from.clone(),
-                body: body.clone(),
-            });
-        }
-        let _ = self.events.send(Event::Edit { seq, from, body });
-    }
-
-    fn spread_presence(&self, p: &Presence, except: Option<EndpointId>) {
-        let s = self.state.lock().unwrap();
-        for (id, peer) in &s.peers {
-            if Some(*id) != except {
-                send_datagram(&peer.conn, p);
-            }
-        }
-    }
-
-    fn sync_members(&self, s: &HubState) {
-        let mut list = vec![self.me.clone()];
-        list.extend(s.peers.values().map(|p| p.member.clone()));
-        *self.members.lock().unwrap() = list;
-    }
-}
-
-async fn accept_loop(endpoint: Endpoint, hub: Arc<Hub>) {
-    while let Some(incoming) = endpoint.accept().await {
-        let hub = hub.clone();
+async fn accept_loop(core: Arc<Core>) {
+    while let Some(incoming) = core.endpoint.accept().await {
+        let core = core.clone();
         tokio::spawn(async move {
             if let Ok(conn) = incoming.await {
-                let _ = serve(conn, hub).await;
+                let _ = serve(conn, core).await;
             }
         });
     }
 }
 
-/// One joiner, from hello to goodbye.
-async fn serve(conn: Connection, hub: Arc<Hub>) -> Result<()> {
+/// Someone asking to join this app (or, after a hand-over, to rejoin it as host).
+async fn serve(conn: Connection, core: Arc<Core>) -> Result<()> {
     let remote = conn.remote_id();
     let (mut send, mut recv) = tokio::time::timeout(HANDSHAKE, conn.accept_bi())
         .await
@@ -361,133 +606,154 @@ async fn serve(conn: Connection, hub: Arc<Hub>) -> Result<()> {
         project,
         proof,
         name,
+        addr,
+        resume,
     }) = hello
     else {
         conn.close(1u32.into(), b"hello first");
         return Ok(());
     };
-    if project != hub.invite.project || !hub.invite.check(&proof, remote, hub.host_id) {
-        let reason = "This invite isn't valid any more: ask for a new one.".to_string();
-        let _ = wire::write(&mut send, &Frame::Refused { reason }).await;
+    let refuse = |reason: &str| Frame::Refused {
+        reason: reason.into(),
+    };
+    let answer = if project != core.project
+        || !invite::check(&core.key, &proof, remote, core.endpoint.id())
+    {
+        Some(refuse(
+            "This invite isn't valid any more: ask for a new one.",
+        ))
+    } else {
+        // asked to take over by someone whose host left: if it was this app's host too
+        let host_gone = {
+            let st = core.st.lock().unwrap();
+            !st.hosting
+                && resume.as_ref().is_some_and(|r| {
+                    st.host
+                        .as_ref()
+                        .is_none_or(|h| h.id.to_string() == r.from_host)
+                })
+        };
+        if host_gone {
+            core.take_over();
+        }
+        let st = core.st.lock().unwrap();
+        if st.closed {
+            Some(refuse("This session has ended."))
+        } else if !st.hosting {
+            st.host.clone().map(|host| Frame::Redirect { host })
+        } else {
+            None
+        }
+    };
+    if let Some(answer) = answer {
+        let _ = wire::write(&mut send, &answer).await;
         let _ = send.finish();
-        // let the refusal arrive before closing
+        // let the answer arrive before closing
         let _ = tokio::time::timeout(Duration::from_secs(2), conn.closed()).await;
         return Ok(());
     }
+
     let member = Member {
         id: remote.to_string(),
         name: clean_name(&name),
+        addr: EndpointAddr::from_parts(remote, addr.addrs),
     };
     let (out, out_rx) = unbounded_channel();
     let n = {
-        let mut s = hub.state.lock().unwrap();
-        s.next += 1;
-        let n = s.next;
+        let mut st = core.st.lock().unwrap();
+        st.next_conn += 1;
+        let n = st.next_conn;
         // a rejoin (same member, new connection) replaces the old one
-        if let Some(old) = s.peers.remove(&remote) {
+        if let Some(old) = st.peers.remove(&remote) {
             old.conn.close(0u32.into(), b"replaced");
         }
-        for p in s.peers.values() {
+        st.members.retain(|m| m.id != member.id);
+        for p in st.peers.values() {
             let _ = p.out.send(Frame::Joined {
                 member: member.clone(),
             });
         }
-        let mut members = vec![hub.me.clone()];
-        members.extend(s.peers.values().map(|p| p.member.clone()));
-        members.push(member.clone());
-        // first on this member's queue, so nothing ordered after it arrives before it
+        st.members.push(member.clone());
+        let seen = resume.map(|r| r.seen);
+        let missed = match &seen {
+            Some(seen) => st
+                .log
+                .iter()
+                .filter(|o| seen.get(&o.edit.from).is_none_or(|&s| o.edit.n > s))
+                .cloned()
+                .collect(),
+            None => Vec::new(),
+        };
+        // first on this member's queue, so nothing numbered after it arrives before it
         let _ = out.send(Frame::Welcome {
-            members,
-            seq: s.seq,
+            members: st.members.clone(),
+            seq: st.seq,
+            seen: st.seen.clone(),
+            missed,
         });
-        s.peers.insert(
+        st.peers.insert(
             remote,
             Peer {
                 n,
-                member: member.clone(),
                 conn: conn.clone(),
                 out,
             },
         );
-        hub.sync_members(&s);
         n
     };
-    let _ = hub.events.send(Event::Joined(member.clone()));
+    core.emit(Event::Joined(member.clone()));
     tokio::spawn(writer(send, out_rx));
-    tokio::spawn(host_datagrams(conn.clone(), hub.clone(), remote));
+    tokio::spawn(host_datagrams(conn.clone(), core.clone(), remote));
 
-    // their edits, until they leave
+    // their edits (and, after a hand-over, others' this app missed), until they leave
     while let Ok(Some(frame)) = wire::read(&mut recv).await {
-        if let Frame::Edit { body } = frame {
-            hub.order(member.id.clone(), body);
+        if let Frame::Edit { edit } = frame {
+            core.order(edit);
         }
     }
 
-    let mut s = hub.state.lock().unwrap();
-    if s.peers.get(&remote).is_some_and(|p| p.n == n) {
-        s.peers.remove(&remote);
-        for p in s.peers.values() {
+    let mut st = core.st.lock().unwrap();
+    if st.peers.get(&remote).is_some_and(|p| p.n == n) {
+        st.peers.remove(&remote);
+        st.members.retain(|m| m.id != member.id);
+        for p in st.peers.values() {
             let _ = p.out.send(Frame::Left {
                 id: member.id.clone(),
             });
         }
-        hub.sync_members(&s);
-        let _ = hub.events.send(Event::Left { id: member.id });
+        core.emit(Event::Left { id: member.id });
     }
     Ok(())
 }
 
-async fn host_datagrams(conn: Connection, hub: Arc<Hub>, remote: EndpointId) {
+async fn host_datagrams(conn: Connection, core: Arc<Core>, remote: EndpointId) {
     while let Ok(bytes) = conn.read_datagram().await {
         let Ok(mut p) = serde_json::from_slice::<Presence>(&bytes) else {
             continue;
         };
         // who sent it is the connection's id, whatever the message says
         p.from = remote.to_string();
-        hub.spread_presence(&p, Some(remote));
-        let _ = hub.events.send(Event::Presence {
+        {
+            let st = core.st.lock().unwrap();
+            for (id, peer) in &st.peers {
+                if *id != remote {
+                    send_datagram(&peer.conn, &p);
+                }
+            }
+        }
+        core.emit(Event::Presence {
             from: p.from,
             body: p.body,
         });
     }
 }
 
-// ---- a joiner ----
-
-async fn guest_reader(
-    mut recv: iroh::endpoint::RecvStream,
-    tx: UnboundedSender<Event>,
-    members: Arc<Mutex<Vec<Member>>>,
-) {
-    let reason = loop {
-        match wire::read(&mut recv).await {
-            Ok(Some(Frame::Ordered { seq, from, body })) => {
-                let _ = tx.send(Event::Edit { seq, from, body });
-            }
-            Ok(Some(Frame::Joined { member })) => {
-                let mut m = members.lock().unwrap();
-                m.retain(|x| x.id != member.id);
-                m.push(member.clone());
-                let _ = tx.send(Event::Joined(member));
-            }
-            Ok(Some(Frame::Left { id })) => {
-                members.lock().unwrap().retain(|x| x.id != id);
-                let _ = tx.send(Event::Left { id });
-            }
-            Ok(Some(_)) => {}
-            Ok(None) => break "The host left the session.".to_string(),
-            Err(e) => break format!("The connection to the host dropped: {e}"),
-        }
-    };
-    let _ = tx.send(Event::Closed { reason });
-}
-
-async fn guest_datagrams(conn: Connection, tx: UnboundedSender<Event>, me: String) {
+async fn guest_datagrams(core: Arc<Core>, conn: Connection) {
     while let Ok(bytes) = conn.read_datagram().await {
         if let Ok(p) = serde_json::from_slice::<Presence>(&bytes)
-            && p.from != me
+            && p.from != core.me.id
         {
-            let _ = tx.send(Event::Presence {
+            core.emit(Event::Presence {
                 from: p.from,
                 body: p.body,
             });
@@ -501,7 +767,7 @@ mod tests {
     use serde_json::json;
 
     async fn next(s: &mut Session) -> Event {
-        tokio::time::timeout(Duration::from_secs(10), s.next_event())
+        tokio::time::timeout(Duration::from_secs(20), s.next_event())
             .await
             .expect("an event in time")
             .expect("the session is open")
@@ -517,22 +783,37 @@ mod tests {
         }
     }
 
+    /// The next edit, skipping joins, leaves and hand-overs.
+    async fn next_edit(s: &mut Session) -> (u64, String, Value) {
+        loop {
+            if let Event::Edit { seq, from, body } = next_change(s).await {
+                return (seq, from, body);
+            }
+        }
+    }
+
+    async fn host() -> Session {
+        Session::host(&Identity::generate(), "Host", Relays::Off)
+            .await
+            .unwrap()
+    }
+
+    async fn join(code: &str, name: &str) -> Session {
+        let invite = Invite::decode(code).unwrap();
+        Session::join(&Identity::generate(), &invite, name, Relays::Off)
+            .await
+            .unwrap()
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn host_orders_edits_for_everyone_and_passes_cursors() {
-        let mut host = Session::host(&Identity::generate(), "Host", Relays::Off)
-            .await
-            .unwrap();
+        let mut host = host().await;
         let code = host.invite().encode();
-        let invite = Invite::decode(&code).unwrap();
 
-        let mut a = Session::join(&Identity::generate(), &invite, "  Ana\u{7}  ", Relays::Off)
-            .await
-            .unwrap();
+        let mut a = join(&code, "  Ana\u{7}  ").await;
         assert_eq!(a.me().name, "Ana");
         assert_eq!(next(&mut host).await, Event::Joined(a.me().clone()));
-        let mut b = Session::join(&Identity::generate(), &invite, "Bo", Relays::Off)
-            .await
-            .unwrap();
+        let mut b = join(&code, "Bo").await;
         assert_eq!(next(&mut host).await, Event::Joined(b.me().clone()));
         assert_eq!(next(&mut a).await, Event::Joined(b.me().clone()));
         let names: Vec<String> = b.members().into_iter().map(|m| m.name).collect();
@@ -548,10 +829,7 @@ mod tests {
         for s in [&mut host, &mut a, &mut b] {
             let mut list = Vec::new();
             for _ in 0..4 {
-                match next_change(s).await {
-                    Event::Edit { seq, from, body } => list.push((seq, from, body)),
-                    other => panic!("expected an edit, got {other:?}"),
-                }
+                list.push(next_edit(s).await);
             }
             seen.push(list);
         }
@@ -561,7 +839,6 @@ mod tests {
             seen[0].iter().map(|e| e.0).collect::<Vec<_>>(),
             [1, 2, 3, 4]
         );
-        // a's own edits keep their order, and carry a's id
         let a_edits: Vec<&Value> = seen[0]
             .iter()
             .filter(|e| e.1 == a.me().id)
@@ -572,7 +849,7 @@ mod tests {
             [&json!({"stroke": "a1"}), &json!({"stroke": "a2"})]
         );
 
-        // a cursor from a reaches the host and b, with a's real id (not what a claims)
+        // a cursor from a reaches the host and b, with a's real id
         let a_id = a.me().id.clone();
         for _ in 0..20 {
             a.presence(json!({"x": 10, "y": 20}));
@@ -597,20 +874,108 @@ mod tests {
         );
         assert_eq!(next_change(&mut a).await, Event::Left { id: b_id });
         assert_eq!(host.members().len(), 2);
-
-        // the host leaves: a's session ends
         host.close().await;
-        assert!(matches!(next_change(&mut a).await, Event::Closed { .. }));
+        a.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn when_the_host_leaves_the_longest_member_carries_on() {
+        let mut h = host().await;
+        let code = h.invite().encode();
+        let mut a = join(&code, "Ana").await;
+        let mut b = join(&code, "Bo").await;
+        let (a_id, b_id) = (a.me().id.clone(), b.me().id.clone());
+        a.edit(json!(1)).unwrap();
+        b.edit(json!(2)).unwrap();
+        for s in [&mut a, &mut b] {
+            assert_eq!(next_edit(s).await.0, 1);
+            assert_eq!(next_edit(s).await.0, 2);
+        }
+        let _ = next_edit(&mut h).await;
+        let _ = next_edit(&mut h).await;
+
+        // the host goes; b draws while the session is changing hands
+        h.close().await;
+        b.edit(json!("during")).unwrap();
+
+        // a (in longest) takes over, b reconnects to it
+        let mut a_host = false;
+        loop {
+            match next_change(&mut a).await {
+                Event::HostChanged { host, .. } => {
+                    assert_eq!(host, a_id);
+                    a_host = true;
+                }
+                Event::Edit { seq, from, body } => {
+                    assert!(a_host, "the edit came through the new host");
+                    assert_eq!(
+                        (seq, from.as_str(), body),
+                        (3, b_id.as_str(), json!("during"))
+                    );
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(a.is_host());
+        let mut b_moved = false;
+        loop {
+            match next_change(&mut b).await {
+                Event::HostChanged { host, members } => {
+                    assert_eq!(host, a_id);
+                    assert_eq!(members.len(), 2);
+                    b_moved = true;
+                }
+                Event::Edit { seq, body, .. } => {
+                    assert!(b_moved);
+                    assert_eq!((seq, body), (3, json!("during")), "once, numbered by a");
+                    break;
+                }
+                _ => {}
+            }
+        }
+        // and it carries on
+        b.edit(json!("after")).unwrap();
+        assert_eq!(next_edit(&mut a).await.0, 4);
+        assert_eq!(next_edit(&mut b).await, (4, b_id.clone(), json!("after")));
+
+        // an invite made before the hand-over still works: c gets passed to a
+        let mut c = join(&code_from(&b), "Cy").await;
+        assert!(matches!(next_change(&mut a).await, Event::Joined(m) if m.name == "Cy"));
+        c.edit(json!("hi")).unwrap();
+        assert_eq!(next_edit(&mut a).await.0, 5);
+        assert_eq!(next_edit(&mut c).await.0, 5);
+        for s in [a, b, c] {
+            s.close().await;
+        }
+    }
+
+    fn code_from(s: &Session) -> String {
+        s.invite().encode()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_last_one_left_carries_on_alone() {
+        let h = host().await;
+        let mut a = join(&h.invite().encode(), "Ana").await;
+        h.close().await;
+        loop {
+            if let Event::HostChanged { host, members } = next_change(&mut a).await {
+                assert_eq!(host, a.me().id);
+                assert_eq!(members.len(), 1);
+                break;
+            }
+        }
+        a.edit(json!("still here")).unwrap();
+        assert_eq!(next_edit(&mut a).await.2, json!("still here"));
         a.close().await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_wrong_invite_is_refused() {
-        let host = Session::host(&Identity::generate(), "Host", Relays::Off)
-            .await
-            .unwrap();
-        let mut forged = host.invite().clone();
-        forged.key = "00".repeat(32);
+        let host = host().await;
+        let mut forged = host.invite();
+        forged.key = [0; 32];
         let e = Session::join(&Identity::generate(), &forged, "Eve", Relays::Off)
             .await
             .err()
@@ -634,25 +999,23 @@ mod online {
         let mut host = Session::host(&Identity::generate(), "Host", Relays::Iroh)
             .await
             .unwrap();
-        let invite = host.invite().clone();
+        let invite = host.invite();
         assert!(
-            invite.host.relay_urls().next().is_some(),
+            invite.addrs[0].relay_urls().next().is_some(),
             "the invite carries a relay"
         );
-        // joiner knows only the host's id and relay: no direct address
-        let mut only_relay = invite.clone();
-        only_relay.host = iroh::EndpointAddr::from_parts(
-            invite.host.id,
-            invite
-                .host
-                .relay_urls()
-                .cloned()
-                .map(iroh::TransportAddr::Relay),
-        );
+        assert_eq!(invite.addrs[0].ip_addrs().count(), 0, "and no home address");
+        let code = invite.encode();
+        println!("code: {} characters", code.len());
         let t = std::time::Instant::now();
-        let a = Session::join(&Identity::generate(), &only_relay, "Ana", Relays::Iroh)
-            .await
-            .unwrap();
+        let a = Session::join(
+            &Identity::generate(),
+            &Invite::decode(&code).unwrap(),
+            "Ana",
+            Relays::Iroh,
+        )
+        .await
+        .unwrap();
         println!("joined through the relay in {:?}", t.elapsed());
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(10), host.next_event())
