@@ -4,6 +4,11 @@
 //!
 //! The window calls `share_host` / `share_join`, sends edits and cursors, and listens to
 //! "share-event" for what the others do.
+//!
+//! **AI generation is a solo act** (the owner's rule, ADR-0013): nothing made by AI is
+//! generated during a shared session. Every AI feature in the shell starts with
+//! [`Sharing::solo_only`], which refuses while a session is live; the session's edits
+//! carry drawing, layers and the timeline only.
 
 use std::path::Path;
 
@@ -104,6 +109,14 @@ impl Sharing {
         info
     }
 
+    /// AI features call this first: an error while drawing together (AI is solo only).
+    pub async fn solo_only(&self) -> Result<(), String> {
+        if self.status().await.is_some() {
+            return Err("AI tools are for solo work: leave the shared session to use them.".into());
+        }
+        Ok(())
+    }
+
     pub async fn status(&self) -> Option<Info> {
         let mut g = self.0.lock().await;
         // a session that ended on its own (the host left) is gone
@@ -195,4 +208,31 @@ async fn pump(app: AppHandle, mut s: Session, mut rx: mpsc::UnboundedReceiver<Cm
         }
     }
     s.close().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn ai_is_refused_while_drawing_together() {
+        let sharing = Sharing::default();
+        assert!(sharing.solo_only().await.is_ok(), "solo: AI allowed");
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let me = Member {
+            id: "me".into(),
+            name: "Me".into(),
+        };
+        *sharing.0.lock().await = Some(Live {
+            info: Info {
+                invite: String::new(),
+                me: me.clone(),
+                members: vec![me],
+                host: true,
+            },
+            tx,
+        });
+        let e = sharing.solo_only().await.unwrap_err();
+        assert!(e.contains("solo"), "{e}");
+    }
 }

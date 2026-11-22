@@ -83,6 +83,21 @@ tiles by hash on disk). Always available and simpler to make consistent, but the
 stores and passes on everything. It stays the plan B if peer to peer proves unreliable,
 and an always-online member running on the VPS is a later middle ground.
 
+### AI generation is a solo act
+
+The owner's rule: AI is for solo work only. Shared projects are drawn by people.
+
+- **No AI in a shared session:** while a session is live, AI tools are hidden in the window
+  (`aiAllowed` in `lib/share.ts`) and refused by the shell (`ai_allowed`, which every AI
+  feature calls before running).
+- **Nothing AI travels through a session:** the session's edits are a closed list:
+  strokes, tiles, layers and timeline edits. An edit of any other kind is dropped on
+  arrival.
+- **The director plugin** (Claude Code) only builds and works on solo projects. It never
+  generates into a shared project.
+- **Share a copy** of a solo project leaves its AI layers behind (the guides from S6,
+  marked with their provenance per ADR-0011) in the private original.
+
 ### Each layer has one drawer at a time, so drawings never conflict
 
 - Every layer has an **owner** (who made it) and a list of **people allowed to draw on it**.
