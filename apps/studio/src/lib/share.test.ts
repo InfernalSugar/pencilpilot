@@ -1,5 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
-import { aiAllowed, cleanInvite, Cursors, isCursor, memberColour, Throttle } from './share';
+import {
+	aiAllowed,
+	cleanInvite,
+	cleanRelay,
+	Cursors,
+	isCursor,
+	memberColour,
+	Throttle
+} from './share';
 
 describe('drawing together', () => {
 	it('gives each member the same colour everywhere', () => {
@@ -17,6 +25,14 @@ describe('drawing together', () => {
 		expect(
 			aiAllowed({ invite: 'pp1-x', me: { id: 'a', name: 'A' }, members: [], host: true })
 		).toBe(false);
+	});
+
+	it('reads a relay address as typed', () => {
+		expect(cleanRelay('relay.example.com')).toBe('https://relay.example.com');
+		expect(cleanRelay(' https://relay.example.com/ ')).toBe('https://relay.example.com');
+		expect(cleanRelay('http://relay.example.com')).toBe('');
+		expect(cleanRelay('not a url')).toBe('');
+		expect(cleanRelay('')).toBe('');
 	});
 
 	it('checks cursor messages', () => {

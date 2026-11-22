@@ -532,8 +532,12 @@ async fn bind(id: &Identity, relays: &Relays) -> Result<Endpoint> {
                 .iter()
                 .map(|u| u.parse::<RelayUrl>().map_err(|e| err(format!("{u}: {e}"))))
                 .collect::<Result<Vec<_>>>()?;
-            Endpoint::builder(presets::Minimal)
-                .relay_mode(RelayMode::Custom(urls.into_iter().collect::<RelayMap>()))
+            let b = Endpoint::builder(presets::Minimal)
+                .relay_mode(RelayMode::Custom(urls.into_iter().collect::<RelayMap>()));
+            // tests run their own relay, with a self-signed certificate
+            #[cfg(test)]
+            let b = b.ca_tls_config(iroh::tls::CaTlsConfig::insecure_skip_verify());
+            b
         }
         Relays::Off => Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled),
     };
@@ -983,6 +987,78 @@ mod tests {
         assert!(e.0.contains("isn't valid"), "{e}");
         assert_eq!(host.members().len(), 1);
         host.close().await;
+    }
+}
+
+/// Through our own relay (a relay server run in the test, as on the VPS): members that know
+/// each other only by id and relay find each other.
+#[cfg(test)]
+mod own_relay {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn joins_and_hands_over_through_our_own_relay() {
+        let (_map, url, _server) = iroh::test_utils::run_relay_server().await.unwrap();
+        let relays = Relays::Custom(vec![url.to_string()]);
+        let mut h = Session::host(&Identity::generate(), "Host", relays.clone())
+            .await
+            .unwrap();
+        let invite = h.invite();
+        let via: Vec<String> = invite.addrs[0]
+            .relay_urls()
+            .map(|u| u.to_string())
+            .collect();
+        assert_eq!(via, [url.to_string()], "the code points at our relay");
+        assert_eq!(invite.addrs[0].ip_addrs().count(), 0);
+        let code = invite.encode();
+        let a = Session::join(
+            &Identity::generate(),
+            &Invite::decode(&code).unwrap(),
+            "Ana",
+            relays.clone(),
+        )
+        .await
+        .unwrap();
+        let mut b = Session::join(
+            &Identity::generate(),
+            &Invite::decode(&code).unwrap(),
+            "Bo",
+            relays,
+        )
+        .await
+        .unwrap();
+        a.edit(json!("a")).unwrap();
+        for s in [&mut h, &mut b] {
+            loop {
+                if let Some(Event::Edit { seq, .. }) =
+                    tokio::time::timeout(Duration::from_secs(20), s.next_event())
+                        .await
+                        .unwrap()
+                {
+                    assert_eq!(seq, 1);
+                    break;
+                }
+            }
+        }
+        h.close().await;
+        b.edit(json!("b")).unwrap();
+        loop {
+            match tokio::time::timeout(Duration::from_secs(30), b.next_event())
+                .await
+                .unwrap()
+            {
+                Some(Event::Edit { seq: 2, body, .. }) => {
+                    assert_eq!(body, json!("b"));
+                    break;
+                }
+                Some(Event::Closed { reason }) => panic!("{reason}"),
+                _ => {}
+            }
+        }
+        assert!(a.is_host());
+        a.close().await;
+        b.close().await;
     }
 }
 

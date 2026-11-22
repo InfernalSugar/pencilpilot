@@ -479,9 +479,10 @@ async fn share_host(
     app: AppHandle,
     state: State<'_, share::Sharing>,
     name: String,
+    relay: Option<String>,
 ) -> Result<share::Info, String> {
     let data = data_dir(&app)?;
-    state.host(app, &data, &name).await
+    state.host(app, &data, &name, relay.as_deref()).await
 }
 
 /// Join a session from an invite code.
@@ -491,9 +492,10 @@ async fn share_join(
     state: State<'_, share::Sharing>,
     code: String,
     name: String,
+    relay: Option<String>,
 ) -> Result<share::Info, String> {
     let data = data_dir(&app)?;
-    state.join(app, &data, &code, &name).await
+    state.join(app, &data, &code, &name, relay.as_deref()).await
 }
 
 /// The session in progress, if any.
