@@ -21,7 +21,9 @@ use hokusai::tile::empty_tile;
 use hokusai::{Brush, BrushSetting, BrushState, TILE_SIZE, TilePixels, TiledSurface};
 
 pub mod adjust;
+mod clone;
 pub mod layers;
+mod select;
 pub mod texture;
 
 pub use layers::{Blend, LayerProps};
@@ -48,6 +50,8 @@ pub struct UndoSurface {
     touched: HashSet<TileKey>,
     /// grain / tip / dual brush for the stroke being painted (see [`texture`])
     style: Option<std::sync::Arc<texture::DabStyle>>,
+    /// a clone stroke: where its dabs copy from (see [`clone`])
+    clone: Option<std::sync::Arc<clone::CloneSource>>,
 }
 
 impl UndoSurface {
@@ -90,6 +94,9 @@ impl TiledSurface for UndoSurface {
     /// libmypaint's dab, then (with a texture) each pixel's change scaled by
     /// how much the grain / tip / dual brush lets through there.
     fn draw_dab(&mut self, dab: &hokusai::Dab) -> bool {
+        if let Some(src) = self.clone.clone() {
+            return clone::clone_dab(self, dab, &src);
+        }
         let Some(style) = self.style.clone() else {
             return hokusai::brushmodes::draw_dab_default(self, dab);
         };
@@ -270,6 +277,7 @@ impl Clone for UndoSurface {
             dirty: HashSet::new(),
             touched: HashSet::new(),
             style: None,
+            clone: None,
         }
     }
 }
@@ -1539,6 +1547,7 @@ impl Painter {
         self.clip_to_selection(id);
         let snap = self.layers.iter_mut().find(|l| l.id == id).and_then(|l| {
             l.surface.style = None;
+            l.surface.clone = None;
             l.surface.recording.take()
         });
         self.state.reset();
@@ -1561,6 +1570,7 @@ impl Painter {
         };
         if let Some(l) = self.layers.iter_mut().find(|l| l.id == id) {
             l.surface.style = None;
+            l.surface.clone = None;
             if let Some(snap) = l.surface.recording.take() {
                 l.surface.swap_in(snap);
             }

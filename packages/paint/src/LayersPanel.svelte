@@ -30,6 +30,8 @@
 		moveGroup(id: number, up: boolean): void;
 		/** drawing assist on a layer (strokes snap to the guides) */
 		setLayerAssist?(id: number, on: boolean): void;
+		/** select what's on a layer; `op` 0 replace, 1 add, 2 subtract, 3 intersect */
+		selectLayerContents?(id: number, op?: number): void;
 	}
 </script>
 
@@ -122,6 +124,18 @@
 	let dragging = $state<number | null>(null);
 	let dropAt = $state<number | null>(null);
 	/** preview canvases by layer id (not reactive state: written by the action below) */
+	/**
+	 * Ctrl/⌘+click a layer: select what's on it (as in Photoshop). With Shift it adds
+	 * to the selection, with Alt it takes away, with both it keeps what's in both.
+	 */
+	function contentsClick(e: MouseEvent, id: number): boolean {
+		if (!(e.ctrlKey || e.metaKey) || !controls?.selectLayerContents) return false;
+		e.preventDefault();
+		const op = e.shiftKey && e.altKey ? 3 : e.shiftKey ? 1 : e.altKey ? 2 : 0;
+		controls.selectLayerContents(id, op);
+		return true;
+	}
+
 	const thumbs: Record<number, HTMLCanvasElement> = {};
 	const maskThumbs: Record<number, HTMLCanvasElement> = {};
 
@@ -394,6 +408,16 @@
 						Drawing assist
 					</button>
 				{/if}
+				{#if controls?.selectLayerContents}
+					<button
+						type="button"
+						class="chip"
+						title="Select what's on this layer (or Ctrl+click its picture)"
+						onclick={() => controls?.selectLayerContents?.(active.id)}
+					>
+						Select contents
+					</button>
+				{/if}
 				{#if active.group}
 					<button
 						type="button"
@@ -610,6 +634,7 @@
 							</svg>
 						</button>
 					{:else}
+						<!-- (Ctrl+click: select its contents; the name button does the same from the keyboard) -->
 						<canvas
 							class="thumb"
 							width={TW}
@@ -617,6 +642,8 @@
 							style="width:{TW}px;height:{TH}px"
 							use:thumb={l.id}
 							aria-hidden="true"
+							title="Ctrl+click: select what's on this layer"
+							onclick={(e) => contentsClick(e, l.id) || pickLayer(l.id)}
 						></canvas>
 					{/if}
 					{#if l.mask}
@@ -660,7 +687,9 @@
 							class="name"
 							aria-current={l.id === status.active ? 'true' : undefined}
 							title="Select · double-click to rename"
-							onclick={() => (l.editingMask ? controls?.editMask(l.id, false) : pickLayer(l.id))}
+							onclick={(e) =>
+								contentsClick(e, l.id) ||
+								(l.editingMask ? controls?.editMask(l.id, false) : pickLayer(l.id))}
 							ondblclick={() => (renaming = l.id)}
 							onkeydown={(e) => {
 								if (e.key === 'F2') renaming = l.id;

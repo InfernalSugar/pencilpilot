@@ -2856,6 +2856,7 @@
 		'lasso-fill': 'lasso-fill',
 		measure: 'measure',
 		smudge: 'smudge',
+		clone: 'clone',
 		pen: 'pen',
 		transform: 'transform',
 		liquify: 'liquify',
@@ -3284,6 +3285,10 @@
 					selectShape={toolOpts.selectShape}
 					wandTolerance={toolOpts.wandTolerance}
 					wandContiguous={toolOpts.wandContiguous}
+					wandAllLayers={toolOpts.wandAllLayers}
+					cloneAligned={toolOpts.cloneAligned}
+					cloneAllLayers={toolOpts.cloneAllLayers}
+					cloneHeal={toolOpts.cloneHeal}
 					liquifySize={toolOpts.liquifySize}
 					liquifyStrength={toolOpts.liquifyStrength}
 					smudgeStrength={toolOpts.smudgeStrength}

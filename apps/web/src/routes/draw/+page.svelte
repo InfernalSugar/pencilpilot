@@ -143,6 +143,7 @@
 		| 'lasso-fill'
 		| 'measure'
 		| 'smudge'
+		| 'clone'
 		| 'pen';
 	let tool = $state<Tool>('brush');
 	// paste a picture (Ctrl+V) to import it as a layer
@@ -771,6 +772,7 @@
 		else if (!mod && k === 'f') tool = tool === 'lasso-fill' ? 'brush' : 'lasso-fill';
 		else if (!mod && k === 'u') tool = tool === 'measure' ? 'brush' : 'measure';
 		else if (!mod && k === 's') tool = tool === 'smudge' ? 'brush' : 'smudge';
+		else if (!mod && k === 'j') tool = tool === 'clone' ? 'brush' : 'clone';
 		else if (!mod && k === 'p') tool = tool === 'pen' ? 'brush' : 'pen';
 		else if (tool === 'pen' && e.key === 'Enter') {
 			if (canvas?.penStroke(toolOpts.penTaper)) canvas.penClear();
@@ -1509,6 +1511,10 @@
 						selectShape={toolOpts.selectShape}
 						wandTolerance={toolOpts.wandTolerance}
 						wandContiguous={toolOpts.wandContiguous}
+						wandAllLayers={toolOpts.wandAllLayers}
+						cloneAligned={toolOpts.cloneAligned}
+						cloneAllLayers={toolOpts.cloneAllLayers}
+						cloneHeal={toolOpts.cloneHeal}
 						liquifySize={toolOpts.liquifySize}
 						liquifyStrength={toolOpts.liquifyStrength}
 						smudgeStrength={toolOpts.smudgeStrength}

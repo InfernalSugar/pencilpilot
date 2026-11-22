@@ -13,6 +13,7 @@
 		| 'liquify'
 		| 'gradient'
 		| 'smudge'
+		| 'clone'
 		| 'pen'
 		| 'adjust';
 	export const ALL_TOOLS: ToolId[] = [
@@ -28,6 +29,7 @@
 		'liquify',
 		'gradient',
 		'smudge',
+		'clone',
 		'pen',
 		'measure',
 		'adjust'
@@ -250,6 +252,33 @@
 					<path d="M9 11V5a2 2 0 0 1 4 0v5" /><path
 						d="M13 10V8a2 2 0 0 1 4 0v4c0 5-3 9-7 9-3 0-5-2-6-5l-1-3a1.6 1.6 0 0 1 3-1l2 3"
 					/>
+				</svg>
+			</button>
+		{/if}
+		{#if has('clone')}
+			<button
+				type="button"
+				class="tool"
+				aria-pressed={tool === 'clone'}
+				aria-label="Clone ({key('clone', 'J')})"
+				title="Clone ({key(
+					'clone',
+					'J'
+				)}): Alt+click where to copy from, then paint it here; Heal blends it in"
+				onclick={() => (tool = tool === 'clone' ? 'brush' : 'clone')}
+			>
+				<svg
+					width="22"
+					height="22"
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="2.3"
+					stroke-linecap="round"
+					stroke-linejoin="round"
+					aria-hidden="true"
+				>
+					<path d="M10 3h4v6l4 3v3H6v-3l4-3Z" /><path d="M5 19h14" />
 				</svg>
 			</button>
 		{/if}
