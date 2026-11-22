@@ -11,6 +11,7 @@
 		saveSettings,
 		settings
 	} from '#lib/settings.svelte.js';
+	import { cleanRelay } from '#lib/share.js';
 	import {
 		ACTIONS,
 		clashes,
@@ -205,6 +206,31 @@
 		{#if dataFolder}
 			<p class="hint">Recovery copies, versions and settings live in <code>{dataFolder}</code>.</p>
 		{/if}
+	</section>
+
+	<section aria-labelledby="together-h">
+		<h2 id="together-h">Drawing together</h2>
+		<label class="row">
+			<span>Your name</span>
+			<input maxlength="24" placeholder="What others see" bind:value={settings.shareName} />
+		</label>
+		<label class="row">
+			<span>Relay</span>
+			<input
+				placeholder="Default (iroh’s public relays)"
+				aria-invalid={!!settings.shareRelay.trim() && !cleanRelay(settings.shareRelay)}
+				bind:value={settings.shareRelay}
+			/>
+		</label>
+		{#if settings.shareRelay.trim() && !cleanRelay(settings.shareRelay)}
+			<p class="hint">That isn’t an https address: the default relays are used.</p>
+		{/if}
+		<p class="hint">
+			The relay introduces the apps of people drawing together and carries their drawing when they
+			can’t connect directly. It’s encrypted; the relay can’t see what you draw. Leave it empty for
+			the default, or give your own (see <code>deploy/relay</code>). Solo projects never connect to
+			anything.
+		</p>
 	</section>
 </main>
 

@@ -22,6 +22,8 @@ export interface Settings {
 	versionsKept: number;
 	/** the name others see when drawing together */
 	shareName: string;
+	/** our own relay for drawing together ('' = the default) */
+	shareRelay: string;
 }
 
 export const AUTOSAVE_CHOICES = [0, 10, 20, 60, 300];
@@ -34,7 +36,8 @@ export const DEFAULTS: Settings = {
 	projectFolder: null,
 	autosaveSeconds: 20,
 	versionsKept: 20,
-	shareName: ''
+	shareName: '',
+	shareRelay: ''
 };
 
 /** Saved settings, cleaned: anything missing or wrong falls back to the default. */
@@ -54,7 +57,8 @@ export function cleanSettings(raw: unknown): Settings {
 			? (o.autosaveSeconds as number)
 			: DEFAULTS.autosaveSeconds,
 		versionsKept: int(o.versionsKept, DEFAULTS.versionsKept, 0, 100),
-		shareName: typeof o.shareName === 'string' ? o.shareName.slice(0, 24) : ''
+		shareName: typeof o.shareName === 'string' ? o.shareName.slice(0, 24) : '',
+		shareRelay: typeof o.shareRelay === 'string' ? o.shareRelay.slice(0, 200) : ''
 	};
 }
 

@@ -53,9 +53,12 @@ enum Cmd {
     Leave(oneshot::Sender<()>),
 }
 
-/// Relays: `PENCILPILOT_RELAY` (comma-separated URLs, our own), `off` (same network only),
-/// or iroh's public relays.
-fn relays() -> Relays {
+/// Relays: the app's setting (our own relay's URL), else `PENCILPILOT_RELAY`
+/// (comma-separated URLs, or `off`: same network only), else iroh's public relays.
+fn relays(setting: Option<&str>) -> Relays {
+    if let Some(url) = setting.map(str::trim).filter(|u| !u.is_empty()) {
+        return Relays::Custom(vec![url.to_string()]);
+    }
     match std::env::var("PENCILPILOT_RELAY") {
         Ok(v) if v.trim() == "off" => Relays::Off,
         Ok(v) if !v.trim().is_empty() => {
@@ -78,10 +81,16 @@ fn identity(data: &Path) -> Result<Identity, String> {
 }
 
 impl Sharing {
-    pub async fn host(&self, app: AppHandle, data: &Path, name: &str) -> Result<Info, String> {
+    pub async fn host(
+        &self,
+        app: AppHandle,
+        data: &Path,
+        name: &str,
+        relay: Option<&str>,
+    ) -> Result<Info, String> {
         self.leave().await;
         let id = identity(data)?;
-        let s = Session::host(&id, name, relays())
+        let s = Session::host(&id, name, relays(relay))
             .await
             .map_err(|e| e.to_string())?;
         Ok(self.start(app, s).await)
@@ -93,11 +102,12 @@ impl Sharing {
         data: &Path,
         code: &str,
         name: &str,
+        relay: Option<&str>,
     ) -> Result<Info, String> {
         let invite = Invite::decode(code).map_err(|e| e.to_string())?;
         self.leave().await;
         let id = identity(data)?;
-        let s = Session::join(&id, &invite, name, relays())
+        let s = Session::join(&id, &invite, name, relays(relay))
             .await
             .map_err(|e| e.to_string())?;
         Ok(self.start(app, s).await)
@@ -273,5 +283,20 @@ mod tests {
         });
         let e = sharing.solo_only().await.unwrap_err();
         assert!(e.contains("solo"), "{e}");
+    }
+}
+
+#[cfg(test)]
+mod relay_tests {
+    use super::*;
+
+    #[test]
+    fn the_setting_picks_our_relay() {
+        assert_eq!(
+            relays(Some(" https://relay.example.com ")),
+            Relays::Custom(vec!["https://relay.example.com".into()])
+        );
+        // empty: the environment or iroh's public relays
+        assert_ne!(relays(Some("")), Relays::Custom(vec![String::new()]));
     }
 }
