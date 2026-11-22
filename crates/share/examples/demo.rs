@@ -7,11 +7,19 @@
 //! (so the app gets going), and prints what the others do, briefly (an edit's kind, layer
 //! and number of tiles, not its pixels). Paste the printed code into the app's
 //! **Draw together → Join**. `PENCILPILOT_RELAY=off` keeps it on this network.
+//!
+//! Drawing together needs a sign-in pass: the demo signs its own with the website's
+//! development key (the one `pnpm --filter @pencilpilot/web dev` uses when
+//! `PASS_SIGNING_KEY` isn't set), which a debug build of the app trusts. Give another key
+//! (64 hex characters) in `PASS_SIGNING_KEY` to match a site that has its own.
 
 use std::time::Duration;
 
-use pencilpilot_share::{Event, Identity, Invite, Relays, Session};
+use pencilpilot_share::{Event, Identity, Invite, Pass, PassInfo, Relays, SecretKey, Session};
 use serde_json::{Value, json};
+
+/// The website's development signing key (public knowledge: development only).
+const DEV_SEED: &str = "62e1111add10abf5114b66e2caee869c95d97cf13b95d154524efcfee558cbf6";
 
 /// An edit, in a line.
 fn brief(body: &Value) -> String {
@@ -49,10 +57,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => Relays::Iroh,
     };
     let id = Identity::generate();
+    let seed = std::env::var("PASS_SIGNING_KEY").unwrap_or_else(|_| DEV_SEED.into());
+    let seed: [u8; 32] = data_encoding::HEXLOWER_PERMISSIVE
+        .decode(seed.trim().as_bytes())?
+        .try_into()
+        .map_err(|_| "PASS_SIGNING_KEY: 64 hex characters")?;
+    let site = SecretKey::from_bytes(&seed);
+    let now = pencilpilot_share::now();
+    let pass = Pass::sign(
+        &site,
+        &PassInfo {
+            user: "u_demo".into(),
+            name: "Demo".into(),
+            endpoint: id.id(),
+            issued: now,
+            expires: now + 24 * 3600,
+        },
+    );
+    let site = site.public();
     let mut s = match std::env::args().nth(1) {
-        Some(code) => Session::join(&id, &Invite::decode(&code)?, "Demo", relays).await?,
+        Some(code) => Session::join(&id, &Invite::decode(&code)?, &pass, &site, relays).await?,
         None => {
-            let s = Session::host(&id, "Demo", relays).await?;
+            let s = Session::host(&id, &pass, &site, relays).await?;
             println!("Invite code:\n\n{}\n", s.invite().encode());
             s
         }

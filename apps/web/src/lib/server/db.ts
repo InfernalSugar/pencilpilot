@@ -109,7 +109,26 @@ const MIGRATIONS: string[] = [
 		created_at INTEGER NOT NULL,
 		PRIMARY KEY (day, user_id)
 	);
-	CREATE INDEX daily_user ON daily_scores(user_id, day);`
+	CREATE INDEX daily_user ON daily_scores(user_id, day);`,
+	// the desktop app linked to an account, for drawing together (lib/server/applink.ts):
+	// one-time codes on the way, then the app's token. Only hashes are stored.
+	`CREATE TABLE app_link_codes (
+		id TEXT PRIMARY KEY,
+		user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		challenge TEXT NOT NULL,
+		redirect_uri TEXT NOT NULL,
+		label TEXT NOT NULL,
+		expires_at INTEGER NOT NULL
+	);
+	CREATE TABLE app_links (
+		id TEXT PRIMARY KEY,
+		token_hash TEXT NOT NULL UNIQUE,
+		user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		label TEXT NOT NULL,
+		created_at INTEGER NOT NULL,
+		last_used_at INTEGER
+	);
+	CREATE INDEX app_links_user ON app_links(user_id);`
 ];
 
 export function openDb(path: string): DB {

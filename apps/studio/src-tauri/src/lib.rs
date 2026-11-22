@@ -2,9 +2,11 @@
 //!
 //! The studio runs in the window (the paint engine as WebAssembly for now). Here: saving
 //! and opening `.ppstudio` projects (see [`project`]), recovery copies and version
-//! history ([`store`]), drawing together peer to peer ([`share`]), exports, and later the native engine (crates/brush) and the
+//! history ([`store`]), drawing together peer to peer ([`share`], signed in with a
+//! PencilPilot account: [`account`]), exports, and later the native engine (crates/brush) and the
 //! animation core (crates/anim).
 
+mod account;
 mod export;
 mod lipsync;
 mod project;
@@ -473,29 +475,66 @@ fn bench_report(app: AppHandle, report: String) {
     }
 }
 
-/// Host a drawing-together session: the invite to share, who's here.
+/// Who this app is signed in as (a PencilPilot account), if anyone.
+#[tauri::command]
+async fn account_status(
+    app: AppHandle,
+    account: State<'_, account::Account>,
+) -> Result<Option<account::Status>, String> {
+    Ok(account.status(&data_dir(&app)?).await)
+}
+
+/// Sign in with PencilPilot: the browser opens at the website; done once the person has
+/// confirmed there.
+#[tauri::command]
+async fn account_sign_in(
+    app: AppHandle,
+    account: State<'_, account::Account>,
+) -> Result<account::Status, String> {
+    account.sign_in(&data_dir(&app)?).await
+}
+
+/// Stop a sign-in that's waiting for the browser.
+#[tauri::command]
+fn account_cancel(account: State<'_, account::Account>) {
+    account.cancel();
+}
+
+/// Sign out: the app forgets its token (and the website revokes it, when online).
+#[tauri::command]
+async fn account_sign_out(
+    app: AppHandle,
+    account: State<'_, account::Account>,
+) -> Result<(), String> {
+    account.sign_out(&data_dir(&app)?).await;
+    Ok(())
+}
+
+/// Host a drawing-together session: the invite to share, who's here. Needs a sign-in.
 #[tauri::command]
 async fn share_host(
     app: AppHandle,
     state: State<'_, share::Sharing>,
-    name: String,
+    account: State<'_, account::Account>,
     relay: Option<String>,
 ) -> Result<share::Info, String> {
     let data = data_dir(&app)?;
-    state.host(app, &data, &name, relay.as_deref()).await
+    state.host(app, &data, &account, relay.as_deref()).await
 }
 
-/// Join a session from an invite code.
+/// Join a session from an invite code. Needs a sign-in.
 #[tauri::command]
 async fn share_join(
     app: AppHandle,
     state: State<'_, share::Sharing>,
+    account: State<'_, account::Account>,
     code: String,
-    name: String,
     relay: Option<String>,
 ) -> Result<share::Info, String> {
     let data = data_dir(&app)?;
-    state.join(app, &data, &code, &name, relay.as_deref()).await
+    state
+        .join(app, &data, &code, &account, relay.as_deref())
+        .await
 }
 
 /// Come back to a shared project: join a member who's online, or host it again.
@@ -503,14 +542,14 @@ async fn share_join(
 async fn share_rejoin(
     app: AppHandle,
     state: State<'_, share::Sharing>,
+    account: State<'_, account::Account>,
     code: String,
     addrs: Vec<serde_json::Value>,
-    name: String,
     relay: Option<String>,
 ) -> Result<share::Info, String> {
     let data = data_dir(&app)?;
     state
-        .rejoin(app, &data, &code, addrs, &name, relay.as_deref())
+        .rejoin(app, &data, &code, addrs, &account, relay.as_deref())
         .await
 }
 
@@ -582,6 +621,7 @@ pub fn run() {
         .manage(LipSync::default())
         .manage(VideoIn::default())
         .manage(share::Sharing::default())
+        .manage(account::Account::default())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // PP_BENCH=1: open the engine benchmark straight away
@@ -634,6 +674,10 @@ pub fn run() {
             frames_get,
             frames_retain,
             frames_stats,
+            account_status,
+            account_sign_in,
+            account_cancel,
+            account_sign_out,
             share_host,
             share_join,
             share_rejoin,

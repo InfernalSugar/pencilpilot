@@ -103,6 +103,37 @@
 		</Tile>
 
 		<Tile span={2}>
+			<h2>PencilPilot app</h2>
+			<p class="muted">
+				Apps linked to your account can draw together as you (people you draw with see your name).
+				Unlink one you no longer use, or don’t recognise.
+			</p>
+			{#if data.apps.length}
+				<ul class="apps">
+					{#each data.apps as a (a.id)}
+						<li>
+							<span class="grow">
+								<b>{a.label}</b>
+								<span class="muted">
+									linked {new Date(a.created_at).toLocaleDateString()}{a.last_used_at
+										? ` · last used ${new Date(a.last_used_at).toLocaleDateString()}`
+										: ''}
+								</span>
+							</span>
+							<form method="POST" action="?/unlink" use:enhance>
+								<input type="hidden" name="id" value={a.id} />
+								<Button type="submit" variant="outline">Unlink</Button>
+							</form>
+						</li>
+					{/each}
+				</ul>
+			{:else}
+				<p class="muted">No apps linked. In the app: Draw together → Sign in with PencilPilot.</p>
+			{/if}
+			{#if form?.saved === 'unlinked'}<p class="ok" role="status">Unlinked.</p>{/if}
+		</Tile>
+
+		<Tile span={2}>
 			<h2>Your data</h2>
 			<p class="muted">Everything we store about you: your email, name and practice history.</p>
 			<div class="row">
@@ -220,5 +251,23 @@
 		margin: 0;
 		color: var(--pp-cat-env);
 		font-weight: 600;
+	}
+	.apps {
+		margin: 0;
+		padding: 0;
+		list-style: none;
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+	}
+	.apps li {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 12px;
+	}
+	.apps .grow {
+		display: flex;
+		flex-direction: column;
 	}
 </style>

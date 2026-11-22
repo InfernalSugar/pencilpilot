@@ -20,8 +20,6 @@ export interface Settings {
 	autosaveSeconds: number;
 	/** earlier versions kept per project (0 = none) */
 	versionsKept: number;
-	/** the name others see when drawing together */
-	shareName: string;
 	/** our own relay for drawing together ('' = the default) */
 	shareRelay: string;
 }
@@ -36,7 +34,6 @@ export const DEFAULTS: Settings = {
 	projectFolder: null,
 	autosaveSeconds: 20,
 	versionsKept: 20,
-	shareName: '',
 	shareRelay: ''
 };
 
@@ -57,7 +54,6 @@ export function cleanSettings(raw: unknown): Settings {
 			? (o.autosaveSeconds as number)
 			: DEFAULTS.autosaveSeconds,
 		versionsKept: int(o.versionsKept, DEFAULTS.versionsKept, 0, 100),
-		shareName: typeof o.shareName === 'string' ? o.shareName.slice(0, 24) : '',
 		shareRelay: typeof o.shareRelay === 'string' ? o.shareRelay.slice(0, 200) : ''
 	};
 }

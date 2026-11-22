@@ -9,6 +9,8 @@
 //!   credits are tied to it.
 //! - [`Invite`]: the code a member shares: the project, the host's address and the
 //!   project's secret, which proves a joiner was invited.
+//! - [`Pass`]: the website's signed word that a computer belongs to a PencilPilot account.
+//!   Drawing together needs one: members check each other's, and names come from them.
 //! - [`Session`]: the live connection. One member's app is the **host**: everyone connects
 //!   to it, it numbers every edit and passes it on, so all apps apply edits in the same
 //!   order. Cursors (presence) go as datagrams: unreliable, newest wins, never stored.
@@ -18,17 +20,22 @@
 
 mod identity;
 mod invite;
+mod pass;
 mod session;
 mod wire;
 
 pub use identity::Identity;
 pub use invite::Invite;
 pub use iroh::{EndpointAddr, SecretKey};
+pub use pass::{Pass, PassInfo, SiteKey, now, site_key};
 pub use session::{Event, Member, Relays, Session};
 pub use wire::Signed;
 
 /// The protocol's name in the connection handshake. Apps with another version don't connect.
-pub const ALPN: &[u8] = b"pencilpilot/share/1";
+/// (2: joining carries a sign-in pass.)
+pub const ALPN: &[u8] = b"pencilpilot/share/2";
+/// The protocol before passes: an app on it is told to update.
+pub(crate) const ALPN_V1: &[u8] = b"pencilpilot/share/1";
 
 /// What went wrong, in words the app can show.
 #[derive(Debug, Clone, PartialEq, Eq)]

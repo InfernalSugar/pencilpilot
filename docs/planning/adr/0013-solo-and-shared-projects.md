@@ -172,11 +172,11 @@ How they sync:
 - **Joining** shows a short note: the work is shared, every member may use and export it,
   and credits travel with it. (This wording needs a legal check, see the questions.)
 
-### Identity and joining (no accounts)
+### Identity and joining
 
 - **Identity is a key per computer** (`Identity`): made on first use, kept readable only
   by the user, never sent. Its public half is the member's id; every change and credit
-  is tied to it. Your name is what you type the first time.
+  is tied to it. Your name comes from your PencilPilot account (see below).
 - **Inviting:** any member's app shows an **invite code** (`pp1-…`, about 140 characters)
   to send however you like. It holds the project's secret (the project's id is derived
   from it) and who to ask: the code's maker, then the host, each by id and relay. Home IP
@@ -187,8 +187,46 @@ How they sync:
 - **Removing a member:** the project's creator makes a new secret (old codes stop
   working) and the apps stop accepting that member's id. Their layers stay, since the work
   belongs to everyone, but they can't draw any more.
-- Later, optionally: link an identity to a website account, for a profile and credits
-  across devices.
+
+### Sign-in and passes (decided 2026-11-23)
+
+The owner's rule: **drawing together needs a PencilPilot account** (the website's). Solo
+stays fully offline and never asks for one.
+
+- **Linking the app** (the usual way for desktop apps, RFC 8252 with PKCE): Draw together
+  (or Settings → Drawing together) → **Sign in with PencilPilot**. The shell listens on
+  `http://127.0.0.1:{free port}/linked` and opens the system browser at the site's
+  `/app/link`. The person signs in there (email or Google) and confirms **Link this
+  PencilPilot app** (choosing the name others see). The browser comes back to the app with
+  a one-time code (5 minutes, used up by the first try); the shell trades it, with a secret
+  only it knows, for a long-lived **app token**. The token is kept in the app's data folder,
+  readable only by the user (as the computer's key is); the site keeps only its hash.
+  **Sign out** forgets it and revokes it; the site's Account page lists linked apps and
+  unlinks them.
+- **Passes:** before hosting or joining, the shell asks the site (`POST /api/app/pass`,
+  with the token) for a pass: `{account id, display name, this computer's member id,
+  issued, expires (24 h)}`, signed with the site's ed25519 key (`PASS_SIGNING_KEY`). The
+  app has the site's public key built in. It asks again when the one kept has under an hour
+  left. A pass carries no email.
+- **Checked by the members, not a server:** the join handshake carries the joiner's pass;
+  the host checks it (the site's signature, not expired, made for the connecting
+  computer's id) and refuses without a good one. The welcome carries the members with
+  their passes; a joiner refuses a host without a good one. **Names in a session come from
+  passes**: the free-text name is gone.
+- **A pass is needed to join, not to stay:** one that runs out mid-session doesn't put
+  anyone out, and members coming back to a new host after a hand-over are let in with an
+  expired pass (still signed, still for their computer). Rejoining a project later needs a
+  fresh one.
+- **Offline:** no pass, no hosting or joining; the dialog says to sign in, and why.
+- **Versions:** the protocol is now `pencilpilot/share/2`. An app on `/1` is told to
+  update; a new app reaching an old one says everyone needs the latest app.
+- **Configuration:** the site needs `PASS_SIGNING_KEY` (a 32-byte ed25519 seed in hex;
+  `node apps/web/scripts/pass-key.mjs` makes a pair). The app is built with
+  `PENCILPILOT_SITE_URL` (the site's address) and `PENCILPILOT_PASS_KEY` (the public half);
+  `PENCILPILOT_SITE` and `PENCILPILOT_PASS_KEY` override them when it runs. Debug builds
+  default to the local dev server (`http://localhost:5173`) and the development key, which
+  the dev server uses when `PASS_SIGNING_KEY` isn't set. A release build without them
+  can't draw together.
 
 ### Going offline and coming back
 
@@ -232,7 +270,8 @@ How they sync:
 ## Questions for the owner
 
 1. ~~Where it runs~~: peer to peer over iroh (decided 2026-11-22).
-2. ~~Guests~~: no accounts needed; a key per computer (decided with peer to peer).
+2. ~~Guests~~: a key per computer (decided with peer to peer); since 2026-11-23 drawing
+   together also needs a PencilPilot account (see "Sign-in and passes").
 3. **Owner away:** when a layer's owner is offline and someone asks to draw there, who can
    say yes? The project's creator? An automatic yes after some time? Nobody until they're
    back?
