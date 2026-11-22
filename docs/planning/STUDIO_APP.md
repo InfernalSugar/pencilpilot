@@ -204,6 +204,22 @@ colour flats and lip-sync are free (local).
 - **S11-T05** Licence review of every model and dependency; privacy policy for the app `legal`
 - **S11-T06** Closed beta with a few animators; fix list; v1.0 `app`
 
+## S12 — Solo and shared projects (≈6–8 weeks)
+Two kinds of project: **solo** (private, on your computer, as today) and **shared** (several
+people drawing live, the work and the credits belong to everyone). Design:
+[ADR-0013](adr/0013-solo-and-shared-projects.md).
+- **S12-T01** Solo stays private, provably: start screen with **My projects** / **Shared projects**; a test that fails if the window's CSP gains a network origin; the shell opens no connection for a solo project; **Share a copy…** leaves the private original untouched `app`
+- **S12-T02** Sign in from the app: the website's sign-in in the browser, the token back through a `pencilpilot://` link (or localhost), kept in the OS keychain `app` `infra`
+- **S12-T03** The shared-project server on the website's Node server: projects, members, invites (link / code), layer access, the numbered change log (SQLite) and tiles by hash on disk; snapshots and clean-up `infra`
+- **S12-T04** The engine for shared mode: the tile hashes a change touched; put in other people's tiles outside the local undo; layers you can't draw on are locked; undo kept per layer you can draw on `brush`
+- **S12-T05** Live layers on one frame: live strokes as previews, tile changes as the record, late joiners load hashes then tiles near the playhead `app` `brush`
+- **S12-T06** Layer access: owner, the people allowed to draw, **Ask to draw here** → let them / hand it over / no, take it back; adding layers as in solo `app` `design`
+- **S12-T07** Cursors and presence: named, coloured cursors (~20/s, newest wins), who is on which layer and frame, badges on the timeline, **Follow** `app` `design`
+- **S12-T08** The timeline and project shared: layers, groups, masks, scenes, cuts, frames, exposures, marks, transitions, dialogue and sound as small edits in the server's order (later wins; destructive edits to others' work refused) `anim` `infra`
+- **S12-T09** Your own undo (never someone else's; refuses to wipe work drawn over since), going offline and back (queued changes; drawing on a layer you lost becomes a new layer of yours) `app` `brush`
+- **S12-T10** Credits: who made each change; a credits panel; credits in exports' metadata and an optional end card; any member exports or saves a solo copy with the credits `app` `anim`
+- **S12-T11** Limits and safety: 8 people, upload size per project, rate limits, removing a member, a load test (8 people drawing, 1080p), a security review, the joining note's wording (legal) `infra` `legal`
+
 ---
 
 ## Order and first usable version
