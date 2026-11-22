@@ -1878,3 +1878,26 @@ test('shift & trace: the onion skin’s drawings move to line up, then go back',
 	await tl.getByRole('button', { name: 'Onion skin settings' }).click();
 	await expect(pad).toHaveAttribute('aria-valuetext', '0, 0 px, 0°');
 });
+
+test('clone: Alt+click where to copy from, paint the copy, undo it', async ({ page }) => {
+	await stubTauri(page);
+	await ready(page);
+	for (let i = 0; i < 4; i++) await page.keyboard.press(']');
+	await scribble(page, 0.2);
+	await expect.poll(() => ink(page, 0, 0.4)).toBeGreaterThan(100);
+	expect(await ink(page, 0.5, 0.8)).toBe(0);
+	await page.keyboard.press('j');
+	await expect(page.getByRole('group', { name: 'Clone' })).toBeVisible();
+	await expect(page.getByTestId('clone-hint')).toBeVisible();
+	// the source: where the scribble starts; then the same stroke 40% lower
+	const b = (await canvas(page).boundingBox())!;
+	await page.keyboard.down('Alt');
+	await page.mouse.click(b.x + b.width * 0.2, b.y + b.height * 0.2);
+	await page.keyboard.up('Alt');
+	await expect(page.getByTestId('clone-hint')).toHaveCount(0);
+	await scribble(page, 0.6);
+	await expect.poll(() => ink(page, 0.5, 0.8)).toBeGreaterThan(100);
+	await expect(page.getByTestId('clone-source')).toBeVisible();
+	await page.keyboard.press('Control+z');
+	await expect.poll(() => ink(page, 0.5, 0.8)).toBe(0);
+});

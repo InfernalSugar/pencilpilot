@@ -20,6 +20,8 @@ export interface Stroke {
 	color?: string;
 	size?: number;
 	opacity?: number;
+	/** a Clone tool stroke: it copied from (dx, dy) away (healed, from all layers) */
+	clone?: { dx: number; dy: number; heal: boolean; all: boolean };
 	points: StrokePoint[];
 }
 
@@ -41,6 +43,7 @@ function labelOf(a: Action): string {
 	if (a.label) return a.label;
 	switch (a.kind) {
 		case 'stroke':
+			if (a.stroke.clone) return a.stroke.clone.heal ? 'Heal' : 'Clone';
 			return a.stroke.eraser ? 'Eraser' : 'Brush stroke';
 		case 'clear':
 			return 'Clear layer';
