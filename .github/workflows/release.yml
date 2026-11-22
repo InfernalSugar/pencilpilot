@@ -1,0 +1,56 @@
+name: Release
+
+# Publishes a preview release from installers the App workflow already built (no rebuild):
+# Actions → Release → Run workflow, with that App run's id. The installers aren't signed
+# yet (S11-T01), so Windows shows "Windows protected your PC": More info → Run anyway.
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: The App workflow run whose installers to publish
+        required: true
+      tag:
+        description: The release's tag (e.g. v0.1.0-preview.1)
+        required: true
+      systems:
+        description: Which installers (Windows, Linux, macOS), space-separated
+        default: Windows Linux
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Fetch the installers
+        run: |
+          sha=$(gh api "repos/$GH_REPO/actions/runs/${{ inputs.run_id }}" --jq '.conclusion + " " + .head_sha')
+          case "$sha" in success\ *) ;; *) echo "That run didn't succeed: $sha"; exit 1;; esac
+          echo "SHA=${sha#success }" >> "$GITHUB_ENV"
+          for s in ${{ inputs.systems }}; do
+            gh run download "${{ inputs.run_id }}" -n "PencilPilot-$s" -D "dl/$s"
+          done
+          mkdir out
+          find dl -type f \( -name '*.exe' -o -name '*.msi' -o -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' -o -name '*.dmg' \) -exec mv {} out/ \;
+          (cd out && sha256sum * > SHA256SUMS.txt && ls -la)
+      - name: Publish
+        run: |
+          cat > notes.md <<'EOF'
+          A preview of PencilPilot to try out, drawing together included (**Draw together** in the studio).
+
+          **Which file?**
+          - **Windows:** the `…_x64-setup.exe` (or the `.msi`). Windows will say "Windows protected your PC", because the app isn't signed yet: click **More info → Run anyway**. If Windows asks whether PencilPilot may use the network, allow it, so drawing together works.
+          - **Linux:** the `.AppImage` runs anywhere (make it executable, then open it); or the `.deb` (Ubuntu, Debian, Mint) or `.rpm` (Fedora, openSUSE).
+
+          **Drawing together:** one of you hosts (Draw together → Host) and sends the invite code or QR; the other pastes it into Draw together → Join. No router settings needed.
+
+          This is a preview: save often, and tell us what breaks.
+          EOF
+          gh release create "${{ inputs.tag }}" out/* --target "$SHA" --prerelease \
+            --title "PencilPilot ${{ inputs.tag }} (preview)" --notes-file notes.md
