@@ -62,6 +62,19 @@ class FakeCanvas implements CanvasPort {
 	select(id: number) {
 		this.selected = id;
 	}
+	removeLayer(id: number) {
+		if (this.busy) return false;
+		this.layerList = this.layerList.filter((l) => l.id !== id);
+		return true;
+	}
+	moveNextTo(id: number, ref: number, above: boolean) {
+		if (this.busy) return false;
+		const l = this.layerList.find((x) => x.id === id)!;
+		this.layerList = this.layerList.filter((x) => x.id !== id);
+		const r = this.layerList.findIndex((x) => x.id === ref);
+		this.layerList.splice(above ? r + 1 : r, 0, l);
+		return true;
+	}
 	layers() {
 		return this.layerList.map((l) => ({ id: l.id, name: l.name }));
 	}
@@ -266,5 +279,44 @@ describe('drawing together: apps', () => {
 		bc.busy = false;
 		await bo.localChanged();
 		expect(bc.pixel(bc.byName('Sky').id, 4, 4)).toBe(44);
+	});
+
+	it('deletes and moves shared layers for everyone (only their owner can)', async () => {
+		const session = new FakeSession();
+		const hc = new FakeCanvas(['Sky', 'Hills']);
+		const host = new Together(A, 'Ana', hc, session.net(A));
+		session.apps.set(A, host);
+		host.startHost();
+		await session.settle();
+		const bc = new FakeCanvas();
+		const bo = new Together(B, 'Bo', bc, session.net(B));
+		session.apps.set(B, bo);
+		bo.startJoin(A);
+		await session.settle();
+		const names = (c: FakeCanvas) => c.layerList.filter((l) => l.visible).map((l) => l.name);
+		expect(names(hc)).toEqual(['Sky', 'Hills', 'Bo’s layer']);
+		expect(names(bc)).toEqual(['Sky', 'Hills', 'Bo’s layer']);
+
+		// Bo can't move or delete Ana's layers
+		const sky = host.lidOf(hc.byName('Sky').id)!;
+		bo.net.edit({ k: 'remove', lid: sky });
+		await session.settle();
+		expect(names(bc)).toContain('Sky');
+
+		// Ana moves Sky to the top, everywhere
+		host.moveOwn(sky, 2);
+		await session.settle();
+		expect(names(hc)).toEqual(['Hills', 'Bo’s layer', 'Sky']);
+		expect(names(bc)).toEqual(['Hills', 'Bo’s layer', 'Sky']);
+
+		// and deletes Hills; Bo's canvas is mid-stroke, so it goes once he's done
+		bc.busy = true;
+		host.removeOwn(host.lidOf(hc.byName('Hills').id)!);
+		await session.settle();
+		expect(names(hc)).toEqual(['Bo’s layer', 'Sky']);
+		expect(names(bc)).toContain('Hills');
+		bc.busy = false;
+		await bo.localChanged();
+		expect(names(bc)).toEqual(['Bo’s layer', 'Sky']);
 	});
 });

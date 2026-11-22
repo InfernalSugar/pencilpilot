@@ -901,6 +901,20 @@ impl PaintCanvas {
     }
 
     /// Forget the undo/redo history.
+    /// Move a layer without an undo step (a shared layer someone else moved); then clear
+    /// the history.
+    #[wasm_bindgen(js_name = moveLayerSilent)]
+    pub fn move_layer_silent(&mut self, id: u32, to: usize) -> bool {
+        self.inner.move_layer_silent(id, to)
+    }
+
+    /// Remove a layer without an undo step (a shared layer someone else deleted); then
+    /// clear the history.
+    #[wasm_bindgen(js_name = removeLayerSilent)]
+    pub fn remove_layer_silent(&mut self, id: u32) -> bool {
+        self.inner.remove_layer_silent(id)
+    }
+
     #[wasm_bindgen(js_name = clearHistory)]
     pub fn clear_history(&mut self) {
         self.inner.clear_history();
