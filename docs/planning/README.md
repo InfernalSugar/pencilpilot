@@ -14,7 +14,7 @@ Start here.
 | [ADR-0010 Studio app](adr/0010-studio-app.md) | A Tauri 2 app sharing the engine and UI; animation core in Rust; `.ppstudio` files |
 | [ADR-0011 AI assistance](adr/0011-ai-assist.md) | AI in the app only: guides, never the final art; your own style; BYOK; provenance |
 | [ADR-0012 Where the app paints](adr/0012-where-painting-runs.md) | Live painting in the window (WebAssembly); the native engine, on every core, for whole canvases (benchmarks) |
-| [ADR-0013 Solo and shared projects](adr/0013-solo-and-shared-projects.md) | Solo projects stay private on your computer; shared projects live on our server, one drawer per layer, live strokes + tile changes, shared credits (proposed) |
+| [ADR-0013 Solo and shared projects](adr/0013-solo-and-shared-projects.md) | Solo projects stay private on your computer; shared projects peer to peer over iroh, one drawer per layer, live strokes + tile changes, shared credits |
 | [LICENSING.md](LICENSING.md) | Licence rules for code, content, and reference images |
 | [CONTENT_GUIDE.md](CONTENT_GUIDE.md) | How to write rules, tips, lessons and drills |
 
