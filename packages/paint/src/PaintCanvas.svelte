@@ -3288,6 +3288,69 @@
 		notify();
 		return true;
 	}
+	/** An adjustment layer on top, not an undo step (a shared one); `spec` is its JSON. */
+	export function addAdjustmentLayerQuiet(spec: string, name: string): number {
+		if (!paint) return 0;
+		const a = parseSpec(spec);
+		const id = paint.addAdjustmentLayerSilent(
+			name,
+			spec,
+			a.hue,
+			a.saturation,
+			a.brightness,
+			a.contrast,
+			toneTables(a),
+			mapTable(a.map)
+		);
+		if (id) {
+			schedule();
+			notify();
+		}
+		return id;
+	}
+	/** Change an adjustment layer, not an undo step (changed elsewhere). False when busy. */
+	export function setAdjustmentQuiet(id: number, spec: string): boolean {
+		if (!paint) return false;
+		const a = parseSpec(spec);
+		const ok = paint.setAdjustmentSilent(
+			id,
+			spec,
+			a.hue,
+			a.saturation,
+			a.brightness,
+			a.contrast,
+			toneTables(a),
+			mapTable(a.map)
+		);
+		if (ok) {
+			schedule();
+			notify();
+		}
+		return ok;
+	}
+	/** A layer's mask as packed tiles (empty: it has no mask). */
+	export const maskPacked = (id: number) => paint?.maskTilesPacked(id) ?? new Uint8Array();
+	/** Put a layer's mask (empty bytes remove it), not an undo step. False when busy. */
+	export function putMaskQuiet(id: number, packed: Uint8Array): boolean {
+		if (!paint?.putMaskTiles(id, packed)) return false;
+		schedule();
+		notify();
+		return true;
+	}
+	/** Every layer now, bottom → top, with how it shows (and an adjustment layer's JSON). */
+	export const sharedLayerList = () =>
+		layerList().map((l) => ({
+			id: l.id,
+			name: l.name,
+			adjust: l.adjust,
+			look: {
+				visible: l.visible,
+				opacity: l.opacity,
+				blend: l.blend as string,
+				alphaLock: l.alphaLock,
+				clip: !!l.clip
+			}
+		}));
 	/** Paint layers now, bottom → top (not adjustment layers). */
 	export const paintLayers = () =>
 		layerList()

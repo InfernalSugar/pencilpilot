@@ -33,6 +33,8 @@ class FakeCanvas implements CanvasPort {
 		drawing: number;
 		opacity: number;
 		blend: string;
+		adjust: string | null;
+		mask: TileMap | null;
 	}[] = [];
 	drawings = new Map<number, TileMap>();
 	selected = 0;
@@ -41,7 +43,7 @@ class FakeCanvas implements CanvasPort {
 	constructor(names: string[] = ['Layer 1']) {
 		for (const n of names) this.addLayer(n);
 	}
-	addLayer(name: string) {
+	addLayer(name: string, adjust?: string) {
 		const id = this.#next++;
 		this.layerList.push({
 			id,
@@ -50,9 +52,25 @@ class FakeCanvas implements CanvasPort {
 			visible: true,
 			drawing: 0,
 			opacity: 1,
-			blend: 'normal'
+			blend: 'normal',
+			adjust: adjust ?? null,
+			mask: null
 		});
 		return id;
+	}
+	setAdjust(id: number, spec: string) {
+		if (this.busy) return false;
+		this.layerList.find((l) => l.id === id)!.adjust = spec;
+		return true;
+	}
+	maskPacked(id: number) {
+		const m = this.layerList.find((l) => l.id === id)!.mask;
+		return m ? pack(m) : new Uint8Array();
+	}
+	putMask(id: number, packed: Uint8Array) {
+		if (this.busy) return false;
+		this.layerList.find((l) => l.id === id)!.mask = packed.length ? unpack(packed) : null;
+		return true;
 	}
 	setLayer(
 		id: number,
@@ -145,6 +163,7 @@ class FakeCanvas implements CanvasPort {
 		return this.layerList.map((l) => ({
 			id: l.id,
 			name: l.name,
+			adjust: l.adjust,
 			look: {
 				visible: l.visible,
 				opacity: l.opacity,
@@ -556,5 +575,55 @@ describe('drawing together: apps', () => {
 		await bo.localChanged();
 		await session.settle();
 		expect(session.seq).toBe(before);
+	});
+
+	it('shares masks and adjustment layers', async () => {
+		const session = new FakeSession();
+		const hc = new FakeCanvas(['Sky']);
+		const host = new Together(A, 'Ana', hc, session.net(A));
+		session.apps.set(A, host);
+		await host.startHost();
+		await session.settle();
+		const bc = new FakeCanvas();
+		const bo = new Together(B, 'Bo', bc, session.net(B));
+		session.apps.set(B, bo);
+		bo.startJoin(A);
+		await session.settle();
+
+		// Ana masks part of the sky
+		const sky = hc.byName('Sky');
+		sky.mask = new Map([['0,0', tile(200)]]);
+		await host.localChanged();
+		await session.settle();
+		expect(bc.byName('Sky').mask?.get('0,0')?.[0]).toBe(200);
+
+		// and adds a warm adjustment layer (made here above the sky: it goes on top)
+		hc.addLayer('Warm', '{"hue":12}');
+		await host.localChanged();
+		await session.settle();
+		expect(bc.byName('Warm').adjust).toBe('{"hue":12}');
+		expect(bc.layerList.at(-1)?.name).toBe('Warm');
+		// changes it
+		hc.setAdjust(hc.byName('Warm').id, '{"hue":30}');
+		await host.localChanged();
+		await session.settle();
+		expect(bc.byName('Warm').adjust).toBe('{"hue":30}');
+
+		// removes the mask
+		sky.mask = null;
+		await host.localChanged();
+		await session.settle();
+		expect(bc.byName('Sky').mask).toBeNull();
+
+		// a joiner later gets both
+		const cc = new FakeCanvas();
+		const cy = new Together(C, 'Cy', cc, session.net(C));
+		session.apps.set(C, cy);
+		sky.mask = new Map([['1,1', tile(99)]]);
+		await host.localChanged();
+		cy.startJoin(A);
+		await session.settle();
+		expect(cc.byName('Sky').mask?.get('1,1')?.[0]).toBe(99);
+		expect(cc.byName('Warm').adjust).toBe('{"hue":30}');
 	});
 });

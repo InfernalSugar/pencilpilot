@@ -3433,68 +3433,102 @@ impl Painter {
     /// x, `i32` y and 64×64 straight-alpha sRGB RGBA8 (the project file's tiles). Only
     /// tiles with paint; empty for an unknown drawing.
     pub fn drawing_tiles_packed(&self, drawing: u32) -> Vec<u8> {
-        let tiles = self.drawing_tiles(drawing);
-        let ts = TILE_SIZE;
-        let list: Vec<(&TileKey, &Box<TilePixels>)> = tiles
-            .map(|t| {
-                t.iter()
-                    .filter(|(_, px)| px.iter().flatten().any(|p| p[3] > 0))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let mut out = Vec::with_capacity(4 + list.len() * (8 + ts * ts * 4));
-        out.extend_from_slice(&(list.len() as u32).to_le_bytes());
-        for (&(tx, ty), px) in list {
-            out.extend_from_slice(&tx.to_le_bytes());
-            out.extend_from_slice(&ty.to_le_bytes());
-            for row in px.iter() {
-                for p in row {
-                    if p[3] == 0 {
-                        out.extend_from_slice(&[0; 4]);
-                        continue;
-                    }
-                    let (c, a) = unpremul_srgb(*p);
-                    out.extend_from_slice(&[
-                        (c[0] * 255.0).round() as u8,
-                        (c[1] * 255.0).round() as u8,
-                        (c[2] * 255.0).round() as u8,
-                        (a * 255.0).round() as u8,
-                    ]);
-                }
-            }
+        pack_tiles(self.drawing_tiles(drawing))
+    }
+
+    /// A layer's mask as packed tiles (as [`Painter::drawing_tiles_packed`]); empty when the
+    /// layer has no mask (a mask that shows everything is a count of 0).
+    pub fn mask_tiles_packed(&self, id: u32) -> Vec<u8> {
+        self.index_of(id)
+            .and_then(|i| self.layers[i].mask_surface())
+            .map_or_else(Vec::new, |m| pack_tiles(Some(&m.tiles)))
+    }
+
+    /// Put a layer's mask from packed tiles without an undo step (a shared layer's mask
+    /// changed elsewhere); empty bytes remove the mask. False if busy or the bytes don't
+    /// add up.
+    pub fn put_mask_tiles(&mut self, id: u32, packed: &[u8]) -> bool {
+        if !self.idle() {
+            return false;
         }
-        out
+        let Some(idx) = self.index_of(id) else {
+            return false;
+        };
+        if packed.is_empty() {
+            self.mark_layer(idx);
+            let l = &mut self.layers[idx];
+            l.set_editing(false);
+            l.mask = None;
+            self.mark_layer(idx);
+            return true;
+        }
+        let Some(tiles) = unpack_tiles(packed) else {
+            return false;
+        };
+        self.mark_layer(idx);
+        let l = &mut self.layers[idx];
+        l.set_editing(false);
+        l.mask = Some(UndoSurface {
+            tiles,
+            ..UndoSurface::default()
+        });
+        self.mark_layer(idx);
+        true
+    }
+
+    /// Add an adjustment layer on top without an undo step (a shared one). Its id (0: no
+    /// room, or busy).
+    pub fn add_adjustment_layer_silent(
+        &mut self,
+        name: &str,
+        adj: adjust::ColourAdjust,
+        spec: &str,
+    ) -> u32 {
+        if !self.idle() || self.layers.len() >= MAX_LAYERS {
+            return 0;
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        let mut props = LayerProps::named(name.chars().take(60).collect::<String>());
+        props.adjust = Some(Box::new(adj));
+        props.adjust_spec = spec.into();
+        let mut layer = Layer::new(id, props);
+        layer.mask = Some(UndoSurface::default());
+        self.layers.push(layer);
+        self.mark_all();
+        id
+    }
+
+    /// Change an adjustment layer's settings without an undo step (changed elsewhere).
+    pub fn set_adjustment_silent(
+        &mut self,
+        id: u32,
+        adj: adjust::ColourAdjust,
+        spec: &str,
+    ) -> bool {
+        let Some(idx) = self.index_of(id) else {
+            return false;
+        };
+        if self.layers[idx].props.adjust.is_none() || !self.idle() {
+            return false;
+        }
+        let props = &mut self.layers[idx].props;
+        props.adjust = Some(Box::new(adj));
+        props.adjust_spec = spec.into();
+        self.mark_all();
+        true
     }
 
     /// Load a drawing from packed tiles (as [`Painter::drawing_tiles_packed`] makes them),
     /// replacing it if it exists. Not an undo step. False if busy or the bytes don't
     /// add up.
     pub fn put_drawing_tiles(&mut self, drawing: u32, packed: &[u8]) -> bool {
-        let ts = TILE_SIZE;
-        let tile_bytes = ts * ts * 4;
-        if drawing == 0 || !self.idle() || packed.len() < 4 {
+        if drawing == 0 || !self.idle() {
             return false;
         }
-        let n = u32::from_le_bytes(packed[..4].try_into().unwrap()) as usize;
-        if packed.len() != 4 + n * (8 + tile_bytes) {
+        let Some(tiles) = unpack_tiles(packed) else {
             return false;
-        }
-        let mut tiles = TileMap::new();
-        for i in 0..n {
-            let at = 4 + i * (8 + tile_bytes);
-            let tx = i32::from_le_bytes(packed[at..at + 4].try_into().unwrap());
-            let ty = i32::from_le_bytes(packed[at + 4..at + 8].try_into().unwrap());
-            let src = &packed[at + 8..at + 8 + tile_bytes];
-            let mut t = empty_tile();
-            for (k, px) in src.as_chunks::<4>().0.iter().enumerate() {
-                if px[3] == 0 {
-                    continue;
-                }
-                let c = [px[0], px[1], px[2]].map(|v| v as f32 / 255.0);
-                t[k / ts][k % ts] = premul_fix15(c, px[3] as f32 / 255.0);
-            }
-            tiles.insert((tx, ty), t);
-        }
+        };
         self.next_drawing = self.next_drawing.max(drawing + 1);
         if let Some(idx) = self.layers.iter().position(|l| l.drawing == drawing) {
             let l = &mut self.layers[idx];
@@ -4501,6 +4535,70 @@ fn rgb_to_hsv(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
     (h, s, max)
 }
 
+/// Tiles as the file packs them: u32 count; per tile i32 x, i32 y, 64×64 straight RGBA8.
+fn pack_tiles(tiles: Option<&TileMap>) -> Vec<u8> {
+    let ts = TILE_SIZE;
+    let list: Vec<(&TileKey, &Box<TilePixels>)> = tiles
+        .map(|t| {
+            t.iter()
+                .filter(|(_, px)| px.iter().flatten().any(|p| p[3] > 0))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut out = Vec::with_capacity(4 + list.len() * (8 + ts * ts * 4));
+    out.extend_from_slice(&(list.len() as u32).to_le_bytes());
+    for (&(tx, ty), px) in list {
+        out.extend_from_slice(&tx.to_le_bytes());
+        out.extend_from_slice(&ty.to_le_bytes());
+        for row in px.iter() {
+            for p in row {
+                if p[3] == 0 {
+                    out.extend_from_slice(&[0; 4]);
+                    continue;
+                }
+                let (c, a) = unpremul_srgb(*p);
+                out.extend_from_slice(&[
+                    (c[0] * 255.0).round() as u8,
+                    (c[1] * 255.0).round() as u8,
+                    (c[2] * 255.0).round() as u8,
+                    (a * 255.0).round() as u8,
+                ]);
+            }
+        }
+    }
+    out
+}
+
+/// Tiles packed as [`pack_tiles`] makes them, back (None if the bytes don't add up).
+fn unpack_tiles(packed: &[u8]) -> Option<TileMap> {
+    let ts = TILE_SIZE;
+    let tile_bytes = ts * ts * 4;
+    if packed.len() < 4 {
+        return None;
+    }
+    let n = u32::from_le_bytes(packed[..4].try_into().unwrap()) as usize;
+    if packed.len() != 4 + n * (8 + tile_bytes) {
+        return None;
+    }
+    let mut tiles = TileMap::new();
+    for i in 0..n {
+        let at = 4 + i * (8 + tile_bytes);
+        let tx = i32::from_le_bytes(packed[at..at + 4].try_into().unwrap());
+        let ty = i32::from_le_bytes(packed[at + 4..at + 8].try_into().unwrap());
+        let src = &packed[at + 8..at + 8 + tile_bytes];
+        let mut t = empty_tile();
+        for (k, px) in src.as_chunks::<4>().0.iter().enumerate() {
+            if px[3] == 0 {
+                continue;
+            }
+            let c = [px[0], px[1], px[2]].map(|v| v as f32 / 255.0);
+            t[k / ts][k % ts] = premul_fix15(c, px[3] as f32 / 255.0);
+        }
+        tiles.insert((tx, ty), t);
+    }
+    Some(tiles)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4521,6 +4619,58 @@ mod tests {
             p.stroke_to(b, 20.0 + i as f32 * 4.0, y, 1.0, 0.0, 0.0, 0.01);
         }
         p.end_stroke(b);
+    }
+
+    #[test]
+    fn masks_and_adjustment_layers_travel_without_undo_steps() {
+        let mut p = Painter::new(200, 100);
+        let a = p.layers[0].id;
+        assert!(p.mask_tiles_packed(a).is_empty(), "no mask yet");
+        // a mask with a painted tile, from elsewhere
+        let mut other = Painter::new(200, 100);
+        let b = other.layers[0].id;
+        other.add_mask(b);
+        other.set_active_layer(b);
+        other.set_mask_editing(b, true);
+        let mut pen = pen();
+        line(&mut other, &pen, 50.0);
+        let packed = other.mask_tiles_packed(b);
+        assert!(packed.len() > 4, "the mask has tiles");
+        let undo = p.undo.len();
+        assert!(p.put_mask_tiles(a, &packed));
+        // (tiles come out in any order: compare them by place)
+        let by_place = |b: &[u8]| {
+            let n = u32::from_le_bytes(b[..4].try_into().unwrap()) as usize;
+            let mut m: Vec<&[u8]> = (0..n)
+                .map(|i| &b[4 + i * (8 + 64 * 64 * 4)..4 + (i + 1) * (8 + 64 * 64 * 4)])
+                .collect();
+            m.sort();
+            m.concat()
+        };
+        assert_eq!(
+            by_place(&p.mask_tiles_packed(a)),
+            by_place(&packed),
+            "the same mask here"
+        );
+        assert_eq!(p.undo.len(), undo, "no undo step");
+        assert!(p.put_mask_tiles(a, &[]));
+        assert!(p.mask_tiles_packed(a).is_empty(), "gone again");
+        assert!(
+            !p.put_mask_tiles(a, &[1, 2, 3, 4, 5]),
+            "bytes that don't add up"
+        );
+
+        let id = p.add_adjustment_layer_silent("Warm", adjust::ColourAdjust::default(), "{}");
+        assert!(id > 0);
+        assert_eq!(p.layers.last().unwrap().id, id, "on top");
+        assert_eq!(p.undo.len(), undo, "no undo step");
+        assert!(p.set_adjustment_silent(id, adjust::ColourAdjust::default(), r#"{"hue":10}"#));
+        assert_eq!(p.layers.last().unwrap().props.adjust_spec, r#"{"hue":10}"#);
+        assert!(
+            !p.set_adjustment_silent(a, adjust::ColourAdjust::default(), "{}"),
+            "not one"
+        );
+        pen.get_mut(BrushSetting::Radius).base_value = 1.0;
     }
 
     #[test]
