@@ -1782,6 +1782,12 @@
 		});
 	});
 
+	/** the project has arrived (joining); refreshed with the session's changes */
+	const togetherSynced = $derived.by(() => {
+		void togetherTick;
+		return !!together?.synced;
+	});
+
 	/** shared layers, for the Draw together dialog */
 	const sharedLayers = $derived.by(() => {
 		void togetherTick;
@@ -3234,7 +3240,7 @@
 					canRejoin={!!savedShare}
 					onrejoin={() => void shareRejoin()}
 					layers={sharedLayers}
-					synced={!!together?.synced}
+					synced={togetherSynced}
 					onask={(lid) => together?.ask(lid)}
 					ongrant={(lid, to, handover) => together?.grant(lid, to, handover)}
 					ondeny={(lid, to) => together?.deny(lid, to)}

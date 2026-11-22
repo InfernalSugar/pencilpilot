@@ -602,11 +602,25 @@ async fn bind(id: &Identity, relays: &Relays) -> Result<Endpoint> {
         Relays::Off => Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled),
     };
     builder
+        .dns_resolver(resolver())
         .secret_key(id.secret())
         .alpns(vec![ALPN.to_vec()])
         .bind()
         .await
         .map_err(|e| err(format!("Couldn't start the connection: {e}")))
+}
+
+/// The DNS resolver: the system's nameservers, with public ones asked at the same time.
+///
+/// Some DNS proxies (VMware's NAT, some home routers) answer the resolver's queries with
+/// an error while the system's own resolver gets answers. An error counts as an answer, so
+/// with the public nameservers only as a fallback the relay can't be found at all and
+/// nobody can join. Racing them from the start, the first good answer wins.
+fn resolver() -> iroh::dns::DnsResolver {
+    iroh::dns::DnsResolver::builder()
+        .with_system_defaults()
+        .with_fallback_mode(iroh::dns::FallbackMode::Eager)
+        .build()
 }
 
 /// 1–24 visible characters, or "Someone".
