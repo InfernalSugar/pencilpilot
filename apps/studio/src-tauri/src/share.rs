@@ -33,8 +33,18 @@ pub struct Info {
 pub struct Sharing(Mutex<Option<Live>>);
 
 pub struct Live {
-    info: Info,
+    /// kept current by the pump (who's here, who hosts, the code after a hand-over)
+    info: std::sync::Arc<std::sync::Mutex<Info>>,
     tx: mpsc::UnboundedSender<Cmd>,
+}
+
+fn info_of(s: &Session) -> Info {
+    Info {
+        invite: s.invite().encode(),
+        me: s.me().clone(),
+        members: s.members(),
+        host: s.is_host(),
+    }
 }
 
 enum Cmd {
@@ -94,18 +104,11 @@ impl Sharing {
     }
 
     async fn start(&self, app: AppHandle, s: Session) -> Info {
-        let info = Info {
-            invite: s.invite().encode(),
-            me: s.me().clone(),
-            members: s.members(),
-            host: s.is_host(),
-        };
+        let info = info_of(&s);
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(info.clone()));
         let (tx, rx) = mpsc::unbounded_channel();
-        tauri::async_runtime::spawn(pump(app, s, rx));
-        *self.0.lock().await = Some(Live {
-            info: info.clone(),
-            tx,
-        });
+        tauri::async_runtime::spawn(pump(app, s, rx, shared.clone()));
+        *self.0.lock().await = Some(Live { info: shared, tx });
         info
     }
 
@@ -123,7 +126,8 @@ impl Sharing {
         if g.as_ref().is_some_and(|l| l.tx.is_closed()) {
             *g = None;
         }
-        g.as_ref().map(|l| l.info.clone())
+        g.as_ref()
+            .map(|l| l.info.lock().unwrap_or_else(|e| e.into_inner()).clone())
     }
 
     pub async fn edit(&self, body: Value) -> Result<(), String> {
@@ -157,27 +161,56 @@ impl Sharing {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum WindowEvent {
-    Edit { seq: u64, from: String, body: Value },
-    Presence { from: String, body: Value },
-    Joined { member: Member },
-    Left { id: String },
-    Closed { reason: String },
+    Edit {
+        seq: u64,
+        from: String,
+        body: Value,
+    },
+    Presence {
+        from: String,
+        body: Value,
+    },
+    Joined {
+        member: Member,
+    },
+    Left {
+        id: String,
+    },
+    /// the host left and `host` took over (`you`: this app); who's here; the new code
+    HostChanged {
+        host: String,
+        you: bool,
+        members: Vec<Member>,
+        invite: String,
+    },
+    Closed {
+        reason: String,
+    },
 }
 
-impl From<Event> for WindowEvent {
-    fn from(e: Event) -> Self {
-        match e {
-            Event::Edit { seq, from, body } => Self::Edit { seq, from, body },
-            Event::Presence { from, body } => Self::Presence { from, body },
-            Event::Joined(member) => Self::Joined { member },
-            Event::Left { id } => Self::Left { id },
-            Event::Closed { reason } => Self::Closed { reason },
-        }
+fn window_event(e: Event, s: &Session) -> WindowEvent {
+    match e {
+        Event::Edit { seq, from, body } => WindowEvent::Edit { seq, from, body },
+        Event::Presence { from, body } => WindowEvent::Presence { from, body },
+        Event::Joined(member) => WindowEvent::Joined { member },
+        Event::Left { id } => WindowEvent::Left { id },
+        Event::HostChanged { host, members } => WindowEvent::HostChanged {
+            you: host == s.me().id,
+            host,
+            members,
+            invite: s.invite().encode(),
+        },
+        Event::Closed { reason } => WindowEvent::Closed { reason },
     }
 }
 
 /// Owns the session: the window's commands in, the session's events out.
-async fn pump(app: AppHandle, mut s: Session, mut rx: mpsc::UnboundedReceiver<Cmd>) {
+async fn pump(
+    app: AppHandle,
+    mut s: Session,
+    mut rx: mpsc::UnboundedReceiver<Cmd>,
+    info: std::sync::Arc<std::sync::Mutex<Info>>,
+) {
     loop {
         tokio::select! {
             cmd = rx.recv() => match cmd {
@@ -198,7 +231,10 @@ async fn pump(app: AppHandle, mut s: Session, mut rx: mpsc::UnboundedReceiver<Cm
             ev = s.next_event() => match ev {
                 Some(e) => {
                     let closed = matches!(e, Event::Closed { .. });
-                    let _ = app.emit("share-event", WindowEvent::from(e));
+                    if matches!(e, Event::Joined(_) | Event::Left { .. } | Event::HostChanged { .. }) {
+                        *info.lock().unwrap_or_else(|e| e.into_inner()) = info_of(&s);
+                    }
+                    let _ = app.emit("share-event", window_event(e, &s));
                     if closed {
                         break;
                     }
@@ -222,14 +258,17 @@ mod tests {
         let me = Member {
             id: "me".into(),
             name: "Me".into(),
+            addr: pencilpilot_share::EndpointAddr::new(
+                pencilpilot_share::SecretKey::generate().public(),
+            ),
         };
         *sharing.0.lock().await = Some(Live {
-            info: Info {
+            info: std::sync::Arc::new(std::sync::Mutex::new(Info {
                 invite: String::new(),
                 me: me.clone(),
                 members: vec![me],
                 host: true,
-            },
+            })),
             tx,
         });
         let e = sharing.solo_only().await.unwrap_err();
