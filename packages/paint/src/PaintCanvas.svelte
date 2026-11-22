@@ -3244,6 +3244,38 @@
 		}
 		return d;
 	}
+	/**
+	 * Move a layer to `to` (0 = bottom) without an undo step: someone else moved a shared
+	 * layer. Undo and redo are cleared (their steps place layers by position). False when
+	 * busy (mid-stroke): try again.
+	 */
+	export function moveLayerQuiet(id: number, to: number): boolean {
+		if (!paint?.moveLayerSilent(id, to)) return false;
+		paint.clearHistory();
+		log.forgetHistory();
+		schedule();
+		notify();
+		return true;
+	}
+	/** Move a layer right above (or below) another, quietly, as above. */
+	export function moveLayerQuietNextTo(id: number, ref: number, above: boolean): boolean {
+		const list = layerList();
+		const from = list.findIndex((l) => l.id === id);
+		const r = list.findIndex((l) => l.id === ref);
+		// a layer that isn't here: nothing to do
+		if (from < 0 || r < 0 || from === r) return true;
+		const to = above ? (r < from ? r + 1 : r) : r < from ? r : r - 1;
+		return to === from || moveLayerQuiet(id, to);
+	}
+	/** Remove a layer without an undo step (someone else deleted a shared layer); as above. */
+	export function removeLayerQuiet(id: number): boolean {
+		if (!paint?.removeLayerSilent(id)) return false;
+		paint.clearHistory();
+		log.forgetHistory();
+		schedule();
+		notify();
+		return true;
+	}
 	/** Paint layers now, bottom → top (not adjustment layers). */
 	export const paintLayers = () =>
 		layerList()

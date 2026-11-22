@@ -1528,6 +1528,8 @@
 			packed: (d) => c.drawingTilesPacked(d),
 			put: (d, p) => c.putDrawingTiles(d, p),
 			select: (id) => c.selectLayer(id),
+			removeLayer: (id) => c.removeLayerQuiet(id),
+			moveNextTo: (id, ref, above) => c.moveLayerQuietNextTo(id, ref, above),
 			layers: () => c.paintLayers()
 		};
 	}
@@ -1604,10 +1606,27 @@
 		return new Proxy(c, {
 			get(target, prop, recv) {
 				if (prop === 'addLayer') return (name?: string) => t.addOwnLayer(name);
+				const own = (id: number) => {
+					const lid = t.lidOf(id);
+					if (lid && t.shared.layers.get(lid)?.owner === t.me) return lid;
+					note('Only the person who made a shared layer can delete or move it.');
+					return null;
+				};
+				if (prop === 'deleteLayer')
+					return (id: number) => {
+						const lid = own(id);
+						if (lid) t.removeOwn(lid);
+					};
+				if (prop === 'moveLayer')
+					return (id: number, to: number) => {
+						const lid = own(id);
+						// it goes where the layer now at `to` is, in the shared order
+						const there = status?.layers[to]?.id;
+						const at = there ? t.shared.order.indexOf(t.lidOf(there) ?? '') : -1;
+						if (lid && at >= 0) t.moveOwn(lid, at);
+					};
 				if (
 					[
-						'deleteLayer',
-						'moveLayer',
 						'moveLayerTo',
 						'mergeDown',
 						'addGroup',

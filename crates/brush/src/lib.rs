@@ -3032,6 +3032,44 @@ impl Painter {
         id
     }
 
+    /// Move a layer to `to` (0 = bottom) without an undo step (someone else moved a shared
+    /// layer). The history's steps that place layers by position would point at the wrong
+    /// layers afterwards: the caller clears the history (`clear_history`).
+    pub fn move_layer_silent(&mut self, id: u32, to: usize) -> bool {
+        let Some(from) = self.index_of(id) else {
+            return false;
+        };
+        let to = to.min(self.layers.len() - 1);
+        if !self.idle() || from == to {
+            return false;
+        }
+        let l = self.layers.remove(from);
+        self.layers.insert(to, l);
+        self.mark_all();
+        true
+    }
+
+    /// Remove a layer without an undo step (someone else deleted a shared layer). As with
+    /// [`Painter::move_layer_silent`], the caller clears the history.
+    pub fn remove_layer_silent(&mut self, id: u32) -> bool {
+        let Some(index) = self.index_of(id) else {
+            return false;
+        };
+        if !self.idle() || self.layers.len() <= 1 {
+            return false;
+        }
+        self.mark_layer(index);
+        let layer = self.layers.remove(index);
+        if layer.id == self.active {
+            let i = index
+                .saturating_sub(1)
+                .min(self.layers.len().saturating_sub(1));
+            self.active = self.layers.get(i).map_or(0, |l| l.id);
+        }
+        self.mark_all();
+        true
+    }
+
     /// Erase a layer without an undo step (before redrawing someone's strokes).
     pub fn clear_layer_silent(&mut self, id: u32) {
         if let Some(idx) = self.index_of(id) {
@@ -4483,6 +4521,29 @@ mod tests {
             p.stroke_to(b, 20.0 + i as f32 * 4.0, y, 1.0, 0.0, 0.0, 0.01);
         }
         p.end_stroke(b);
+    }
+
+    #[test]
+    fn shared_layers_move_and_go_without_undo_steps() {
+        let mut p = Painter::new(200, 100);
+        let b = pen();
+        let first = p.layers[0].id;
+        let a = p.add_layer("A");
+        let c = p.add_layer("C");
+        line(&mut p, &b, 50.0);
+        let undo_before = p.undo.len();
+        assert!(p.move_layer_silent(c, 0));
+        assert_eq!(p.layers[0].id, c);
+        assert_eq!(p.undo.len(), undo_before, "no undo step");
+        assert!(!p.move_layer_silent(c, 0), "already there");
+        p.set_active_layer(a);
+        assert!(p.remove_layer_silent(a));
+        assert!(p.index_of(a).is_none());
+        assert_ne!(p.active, a, "another layer is active");
+        assert!(p.index_of(first).is_some());
+        // the last layer can't go
+        assert!(p.remove_layer_silent(first));
+        assert!(!p.remove_layer_silent(c));
     }
 
     /// a fat line for texture tests (radius ≈ 12 px)
