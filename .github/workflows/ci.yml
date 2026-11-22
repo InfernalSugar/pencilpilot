@@ -22,6 +22,26 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
 
+  # Drawing together (crates/share) on the systems friends use: apps connecting, host
+  # hand-over, our own relay, and once over the internet through iroh's public relays.
+  share:
+    name: Drawing together (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: Windows, os: windows-latest }
+          - { name: macOS, os: macos-latest }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p pencilpilot-share
+      # (the public relays can be busy: a failure here is reported, not blocking)
+      - run: cargo test -p pencilpilot-share -- --ignored --nocapture
+        continue-on-error: true
+
   web:
     runs-on: ubuntu-latest
     steps:
