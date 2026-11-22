@@ -3288,6 +3288,74 @@
 		notify();
 		return true;
 	}
+	/** After a quiet change to the layers: undo and redo are cleared (as above). */
+	function quietly(ok: boolean): boolean {
+		if (!ok || !paint) return false;
+		paint.clearHistory();
+		log.forgetHistory();
+		schedule();
+		notify();
+		return true;
+	}
+	/** A new group holding layer `id`, quietly; its id (0: busy or no such layer). */
+	export function addGroupQuiet(id: number): number {
+		const gid = paint?.addGroup(id) ?? 0;
+		quietly(gid !== 0);
+		return gid;
+	}
+	/** A group's settings, quietly (someone else changed them). */
+	export function setGroupQuiet(id: number, patch: Partial<GroupSettings>): boolean {
+		const cur = paint && groupSettings(id);
+		if (!cur) return true;
+		const s = { ...cur, ...patch };
+		if (paint!.setGroup(id, s.name, s.visible, s.opacity, false)) {
+			schedule();
+			notify();
+		}
+		return true;
+	}
+	/** Move a layer right above (or below) `ref` (0: where it is) and into `group` (0 =
+	 * none), quietly. False when busy. */
+	export function placeLayerQuiet(id: number, ref: number, above: boolean, group: number): boolean {
+		const list = layerList();
+		const from = list.findIndex((l) => l.id === id);
+		if (from < 0) return true;
+		const r = ref ? list.findIndex((l) => l.id === ref) : from;
+		if (r < 0) return true;
+		const to = r === from ? from : above ? (r < from ? r + 1 : r) : r < from ? r : r - 1;
+		if (to === from && list[from].group === group) return true;
+		return quietly(!!paint?.moveLayerTo(id, to, group));
+	}
+	/** Take a group's layers out of it and remove it, quietly. */
+	export function ungroupQuiet(id: number): boolean {
+		if (!groupList().some((g) => g.id === id)) return true;
+		return quietly(!!paint?.ungroup(id));
+	}
+	/** Merge a layer into the one below, quietly (drawing together: the merged pixels and
+	 * the layer's removal go to the others as the session's edits). */
+	export function mergeDownQuiet(id: number): boolean {
+		if (!paint) return false;
+		const layers = layerList();
+		const below = layers[layers.findIndex((l) => l.id === id) - 1]?.id;
+		if (below === undefined || !paint.mergeDown(id)) return false;
+		log.merge(id, below);
+		return quietly(true);
+	}
+	/** Flatten a group into its bottom layer, quietly (as above); that layer's id (0: no). */
+	export function mergeGroupQuiet(id: number): number {
+		if (!paint) return 0;
+		const members = layerList().filter((l) => l.group === id);
+		const into = paint.mergeGroup(id);
+		if (!into) return 0;
+		log.batch(() => {
+			for (const l of members.slice(1).reverse()) log.merge(l.id, into);
+		});
+		quietly(true);
+		return into;
+	}
+	/** The groups now (id, name, eye, opacity). */
+	export const groupsNow = () => groupList();
+
 	/** An adjustment layer on top, not an undo step (a shared one); `spec` is its JSON. */
 	export function addAdjustmentLayerQuiet(spec: string, name: string): number {
 		if (!paint) return 0;
@@ -3343,6 +3411,7 @@
 			id: l.id,
 			name: l.name,
 			adjust: l.adjust,
+			group: l.group,
 			look: {
 				visible: l.visible,
 				opacity: l.opacity,

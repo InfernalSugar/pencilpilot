@@ -8,12 +8,15 @@
 	interface LayerRow {
 		lid: string;
 		name: string;
+		/** a group of layers, not a layer */
+		group?: boolean;
 		owner: string;
 		mine: boolean;
 		canDraw: boolean;
 		asked: boolean;
 		writers: { id: string; name: string }[];
-		asks: { id: string; name: string }[];
+		/** `text`: what they ask, in words; `own`: to have it handed over; `draw`: to draw */
+		asks: { id: string; name: string; text?: string; own?: boolean; draw?: boolean }[];
 	}
 
 	let {
@@ -135,8 +138,8 @@
 							<span class="lname">{l.name}</span>
 							<span class="owner">{l.mine ? 'yours' : l.owner}</span>
 							{#if l.canDraw && !l.mine}
-								<span class="tag">you can draw</span>
-							{:else if !l.canDraw}
+								<span class="tag">{l.group ? 'you can change it' : 'you can draw'}</span>
+							{:else if !l.canDraw && !l.group}
 								<button type="button" class="small" disabled={l.asked} onclick={() => onask(l.lid)}>
 									{l.asked ? 'Asked' : 'Ask to draw here'}
 								</button>
@@ -144,19 +147,35 @@
 						</div>
 						{#each l.asks as a (a.id)}
 							<div class="ask">
-								<span><b>{a.name}</b> asks to draw here</span>
-								<button type="button" class="small go" onclick={() => ongrant(l.lid, a.id, false)}>
-									Let them draw
-								</button>
-								<button type="button" class="small" onclick={() => ongrant(l.lid, a.id, true)}>
-									Hand it over
-								</button>
+								<span><b>{a.name}</b> {a.text ?? 'asks to draw here'}</span>
+								{#if !a.own}
+									<button
+										type="button"
+										class="small go"
+										onclick={() => ongrant(l.lid, a.id, false)}
+									>
+										{a.draw === false ? 'Allow' : 'Let them draw'}
+									</button>
+								{/if}
+								{#if a.own || a.draw !== false}
+									<button
+										type="button"
+										class="small {a.own ? 'go' : ''}"
+										onclick={() => ongrant(l.lid, a.id, true)}
+									>
+										Hand it over
+									</button>
+								{/if}
 								<button type="button" class="small" onclick={() => ondeny(l.lid, a.id)}>No</button>
 							</div>
 						{/each}
 						{#if l.mine && l.writers.length}
 							<div class="ask">
-								<span>Also drawing: {l.writers.map((w) => w.name).join(', ')}</span>
+								<span>
+									{l.group ? 'Also changing it' : 'Also drawing'}: {l.writers
+										.map((w) => w.name)
+										.join(', ')}
+								</span>
 								{#each l.writers as w (w.id)}
 									<button type="button" class="small" onclick={() => onrevoke(l.lid, w.id)}>
 										Take back from {w.name}
