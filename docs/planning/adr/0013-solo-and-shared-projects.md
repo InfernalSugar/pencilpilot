@@ -1,6 +1,7 @@
 # ADR-0013: Two kinds of project: solo (private) and shared (live, together)
 
-- Status: proposed (2026-11-22). Milestone S12 in [STUDIO_APP.md](../STUDIO_APP.md).
+- Status: accepted (2026-11-22): **peer to peer over iroh** for shared projects, with a
+  server as the fallback design. Milestone S12 in [STUDIO_APP.md](../STUDIO_APP.md).
 - Builds on [ADR-0008](0008-private-lobbies.md) (the website's live lobbies) and
   [ADR-0012](0012-where-painting-runs.md) (where the app paints).
 
@@ -37,7 +38,7 @@ The app has two modes:
   members may run different app versions, and fills, transforms, filters and imports
   aren't strokes. So strokes can't be the shared record on their own.
 
-## Decision (proposed)
+## Decision
 
 ### Solo stays exactly as it is, and says so
 
@@ -50,19 +51,37 @@ The app has two modes:
 - Making a solo project shared is always an explicit **Share a copy…**. The private
   original stays on disk, untouched and still private.
 
-### Shared projects live on our server
+### Shared projects live on every member's computer: peer to peer over iroh
 
-- The website's Node server keeps them, next to the lobbies (one deployment, accounts
-  already there).
-- It stores:
-  - **SQLite:** projects, members, layer access, the change log
-  - **a folder of tiles by hash:** the same blobs as in `.ppstudio`, plus sounds and
-    imported pictures
-- The project stays available when any one person is offline, which fits "belongs to
-  everyone".
-- Each member's app keeps a local cache, so opening is fast and tiles download once.
-- Not chosen: one player's app as the server (peer to peer). It's cheaper, but the project
-  disappears when that person is offline and joins break on home routers.
+The members' apps connect to each other directly with [iroh](https://iroh.computer): QUIC,
+encrypted end to end, with hole punching through home routers. **Nobody forwards ports
+or changes router settings.**
+
+- **A relay** introduces members and carries the traffic of those who can't connect
+  directly (strict office or school networks). It's encrypted, so the relay sees only
+  metadata: IP addresses, member ids, when and how much, never the drawings.
+  - Building and testing: iroh's free public relays.
+  - A release: our own `iroh-relay` on a small VPS (KVM 1 or 2), so no one else sees
+    users' metadata and uptime is ours.
+  - Optional later: relay-only mode, so members never learn each other's IP addresses
+    (for projects with strangers).
+- **Every member's app keeps the whole project** (the `.ppstudio` tiles by hash, plus the
+  change log). The work literally belongs to everyone: anyone can open it, draw on their
+  own copy offline, and export, any time.
+- **The host:** one online app (the one that has been in longest) numbers every edit and
+  passes it on, so all apps apply edits in the same order. The others connect to it. When
+  it leaves, the next one takes over: **host hand-over**.
+- **Cursors** travel as QUIC datagrams: unreliable, newest wins, never stored.
+- **Joining needs one member online,** to hand over the project. Opening an old project
+  with nobody else online works on your own copy and syncs when someone comes back.
+- `crates/share` (pencilpilot-share) does this: identity, invites, the session (host
+  ordering, cursors, joins and leaves), tested between apps on one machine and, manually,
+  through iroh's public relays.
+
+Fallback, not chosen: projects on our own server (the website's Node server; SQLite plus
+tiles by hash on disk). Always available and simpler to make consistent, but the server
+stores and passes on everything. It stays the plan B if peer to peer proves unreliable,
+and an always-online member running on the VPS is a later middle ground.
 
 ### Each layer has one drawer at a time, so drawings never conflict
 
@@ -138,16 +157,20 @@ How they sync:
 - **Joining** shows a short note: the work is shared, every member may use and export it,
   and credits travel with it. (This wording needs a legal check, see the questions.)
 
-### Accounts and joining
+### Identity and joining (no accounts)
 
-- A shared project needs an account. Credits need a name that stays with the person, and
-  the project needs to know who may draw where.
-- **Signing in from the app:** it opens the website's sign-in in the browser. The site
-  hands the app a token through a `pencilpilot://` link or a code on localhost. The token
-  is kept in the OS keychain, as AI keys are.
-- **Inviting:** by a link or a code, as with lobbies. The project's creator can remove a
-  member. Their layers stay, since the work belongs to everyone, but they can't draw any
-  more.
+- **Identity is a key per computer** (`Identity`): made on first use, kept readable only
+  by the user, never sent. Its public half is the member's id; every change and credit
+  is tied to it. Your name is what you type the first time.
+- **Inviting:** the host's app shows an **invite code** (`pp1-…`, or as a QR code) to send
+  however you like. It holds the project id, the host's address (relay and direct) and the
+  project's secret. A joiner proves it holds the secret with a keyed hash bound to both
+  ids, so the secret itself never crosses the network and a proof can't be reused.
+- **Removing a member:** the project's creator makes a new secret (old codes stop
+  working) and the apps stop accepting that member's id. Their layers stay, since the work
+  belongs to everyone, but they can't draw any more.
+- Later, optionally: link an identity to a website account, for a profile and credits
+  across devices.
 
 ### Going offline and coming back
 
@@ -166,12 +189,13 @@ How they sync:
     for home connections.
   - The live points stream is tiny: 120 messages a second per person is already the
     lobby limit.
-- **Opening:** fetches the project's list of tile hashes first, then the tiles near the
-  playhead, then the rest in the background.
-- **Server:** the change log is compacted into snapshots now and then, and tiles nothing
-  points to are cleared out after 30 days.
-- **One server process** to begin with. More would need a shared store, as noted in
-  ADR-0008.
+- **Joining a project:** fetches the project's list of tile hashes first, then the tiles
+  near the playhead, then the rest in the background, from the host.
+- **Host upload:** the host passes every edit to everyone (a star), so with 8 people a
+  100 KB stroke is about 700 KB of its upload. Fine on home connections. If it isn't, edits
+  can later go member to member (iroh-gossip).
+- **Each copy:** the change log is compacted into the project file now and then.
+- **The relay** stores nothing and costs little. Ours runs on the VPS.
 
 ## Risks
 
@@ -181,15 +205,16 @@ How they sync:
 | The preview and the final pixels differ (another app version) | The tiles are the truth; the preview lasts a moment |
 | Big imports (a 4K picture, video frames) flood the link | Upload in the background with progress; others see a placeholder until it arrives |
 | Someone vandalises a project | Invite only; owners control their layers; the full history lets any change be undone or a member removed |
-| Server costs grow with stored tiles | Shared tiles stored once, compaction, a size limit per project |
+| Nobody online to join from | Say so plainly; later, an always-online member on the VPS |
+| The host leaves mid-session | Host hand-over to the longest-connected member; unsent edits are resent to the new host |
+| Members see each other's IP addresses (direct connections) | Fine among friends; relay-only mode for projects with strangers |
+| iroh's public relays go down or rate-limit | Our own relay before release |
 | Solo privacy slips through a later change | The CSP test and the "no connection for solo" rule in the shell |
 
 ## Questions for the owner
 
-1. **Where it runs:** on the website's server (recommended), or should one player's app
-   host?
-2. **Guests:** account only (recommended, credits need a lasting name), or can guests
-   join and draw without credits?
+1. ~~Where it runs~~: peer to peer over iroh (decided 2026-11-22).
+2. ~~Guests~~: no accounts needed; a key per computer (decided with peer to peer).
 3. **Owner away:** when a layer's owner is offline and someone asks to draw there, who can
    say yes? The project's creator? An automatic yes after some time? Nobody until they're
    back?

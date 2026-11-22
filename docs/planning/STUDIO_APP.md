@@ -206,11 +206,12 @@ colour flats and lip-sync are free (local).
 
 ## S12 — Solo and shared projects (≈6–8 weeks)
 Two kinds of project: **solo** (private, on your computer, as today) and **shared** (several
-people drawing live, the work and the credits belong to everyone). Design:
+people drawing live, the work and the credits belong to everyone), peer to peer over iroh. Design:
 [ADR-0013](adr/0013-solo-and-shared-projects.md).
 - **S12-T01** Solo stays private, provably: start screen with **My projects** / **Shared projects**; a test that fails if the window's CSP gains a network origin; the shell opens no connection for a solo project; **Share a copy…** leaves the private original untouched `app`
-- **S12-T02** Sign in from the app: the website's sign-in in the browser, the token back through a `pencilpilot://` link (or localhost), kept in the OS keychain `app` `infra`
-- **S12-T03** The shared-project server on the website's Node server: projects, members, invites (link / code), layer access, the numbered change log (SQLite) and tiles by hash on disk; snapshots and clean-up `infra`
+- **S12-T02** The peer-to-peer connection (`crates/share`): a key per computer, invite codes, the session over iroh (the host numbers edits, cursors as datagrams, joins and leaves), tested locally and through iroh's public relays `infra`
+  ✅ First version: identity, invites, host ordering, presence, refusals; an app joined through the public relay in 1.4 s
+- **S12-T03** The session in the app: Tauri commands and events in the Rust shell (the window stays offline), every member's full copy and change log, joining downloads the project, host hand-over, our own `iroh-relay` on the VPS before release `app` `infra`
 - **S12-T04** The engine for shared mode: the tile hashes a change touched; put in other people's tiles outside the local undo; layers you can't draw on are locked; undo kept per layer you can draw on `brush`
 - **S12-T05** Live layers on one frame: live strokes as previews, tile changes as the record, late joiners load hashes then tiles near the playhead `app` `brush`
 - **S12-T06** Layer access: owner, the people allowed to draw, **Ask to draw here** → let them / hand it over / no, take it back; adding layers as in solo `app` `design`
