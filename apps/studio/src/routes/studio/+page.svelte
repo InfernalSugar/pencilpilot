@@ -61,7 +61,7 @@
 	import LipSyncDialog from '#lib/LipSyncDialog.svelte';
 	import FilmDialog from '#lib/FilmDialog.svelte';
 	import ShareDialog from '#lib/ShareDialog.svelte';
-	import { Together, type CanvasPort } from '#lib/together.js';
+	import { readSavedShare, Together, type CanvasPort, type SavedShare } from '#lib/together.js';
 	import {
 		cleanRelay,
 		Cursors,
@@ -69,6 +69,7 @@
 		isCursor,
 		joinSession,
 		leaveSession,
+		rejoinSession,
 		onShareEvent,
 		sendDirect,
 		sendEdit,
@@ -1522,6 +1523,8 @@
 
 	/** the drawing side: shared layers, access, tiles (lib/together.ts) */
 	let together = $state.raw<Together | null>(null);
+	/** this project's shared session, from its file or from leaving (for Rejoin) */
+	let savedShare = $state.raw<SavedShare | null>(null);
 	let togetherTick = $state(0);
 	let togetherTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -1632,9 +1635,16 @@
 		liveStrokes.clear();
 	}
 
+	/** everyone who's been in the project (newest addresses first), to find one later */
+	const everyone = (now: ShareInfo['members']) => [
+		...now,
+		...(savedShare?.members ?? []).filter((m) => !now.some((x) => x.id === m.id))
+	];
+
 	/** after the session: the layers stay (everyone keeps a full copy), unlocked */
-	function stopTogether() {
+	function stopTogether(info: ShareInfo | null = sharing) {
 		clearTimeout(togetherTimer);
+		if (together && info) savedShare = together.save(info.invite, everyone(info.members));
 		dropLive();
 		if (together && canvas)
 			for (const id of together.ids.values()) canvas.setLayerQuiet(id, { locked: false });
@@ -1647,6 +1657,47 @@
 		if (!together) return;
 		clearTimeout(togetherTimer);
 		togetherTimer = setTimeout(() => void together?.localChanged(), 120);
+	}
+
+	/** Back to this project's shared session: join who's online, or host it again. */
+	async function shareRejoin() {
+		const saved = savedShare;
+		if (!saved || !canvas) return;
+		shareBusy = true;
+		shareError = '';
+		try {
+			const name = settings.shareName.trim();
+			void saveSettings().catch(() => {});
+			const info = await rejoinSession(
+				saved.code,
+				saved.members.map((m) => m.addr).filter(Boolean),
+				name,
+				cleanRelay(settings.shareRelay)
+			);
+			sharing = info;
+			together = new Together(
+				info.me.id,
+				info.me.name,
+				canvasPort(canvas),
+				{
+					edit: (body) => void sendEdit(body).catch(() => {}),
+					direct: (to, body) => void sendDirect(to, body).catch(() => {})
+				},
+				() => togetherTick++
+			);
+			together.ontiles = (from) => {
+				if (!liveStrokes.get(from)) canvas?.remoteClear(`live:${from}`);
+			};
+			together.restore(saved);
+			const host = info.members[0]?.id;
+			if (info.host || !host) await together.resumeHost();
+			else together.rejoin(host);
+			togetherTick++;
+		} catch (e) {
+			shareError = String(e);
+		} finally {
+			shareBusy = false;
+		}
 	}
 
 	async function shareStart(join?: string) {
@@ -1668,9 +1719,10 @@
 	async function shareLeave() {
 		shareBusy = true;
 		cursorOut.stop();
+		const was = sharing;
 		await leaveSession().catch(() => {});
 		sharing = null;
-		stopTogether();
+		stopTogether(was);
 		cursorsOf.clear();
 		cursorTick++;
 		shareBusy = false;
@@ -1788,8 +1840,9 @@
 			} else if (e.kind === 'direct') {
 				void together?.onDirect(e.from, e.body);
 			} else if (e.kind === 'closed') {
+				const was = sharing;
 				sharing = null;
-				stopTogether();
+				stopTogether(was);
 				cursorsOf.clear();
 				cursorTick++;
 				shareError = e.reason;
@@ -1839,7 +1892,22 @@
 			groups: snap.groups,
 			activeLayer: status?.active ?? 0,
 			strokes: snap.strokes,
-			extra: { brushId, color, size, opacity, smoothing, scene, cut: cutIndex, frame },
+			extra: {
+				brushId,
+				color,
+				size,
+				opacity,
+				smoothing,
+				scene,
+				cut: cutIndex,
+				frame,
+				// a shared project keeps its session, to rejoin later
+				...(together && sharing
+					? { share: together.save(sharing.invite, everyone(sharing.members)) }
+					: savedShare
+						? { share: savedShare }
+						: {})
+			},
 			created,
 			thumbnail: await canvas.thumbnail(),
 			scenes: toFile(timeline, layerIds),
@@ -2501,6 +2569,13 @@
 			// the canvas gave the layers new ids (in the same order)
 			const now = status?.layers ?? [];
 			const ids = new Map(doc.layers.map((l, i) => [l.id, now[i]?.id ?? 0] as [number, number]));
+			// a shared project: its session, with this canvas's layer ids
+			const share = readSavedShare(doc.extra.share);
+			if (share)
+				share.ids = share.ids
+					.map(([lid, id]) => [lid, ids.get(id) ?? 0] as [string, number])
+					.filter(([, id]) => id > 0);
+			savedShare = share;
 			const at = (v: unknown) => (typeof v === 'number' && v >= 0 ? Math.floor(v) : 0);
 			if (anim) {
 				// (drawings in the frame store come when their frames show)
@@ -3156,6 +3231,8 @@
 			{#if shareOpen}
 				<ShareDialog
 					info={sharing}
+					canRejoin={!!savedShare}
+					onrejoin={() => void shareRejoin()}
 					layers={sharedLayers}
 					synced={!!together?.synced}
 					onask={(lid) => together?.ask(lid)}

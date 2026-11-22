@@ -114,6 +114,50 @@ impl Sharing {
         Ok(self.start(app, s).await)
     }
 
+    /// Come back to a shared project after a break: join whoever of its members is online
+    /// (`code`: its saved invite; `addrs`: the members' addresses as saved), or, when no one
+    /// answers, host it again.
+    pub async fn rejoin(
+        &self,
+        app: AppHandle,
+        data: &Path,
+        code: &str,
+        addrs: Vec<Value>,
+        name: &str,
+        relay: Option<&str>,
+    ) -> Result<Info, String> {
+        let mut invite = Invite::decode(code).map_err(|e| e.to_string())?;
+        self.leave().await;
+        let id = identity(data)?;
+        for a in addrs {
+            if let Ok(a) = serde_json::from_value::<pencilpilot_share::EndpointAddr>(a)
+                && a.id.to_string() != id.id()
+                && !invite.addrs.iter().any(|x| x.id == a.id)
+            {
+                invite.addrs.push(a);
+            }
+        }
+        invite.addrs.retain(|a| a.id.to_string() != id.id());
+        let joined = if invite.addrs.is_empty() {
+            None
+        } else {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(12),
+                Session::join(&id, &invite, name, relays(relay)),
+            )
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+        };
+        let s = match joined {
+            Some(s) => s,
+            None => Session::host_again(&id, &invite, name, relays(relay))
+                .await
+                .map_err(|e| e.to_string())?,
+        };
+        Ok(self.start(app, s).await)
+    }
+
     async fn start(&self, app: AppHandle, s: Session) -> Info {
         let info = info_of(&s);
         let shared = std::sync::Arc::new(std::sync::Mutex::new(info.clone()));
