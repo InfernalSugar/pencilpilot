@@ -1530,7 +1530,11 @@
 
 	function canvasPort(c: PaintCanvas): CanvasPort {
 		return {
-			addLayer: (name) => c.addLayerQuiet(name),
+			addLayer: (name, adjust) =>
+				adjust ? c.addAdjustmentLayerQuiet(adjust, name) : c.addLayerQuiet(name),
+			setAdjust: (id, spec) => c.setAdjustmentQuiet(id, spec),
+			maskPacked: (id) => c.maskPacked(id),
+			putMask: (id, packed) => c.putMaskQuiet(id, packed),
 			setLayer: (id, patch) => c.setLayerQuiet(id, patch as Partial<LayerSettings>),
 			drawingOf: (id) => c.layerDrawingOf(id),
 			newDrawing: () => c.newDrawing(),
@@ -1555,7 +1559,7 @@
 			select: (id) => c.selectLayer(id),
 			removeLayer: (id) => c.removeLayerQuiet(id),
 			moveNextTo: (id, ref, above) => c.moveLayerQuietNextTo(id, ref, above),
-			layers: () => c.paintLayers()
+			layers: () => c.sharedLayerList()
 		};
 	}
 
@@ -1761,9 +1765,6 @@
 				if (
 					[
 						'duplicateLayer',
-						'addMask',
-						'deleteMask',
-						'applyMask',
 						'moveLayerTo',
 						'mergeDown',
 						'addGroup',

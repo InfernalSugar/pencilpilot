@@ -310,6 +310,54 @@ impl PaintCanvas {
         self.inner.adjustment_preview(id, a, spec)
     }
 
+    /// Add an adjustment layer on top without an undo step (a shared one); its id.
+    #[allow(clippy::too_many_arguments)]
+    #[wasm_bindgen(js_name = addAdjustmentLayerSilent)]
+    pub fn add_adjustment_layer_silent(
+        &mut self,
+        name: &str,
+        spec: &str,
+        hue: f32,
+        saturation: f32,
+        brightness: f32,
+        contrast: f32,
+        tone: &[u8],
+        map: &[u8],
+    ) -> u32 {
+        let a = colour_adjust(hue, saturation, brightness, contrast, tone, map);
+        self.inner.add_adjustment_layer_silent(name, a, spec)
+    }
+
+    /// Change an adjustment layer without an undo step (changed elsewhere).
+    #[allow(clippy::too_many_arguments)]
+    #[wasm_bindgen(js_name = setAdjustmentSilent)]
+    pub fn set_adjustment_silent(
+        &mut self,
+        id: u32,
+        spec: &str,
+        hue: f32,
+        saturation: f32,
+        brightness: f32,
+        contrast: f32,
+        tone: &[u8],
+        map: &[u8],
+    ) -> bool {
+        let a = colour_adjust(hue, saturation, brightness, contrast, tone, map);
+        self.inner.set_adjustment_silent(id, a, spec)
+    }
+
+    /// A layer's mask as packed tiles; empty when it has none.
+    #[wasm_bindgen(js_name = maskTilesPacked)]
+    pub fn mask_tiles_packed(&self, id: u32) -> Vec<u8> {
+        self.inner.mask_tiles_packed(id)
+    }
+
+    /// Put a layer's mask from packed tiles, no undo step; empty bytes remove it.
+    #[wasm_bindgen(js_name = putMaskTiles)]
+    pub fn put_mask_tiles(&mut self, id: u32, packed: &[u8]) -> bool {
+        self.inner.put_mask_tiles(id, packed)
+    }
+
     #[wasm_bindgen(js_name = adjustmentCommit)]
     pub fn adjustment_commit(&mut self) -> bool {
         self.inner.adjustment_commit()
