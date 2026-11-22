@@ -1,6 +1,7 @@
 <script lang="ts">
 	import '@pencilpilot/ui/theme.css';
 	import { onMount } from 'svelte';
+	import { applyLook } from '#lib/appearance.js';
 	import { isDark, keepSoon, loadSettings, settings } from '#lib/settings.svelte.js';
 
 	let { children } = $props();
@@ -47,6 +48,9 @@
 			/* storage blocked */
 		}
 	});
+
+	// the interface preferences (size, accent, colours, tooltips) on every screen
+	$effect(() => applyLook($state.snapshot(settings)));
 </script>
 
 {@render children()}

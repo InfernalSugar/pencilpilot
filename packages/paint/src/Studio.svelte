@@ -53,7 +53,8 @@
 		tab = $bindable(''),
 		dockOpen = $bindable(false),
 		dockLabel = 'Panel',
-		layout = $bindable()
+		layout = $bindable(),
+		leftHanded = false
 	}: {
 		/** the back button (none: no back button) */
 		backHref?: string;
@@ -86,6 +87,8 @@
 		dockLabel?: string;
 		/** bars that fold away and resize (none: they stay as they are) */
 		layout?: StudioLayout;
+		/** the tool strip on the right and the dock on the left (phones keep theirs) */
+		leftHanded?: boolean;
 	} = $props();
 
 	let bottomEl = $state<HTMLDivElement>();
@@ -112,14 +115,18 @@
 	}
 	function edgeMove(e: PointerEvent) {
 		if (!drag) return;
-		// up makes the bottom bar taller; left makes the dock wider
+		// up makes the bottom bar taller; towards the canvas makes the dock wider
 		if (drag.what === 'bottom') resizeTo('bottom', drag.size + drag.from - e.clientY);
-		else resizeTo('dock', drag.size + drag.from - e.clientX);
+		else resizeTo('dock', drag.size + (drag.from - e.clientX) * (leftHanded ? -1 : 1));
 	}
 	function edgeKey(e: KeyboardEvent, what: 'bottom' | 'dock') {
 		if (!layout) return;
 		const grow =
-			what === 'bottom' ? { ArrowUp: 1, ArrowDown: -1 } : { ArrowLeft: 1, ArrowRight: -1 };
+			what === 'bottom'
+				? { ArrowUp: 1, ArrowDown: -1 }
+				: leftHanded
+					? { ArrowRight: 1, ArrowLeft: -1 }
+					: { ArrowLeft: 1, ArrowRight: -1 };
 		const step = grow[e.key as keyof typeof grow];
 		if (!step) return;
 		e.preventDefault();
@@ -267,7 +274,7 @@
 		</div>
 	</header>
 
-	<div class="work">
+	<div class="work" class:lefty={leftHanded}>
 		<div class="rail pp-ink-bar">{@render rail()}</div>
 
 		<div class="center">
@@ -591,6 +598,9 @@
 		gap: 8px;
 		position: relative;
 	}
+	.work.lefty {
+		flex-direction: row-reverse;
+	}
 	.rail {
 		color-scheme: dark;
 		flex: none;
@@ -794,7 +804,7 @@
 		flex: 1 1 0;
 		min-height: 0;
 		position: relative;
-		background: var(--pp-surface-sunk);
+		background: var(--pp-canvas-surround, var(--pp-surface-sunk));
 		border-radius: 18px;
 		overflow: hidden;
 	}
@@ -911,6 +921,12 @@
 				transform 0.2s ease,
 				visibility 0.2s;
 		}
+		.lefty .dock {
+			right: auto;
+			left: 0;
+			box-shadow: 14px 0 40px rgba(22, 22, 26, 0.18);
+			transform: translateX(calc(-100% - 24px));
+		}
 		.dock.open {
 			transform: none;
 			visibility: visible;
@@ -986,7 +1002,8 @@
 		.sbar-actions :global(.picker) {
 			display: none;
 		}
-		.work {
+		.work,
+		.work.lefty {
 			flex-direction: column-reverse;
 			gap: 6px;
 		}
@@ -1006,6 +1023,14 @@
 			border-radius: 22px 22px 0 0;
 			box-shadow: 0 -12px 34px rgba(22, 22, 26, 0.2);
 			transform: translateY(calc(100% + 24px));
+		}
+		.lefty .dock {
+			right: 0;
+			box-shadow: 0 -12px 34px rgba(22, 22, 26, 0.2);
+			transform: translateY(calc(100% + 24px));
+		}
+		.lefty .dock.open {
+			transform: none;
 		}
 	}
 </style>

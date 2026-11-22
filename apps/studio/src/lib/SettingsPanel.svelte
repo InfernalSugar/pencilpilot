@@ -1,5 +1,18 @@
 <script lang="ts" module>
-	export type SettingsSection = 'look' | 'pen' | 'keys' | 'files' | 'together';
+	export type SettingsSection =
+		| 'look'
+		| 'pen'
+		| 'keys'
+		| 'files'
+		| 'together'
+		| 'cursor'
+		| 'brushes'
+		| 'canvas'
+		| 'selection'
+		| 'guides'
+		| 'performance'
+		| 'exports'
+		| 'prompts';
 	/** the section last open (it opens there again) */
 	let lastSection: SettingsSection = 'look';
 </script>
@@ -23,6 +36,8 @@
 		type Theme
 	} from '#lib/settings.svelte.js';
 	import { cleanRelay } from '#lib/share.js';
+	import Interface from '#lib/settings/Interface.svelte';
+	import { PREFERENCE_GROUPS } from '#lib/settings/groups.js';
 	import {
 		ACTIONS,
 		clashes,
@@ -42,6 +57,11 @@
 	const SECTIONS: { id: SettingsSection; label: string }[] = [
 		{ id: 'look', label: 'Appearance' },
 		{ id: 'pen', label: 'Pen and touch' },
+		// the preferences (each group its own component); Interface is part of Appearance
+		...PREFERENCE_GROUPS.filter((g) => g.id !== 'interface').map((g) => ({
+			id: g.id as SettingsSection,
+			label: g.title
+		})),
 		{ id: 'keys', label: 'Keyboard shortcuts' },
 		{ id: 'files', label: 'Files' },
 		{ id: 'together', label: 'Drawing together' }
@@ -229,6 +249,9 @@
 						Show everything at the usual size
 					</button>
 				</div>
+
+				<h3>Interface</h3>
+				<Interface />
 			{:else if section === 'pen'}
 				<h2>Pen and touch</h2>
 				<label class="row">
@@ -332,7 +355,7 @@
 						Recovery copies, versions and settings live in <code>{dataFolder}</code>.
 					</p>
 				{/if}
-			{:else}
+			{:else if section === 'together'}
 				<h2>Drawing together</h2>
 				<label class="row">
 					<span>Your name</span>
@@ -355,6 +378,12 @@
 					empty for the default, or give your own (see <code>deploy/relay</code>). Solo projects
 					never connect to anything.
 				</p>
+			{:else}
+				{@const g = PREFERENCE_GROUPS.find((x) => x.id === section)}
+				{#if g}
+					<h2>{g.title}</h2>
+					<g.body />
+				{/if}
 			{/if}
 		</div>
 	</div>

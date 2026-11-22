@@ -14,8 +14,15 @@
 	let {
 		manifest,
 		selected = $bindable(),
-		onclose
-	}: { manifest: BrushManifest; selected: string; onclose: () => void } = $props();
+		onclose,
+		askToDelete = true
+	}: {
+		manifest: BrushManifest;
+		selected: string;
+		onclose: () => void;
+		/** ask "Delete this brush?" first (the app's Settings can switch it off) */
+		askToDelete?: boolean;
+	} = $props();
 
 	// what we're editing: one of "My brushes", or a built-in brush to start a new one from
 	// (read once: the editor edits the brush that was selected when it opened)
@@ -169,7 +176,11 @@
 					<button type="button" class="ghost danger" onclick={remove}>Delete</button>
 					<button type="button" class="ghost" onclick={() => (confirmDelete = false)}>Keep</button>
 				{:else}
-					<button type="button" class="ghost" onclick={() => (confirmDelete = true)}>
+					<button
+						type="button"
+						class="ghost"
+						onclick={() => (askToDelete ? (confirmDelete = true) : remove())}
+					>
 						Delete brush
 					</button>
 				{/if}

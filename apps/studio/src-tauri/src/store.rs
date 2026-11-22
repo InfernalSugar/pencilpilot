@@ -295,6 +295,30 @@ pub fn versions_kept(data: &Path) -> usize {
         .map_or(VERSIONS_KEPT, |n| (n as usize).min(VERSIONS_MAX))
 }
 
+/// The frame store's share of the memory the animation's frames may take (the
+/// `frameMemoryMb` setting: 256 MB to 256 GB, 1 GB unless set), in bytes: three
+/// quarters; the window keeps its recent drawings in the last quarter
+/// (`memoryPlan` in src/lib/frames.ts).
+pub fn frames_budget(data: &Path) -> usize {
+    let mb = settings_get(data)
+        .get("frameMemoryMb")
+        .and_then(serde_json::Value::as_u64)
+        .map_or(1024, |n| n.clamp(256, 262_144));
+    (mb as usize).saturating_mul(1 << 20) / 4 * 3
+}
+
+/// Where frames past that go (the `framesFolder` setting): a folder of this run's own
+/// inside the one chosen (none chosen: `fallback`).
+pub fn frames_folder(data: &Path, fallback: Option<PathBuf>) -> Option<PathBuf> {
+    let run = format!("PencilPilot frames {}", std::process::id());
+    settings_get(data)
+        .get("framesFolder")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty() && Path::new(s).is_absolute())
+        .map(|s| Path::new(s).join(&run))
+        .or(fallback.map(|d| d.join(std::process::id().to_string())))
+}
+
 // ---- recent projects ----
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -590,6 +614,36 @@ mod tests {
             shared_of(&serde_json::json!({ "share": { "code": "nope" } })),
             None
         );
+    }
+
+    #[test]
+    fn the_frame_memory_limit_and_folder_come_from_the_settings() {
+        let data = temp("frames-settings");
+        assert_eq!(frames_budget(&data), 768 << 20);
+        assert_eq!(frames_folder(&data, None), None);
+        let pid = std::process::id().to_string();
+        assert_eq!(
+            frames_folder(&data, Some(PathBuf::from("/cache/frames"))),
+            Some(PathBuf::from("/cache/frames").join(&pid))
+        );
+        settings_set(
+            &data,
+            &serde_json::json!({ "frameMemoryMb": 16384, "framesFolder": "/big/disk" }),
+        )
+        .unwrap();
+        assert_eq!(frames_budget(&data), 12 << 30);
+        assert_eq!(
+            frames_folder(&data, None),
+            Some(PathBuf::from(format!("/big/disk/PencilPilot frames {pid}")))
+        );
+        // too little, and a folder that isn't a whole path: the safe choice
+        settings_set(
+            &data,
+            &serde_json::json!({ "frameMemoryMb": 3, "framesFolder": "relative" }),
+        )
+        .unwrap();
+        assert_eq!(frames_budget(&data), 192 << 20);
+        assert_eq!(frames_folder(&data, None), None);
     }
 
     #[test]

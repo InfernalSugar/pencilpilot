@@ -65,10 +65,20 @@ export class StrokeLog {
 	#all: Stroke[] = [];
 	#undo: Action[] = [];
 	#redo: Action[] = [];
-	readonly limit: number;
+	#limit: number;
 
 	constructor(limit = 60) {
-		this.limit = limit;
+		this.#limit = limit;
+	}
+
+	get limit() {
+		return this.#limit;
+	}
+
+	/** Keep this many undo steps (as the engine does); fewer drops the oldest now. */
+	setLimit(n: number) {
+		this.#limit = n;
+		if (this.#undo.length > n) this.#undo.splice(0, this.#undo.length - n);
 	}
 
 	/** every stroke that is currently applied, on any layer */
@@ -198,7 +208,7 @@ export class StrokeLog {
 	#push(a: Action) {
 		if (this.#collect) return void this.#collect.push(a);
 		this.#undo.push(a);
-		if (this.#undo.length > this.limit) this.#undo.shift();
+		if (this.#undo.length > this.#limit) this.#undo.shift();
 		this.#redo = [];
 	}
 }

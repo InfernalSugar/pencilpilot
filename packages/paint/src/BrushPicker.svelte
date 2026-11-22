@@ -7,10 +7,13 @@
 
 	let {
 		manifest,
-		selected = $bindable()
+		selected = $bindable(),
+		askToDelete = true
 	}: {
 		manifest: BrushManifest;
 		selected: string;
+		/** ask before deleting one of "My brushes" */
+		askToDelete?: boolean;
 	} = $props();
 
 	const FAV_KEY = 'pp.favouriteBrushes';
@@ -74,6 +77,7 @@
 	{#if editing}
 		<BrushEditor
 			{manifest}
+			{askToDelete}
 			bind:selected
 			onclose={() => {
 				editing = false;
