@@ -61,6 +61,7 @@
 	import LipSyncDialog from '#lib/LipSyncDialog.svelte';
 	import FilmDialog from '#lib/FilmDialog.svelte';
 	import ShareDialog from '#lib/ShareDialog.svelte';
+	import SaveChangesDialog from '#lib/SaveChangesDialog.svelte';
 	import { readSavedShare, Together, type CanvasPort, type SavedShare } from '#lib/together.js';
 	import {
 		cleanRelay,
@@ -1972,17 +1973,36 @@
 		}
 	}
 
-	/** Unsaved changes would be lost: ask first. True to go ahead. */
-	async function okToDrop(): Promise<boolean> {
+	/** "Save before…?": the question showing, and how to answer it */
+	let saveAsk = $state<{
+		title: string;
+		answer: (choice: 'yes' | 'no' | 'cancel') => void;
+	} | null>(null);
+	const SAVE_BEFORE = {
+		quit: 'Save before quitting?',
+		open: 'Save before opening another project?',
+		version: 'Save before opening an earlier version?',
+		leave: 'Save before leaving?'
+	};
+
+	/**
+	 * Unsaved changes would be lost: "Save before …?" Yes saves first (going ahead only if
+	 * it did), No goes ahead without saving, Cancel stays. True to go ahead.
+	 */
+	async function okToDrop(why: keyof typeof SAVE_BEFORE = 'leave'): Promise<boolean> {
 		if (!unsaved) return true;
-		const { ask } = await import('@tauri-apps/plugin-dialog');
-		return ask(`“${projectName(path)}” has changes that aren’t saved. Lose them?`, {
-			title: 'Unsaved changes',
-			kind: 'warning',
-			okLabel: 'Lose changes',
-			cancelLabel: 'Keep working'
-		});
+		const choice = await new Promise<'yes' | 'no' | 'cancel'>(
+			(answer) => (saveAsk = { title: SAVE_BEFORE[why], answer })
+		);
+		saveAsk = null;
+		if (choice === 'cancel') return false;
+		if (choice === 'no') return true;
+		await save(false);
+		return !unsaved;
 	}
+
+	// ---- the File menu ----
+	let fileOpen = $state(false);
 
 	/** Put a document on a fresh canvas of its size. */
 	function load(doc: ProjectDoc, opts: { path: string | null; unsaved: boolean; id?: string }) {
@@ -2017,7 +2037,7 @@
 	}
 
 	async function open() {
-		if (busy || !(await okToDrop())) return;
+		if (busy || !(await okToDrop('open'))) return;
 		const target = await askOpenPath(settings.projectFolder);
 		if (!target) return;
 		const old = docId;
@@ -2028,7 +2048,7 @@
 	}
 
 	async function openOldVersion(id: string) {
-		if (!path || busy || !(await okToDrop())) return;
+		if (!path || busy || !(await okToDrop('version'))) return;
 		const file = path;
 		await run('opening', async () =>
 			load(await openVersion(file, id), { path: file, unsaved: true })
@@ -2700,7 +2720,7 @@
 		import('@tauri-apps/api/window').then(({ getCurrentWindow }) =>
 			getCurrentWindow()
 				.onCloseRequested(async (e) => {
-					if (unsaved && !(await okToDrop())) return e.preventDefault();
+					if (unsaved && !(await okToDrop('quit'))) return e.preventDefault();
 					await discardRecovery(docId).catch(() => {});
 				})
 				.then((un) => (stop = un))
@@ -2849,24 +2869,93 @@
 		{/snippet}
 		{#snippet actions()}
 			{#if fileNote}<span class="note" role="alert">{fileNote}</span>{/if}
-			<button
-				type="button"
-				class="act"
-				disabled={!!busy}
-				onclick={open}
-				title="Open a project ({keyOf('open')})"
-			>
-				{busy === 'opening' ? 'Opening…' : 'Open'}
-			</button>
-			<button
-				type="button"
-				class="act"
-				disabled={!!busy}
-				onclick={() => save(false)}
-				title="Save ({keyOf('save')}); Save as: {keyOf('save-as')}"
-			>
-				{busy === 'saving' ? 'Saving…' : 'Save'}
-			</button>
+			<div class="export">
+				<button
+					type="button"
+					class="act"
+					aria-expanded={fileOpen}
+					disabled={!!busy}
+					onclick={() => {
+						fileOpen = !fileOpen;
+						exportOpen = false;
+						importOpen = false;
+					}}
+				>
+					{busy === 'opening' ? 'Opening…' : busy === 'saving' ? 'Saving…' : 'File'}
+				</button>
+				{#if fileOpen}
+					<div class="menu" role="group" aria-label="File">
+						<button
+							type="button"
+							onclick={() => {
+								fileOpen = false;
+								void open();
+							}}
+						>
+							<b>Open…</b><span>A project ({keyOf('open')})</span>
+						</button>
+						<button
+							type="button"
+							onclick={() => {
+								fileOpen = false;
+								void save(false);
+							}}
+						>
+							<b>Save</b><span>This project ({keyOf('save')})</span>
+						</button>
+						<button
+							type="button"
+							onclick={() => {
+								fileOpen = false;
+								void save(true);
+							}}
+						>
+							<b>Save as…</b><span>A copy under a new name ({keyOf('save-as')})</span>
+						</button>
+						<p class="menu-head">Export as</p>
+						<button
+							type="button"
+							disabled={!status || status.blank}
+							onclick={() => {
+								fileOpen = false;
+								void exportAs('png');
+							}}
+						>
+							<b>PNG picture…</b><span>One flat image</span>
+						</button>
+						<button
+							type="button"
+							disabled={!status || status.blank}
+							onclick={() => {
+								fileOpen = false;
+								void exportAs('psd');
+							}}
+						>
+							<b>Photoshop file (.psd)…</b><span>Keeps layers, groups and masks</span>
+						</button>
+						<button
+							type="button"
+							disabled={!status || status.blank}
+							onclick={() => {
+								fileOpen = false;
+								void openAnimExport();
+							}}
+						>
+							<b>Animation…</b><span>MP4, ProRes, WebM, GIF, animated PNG, PNG sequence</span>
+						</button>
+						<button
+							type="button"
+							disabled={!status || status.blank}
+							onclick={() => {
+								fileOpen = false;
+								void openFilm();
+							}}
+						>
+							<b>Film of the drawing…</b><span>Timelapse, or this frame drawn live</span>
+						</button>
+					</div>
+				{/if}
+			</div>
 			<VersionsMenu {path} disabled={!!busy} onopen={openOldVersion} />
 			<div class="export">
 				<button
@@ -3250,6 +3339,13 @@
 					onclose={() => (animExport = null)}
 				/>
 			{/if}
+			{#if saveAsk}
+				<SaveChangesDialog
+					title={saveAsk.title}
+					name={projectName(path)}
+					onanswer={(c) => saveAsk?.answer(c)}
+				/>
+			{/if}
 			{#if shareOpen}
 				<ShareDialog
 					info={sharing}
@@ -3418,6 +3514,17 @@
 	}
 	.menu button:hover {
 		background: var(--pp-ground);
+	}
+	.menu button:disabled {
+		opacity: 0.45;
+		cursor: default;
+	}
+	.menu-head {
+		margin: 6px 12px 0;
+		color: var(--pp-muted);
+		font: 600 12px var(--pp-font-body);
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
 	}
 	.menu span {
 		color: var(--pp-muted);

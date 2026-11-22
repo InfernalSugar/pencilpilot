@@ -257,6 +257,10 @@ test('save, change, open again (asking before losing the change)', async ({ page
 	await scribble(page, 0.85);
 	await expect(page.getByLabel('not saved')).toBeVisible();
 	await page.keyboard.press('Control+o');
+	// "Save before opening another project?" No: open without saving
+	const ask = page.getByRole('dialog', { name: 'Save before opening another project?' });
+	await expect(ask).toBeVisible();
+	await ask.getByRole('button', { name: 'No' }).click();
 	await expect(page.getByLabel('not saved')).toHaveCount(0);
 	await expectSavedDrawing(page, drawn);
 	expect((await calls(page)).map((c) => c.cmd)).toEqual(
@@ -264,23 +268,54 @@ test('save, change, open again (asking before losing the change)', async ({ page
 			'plugin:dialog|save',
 			'project_save',
 			'recovery_discard',
-			'plugin:dialog|message',
 			'plugin:dialog|open',
 			'project_open'
 		])
 	);
 });
 
-test('keeping your changes stops the open', async ({ page }) => {
-	await stubTauri(page, { askAnswer: false });
+test('cancel keeps your changes and stops the open', async ({ page }) => {
+	await stubTauri(page);
 	await ready(page);
 	await scribble(page, 0.5);
 	await page.keyboard.press('Control+o');
-	await expect
-		.poll(async () => (await calls(page)).map((c) => c.cmd))
-		.toContain('plugin:dialog|message');
+	const ask = page.getByRole('dialog', { name: 'Save before opening another project?' });
+	await ask.getByRole('button', { name: 'Cancel' }).click();
+	await expect(ask).toHaveCount(0);
 	expect((await calls(page)).map((c) => c.cmd)).not.toContain('plugin:dialog|open');
 	await expect(page.getByLabel('not saved')).toBeVisible();
+});
+
+test('yes saves first, then goes ahead', async ({ page }) => {
+	await stubTauri(page);
+	await ready(page);
+	await scribble(page, 0.5);
+	await page.keyboard.press('Control+o');
+	const ask = page.getByRole('dialog', { name: 'Save before opening another project?' });
+	await ask.getByRole('button', { name: 'Yes' }).click();
+	// saved (asking where: it had no file yet), then the open goes on
+	await expect
+		.poll(async () => (await calls(page)).map((c) => c.cmd))
+		.toEqual(expect.arrayContaining(['plugin:dialog|save', 'project_save', 'plugin:dialog|open']));
+	const cmds = (await calls(page)).map((c) => c.cmd);
+	expect(cmds.indexOf('project_save')).toBeLessThan(cmds.indexOf('plugin:dialog|open'));
+});
+
+test('the File menu saves, saves as, and exports', async ({ page }) => {
+	await stubTauri(page);
+	await ready(page);
+	await scribble(page, 0.5);
+	const file = page.getByRole('button', { name: 'File', exact: true });
+	await file.click();
+	const menu = page.getByRole('group', { name: 'File' });
+	for (const item of ['Open…', 'Save', 'Save as…', 'PNG picture…', 'Photoshop file (.psd)…'])
+		await expect(menu.getByText(item, { exact: true })).toBeVisible();
+	await menu.getByRole('button', { name: /^Save as…/ }).click();
+	await expect.poll(async () => (await calls(page)).map((c) => c.cmd)).toContain('project_save');
+	await expect(page.getByLabel('not saved')).toHaveCount(0);
+	await file.click();
+	await menu.getByRole('button', { name: /^PNG picture…/ }).click();
+	await expect.poll(async () => (await calls(page)).map((c) => c.cmd)).toContain('export_write');
 });
 
 test('unsaved work is autosaved as a recovery copy every 20 seconds', async ({ page }) => {
@@ -336,7 +371,11 @@ test('an earlier version can be opened', async ({ page }) => {
 	await expect(menu).toContainText('47 KB');
 	await scribble(page, 0.85);
 	await menu.getByRole('button', { name: 'Open' }).click();
-	// opening a version over unsaved work asks first; it opens as unsaved work
+	// opening a version over unsaved work asks first (No: don't save); it opens as unsaved work
+	await page
+		.getByRole('dialog', { name: 'Save before opening an earlier version?' })
+		.getByRole('button', { name: 'No' })
+		.click();
 	await expect.poll(async () => (await calls(page)).map((c) => c.cmd)).toContain('version_open');
 	await expectSavedDrawing(page, drawn);
 	await expect(page.getByLabel('not saved')).toBeVisible();
@@ -421,13 +460,12 @@ test('home: recent projects open; missing ones are marked and can be removed', a
 });
 
 test('leaving the studio with unsaved work asks first', async ({ page }) => {
-	await stubTauri(page, { askAnswer: false });
+	await stubTauri(page);
 	await ready(page);
 	await scribble(page, 0.5);
 	await page.getByRole('link', { name: 'Back' }).click();
-	await expect
-		.poll(async () => (await calls(page)).map((c) => c.cmd))
-		.toContain('plugin:dialog|message');
+	const ask = page.getByRole('dialog', { name: 'Save before leaving?' });
+	await ask.getByRole('button', { name: 'Cancel' }).click();
 	await expect(page).toHaveURL(/\/studio/);
 	await expect(page.getByLabel('not saved')).toBeVisible();
 });
