@@ -141,6 +141,7 @@
 	import {
 		STRIDE,
 		boilStrokes,
+		bounds,
 		decodeLineData,
 		encodeLineData,
 		encodeLines,
@@ -559,6 +560,8 @@
 
 	/** a stroke picked to edit from another tool (Transform, a held brush): it acts as Select line */
 	let picking2 = $state(false);
+	/** bumps when the active layer, the selection or mask editing change (see `bakeTainted`) */
+	let strokeTick = $state(0);
 	/** the Select line tool, or a stroke picked from another tool */
 	const lineTool = $derived(tool === 'lines' || picking2);
 
@@ -569,8 +572,18 @@
 
 	// paint over editable strokes made them plain pixels: their part goes with that step
 	let bakeQueued = false;
+	/** what Move's stroke outlines depend on, as last seen (see `strokeTick`) */
+	let strokeKey = '';
 	function bakeTainted() {
 		bakeQueued = false;
+		// (outside any effect, and only when it changed: no loops)
+		if (paint) {
+			const key = `${paint.activeLayer}|${paint.hasSelection()}|${paint.isEditingMask()}`;
+			if (key !== strokeKey) {
+				strokeKey = key;
+				strokeTick++;
+			}
+		}
 		if (!paint || lines.busy) return;
 		const t = paint.takeTainted();
 		if (!t.length) return;
@@ -616,6 +629,15 @@
 		return paint.beginStroke();
 	}
 
+	/** What a stroke keeps of its brush's reach: how far it paints, and whether it smudges. */
+	function brushReach(b: PaintBrush): Pick<LineStroke, 'reach' | 'smudge'> {
+		const reach = Math.round(b.paintReach() * 100) / 100;
+		return {
+			...(reach > 2.5 ? { reach } : {}),
+			...(b.smudgeReach() > 0 ? { smudge: true } : {})
+		};
+	}
+
 	/** A line stroke ending: it and its symmetry copies, to join the drawing (`lines.added`). */
 	function finishLineStroke(shape: EditShape | null) {
 		const pts = linePts;
@@ -630,6 +652,8 @@
 			opacity,
 			radius: brush.radius(),
 			seed: lineSeed,
+			// how far it paints or picks paint up (redraws take that in)
+			...brushReach(brush),
 			...(brushTexture ? { texture: $state.snapshot(brushTexture) as typeof brushTexture } : {}),
 			...(shape ? { shape } : {})
 		};
@@ -2252,15 +2276,45 @@
 		});
 	}
 
-	// entering the tool lifts the pixels; leaving it keeps the result
+	/**
+	 * Move on a layer with editable strokes (and no selection): the strokes show as
+	 * outlines to pick, and the layer's box only comes with a drag off them.
+	 */
+	const moveStrokes = $derived.by(() => {
+		void strokeTick;
+		void lines.version;
+		if (tool !== 'transform' || picking2 || !ready || !paint) return false;
+		if (paint.hasSelection() || paint.isEditingMask()) return false;
+		return lines.strokesOf(paint.activeLayer).length > 0;
+	});
+	/** the strokes Move shows to pick */
+	const moveList = $derived.by(() =>
+		moveStrokes && paint ? lines.strokesOf(paint.activeLayer) : ([] as readonly LineStroke[])
+	);
+	/** the stroke under the pointer, with Move showing strokes (its id) */
+	let hoverStroke = $state<string | null>(null);
+
+	/** Lift the layer (or selection) for Transform; false if there's nothing to move. */
+	function beginTransform(): boolean {
+		if (!paint || xf || paint.isTransforming()) return !!xf;
+		const b = paint.transformBegin();
+		if (b.length !== 4) {
+			ontransformend?.('empty');
+			return false;
+		}
+		xf = { box: [b[0], b[1], b[2], b[3]], tx: 0, ty: 0, sx: 1, sy: 1, rot: 0, fx: 1, fy: 1 };
+		if (untrack(() => warp)) xf = { ...xf, mesh: startMesh(xf) };
+		schedule();
+		notify();
+		return true;
+	}
+
+	// entering the tool lifts the pixels (with editable strokes showing: at the first drag
+	// off them); leaving it keeps the result
 	$effect(() => {
 		if (!ready || !paint) return;
-		if (tool === 'transform' && !xf && !picking2 && !paint.isTransforming()) {
-			const b = paint.transformBegin();
-			if (b.length !== 4) return void ontransformend?.('empty');
-			xf = { box: [b[0], b[1], b[2], b[3]], tx: 0, ty: 0, sx: 1, sy: 1, rot: 0, fx: 1, fy: 1 };
-			if (untrack(() => warp)) xf = { ...xf, mesh: startMesh(xf) };
-			schedule();
+		if (tool === 'transform' && !xf && !picking2 && !moveStrokes && !paint.isTransforming()) {
+			untrack(beginTransform);
 		} else if (tool !== 'transform' && xf) {
 			transformCommit();
 		}
@@ -2269,10 +2323,48 @@
 	export function transformCommit() {
 		if (!paint || !xf) return;
 		const label = xf.mesh ? 'Warp' : xf.quad ? 'Distort' : 'Transform';
+		// move, scale, turn and flip take editable strokes along (they stay editable); a
+		// distort or warp makes them plain pixels
+		const m: Affine | null = !xf.mesh && !xf.quad ? xfMatrix(xf) : null;
 		xf = null;
-		changed(paint.transformCommit(), undefined, label);
+		const layer = paint.activeLayer;
+		const follow = m ? strokesFollowing(layer) : null;
+		const ok = paint.transformCommitKeeping(!!follow && isLineLayer(layer));
+		changed(ok, undefined, label);
+		if (ok && follow && m) {
+			const effect = lines.followTransform(layer, m, follow, paint.takeTainted());
+			if (effect) log.attachLast(effect);
+			schedule();
+			notify();
+		}
+		paint.xfForget();
 		refreshAnts();
 		ontransformend?.('done');
+	}
+
+	/**
+	 * The editable strokes a transform of `layer` takes along (ids; null: none): every
+	 * one, or with a selection those wholly inside it. A line layer's strokes go all
+	 * together or not at all (then it turns into pixels, as before).
+	 */
+	function strokesFollowing(layer: number): Set<string> | null {
+		if (!paint || paint.isEditingMask()) return null;
+		const list = lines.strokesOf(layer);
+		if (!list.length) return null;
+		const sel = paint.hasSelection() ? paint.selectionMask() : null;
+		const inside = (s: LineStroke) => {
+			if (!sel) return true;
+			const b = bounds(s);
+			const [x0, y0] = [Math.floor(b.x0), Math.floor(b.y0)];
+			const [x1, y1] = [Math.ceil(b.x1), Math.ceil(b.y1)];
+			if (x0 < 0 || y0 < 0 || x1 >= width || y1 >= height) return false;
+			for (let y = y0; y <= y1; y++)
+				for (let x = x0; x <= x1; x++) if (sel[y * width + x] < 255) return false;
+			return true;
+		};
+		const ids = new Set(list.filter(inside).map((s) => s.id));
+		if (!ids.size || (isLineLayer(layer) && ids.size !== list.length)) return null;
+		return ids;
 	}
 	export function transformCancel() {
 		if (!paint || !xf) return;
@@ -3244,8 +3336,24 @@
 			return;
 		}
 		if (tool === 'transform') {
-			if (!xf) return;
 			const p = toCanvas(e.clientX, e.clientY);
+			if (!xf) {
+				if (!moveStrokes) return;
+				const l = shownLayers().find((x) => x.id === paint!.activeLayer);
+				if (l && (l.locked || !l.visible)) return onblocked?.(l.visible ? 'locked' : 'hidden');
+				// on a stroke: it's picked, and a drag moves it
+				if (lines.hit(paint.activeLayer, p[0], p[1], fit * zoom) >= 0) {
+					pickStroke(p);
+					if (!picking2) return;
+					capture(e);
+					linePointer = e.pointerId;
+					hoverStroke = null;
+					lines.down(paint.activeLayer, p[0], p[1], false, fit * zoom);
+					return;
+				}
+				// off them: the layer moves, as Move does
+				if (!beginTransform() || !xf) return;
+			}
 			const hit: { mode: NonNullable<typeof xfDrag>['mode']; index: number } = xfHit(p) ?? {
 				mode: 'move',
 				index: 0
@@ -3432,6 +3540,11 @@
 				onlive?.({ type: 'cancel', k: liveK });
 			}
 			pickStroke(h.p);
+			// still pressed: moving on drags what was picked (its twins too), one step
+			if (picking2 && paint) {
+				linePointer = id;
+				lines.down(paint.activeLayer, h.p[0], h.p[1], false, fit * zoom);
+			}
 		}, HOLD_PICK_MS);
 		holdPick = { id, x: e.clientX, y: e.clientY, p, timer };
 	}
@@ -3468,6 +3581,12 @@
 
 	function move(e: PointerEvent) {
 		if (oncursor) oncursor(toCanvas(e.clientX, e.clientY));
+		if (moveStrokes && !xf && paint && linePointer === null) {
+			const [x, y] = toCanvas(e.clientX, e.clientY);
+			const list = lines.strokesOf(paint.activeLayer);
+			const i = lines.hit(paint.activeLayer, x, y, fit * zoom);
+			hoverStroke = i >= 0 ? list[i].id : null;
+		}
 		if (
 			holdPick?.id === e.pointerId &&
 			Math.hypot(e.clientX - holdPick.x, e.clientY - holdPick.y) > 3
@@ -3945,6 +4064,8 @@
 	export const layerStrokes = (id: number) => lines.strokesOf(id).length;
 	/** A stroke picked with another tool (Move, a held brush) is being edited. */
 	export const strokePicked = () => picking2;
+	/** Move shows the active layer's editable strokes to pick (no layer box yet). */
+	export const moveShowsStrokes = () => moveStrokes && !xf;
 	/** a drawing's line strokes */
 	export const lineStrokes = (drawing: number): readonly LineStroke[] => lines.store.get(drawing);
 	/** the drawings that have line strokes */
@@ -4975,6 +5096,22 @@
 				<circle class="grad" cx={grad.to[0]} cy={grad.to[1]} r={hr} />
 			</svg>
 		{/if}
+		{#if moveStrokes && !xf}
+			{@const shown = moveList}
+			<svg
+				class="xf stroke-hints"
+				viewBox="0 0 {width} {height}"
+				preserveAspectRatio="none"
+				aria-hidden="true"
+				data-testid="stroke-outlines"
+				data-count={shown.length}
+				data-hover={hoverStroke ?? ''}
+			>
+				{#each shown as s (s.id)}
+					<polyline class="hint" class:hover={s.id === hoverStroke} points={linePoints(s)} />
+				{/each}
+			</svg>
+		{/if}
 		{#if lineTool && (lines.sel || lines.marquee)}
 			{@const k = Math.max(0.01, fit * zoom)}
 			{@const hr = 5 / k}
@@ -5237,7 +5374,13 @@
 		{/if}
 		{#if xfShape && !xf?.mesh}
 			{@const hr = 7 / Math.max(0.01, fit * zoom)}
-			<svg class="xf" viewBox="0 0 {width} {height}" preserveAspectRatio="none" aria-hidden="true">
+			<svg
+				class="xf"
+				viewBox="0 0 {width} {height}"
+				preserveAspectRatio="none"
+				aria-hidden="true"
+				data-testid="transform-box"
+			>
 				<polygon points={xfShape.corners.map((p) => p.join(',')).join(' ')} />
 				<line x1={xfShape.top[0]} y1={xfShape.top[1]} x2={xfShape.rotH[0]} y2={xfShape.rotH[1]} />
 				{#each [...xfShape.corners, ...xfShape.edges] as [x, y], i (i)}
@@ -5801,6 +5944,19 @@
 	.xf .line-path-under {
 		stroke: rgba(255, 255, 255, 0.85);
 		stroke-width: 3.5;
+	}
+	/* Move on a layer with editable strokes: each one, to pick */
+	.stroke-hints .hint {
+		fill: none;
+		stroke: rgba(61, 107, 255, 0.75);
+		stroke-width: 1.5;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+		vector-effect: non-scaling-stroke;
+	}
+	.stroke-hints .hint.hover {
+		stroke: #3d6bff;
+		stroke-width: 2.5;
 	}
 	.xf .line-path {
 		stroke: #3d6bff;

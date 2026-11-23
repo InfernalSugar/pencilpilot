@@ -15,6 +15,20 @@ pub struct PaintBrush {
 
 #[wasm_bindgen]
 impl PaintBrush {
+    /// How far past its dabs the brush reads the paint (smudging), as a multiple of the
+    /// dab radius; 0 when it doesn't smudge.
+    #[wasm_bindgen(js_name = smudgeReach)]
+    pub fn smudge_reach(&self) -> f32 {
+        brush::smudge_reach(&self.inner)
+    }
+
+    /// How far from the path the brush's strokes can paint or read paint, as a multiple
+    /// of its radius (redraws take in every tile that far).
+    #[wasm_bindgen(js_name = paintReach)]
+    pub fn paint_reach(&self) -> f32 {
+        brush::paint_reach(&self.inner)
+    }
+
     #[wasm_bindgen(constructor)]
     pub fn new(myb_json: &str) -> Result<PaintBrush, JsError> {
         let inner = hokusai::myb::from_str(myb_json).map_err(|e| JsError::new(&e.to_string()))?;
@@ -1089,8 +1103,8 @@ impl PaintCanvas {
     /// Replay one whole stroke into the redraw: `pts` = x, y, pressure, xtilt, ytilt,
     /// dtime (seconds) per point.
     #[wasm_bindgen(js_name = linesStroke)]
-    pub fn lines_stroke(&mut self, brush: &PaintBrush, seed: u32, pts: &[f32]) {
-        self.inner.lines_stroke(&brush.inner, seed, pts);
+    pub fn lines_stroke(&mut self, brush: &PaintBrush, seed: u32, pts: &[f32], group: u32) {
+        self.inner.lines_stroke(&brush.inner, seed, pts, group);
     }
 
     /// Put the redrawn tiles on the layer (not an undo step until `linesPush`).
@@ -1126,9 +1140,49 @@ impl PaintCanvas {
 
     /// Start replaying strokes into a drawing's base (strokes becoming plain pixels);
     /// `linesStroke`… then `linesCommit` (joins the last undo step).
+    /// Keep the transform; `lines`: a line layer stays one (its strokes follow). What it
+    /// did is kept for editable strokes to follow (`xf*`).
+    #[wasm_bindgen(js_name = transformCommitKeeping)]
+    pub fn transform_commit_keeping(&mut self, lines: bool) -> bool {
+        self.inner.transform_commit_keeping(lines)
+    }
+
+    /// The drawing the last transform kept was of (0: none).
+    #[wasm_bindgen(js_name = xfDrawing)]
+    pub fn xf_drawing(&self) -> u32 {
+        self.inner.xf_drawing()
+    }
+
+    /// Start working out the layer before the last transform without its editable
+    /// strokes but those that became plain pixels: those follow (`linesStroke`), then
+    /// `linesCommit`.
+    #[wasm_bindgen(js_name = xfWithoutBegin)]
+    pub fn xf_without_begin(&mut self) -> bool {
+        self.inner.xf_without_begin()
+    }
+
+    /// The pixels under the strokes that followed the last transform, at `tiles`, become
+    /// their base (joins the last undo step).
+    #[wasm_bindgen(js_name = xfBase)]
+    pub fn xf_base(&mut self, tiles: &[i32]) -> bool {
+        self.inner.xf_base(tiles)
+    }
+
+    #[wasm_bindgen(js_name = xfForget)]
+    pub fn xf_forget(&mut self) {
+        self.inner.xf_forget();
+    }
+
     #[wasm_bindgen(js_name = baseBegin)]
     pub fn base_begin(&mut self, drawing: u32, layer: u32, tiles: &[i32]) -> bool {
         self.inner.base_begin(drawing, layer, tiles)
+    }
+
+    /// Tiles a smudging stroke read from join its drawing's base as they are (joins the
+    /// last undo step).
+    #[wasm_bindgen(js_name = baseCover)]
+    pub fn base_cover(&mut self, drawing: u32, tiles: &[i32]) -> bool {
+        self.inner.base_cover(drawing, tiles)
     }
 
     /// Forget base tiles no editable stroke needs (joins the last undo step).
