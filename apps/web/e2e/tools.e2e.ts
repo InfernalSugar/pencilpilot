@@ -577,6 +577,66 @@ test('QuickShape: a second finger (or Shift, or Edit shape) makes a perfect circ
 	expect(await aspect()).toBeGreaterThan(0.9);
 });
 
+test('QuickShape: lines with corners can be curved, and stay curved for the next one', async ({
+	page
+}) => {
+	await ready(page);
+	/** which pixels have ink, as one string */
+	const ink = () =>
+		canvas(page).evaluate((c: HTMLCanvasElement) => {
+			const d = c.getContext('2d')!.getImageData(0, 0, c.width, c.height).data;
+			let s = '';
+			for (let i = 0; i < d.length; i += 4) s += d[i] < 225 ? '1' : '0';
+			return s;
+		});
+	/** a V (three corners) drawn and held until it snaps */
+	const vee = async () => {
+		const b = await box(page);
+		const pts = [
+			[0.3, 0.3],
+			[0.5, 0.75],
+			[0.7, 0.3]
+		];
+		await page.mouse.move(b.x + b.width * pts[0][0], b.y + b.height * pts[0][1]);
+		await page.mouse.down();
+		for (let k = 0; k < 2; k++)
+			for (let i = 1; i <= 20; i++) {
+				const [p, q] = [pts[k], pts[k + 1]];
+				const t = i / 20;
+				await page.mouse.move(
+					b.x + b.width * (p[0] + (q[0] - p[0]) * t),
+					b.y + b.height * (p[1] + (q[1] - p[1]) * t)
+				);
+			}
+		await page.waitForTimeout(800);
+		await page.mouse.up();
+	};
+	await vee();
+	const bar = page.getByRole('toolbar', { name: 'Edit shape' });
+	await expect(bar.getByRole('button', { name: 'Straight' })).toHaveAttribute(
+		'aria-pressed',
+		'true'
+	);
+	const straight = await ink();
+	/** how many pixels differ from the straight V, as a share of its ink */
+	const apart = async () => {
+		const now = await ink();
+		let diff = 0;
+		for (let i = 0; i < now.length; i++) if (now[i] !== straight[i]) diff++;
+		return diff / Math.max(1, straight.split('1').length - 1);
+	};
+	await bar.getByRole('button', { name: 'Curved' }).click();
+	await expect.poll(apart).toBeGreaterThan(0.5);
+	// back to the same lines (the pencil's grain differs a little each time)
+	await bar.getByRole('button', { name: 'Straight' }).click();
+	await expect.poll(apart).toBeLessThan(0.3);
+	await bar.getByRole('button', { name: 'Curved' }).click();
+	// the next V comes out curved
+	await page.keyboard.press('Control+z');
+	await vee();
+	await expect(bar.getByRole('button', { name: 'Curved' })).toHaveAttribute('aria-pressed', 'true');
+});
+
 /** the ink's bounding box as fractions of the canvas */
 const inkFrac = (page: Page) =>
 	canvas(page).evaluate((c: HTMLCanvasElement) => {
