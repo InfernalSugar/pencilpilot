@@ -1702,7 +1702,7 @@
 			<section aria-label="Brushes">
 				{#if manifest}
 					<BrushPicker {manifest} bind:selected={brushId} />
-					<BrushTexturePanel {brushId} onpick={(id) => (brushId = id)} />
+					<BrushTexturePanel {brushId} />
 				{:else}
 					<p class="muted">Loading brushes…</p>
 				{/if}

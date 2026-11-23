@@ -3571,7 +3571,7 @@
 			{:else if t === 'brushes'}
 				{#if manifest}
 					<BrushPicker {manifest} bind:selected={brushId} askToDelete={settings.askToDelete} />
-					<BrushTexturePanel {brushId} onpick={(id) => (brushId = id)} />
+					<BrushTexturePanel {brushId} />
 				{:else}
 					<p>Loading brushes…</p>
 				{/if}

@@ -12,7 +12,8 @@
 		| 'guides'
 		| 'performance'
 		| 'exports'
-		| 'prompts';
+		| 'prompts'
+		| 'about';
 	/** the section last open (it opens there again) */
 	let lastSection: SettingsSection = 'look';
 </script>
@@ -64,7 +65,8 @@
 			label: g.title
 		})),
 		{ id: 'files', label: 'Files' },
-		{ id: 'together', label: 'Drawing together' }
+		{ id: 'together', label: 'Drawing together' },
+		{ id: 'about', label: 'About' }
 	];
 	const THEMES: [Theme, string][] = [
 		['light', 'Light'],
@@ -378,6 +380,17 @@
 					empty for the default, or give your own (see <code>deploy/relay</code>). Solo projects
 					never connect to anything.
 				</p>
+			{:else if section === 'about'}
+				<h2>About</h2>
+				<p>PencilPilot: a drawing and frame-by-frame animation app.</p>
+				<h3>Credits</h3>
+				<p class="credit">
+					The brushes are the
+					<a href="https://github.com/mypaint/mypaint-brushes" target="_blank" rel="noreferrer">
+						MyPaint brush pack
+					</a>
+					(CC0), by its artists, and they paint with a port of the MyPaint brush engine.
+				</p>
 			{:else}
 				{@const g = PREFERENCE_GROUPS.find((x) => x.id === section)}
 				{#if g}
@@ -627,6 +640,10 @@
 	}
 	code {
 		font-size: 12px;
+	}
+	.credit a {
+		color: inherit;
+		font-weight: 600;
 	}
 
 	/* narrow windows: the sections go across the top */
