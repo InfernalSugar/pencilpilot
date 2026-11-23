@@ -89,6 +89,8 @@ export class FrameCache {
 	/** when each drawing was last shown or changed */
 	#used = new Map<number, number>();
 	#clock = 0;
+	/** held in the engine until let go (a step about to change them all) */
+	#pinned = new Set<number>();
 	/** drawings kept in the engine besides the ones showing */
 	keep = keepByDeveloper() || KEEP_MOST;
 
@@ -174,12 +176,40 @@ export class FrameCache {
 		// (undo brings back a drawing it needs first: see the studio's undo)
 		const kept = c.keptDrawings();
 		const free = kept
-			.filter((id) => !this.#dirty.has(id))
+			.filter((id) => !this.#dirty.has(id) && !this.#pinned.has(id))
 			.sort((a, b) => (this.#used.get(a) ?? 0) - (this.#used.get(b) ?? 0));
 		let over = kept.length - this.keep;
 		for (const id of free) {
 			if (over <= 0) break;
 			if (c.forgetDrawing(id)) over--;
+		}
+	}
+
+	/**
+	 * Bring these drawings from the store and hold them in the engine (`trim` leaves
+	 * them) until `release`: a step that changes them all (a canvas size) needs every
+	 * one of them there at once.
+	 */
+	async hold(ids: number[]) {
+		for (const id of ids) if (id) this.#pinned.add(id);
+		await this.ensure(ids);
+	}
+
+	/**
+	 * Let held drawings go: the changed ones go to the store, a batch at a time, the
+	 * engine keeping only what it usually keeps.
+	 */
+	async release(changed: number[] = [], batch = 24) {
+		this.touch(changed);
+		try {
+			for (let i = 0; i < changed.length; i += batch) {
+				await this.push(changed.slice(i, i + batch));
+				for (const id of changed.slice(i, i + batch)) this.#pinned.delete(id);
+				this.trim();
+			}
+		} finally {
+			this.#pinned.clear();
+			this.trim();
 		}
 	}
 
