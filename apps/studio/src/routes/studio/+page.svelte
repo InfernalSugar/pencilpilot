@@ -114,6 +114,7 @@
 		FILM_FPS,
 		ease,
 		liveSchedule,
+		liveSteps,
 		runs as runsOf,
 		strokesOfFrame,
 		type FilmSettings
@@ -2544,7 +2545,11 @@
 				const hold = Math.round(1.5 * FILM_FPS);
 				total = drawFrames + pause + fade + hold;
 				// (frames where nothing new is drawn are sent once, held)
-				let pending = 0;
+				const steps = liveSteps(
+					events.map((v) => v.t),
+					drawFrames,
+					FILM_FPS
+				);
 				let e = 0;
 				await invoke('export_begin', {
 					spec: {
@@ -2554,37 +2559,30 @@
 						height: out.height,
 						fps: FILM_FPS,
 						transparent: false,
-						frames: total,
+						// pictures sent (each held some frames): the drawing, the lines
+						// (held for the pause), the fade, the finished frame (held)
+						frames: steps.length + 1 + fade + 1,
 						total,
 						once: false,
 						quality: settings.exportQuality,
 						meta: exportMeta()
 					}
 				});
-				for (let i = 0; i < drawFrames; i++) {
-					const t = (i + 1) / FILM_FPS;
-					let moved = false;
-					while (e < events.length && events[e].t <= t) {
+				for (const step of steps) {
+					while (e < step.upTo) {
 						player.drawTo(events[e].stroke, events[e].points);
 						e++;
-						moved = true;
 					}
-					if (!moved && pending) {
-						pending++;
-						continue;
-					}
-					if (pending) await send(pending);
 					const r = filmStage.renderFrame([], k);
 					if (!r) throw new Error('the film canvas went away');
 					paper();
 					await draw(r);
-					pending = 1;
+					await send(step.repeat);
 				}
 				while (e < events.length) player.drawTo(events[e].stroke, events[e++].points);
 				const r = filmStage.renderFrame([], k);
 				if (!r) throw new Error('the film canvas went away');
 				const lines = { rgba: r.rgba.slice(), width: r.width, height: r.height };
-				if (pending) await send(pending);
 				paper();
 				await draw(lines);
 				await send(pause);

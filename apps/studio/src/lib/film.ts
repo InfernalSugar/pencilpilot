@@ -79,6 +79,30 @@ export function liveSchedule(
 	return { events, duration: clock };
 }
 
+/**
+ * The drawing part of a drawn-live film as pictures: each shows the first `upTo`
+ * events and is held `repeat` frames. A new picture starts only when a stroke moved,
+ * so frames where nothing new is drawn are sent once, held. (The exporter counts
+ * pictures, so this is also how many the film announces.)
+ */
+export function liveSteps(
+	times: number[],
+	frames: number,
+	fps: number
+): { upTo: number; repeat: number }[] {
+	const out: { upTo: number; repeat: number }[] = [];
+	let e = 0;
+	for (let i = 0; i < frames; i++) {
+		const t = (i + 1) / fps;
+		const from = e;
+		while (e < times.length && times[e] <= t) e++;
+		const last = out.at(-1);
+		if (last && e === from) last.repeat++;
+		else out.push({ upTo: e, repeat: 1 });
+	}
+	return out;
+}
+
 /** Smooth in and out (0 → 1), for the dissolve into the finished frame. */
 export const ease = (x: number) => {
 	const t = Math.min(1, Math.max(0, x));
