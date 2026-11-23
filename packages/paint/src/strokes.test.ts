@@ -69,6 +69,16 @@ describe('StrokeLog', () => {
 		expect(n).toBe(3);
 		expect(ids(log)).toEqual(['1', '2']);
 	});
+
+	it('takes a new limit, dropping the oldest steps', () => {
+		const log = new StrokeLog(10);
+		for (const id of ['1', '2', '3', '4', '5']) log.add(s(id));
+		log.setLimit(2);
+		let n = 0;
+		while (log.undo()) n++;
+		expect(n).toBe(2);
+		expect(ids(log)).toEqual(['1', '2', '3']);
+	});
 });
 
 describe('StrokeLog batch', () => {

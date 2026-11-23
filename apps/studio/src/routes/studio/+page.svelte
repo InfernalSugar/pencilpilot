@@ -55,6 +55,8 @@
 	} from '#lib/project.js';
 	import { beforeNavigate, goto } from '$app/navigation';
 	import { loadSettings, saveSettings, settings } from '#lib/settings.svelte.js';
+	import { exportText, tagPng } from '#lib/png-meta.js';
+	import type { ViewPrefs } from '@pencilpilot/paint/view-prefs';
 	import { actionFor, comboOf, showKey, type ActionId } from '#lib/shortcuts.js';
 	import { page } from '$app/state';
 	import VersionsMenu from '#lib/VersionsMenu.svelte';
@@ -140,7 +142,7 @@
 		walls
 	} from '#lib/colour.js';
 	import { FrameCache } from '#lib/frames.js';
-	import { cleanOnion, onionEntries, type OnionSettings } from '#lib/onion.js';
+	import { onionEntries, type OnionSettings } from '#lib/onion.js';
 	import {
 		clampRange,
 		frameAt,
@@ -381,7 +383,7 @@
 	let scrubbedAt = -1;
 	/** Moving between frames: a snippet of the sound there (to find a word or a beat). */
 	function scrubSound() {
-		if (playing || !sceneClips().length) return;
+		if (playing || !settings.scrubSound || !sceneClips().length) return;
 		const f = sceneFrameOf(frame);
 		if (f === scrubbedAt) return;
 		scrubbedAt = f;
@@ -835,8 +837,8 @@
 	}
 
 	// ---- onion skin and light table: other drawings, tinted, over the canvas ----
-	let onion = $state<OnionSettings>(cleanOnion(readLocal('pp.app.onion', null)));
-	$effect(() => keepLocal('pp.app.onion', $state.snapshot(onion)));
+	// (kept with the settings, where Settings changes its colours and counts too)
+	const onion: OnionSettings = $derived(settings.onion);
 	/** frames pinned to the light table (in this cut) */
 	let pinned = $state<number[]>([]);
 	let onionImage = $state.raw<ImageBitmap | null>(null);
@@ -2086,6 +2088,12 @@
 		}
 	}
 
+	/** the recovery copy kept when "Save before…?" wasn't asked (it stays for home to offer) */
+	let keptCopy = '';
+	/** Let go of a document's recovery copy, unless it was kept on purpose. */
+	const dropRecovery = (id: string) =>
+		id === keptCopy ? Promise.resolve() : discardRecovery(id).catch(() => {});
+
 	/** "Save before…?": the question showing, and how to answer it */
 	let saveAsk = $state<{
 		title: string;
@@ -2104,6 +2112,16 @@
 	 */
 	async function okToDrop(why: keyof typeof SAVE_BEFORE = 'leave'): Promise<boolean> {
 		if (!unsaved) return true;
+		if (!settings.askToSave) {
+			// not asking (Settings): go ahead, keeping a recovery copy so nothing is lost
+			try {
+				await writeRecovery(docId, path, await currentDoc());
+				keptCopy = docId;
+			} catch {
+				return false;
+			}
+			return true;
+		}
 		const choice = await new Promise<'yes' | 'no' | 'cancel'>(
 			(answer) => (saveAsk = { title: SAVE_BEFORE[why], answer })
 		);
@@ -2155,7 +2173,7 @@
 		const old = docId;
 		await run('opening', async () => {
 			load(await openProject(target), { path: target, unsaved: false });
-			await discardRecovery(old).catch(() => {});
+			await dropRecovery(old);
 		});
 	}
 
@@ -2178,7 +2196,7 @@
 			if (kind === 'png') {
 				const d = canvas.exportDrawing();
 				if (!d) throw new Error('nothing to export');
-				bytes = new Uint8Array(await (await fetch(d.png)).arrayBuffer());
+				bytes = tagPng(new Uint8Array(await (await fetch(d.png)).arrayBuffer()), exportMeta());
 			} else {
 				const doc = canvas.exportLayered();
 				if (!doc) throw new Error('nothing to export');
@@ -2299,7 +2317,9 @@
 						transparent: false,
 						frames: plan.length,
 						total,
-						once: false
+						once: false,
+						quality: settings.exportQuality,
+						meta: exportMeta()
 					}
 				});
 				for (const [i, repeat] of plan) {
@@ -2371,7 +2391,9 @@
 						transparent: false,
 						frames: total,
 						total,
-						once: false
+						once: false,
+						quality: settings.exportQuality,
+						meta: exportMeta()
 					}
 				});
 				for (let i = 0; i < drawFrames; i++) {
@@ -2437,9 +2459,20 @@
 	$effect(() => keepLocal('pp.app.export', $state.snapshot(exportSettings)));
 	let exportStop = false;
 
+	/** What exports say about the work (Settings can switch it off): see png-meta.ts. */
+	function exportMeta() {
+		return exportText({
+			on: settings.exportCredits,
+			author: settings.shareName,
+			with: (sharing?.members ?? []).map((m) => m.name)
+		});
+	}
+
 	async function openAnimExport() {
 		exportOpen = false;
 		if (playing) stopPlay();
+		// it starts on the format Settings names
+		exportSettings.format = settings.exportFormat;
 		const { invoke } = await import('@tauri-apps/api/core');
 		const tools = await invoke<{ ffmpeg: string | null; video: string[] }>('export_tools').catch(
 			() => ({ ffmpeg: null, video: [] })
@@ -2504,7 +2537,9 @@
 						)
 					).length,
 					total: runs.reduce((n, r) => n + r.repeat, 0),
-					once: s.once
+					once: s.once,
+					quality: settings.exportQuality,
+					meta: exportMeta()
 				}
 			});
 			const off = new OffscreenCanvas(out.width, out.height);
@@ -2635,8 +2670,12 @@
 			bmp.close();
 			return g.getImageData(0, 0, out.width, out.height).data;
 		};
+		const text = exportMeta();
 		const png = async () =>
-			new Uint8Array(await (await off.convertToBlob({ type: 'image/png' })).arrayBuffer());
+			tagPng(
+				new Uint8Array(await (await off.convertToBlob({ type: 'image/png' })).arrayBuffer()),
+				text
+			);
 		const { writePsd } = await import('@pencilpilot/paint/psd');
 		let n = 0;
 		let last = '';
@@ -2790,7 +2829,7 @@
 		void okToDrop().then(async (ok) => {
 			if (!ok) return;
 			leaving = true;
-			await discardRecovery(docId).catch(() => {});
+			await dropRecovery(docId);
 			// the navigation that was held back (its link was already resolved)
 			// eslint-disable-next-line svelte/no-navigation-without-resolve
 			await goto(to);
@@ -2814,6 +2853,81 @@
 		if (!secs || !isTauri()) return;
 		const timer = setInterval(autosave, secs * 1000);
 		return () => clearInterval(timer);
+	});
+
+	// ---- preferences (Settings) the studio follows ----
+
+	/** how the canvas shows and handles things (cursor, zoom, rulers, selection, guides) */
+	const viewPrefs: ViewPrefs = $derived({
+		cursor: settings.cursor,
+		cursorWhilePainting: settings.cursorWhilePainting,
+		crosshairWhenSmall: settings.crosshairWhenSmall,
+		zoomToPointer: settings.zoomToPointer,
+		wheel: settings.wheel,
+		zoomSpeed: settings.zoomSpeed,
+		smoothZoom: settings.smoothZoom,
+		brushFollowsZoom: settings.brushFollowsZoom,
+		maxBrushSize: settings.maxBrushSize,
+		rulers: settings.rulers,
+		units: settings.units,
+		ppi: settings.ppi,
+		selectionTint: settings.selectionTint,
+		marchingAnts: settings.marchingAnts,
+		gridColour: settings.gridColour,
+		guideColour: settings.guideColour
+	});
+
+	// a new canvas starts as Settings says: its brush, its grid, and (the studio opened on
+	// its own, not from a template) its size and frame rate
+	onMount(() => {
+		void loadSettings().then(() => {
+			if (start.kind !== 'new') return;
+			if (settings.defaultBrush) brushId = settings.defaultBrush;
+			if (settings.gridSize && !readLocal('pp.app.guides', null))
+				toolOpts.guides = {
+					...toolOpts.guides,
+					grid: { ...toolOpts.guides.grid, size: settings.gridSize }
+				};
+			if (page.url.searchParams.get('new')) return;
+			fps = settings.newFps;
+			const { newWidth: width, newHeight: height } = settings;
+			if (width !== canvasSize.width || height !== canvasSize.height) {
+				status = null;
+				canvasSize = { width, height };
+				canvasKey++;
+			}
+		});
+	});
+
+	// the largest brush size: the slider stops there, and a bigger size comes down to it
+	$effect(() => {
+		if (size > settings.maxBrushSize) size = settings.maxBrushSize;
+	});
+
+	// each brush remembers its own size and opacity (when Settings says so)
+	let brushWas = untrack(() => brushId);
+	$effect(() => {
+		const id = brushId;
+		untrack(() => {
+			if (id === brushWas) return;
+			if (settings.perBrushSize) {
+				const kept = readLocal<Record<string, { size: number; opacity: number }>>(
+					'pp.app.brushSizes',
+					{}
+				);
+				kept[brushWas] = { size, opacity };
+				const mine = kept[id];
+				if (mine) [size, opacity] = [mine.size, mine.opacity];
+				keepLocal('pp.app.brushSizes', kept);
+			}
+			brushWas = id;
+		});
+	});
+
+	// the memory limit for frames: how many recent drawings the engine keeps (the app's
+	// store takes the rest of the limit; see memoryPlan)
+	$effect(() => {
+		cache.limit(settings.frameMemoryMb * 2 ** 20, canvasSize.width, canvasSize.height);
 	});
 
 	onMount(() => {
@@ -2847,7 +2961,7 @@
 			getCurrentWindow()
 				.onCloseRequested(async (e) => {
 					if (unsaved && !(await okToDrop('quit'))) return e.preventDefault();
-					await discardRecovery(docId).catch(() => {});
+					await dropRecovery(docId);
 				})
 				.then((un) => (stop = un))
 		);
@@ -2991,7 +3105,14 @@
 />
 
 <div class="app">
-	<Studio backHref={resolve('/')} tabs={TABS} bind:tab bind:dockOpen bind:layout={settings.layout}>
+	<Studio
+		backHref={resolve('/')}
+		tabs={TABS}
+		bind:tab
+		bind:dockOpen
+		bind:layout={settings.layout}
+		leftHanded={settings.leftHanded}
+	>
 		{#snippet title()}
 			<div class="brand">
 				<Logo /><span data-testid="project-name">{projectName(path)}</span>
@@ -3232,6 +3353,7 @@
 				bind:size
 				bind:opacity
 				keys={railKeys}
+				maxSize={settings.maxBrushSize}
 				adjustOpen={toolOpts.adjustOpen}
 				onadjust={() => toolOpts.openAdjust()}
 			/>
@@ -3322,6 +3444,8 @@
 					penPressure={settings.penPressure}
 					fingers={settings.fingers}
 					tapGestures={settings.tapGestures}
+					view={viewPrefs}
+					undoLimit={settings.undoSteps}
 					brushTexture={texture}
 					allowImport
 					onpick={(c) => (color = c)}
@@ -3446,7 +3570,7 @@
 				/>
 			{:else if t === 'brushes'}
 				{#if manifest}
-					<BrushPicker {manifest} bind:selected={brushId} />
+					<BrushPicker {manifest} bind:selected={brushId} askToDelete={settings.askToDelete} />
 					<BrushTexturePanel {brushId} onpick={(id) => (brushId = id)} />
 				{:else}
 					<p>Loading brushes…</p>

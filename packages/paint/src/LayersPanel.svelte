@@ -1082,8 +1082,9 @@
 		flex: none;
 		border-radius: 6px;
 		border: 1px solid var(--pp-track);
-		/* checkerboard = transparent */
-		background: repeating-conic-gradient(#e9e6de 0 25%, #fff 0 50%) 0 0 / 10px 10px;
+		/* checkerboard = transparent (the app can set its colour and size) */
+		background: repeating-conic-gradient(var(--pp-checker, #e9e6de) 0 25%, #fff 0 50%) 0 0 /
+			var(--pp-checker-size, 10px) var(--pp-checker-size, 10px);
 	}
 	.file {
 		display: none;

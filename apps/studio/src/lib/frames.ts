@@ -20,14 +20,31 @@ type Canvas = ReturnType<typeof PaintCanvas>;
 
 const TILE_BYTES = 64 * 64 * 4;
 
-/** Drawings kept in the engine besides the ones showing (a developer can lower it). */
-function keepDefault(): number {
+/** Drawings kept in the engine besides the ones showing, as a developer set it (0: not set). */
+function keepByDeveloper(): number {
 	try {
 		const n = Number(globalThis.localStorage?.getItem('pp.dev.keepDrawings'));
-		return Number.isFinite(n) && n >= 0 && n !== 0 ? n : 24;
+		return Number.isFinite(n) && n > 0 ? n : 0;
 	} catch {
-		return 24;
+		return 0;
 	}
+}
+
+/** The most drawings the engine keeps besides the ones showing. */
+export const KEEP_MOST = 24;
+
+/**
+ * How the memory limit for frames (`limit` bytes) is shared: the app's frame store takes
+ * three quarters (its Rust side works that out from the same setting), and the engine
+ * keeps as many recent drawings as fit in the last quarter, counting each as a whole
+ * canvas (at most 24; none when not even one fits: they come from the store when needed).
+ * The drawings showing are the work itself, so they're always in the engine.
+ */
+export function memoryPlan(limit: number, width: number, height: number) {
+	const drawing = Math.max(1, width * height * 4);
+	const store = Math.floor(limit / 4) * 3;
+	const keep = Math.min(KEEP_MOST, Math.max(0, Math.floor((limit - store) / drawing)));
+	return { store, keep, engine: keep * drawing };
 }
 
 /** Split a store packet into each drawing's engine packing. */
@@ -72,7 +89,8 @@ export class FrameCache {
 	/** when each drawing was last shown or changed */
 	#used = new Map<number, number>();
 	#clock = 0;
-	readonly keep = keepDefault();
+	/** drawings kept in the engine besides the ones showing */
+	keep = keepByDeveloper() || KEEP_MOST;
 
 	constructor(
 		private canvas: () => Canvas | undefined,
@@ -163,6 +181,12 @@ export class FrameCache {
 			if (over <= 0) break;
 			if (c.forgetDrawing(id)) over--;
 		}
+	}
+
+	/** Keep as many drawings in the engine as the memory limit allows (a developer's choice wins). */
+	limit(bytes: number, width: number, height: number) {
+		this.keep = keepByDeveloper() || memoryPlan(bytes, width, height).keep;
+		this.trim();
 	}
 
 	/** A new document: the store starts empty. */

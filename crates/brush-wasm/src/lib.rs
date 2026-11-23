@@ -1089,6 +1089,12 @@ impl PaintCanvas {
         self.inner.remove_layer_silent(id)
     }
 
+    /// How many undo steps are kept (10–500); fewer drops the oldest now.
+    #[wasm_bindgen(js_name = setUndoLimit)]
+    pub fn set_undo_limit(&mut self, n: u32) {
+        self.inner.set_undo_limit(n as usize);
+    }
+
     #[wasm_bindgen(js_name = clearHistory)]
     pub fn clear_history(&mut self) {
         self.inner.clear_history();

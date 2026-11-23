@@ -10,6 +10,7 @@
 	import Logo from '@pencilpilot/ui/Logo.svelte';
 	import { onMount } from 'svelte';
 	import { loadSettings, settings } from '#lib/settings.svelte.js';
+	import { fromUnits, showLength, toUnits } from '@pencilpilot/paint/view-prefs';
 	import {
 		ago,
 		askOpenPath,
@@ -48,13 +49,40 @@
 			custom.fps <= 60
 	);
 
+	/** a side in the units Settings names (2 decimals; pixels whole) */
+	const side = (px: number) => +toUnits(px, settings.units, settings.ppi).toFixed(2);
+	const setSide = (k: 'width' | 'height', v: number) =>
+		(custom[k] = fromUnits(v, settings.units, settings.ppi));
+
+	const sideRange = $derived(
+		settings.units === 'px'
+			? `${SIDE_MIN}–${SIDE_MAX} px`
+			: `${showLength(SIDE_MIN, settings.units, settings.ppi)}–${showLength(SIDE_MAX, settings.units, settings.ppi)}`
+	);
+
 	onMount(() => {
+		// the size and frame rate Settings gives new projects
+		void loadSettings().then(() => {
+			custom = { width: settings.newWidth, height: settings.newHeight, fps: settings.newFps };
+		});
+		// the first time home shows after the app starts: the last project, if Settings says
+		let first = false;
+		try {
+			first = !sessionStorage.getItem('pp.started');
+			sessionStorage.setItem('pp.started', '1');
+		} catch {
+			/* storage blocked */
+		}
 		if (!isTauri()) {
 			recent = [];
 			return;
 		}
 		listRecent()
-			.then((r) => (recent = r))
+			.then(async (r) => {
+				recent = r;
+				await loadSettings();
+				if (first && settings.reopenLast && r[0]?.found) void go({ kind: 'open', path: r[0].path });
+			})
 			.catch(() => (recent = []));
 		listRecovery()
 			.then((r) => (recovery = r))
@@ -183,19 +211,31 @@
 					if (customOk) void go({ kind: 'new', ...custom });
 				}}
 			>
-				<label>
-					Width <input type="number" min={SIDE_MIN} max={SIDE_MAX} bind:value={custom.width} />
-				</label>
-				<label>
-					Height <input type="number" min={SIDE_MIN} max={SIDE_MAX} bind:value={custom.height} />
-				</label>
+				{#each [['width', 'Width'], ['height', 'Height']] as const as [k, label] (k)}
+					<label>
+						{label} ({settings.units})
+						<input
+							type="number"
+							min={side(SIDE_MIN)}
+							max={side(SIDE_MAX)}
+							step={settings.units === 'px' ? 1 : 0.01}
+							value={side(custom[k])}
+							oninput={(e) => setSide(k, +e.currentTarget.value)}
+						/>
+					</label>
+				{/each}
 				<label>
 					Frames a second <input type="number" min="1" max="60" bind:value={custom.fps} />
 				</label>
 				<button type="submit" class="primary" disabled={!customOk}>Create</button>
+				{#if settings.units !== 'px'}
+					<span class="px" data-testid="custom-px">
+						{custom.width} × {custom.height} px at {settings.ppi} ppi
+					</span>
+				{/if}
 				{#if !customOk}
 					<span class="why" role="alert">
-						Sides {SIDE_MIN}–{SIDE_MAX} px, 1–60 frames a second.
+						Sides {sideRange}, 1–60 frames a second.
 					</span>
 				{/if}
 			</form>
@@ -284,53 +324,65 @@
 		</section>
 	{/if}
 
-	<section aria-labelledby="recent-h">
-		<h2 id="recent-h">Recent</h2>
-		{#if solo === null}
-			<p class="muted">Loading…</p>
-		{:else if !solo.length}
-			<p class="muted">Projects you save or open show up here.</p>
-		{:else}
-			<ul class="recent">
-				{#each solo as item (item.path)}
-					<li class:gone={!item.found}>
-						<button
-							type="button"
-							class="card"
-							disabled={!item.found}
-							title={item.path}
-							onclick={() => go({ kind: 'open', path: item.path })}
-						>
-							{#if item.thumbnail}
-								<img src="data:image/png;base64,{item.thumbnail}" alt="" />
-							{:else}
-								<span class="blank" aria-hidden="true"></span>
-							{/if}
-							<b>{projectName(item.path)}</b>
-							<small>
-								{#if item.found}
-									{item.width} × {item.height} · {item.layers} layer{item.layers === 1 ? '' : 's'} · {ago(
-										item.modified
-									)}
+	{#if settings.recentCount > 0}
+		<section aria-labelledby="recent-h">
+			<h2 id="recent-h">Recent</h2>
+			{#if solo === null}
+				<p class="muted">Loading…</p>
+			{:else if !solo.length}
+				<p class="muted">Projects you save or open show up here.</p>
+			{:else}
+				<ul class="recent">
+					{#each solo.slice(0, settings.recentCount) as item (item.path)}
+						<li class:gone={!item.found}>
+							<button
+								type="button"
+								class="card"
+								disabled={!item.found}
+								title={item.path}
+								onclick={() => go({ kind: 'open', path: item.path })}
+							>
+								{#if item.thumbnail}
+									<img src="data:image/png;base64,{item.thumbnail}" alt="" />
 								{:else}
-									Moved or deleted
+									<span class="blank" aria-hidden="true"></span>
 								{/if}
-							</small>
-						</button>
-						<button
-							type="button"
-							class="forget"
-							aria-label="Remove {projectName(item.path)} from the list"
-							title="Remove from the list (the file stays)"
-							onclick={() => forget(item)}
-						>
-							×
-						</button>
-					</li>
-				{/each}
-			</ul>
-		{/if}
-	</section>
+								<b>{projectName(item.path)}</b>
+								<small>
+									{#if item.found}
+										{item.width} × {item.height} · {item.layers} layer{item.layers === 1 ? '' : 's'} ·
+										{ago(item.modified)}
+									{:else}
+										<span class="blank" aria-hidden="true"></span>
+									{/if}
+									<b>{projectName(item.path)}</b>
+									<small>
+										{#if item.found}
+											{item.width} × {item.height} · {item.layers} layer{item.layers === 1
+												? ''
+												: 's'} ·
+											{ago(item.modified)}
+										{:else}
+											Moved or deleted
+										{/if}
+									</small>
+								</small>
+							</button>
+							<button
+								type="button"
+								class="forget"
+								aria-label="Remove {projectName(item.path)} from the list"
+								title="Remove from the list (the file stays)"
+								onclick={() => forget(item)}
+							>
+								×
+							</button>
+						</li>
+					{/each}
+				</ul>
+			{/if}
+		</section>
+	{/if}
 </main>
 
 <style>
@@ -466,6 +518,11 @@
 	}
 	.why {
 		color: var(--pp-accent-ink);
+		font-size: 13px;
+	}
+	.px {
+		align-self: center;
+		color: var(--pp-muted);
 		font-size: 13px;
 	}
 	.recent {

@@ -39,8 +39,10 @@ pub(crate) type TileMap = HashMap<TileKey, Box<TilePixels>>;
 /// Tiles as they were before an edit. `None` = the tile did not exist.
 type Snapshot = HashMap<TileKey, Option<Box<TilePixels>>>;
 
-/// Maximum number of undo steps kept.
+/// Undo steps kept unless the app asks for another number (see [`Painter::set_undo_limit`]).
 pub const UNDO_LIMIT: usize = 60;
+/// The fewest and most undo steps the app may ask for.
+pub const UNDO_LIMIT_RANGE: std::ops::RangeInclusive<usize> = 10..=500;
 
 /// Tile surface that can snapshot the tiles a stroke touches.
 #[derive(Default)]
@@ -444,6 +446,8 @@ pub struct Painter {
     rgba: Vec<u8>,
     undo: Vec<Edit>,
     redo: Vec<Edit>,
+    /// undo steps kept (the oldest go past it)
+    undo_limit: usize,
     /// counts changes to the history (new edits, undo, redo)
     edits: u64,
     /// the last selection fill, while it's still the latest edit (`edits` then)
@@ -495,6 +499,7 @@ impl Painter {
             rgba: vec![255; (width * height * 4) as usize],
             undo: Vec::new(),
             redo: Vec::new(),
+            undo_limit: UNDO_LIMIT,
             edits: 0,
             sel_fill_at: None,
             cels: HashMap::new(),
@@ -1709,7 +1714,7 @@ impl Painter {
         self.edits += 1;
         self.tag_drawings(&mut e);
         self.undo.push(e);
-        if self.undo.len() > UNDO_LIMIT {
+        if self.undo.len() > self.undo_limit {
             self.undo.remove(0);
         }
         self.redo.clear();
@@ -3263,6 +3268,18 @@ impl Painter {
             brush.finish_stroke(&mut state, c);
             c.recording = rec;
         }
+    }
+
+    /// How many undo steps are kept (clamped to [`UNDO_LIMIT_RANGE`]); fewer than the
+    /// history holds now drops the oldest.
+    pub fn set_undo_limit(&mut self, n: usize) {
+        self.undo_limit = n.clamp(*UNDO_LIMIT_RANGE.start(), *UNDO_LIMIT_RANGE.end());
+        let over = self.undo.len().saturating_sub(self.undo_limit);
+        self.undo.drain(..over);
+    }
+
+    pub fn undo_limit(&self) -> usize {
+        self.undo_limit
     }
 
     /// Forget the undo/redo history (e.g. after setting up starter layers,
@@ -5189,6 +5206,28 @@ mod tests {
             n += 1;
         }
         assert_eq!(n, UNDO_LIMIT);
+    }
+
+    #[test]
+    fn undo_limit_can_be_changed() {
+        let mut p = Painter::new(128, 64);
+        let b = pen();
+        p.set_undo_limit(12);
+        for i in 0..20 {
+            line(&mut p, &b, i as f32 + 5.0);
+        }
+        // fewer: the oldest go now
+        p.set_undo_limit(10);
+        let mut n = 0;
+        while p.undo() {
+            n += 1;
+        }
+        assert_eq!(n, 10);
+        // out of range: clamped
+        p.set_undo_limit(1);
+        assert_eq!(p.undo_limit(), 10);
+        p.set_undo_limit(100_000);
+        assert_eq!(p.undo_limit(), 500);
     }
 
     // ---- drawings (animation cels) ----
