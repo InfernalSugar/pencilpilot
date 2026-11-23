@@ -632,11 +632,12 @@ async fn cloud_open(
 }
 
 /// A shared project's name and picture changed (saved): the cloud's list shows them.
+/// `code`: its invite (the project is known by it).
 #[tauri::command]
 async fn cloud_touch(
     app: AppHandle,
     account: State<'_, account::Account>,
-    project: String,
+    code: String,
     name: Option<String>,
     thumb: Option<String>,
     net: Option<share::Net>,
@@ -646,7 +647,7 @@ async fn cloud_touch(
         &data,
         &account,
         &net.unwrap_or_default(),
-        &project,
+        &code,
         name,
         thumb,
     )

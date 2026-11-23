@@ -29,6 +29,7 @@
 	} from '#lib/project.js';
 	import { cleanInvite } from '#lib/share.js';
 	import { askTogether } from '#lib/together-start.js';
+	import CloudTab from '#lib/CloudTab.svelte';
 
 	let recent = $state<RecentItem[] | null>(null);
 	/** projects drawn together get their own row; the others stay in Recent */
@@ -110,6 +111,28 @@
 	function rejoin(item: RecentItem) {
 		askTogether({ what: 'rejoin' });
 		void go({ kind: 'open', path: item.path });
+	}
+	/** from the Cloud tab, a project not on this computer: a new canvas, then join it */
+	function openFromCloud(code: string, width: number, height: number) {
+		askTogether({ what: 'cloud', code });
+		void go({ kind: 'new', width, height, fps: 24 });
+	}
+
+	/** the projects' tabs: this computer's recent ones, or the cloud's shared ones */
+	const showRecent = $derived(settings.recentCount > 0);
+	let tab = $state<'recent' | 'cloud'>('recent');
+	function pick(t: 'recent' | 'cloud') {
+		tab = t;
+		try {
+			localStorage.setItem('pp.home.tab', t);
+		} catch {
+			/* storage blocked */
+		}
+	}
+	try {
+		if (localStorage.getItem('pp.home.tab') === 'cloud') tab = 'cloud';
+	} catch {
+		/* storage blocked */
 	}
 	const names = (w: string[]) =>
 		!w.length
@@ -324,9 +347,38 @@
 		</section>
 	{/if}
 
-	{#if settings.recentCount > 0}
-		<section aria-labelledby="recent-h">
-			<h2 id="recent-h">Recent</h2>
+	{#if showRecent && together}
+		<div class="tabs" role="tablist" aria-label="Projects">
+			{#each [['recent', 'Recent'], ['cloud', 'Cloud']] as const as [id, label] (id)}
+				<button
+					type="button"
+					role="tab"
+					id="{id}-h"
+					aria-selected={tab === id}
+					aria-controls="{id}-panel"
+					tabindex={tab === id ? 0 : -1}
+					onclick={() => pick(id)}
+					onkeydown={(e) => {
+						if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+							pick(tab === 'recent' ? 'cloud' : 'recent');
+							document.getElementById(`${tab}-h`)?.focus();
+						}
+					}}
+				>
+					{label}
+				</button>
+			{/each}
+		</div>
+	{/if}
+
+	{#if together && (tab === 'cloud' || !showRecent)}
+		<section id="cloud-panel" aria-labelledby="cloud-h">
+			{#if !showRecent}<h2 id="cloud-h">Cloud</h2>{/if}
+			<CloudTab local={shared} onrejoin={rejoin} onopen={openFromCloud} />
+		</section>
+	{:else if showRecent}
+		<section id="recent-panel" aria-labelledby="recent-h">
+			{#if !together}<h2 id="recent-h">Recent</h2>{/if}
 			{#if solo === null}
 				<p class="muted">Loading…</p>
 			{:else if !solo.length}
@@ -353,19 +405,8 @@
 										{item.width} × {item.height} · {item.layers} layer{item.layers === 1 ? '' : 's'} ·
 										{ago(item.modified)}
 									{:else}
-										<span class="blank" aria-hidden="true"></span>
+										Moved or deleted
 									{/if}
-									<b>{projectName(item.path)}</b>
-									<small>
-										{#if item.found}
-											{item.width} × {item.height} · {item.layers} layer{item.layers === 1
-												? ''
-												: 's'} ·
-											{ago(item.modified)}
-										{:else}
-											Moved or deleted
-										{/if}
-									</small>
 								</small>
 							</button>
 							<button
@@ -420,6 +461,31 @@
 	}
 	.muted {
 		color: var(--pp-muted);
+	}
+	/* the projects' tabs read as the sections' headings */
+	.tabs {
+		display: flex;
+		gap: 6px;
+		margin: 28px 0 12px;
+	}
+	.tabs [role='tab'] {
+		padding: 4px 2px 6px;
+		margin-right: 14px;
+		border: 0;
+		border-bottom: 3px solid transparent;
+		background: none;
+		color: var(--pp-muted);
+		font: 700 20px var(--pp-font-display);
+		cursor: pointer;
+	}
+	.tabs [role='tab'][aria-selected='true'] {
+		color: var(--pp-ink);
+		border-bottom-color: var(--pp-accent);
+	}
+	.tabs [role='tab']:focus-visible {
+		outline: 2px solid var(--pp-accent);
+		outline-offset: 2px;
+		border-radius: 6px;
 	}
 	.primary,
 	.ghost {

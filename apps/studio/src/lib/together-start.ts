@@ -3,7 +3,12 @@
  * rejoin a shared project's session. Kept in memory between the two screens, so an
  * invite code never goes into an address (or anything that logs one).
  */
-export type TogetherStart = { what: 'host' } | { what: 'join'; code: string } | { what: 'rejoin' };
+export type TogetherStart =
+	| { what: 'host' }
+	| { what: 'join'; code: string }
+	| { what: 'rejoin' }
+	/** opened from home's Cloud tab: its invite (the cloud, and whoever hosts) */
+	| { what: 'cloud'; code: string };
 
 let pending: TogetherStart | null = null;
 

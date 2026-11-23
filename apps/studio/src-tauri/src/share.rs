@@ -272,15 +272,16 @@ pub async fn cloud_touch(
     data: &Path,
     account: &Account,
     net: &Net,
-    project: &str,
+    code: &str,
     name: Option<String>,
     thumb: Option<String>,
 ) -> Result<(), String> {
+    let project = Invite::decode(code).map_err(|e| e.to_string())?.project();
     let Some(mut c) = cloud_connect(data, account, net).await? else {
         return Ok(());
     };
     let r = c
-        .touch(project, name, thumb)
+        .touch(&project, name, thumb)
         .await
         .map_err(|e| e.to_string());
     c.close().await;

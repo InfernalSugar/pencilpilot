@@ -1,0 +1,46 @@
+[Unit]
+Description=PencilPilot cloud keeper: keeps shared projects for drawing together
+Documentation=https://github.com/InfernalSugar/pencilpilot/tree/dev/deploy/keeper
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=pencilpilot-keeper
+Group=pencilpilot-keeper
+ExecStart=/usr/local/bin/pencilpilot-keeper /etc/pencilpilot-keeper/keeper.toml
+Restart=always
+RestartSec=3
+Environment=RUST_LOG=pencilpilot_keeper=info
+StateDirectory=pencilpilot-keeper
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/pencilpilot-keeper
+# keep it in its box: it writes only its own folder, and needs no privileges (UDP 7843)
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/pencilpilot-keeper
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+UMask=0077
+MemoryMax=1G
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

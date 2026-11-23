@@ -6,7 +6,14 @@
 	 */
 	import { onMount } from 'svelte';
 	import { account, endAccount, loadAccount, startSignIn, stopSignIn } from './account.svelte';
-	import { cleanInvite, inviteQr, memberColour, shareChoices, type ShareInfo } from './share';
+	import {
+		cleanInvite,
+		inviteQr,
+		memberColour,
+		people,
+		shareChoices,
+		type ShareInfo
+	} from './share';
 
 	interface LayerRow {
 		lid: string;
@@ -125,15 +132,24 @@
 		{#if qr}
 			<img class="qr" src={qr} alt="The invite code as a QR code" width="140" height="140" />
 		{/if}
-		<h3>Here now ({info.members.length})</h3>
+		<h3>Here now ({people(info.members).length})</h3>
 		<ul class="members">
-			{#each info.members as m (m.id)}
+			{#each people(info.members) as m (m.id)}
 				<li>
 					<i style="background: {memberColour(m.id)}"></i>
 					{m.name}{m.id === info.me.id ? ' (you)' : ''}
 				</li>
 			{/each}
 		</ul>
+		{#if info.cloud && info.cloud !== 'off'}
+			<p class="status" data-testid="cloud-status">
+				{info.cloud === 'unreachable'
+					? 'The cloud can’t be reached right now: this session isn’t kept there.'
+					: info.cloud === 'caught_up'
+						? 'No one else was online: you caught up from the cloud. It keeps what you draw.'
+						: 'The cloud keeps a copy, so anyone in it can carry on when you’re offline.'}
+			</p>
+		{/if}
 		{#if !synced}
 			<p class="status" role="status">Getting the drawing from the others…</p>
 		{:else if layers.length}
@@ -232,8 +248,9 @@
 			<section class="rejoin">
 				<h3>This project is shared</h3>
 				<p>
-					Rejoin it: you’ll join whoever of its members is online, or, if no one is, open it for
-					them. What you drew on your own layers meanwhile is kept.
+					Rejoin it: you’ll join whoever of its members is online, or, if no one is, catch up from
+					the cloud and open it for them. What you drew on your own layers meanwhile is kept; what
+					you drew on others’ is asked for.
 				</p>
 				<button type="button" class="go" disabled={!can.rejoin} onclick={onrejoin}>Rejoin</button>
 			</section>

@@ -15,6 +15,8 @@ interface Stub {
 	askAnswer?: boolean;
 	/** the PencilPilot account the app starts signed in with */
 	account?: { user: string; name: string } | null;
+	/** what cloud_list answers (signed out: the shell says so, whatever this is) */
+	cloud?: { status: string; projects: unknown[]; fetched: number; error?: string };
 }
 
 async function stubTauri(page: Page, stub: Stub = {}) {
@@ -129,6 +131,21 @@ async function stubTauri(page: Page, stub: Stub = {}) {
 					case 'account_sign_out':
 						w.__account = null;
 						return null;
+					// the cloud (its keeper is the shell's to reach)
+					case 'cloud_list': {
+						const signedIn = w.__account === undefined ? stub.account : w.__account;
+						if (!signedIn) return { status: 'signed_out', projects: [], fetched: 0 };
+						return stub.cloud ?? { status: 'off', projects: [], fetched: 0 };
+					}
+					case 'cloud_open':
+						return {
+							project: (args as { project: string }).project,
+							name: 'Jam',
+							width: 1280,
+							height: 720,
+							code: 'pp1-fromTheCloud',
+							state: 'idle'
+						};
 					case 'export_write':
 						return path;
 					case 'export_tools':
@@ -2173,12 +2190,121 @@ test('draw together: sign in with PencilPilot before hosting or joining', async 
 	);
 });
 
-test('settings: signed in for drawing together', async ({ page }) => {
+test('settings: signed in for drawing together, and the cloud', async ({ page }) => {
 	await stubTauri(page, { account: { user: 'u_bo', name: 'Bo' } });
 	await page.goto('/settings');
+	await page.getByRole('tab', { name: 'Drawing together' }).click();
 	await expect(page.getByText('Signed in as Bo')).toBeVisible();
 	await page.getByRole('button', { name: 'Sign out' }).click();
 	await expect(page.getByRole('button', { name: 'Sign in with PencilPilot' })).toBeVisible();
+	// the cloud's address: its id, then @host:port (or off)
+	const cloud = page.getByLabel('Cloud', { exact: true });
+	await cloud.fill('not an address');
+	await expect(cloud).toHaveAttribute('aria-invalid', 'true');
+	await expect(page.getByText(/isn’t a cloud address/)).toBeVisible();
+	await cloud.fill(`${'ab'.repeat(32)}@cloud.example.com:7843`);
+	await expect(cloud).toHaveAttribute('aria-invalid', 'false');
+	await cloud.fill('off');
+	await expect(cloud).toHaveAttribute('aria-invalid', 'false');
+});
+
+/** shared projects as the cloud lists them */
+function cloudProjects() {
+	const now = Math.floor(Date.now() / 1000);
+	const ana = { user: 'u_ana', name: 'Ana' };
+	return [
+		{
+			project: 'aa11',
+			name: 'Walk cycle together',
+			width: 1920,
+			height: 1080,
+			members: [ana, { user: 'u_bo', name: 'Bo' }],
+			changed: now - 2 * 3600,
+			online: ['Bo'],
+			thumb: null,
+			bytes: 2048
+		},
+		{
+			project: 'bb22',
+			name: 'Jam',
+			width: 1280,
+			height: 720,
+			members: [
+				ana,
+				...['Cy', 'Di', 'Ed', 'Fa'].map((n) => ({ user: `u_${n.toLowerCase()}`, name: n }))
+			],
+			changed: now - 600,
+			online: [],
+			thumb: null,
+			bytes: 4096,
+			full: true
+		}
+	];
+}
+
+test('home: the Cloud tab lists the shared projects you’re in, and opens one', async ({ page }) => {
+	await stubTauri(page, {
+		account: { user: 'u_ana', name: 'Ana' },
+		cloud: { status: 'ok', projects: cloudProjects(), fetched: Math.floor(Date.now() / 1000) }
+	});
+	await page.setViewportSize({ width: 1440, height: 960 });
+	await page.goto('/');
+	await expect(page.getByRole('region', { name: 'Recent' })).toBeVisible();
+	// nothing connects until the tab is shown (solo work stays offline)
+	expect((await calls(page)).map((c) => c.cmd)).not.toContain('cloud_list');
+	await page.getByRole('tab', { name: 'Cloud' }).click();
+	const cloud = page.getByRole('region', { name: 'Cloud' });
+	await expect(cloud.getByRole('button', { name: 'Open Walk cycle together' })).toContainText(
+		'With Bo · 2 h ago'
+	);
+	await expect(cloud).toContainText('Bo is drawing now');
+	await expect(cloud.getByRole('button', { name: 'Open Jam' })).toContainText(
+		'With Cy, Di and 2 more · 10 min ago'
+	);
+	await expect(cloud).toContainText('Cloud space full');
+	await expect(page.getByRole('region', { name: 'Recent' })).toHaveCount(0);
+
+	// one click: a new canvas its size, joining (or catching up) through the cloud
+	await cloud.getByRole('button', { name: 'Open Jam' }).click();
+	await expect(canvas(page)).toHaveAttribute('data-ready', 'true', { timeout: 15_000 });
+	expect(page.url()).toContain('new=1280x720');
+	expect(page.url()).not.toContain('pp1-');
+	await expect
+		.poll(async () => (await calls(page)).find((c) => c.cmd === 'share_rejoin')?.json)
+		.toContain('"code":"pp1-fromTheCloud"');
+	expect((await calls(page)).find((c) => c.cmd === 'cloud_open')?.json).toContain('"bb22"');
+
+	// back home: the Cloud tab is still the one showing
+	await page.goto('/');
+	await expect(page.getByRole('tab', { name: 'Cloud' })).toHaveAttribute('aria-selected', 'true');
+	await expect(page.getByRole('region', { name: 'Cloud' })).toContainText('Walk cycle together');
+});
+
+test('home: the Cloud tab asks you to sign in, and says when the cloud is out of reach', async ({
+	page
+}) => {
+	await stubTauri(page, {
+		cloud: {
+			status: 'unreachable',
+			projects: cloudProjects(),
+			fetched: Math.floor(Date.now() / 1000) - 3 * 3600,
+			error: 'Couldn’t reach the cloud.'
+		}
+	});
+	await page.setViewportSize({ width: 1440, height: 960 });
+	await page.goto('/');
+	await page.getByRole('tab', { name: 'Cloud' }).click();
+	const cloud = page.getByRole('region', { name: 'Cloud' });
+	// signed out: a short prompt, and nothing asked of the cloud
+	await expect(cloud).toContainText('Sign in with PencilPilot to see the shared projects');
+	expect((await calls(page)).map((c) => c.cmd)).not.toContain('cloud_list');
+	await cloud.getByRole('button', { name: 'Sign in with PencilPilot' }).click();
+	// signed in, but the cloud can't be reached: said plainly, with the last list
+	await expect(cloud.getByRole('status')).toContainText(
+		'Can’t reach the cloud right now: these are the projects as of 3 h ago.'
+	);
+	await expect(cloud.getByRole('button', { name: 'Open Jam' })).toBeVisible();
+	await expect(cloud.getByRole('button', { name: 'Try again' })).toBeEnabled();
 });
 
 test('text: typed on the canvas, one undo step, changed later, kept in the file, rasterized', async ({

@@ -1167,6 +1167,8 @@ export class Together {
 
 	/** After `restore`, alone: the copy here is the project (others coming back get it). */
 	async resumeHost() {
+		// (what was drawn on others' layers here is in this copy: nothing to ask for)
+		this.#held.clear();
 		for (const [lid, id] of this.ids)
 			for (const d of new Set([this.canvas.drawingOf(id), ...this.canvas.drawingsOfLayer(id)]))
 				this.cache.set(key(lid, this.didOf(d)), unpack(await this.canvas.packed(d)));

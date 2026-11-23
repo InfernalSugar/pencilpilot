@@ -80,18 +80,23 @@
 		type SharedLayer
 	} from '#lib/together.js';
 	import {
+		cleanCloud,
 		cleanRelay,
+		cloudTouch,
 		Cursors,
 		hostSession,
 		isCursor,
+		isKeeper,
 		joinSession,
 		leaveSession,
+		people,
 		rejoinSession,
 		onShareEvent,
 		sendDirect,
 		sendEdit,
 		sendPresence,
 		sessionStatus,
+		takeCatchUp,
 		Throttle,
 		type ShareInfo
 	} from '#lib/share.js';
@@ -1547,6 +1552,14 @@
 		joinOnReady = null;
 		void shareStart(code);
 	});
+	/** from home's Cloud tab: open this shared project (its invite) once the canvas is ready */
+	let cloudOnReady = $state<string | null>(null);
+	$effect(() => {
+		if (!cloudOnReady || !canvas || !status) return;
+		const code = cloudOnReady;
+		cloudOnReady = null;
+		void shareFromCloud(code);
+	});
 	$effect(() => {
 		if (!rejoinOnOpen || !savedShare) return;
 		rejoinOnOpen = false;
@@ -1621,27 +1634,78 @@
 		};
 	}
 
-	function startTogether(info: ShareInfo, joining: boolean) {
-		if (!canvas) return;
-		together = new Together(
+	/** this app's side of a session (the drawing side: lib/together.ts) */
+	function newTogether(info: ShareInfo, c: PaintCanvas) {
+		const t = new Together(
 			info.me.id,
 			info.me.name,
-			canvasPort(canvas),
+			canvasPort(c),
 			{
 				edit: (body) => void sendEdit(body).catch(() => {}),
 				direct: (to, body) => void sendDirect(to, body).catch(() => {})
 			},
 			() => togetherTick++
 		);
-		together.onnote = (text) => note(text, 4000);
-		together.ontiles = (from) => {
+		t.onnote = (text) => note(text, 4000);
+		t.ontiles = (from) => {
 			// their real pixels arrived: the live preview can go (unless they're mid-stroke)
 			if (!liveStrokes.get(from)) canvas?.remoteClear(`live:${from}`);
 		};
+		return t;
+	}
+
+	function startTogether(info: ShareInfo, joining: boolean) {
+		if (!canvas) return;
+		together = newTogether(info, canvas);
 		const host = info.members[0]?.id;
 		if (joining && host) together.startJoin(host);
 		else void together.startHost();
 		togetherTick++;
+	}
+
+	/** where to connect (Settings): our own relay, the cloud */
+	const netOf = () => ({
+		relay: cleanRelay(settings.shareRelay),
+		cloud: cleanCloud(settings.shareCloud)
+	});
+	/** what the cloud lists this project as */
+	const aboutOf = () => ({
+		name: path ? projectName(path) : '',
+		width: canvasSize.width,
+		height: canvasSize.height
+	});
+
+	/** No one else was online: the cloud's copy, as a host's (`restored`: this file's
+	 * session was put back first). False when there was none. */
+	async function catchUpFromCloud(info: ShareInfo, t: Together, restored: boolean) {
+		if (info.cloud !== 'caught_up') return false;
+		const got = await takeCatchUp().catch(() => null);
+		if (!got) return false;
+		const keeper = info.members.find(isKeeper)?.id ?? 'cloud';
+		await t.catchUp(keeper, got.snap, got.edits, restored);
+		return true;
+	}
+
+	/** Opened from home's Cloud tab (a new canvas): join who's in, or catch up from the
+	 * cloud and host it. */
+	async function shareFromCloud(code: string) {
+		if (!canvas) return;
+		shareBusy = true;
+		shareError = '';
+		try {
+			const info = await rejoinSession(code, [], netOf(), aboutOf());
+			sharing = info;
+			together = newTogether(info, canvas);
+			const host = info.members[0]?.id;
+			if (!info.host && host) together.startJoin(host);
+			else if (!(await catchUpFromCloud(info, together, false))) await together.startHost();
+			togetherTick++;
+		} catch (e) {
+			shareError = String(e);
+			shareOpen = true;
+		} finally {
+			shareBusy = false;
+		}
 	}
 
 	// ---- live strokes: others' strokes drawn as they draw them, until the real pixels come
@@ -1700,7 +1764,7 @@
 
 	/** everyone who's been in the project (newest addresses first), to find one later */
 	const everyone = (now: ShareInfo['members']) => [
-		...now,
+		...people(now),
 		...(savedShare?.members ?? []).filter((m) => !now.some((x) => x.id === m.id))
 	];
 
@@ -1722,7 +1786,8 @@
 		togetherTimer = setTimeout(() => void together?.localChanged(), 120);
 	}
 
-	/** Back to this project's shared session: join who's online, or host it again. */
+	/** Back to this project's shared session: join who's online (found directly or through
+	 * the cloud), or catch up from the cloud and host it, or (no cloud) host this copy. */
 	async function shareRejoin() {
 		const saved = savedShare;
 		if (!saved || !canvas) return;
@@ -1733,27 +1798,18 @@
 			const info = await rejoinSession(
 				saved.code,
 				saved.members.map((m) => m.addr).filter(Boolean),
-				cleanRelay(settings.shareRelay)
+				netOf(),
+				aboutOf()
 			);
 			sharing = info;
-			together = new Together(
-				info.me.id,
-				info.me.name,
-				canvasPort(canvas),
-				{
-					edit: (body) => void sendEdit(body).catch(() => {}),
-					direct: (to, body) => void sendDirect(to, body).catch(() => {})
-				},
-				() => togetherTick++
-			);
-			together.onnote = (text) => note(text, 4000);
-			together.ontiles = (from) => {
-				if (!liveStrokes.get(from)) canvas?.remoteClear(`live:${from}`);
-			};
+			together = newTogether(info, canvas);
 			together.restore(saved);
+			// what was drawn on others' layers meanwhile: kept aside, then asked for
+			await together.findOffline();
 			const host = info.members[0]?.id;
-			if (info.host || !host) await together.resumeHost();
-			else together.rejoin(host);
+			if (info.host || !host) {
+				if (!(await catchUpFromCloud(info, together, true))) await together.resumeHost();
+			} else together.rejoin(host);
 			togetherTick++;
 		} catch (e) {
 			shareError = String(e);
@@ -1767,8 +1823,9 @@
 		shareError = '';
 		try {
 			void saveSettings().catch(() => {});
-			const relay = cleanRelay(settings.shareRelay);
-			sharing = join ? await joinSession(join, relay) : await hostSession(relay);
+			sharing = join
+				? await joinSession(join, netOf(), aboutOf())
+				: await hostSession(netOf(), aboutOf());
 			startTogether(sharing, !!join);
 		} catch (e) {
 			shareError = String(e);
@@ -2070,7 +2127,12 @@
 		fileNote = '';
 		try {
 			const versionAtSave = docVersion;
-			path = await saveProject(target, await currentDoc(true));
+			const doc = await currentDoc(true);
+			path = await saveProject(target, doc);
+			// a shared project: the cloud lists it by this name and picture
+			const code = (doc.extra.share as SavedShare | undefined)?.code;
+			if (code && cleanCloud(settings.shareCloud) !== 'off')
+				void cloudTouch(code, projectName(path), doc.thumbnail ?? null, netOf()).catch(() => {});
 			created ??= new Date().toISOString();
 			savedVersion = versionAtSave;
 			// saved for real: the recovery copy has done its job
@@ -2935,6 +2997,7 @@
 		const ask = takeTogether();
 		if (ask) shareOpen = true;
 		if (ask?.what === 'join') joinOnReady = ask.code;
+		if (ask?.what === 'cloud') cloudOnReady = ask.code;
 		if (ask?.what === 'rejoin') {
 			// (it opens once the project's session is read from its file)
 			shareOpen = false;
@@ -3270,7 +3333,7 @@
 					title="Draw with others, live"
 				>
 					{sharing
-						? `Together (${sharing.members.length})${asksForMe ? ' • asks' : ''}`
+						? `Together (${people(sharing.members).length})${asksForMe ? ' • asks' : ''}`
 						: 'Draw together'}
 				</button>
 			{/if}

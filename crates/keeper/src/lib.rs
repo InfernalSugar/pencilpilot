@@ -27,8 +27,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use pencilpilot_share::cloud::{
-    CLOUD_ALPN, CloudMember, CloudProject, KEEPER_USER, OpenState, Opened, Reply, Request,
-    check_proof,
+    CLOUD_ALPN, CloudProject, KEEPER_USER, OpenState, Opened, Reply, Request, check_proof,
 };
 use pencilpilot_share::{
     Connection, EndpointAddr, Event, Hub, Identity, Invite, Member, Pass, Relays, Session, SiteKey,
@@ -737,10 +736,33 @@ fn clean_title(raw: &str) -> String {
     }
 }
 
-/// For the member list (CloudMember is the protocol's).
-pub fn member(user: &str, name: &str) -> CloudMember {
-    CloudMember {
-        user: user.into(),
-        name: name.into(),
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_deployed_settings_read() {
+        let c: Config = toml::from_str(include_str!("../../../deploy/keeper/keeper.toml")).unwrap();
+        assert_eq!(c.port, 7843);
+        assert_eq!(
+            c.relays(),
+            Relays::Custom(vec!["https://relay.example.com".into()])
+        );
+        let r = Rules::from(&c.limits);
+        assert_eq!(r.account_bytes, 1024 << 20);
+        assert_eq!(r.compact_every, Duration::from_secs(30 * 60));
+        // a mistyped setting is an error, not ignored
+        assert!(
+            toml::from_str::<Config>(
+                "data = \"x\"\nkey = \"k\"\npass = \"p\"\nsite_key = \"s\"\nprot = 1"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn titles_are_cleaned() {
+        assert_eq!(clean_title("  Walk\u{7} cycle "), "Walk cycle");
+        assert_eq!(clean_title(""), "Shared project");
     }
 }

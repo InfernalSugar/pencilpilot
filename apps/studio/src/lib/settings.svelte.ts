@@ -41,6 +41,8 @@ export interface Settings {
 	versionsKept: number;
 	/** our own relay for drawing together ('' = the default) */
 	shareRelay: string;
+	/** the cloud that keeps shared projects ('' = the default; 'off' = none): its id@host:port */
+	shareCloud: string;
 
 	// ---- interface ----
 	/** how big everything is (1 = as designed) */
@@ -162,6 +164,7 @@ export const DEFAULTS: Settings = {
 	autosaveSeconds: 20,
 	versionsKept: 20,
 	shareRelay: '',
+	shareCloud: '',
 
 	uiScale: 1,
 	accent: '',
@@ -256,6 +259,7 @@ export function cleanSettings(raw: unknown, legacy: { onion?: unknown } = {}): S
 		autosaveSeconds: one(o.autosaveSeconds, AUTOSAVE_CHOICES, D.autosaveSeconds),
 		versionsKept: int(o.versionsKept, D.versionsKept, 0, 100),
 		shareRelay: typeof o.shareRelay === 'string' ? o.shareRelay.slice(0, 200) : '',
+		shareCloud: typeof o.shareCloud === 'string' ? o.shareCloud.slice(0, 200) : '',
 
 		uiScale: num(o.uiScale, D.uiScale, 0.75, 1.5),
 		accent: themed(o.accent),

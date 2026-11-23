@@ -82,6 +82,7 @@ Fallback, not chosen: projects on our own server (the website's Node server; SQL
 tiles by hash on disk). Always available and simpler to make consistent, but the server
 stores and passes on everything. It stays the plan B if peer to peer proves unreliable,
 and an always-online member running on the VPS is a later middle ground.
+That middle ground is now decided: the cloud's keeper, [ADR-0014](0014-cloud-keeper.md).
 
 ### AI generation is a solo act
 
@@ -234,6 +235,9 @@ stays fully offline and never asks for one.
 - Your layers can't conflict, since only you draw on them.
 - If your access to a layer was taken away meanwhile, your offline drawing on it becomes
   a new layer of yours ("Sam's changes, offline"), so nothing is lost.
+- With the cloud ([ADR-0014](0014-cloud-keeper.md)), coming back works with no one else
+  online: the app catches up from the cloud. Drawing you did on others' layers meanwhile
+  is kept aside and asked for (the owner says yes or no), instead of becoming a new layer.
 
 ## Sizes and limits (first version)
 

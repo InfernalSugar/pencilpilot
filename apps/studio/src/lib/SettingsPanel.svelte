@@ -35,7 +35,7 @@
 		settings,
 		type Theme
 	} from '#lib/settings.svelte.js';
-	import { cleanRelay } from '#lib/share.js';
+	import { cleanCloud, cleanRelay } from '#lib/share.js';
 	import {
 		account,
 		endAccount,
@@ -410,6 +410,26 @@
 					they can’t connect directly. It’s encrypted; the relay can’t see what you draw. Leave it
 					empty for the default, or give your own (see <code>deploy/relay</code>). Solo projects
 					never connect to anything.
+				</p>
+				<label class="row">
+					<span>Cloud</span>
+					<input
+						placeholder="Default"
+						spellcheck="false"
+						aria-invalid={!!settings.shareCloud.trim() && !cleanCloud(settings.shareCloud)}
+						bind:value={settings.shareCloud}
+					/>
+				</label>
+				{#if settings.shareCloud.trim() && !cleanCloud(settings.shareCloud)}
+					<p class="hint">
+						That isn’t a cloud address: it’s the cloud’s id, then <code>@host:port</code>.
+					</p>
+				{/if}
+				<p class="hint">
+					The cloud keeps a copy of your shared projects, so you can carry on when no one else is
+					online and open them on any computer (home’s Cloud tab). Only the projects’ members can
+					get them. Leave it empty for the default, type <code>off</code> for none, or give your own
+					(see <code>deploy/keeper</code>).
 				</p>
 			{:else}
 				{@const g = PREFERENCE_GROUPS.find((x) => x.id === section)}
