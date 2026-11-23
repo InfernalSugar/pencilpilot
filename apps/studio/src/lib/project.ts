@@ -50,6 +50,8 @@ export interface ProjectDrawing {
 	layer: number;
 	/** straight-alpha RGBA, canvas size; none: it's in the app's frame store */
 	rgba?: Uint8Array;
+	/** a line layer's strokes (lines.ts's bytes); none for other drawings */
+	lines?: Uint8Array;
 }
 
 interface PacketLayer {
@@ -66,6 +68,7 @@ interface PacketLayer {
 	adjust?: string | null;
 	style?: LayerStyle | null;
 	text?: string | null;
+	lines?: boolean;
 	rgba: [number, number];
 	mask?: [number, number] | null;
 }
@@ -85,7 +88,12 @@ interface Header {
 	mouthCharts?: FileMouthChart[];
 	drawingKinds?: Record<string, string>;
 	audio?: { file: string; bytes: [number, number] }[];
-	drawings?: { id: number; layer: number; rgba?: [number, number] | null }[];
+	drawings?: {
+		id: number;
+		layer: number;
+		rgba?: [number, number] | null;
+		lines?: [number, number] | null;
+	}[];
 	timelapse?: { t: number; bytes: [number, number] }[];
 	fonts?: { family: string; file: string; bytes: [number, number] }[];
 }
@@ -120,6 +128,7 @@ export function pack(doc: ProjectDoc): Uint8Array {
 			adjust: l.adjust ?? null,
 			...(l.style ? { style: l.style } : {}),
 			...(l.text ? { text: l.text } : {}),
+			...(l.lines ? { lines: true } : {}),
 			rgba: put(l.rgba),
 			mask: l.mask ? put(l.mask) : null
 		})),
@@ -146,7 +155,8 @@ export function pack(doc: ProjectDoc): Uint8Array {
 					drawings: (doc.drawings ?? []).map((d) => ({
 						id: d.id,
 						layer: d.layer,
-						rgba: d.rgba ? put(d.rgba) : null
+						rgba: d.rgba ? put(d.rgba) : null,
+						...(d.lines ? { lines: put(d.lines) } : {})
 					}))
 				}
 			: {})
@@ -197,6 +207,7 @@ export function unpack(packet: ArrayBuffer | Uint8Array): ProjectDoc {
 			adjust: l.adjust ?? null,
 			...(readStyle(l.style) ? { style: readStyle(l.style) } : {}),
 			...(l.text ? { text: l.text } : {}),
+			...(l.lines ? { lines: true } : {}),
 			rgba: get(l.rgba),
 			mask: l.mask ? get(l.mask) : undefined,
 			...(assisted.includes(l.id) ? { assist: true } : {})
@@ -223,7 +234,8 @@ export function unpack(packet: ArrayBuffer | Uint8Array): ProjectDoc {
 		drawings: (h.drawings ?? []).map((d) => ({
 			id: d.id,
 			layer: d.layer,
-			...(d.rgba ? { rgba: get(d.rgba) } : {})
+			...(d.rgba ? { rgba: get(d.rgba) } : {}),
+			...(d.lines ? { lines: get(d.lines) } : {})
 		}))
 	};
 }

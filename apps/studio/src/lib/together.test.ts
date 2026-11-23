@@ -15,6 +15,8 @@ import {
 	type TileMap
 } from './together';
 import { newTimeline, type Timeline } from './timeline';
+import { STRIDE, transformStroke, type LineStroke } from '@pencilpilot/paint/lines';
+import { applyLineEdit, lineEdits, readLineEdit, strokeFromShare, strokeToShare } from './together';
 
 const A = 'a'.repeat(64);
 const B = 'b'.repeat(64);
@@ -259,6 +261,29 @@ class FakeCanvas implements CanvasPort {
 	byName(name: string) {
 		return this.layerList.find((l) => l.name === name)!;
 	}
+	// line layers: which layers, and each drawing's strokes
+	lineLayers = new Set<number>();
+	strokes = new Map<number, readonly LineStroke[]>();
+	isLineLayer(id: number) {
+		return this.lineLayers.has(id);
+	}
+	setLineLayer(id: number, on: boolean) {
+		if (on) this.lineLayers.add(id);
+		else this.lineLayers.delete(id);
+	}
+	lineStrokes(d: number) {
+		return this.strokes.get(d) ?? [];
+	}
+	setLineStrokes(d: number, list: readonly LineStroke[]) {
+		this.strokes.set(d, list);
+	}
+}
+
+/** a line stroke from (x, 0) to (x, 10) */
+function stroke(id: string, x: number): LineStroke {
+	const pts = new Float32Array(3 * STRIDE);
+	for (let i = 0; i < 3; i++) pts.set([x, i * 5, 0.5, 0, 0, 0.01], i * STRIDE);
+	return { id, pts, brush: 'pen', color: '#000000', size: 1, opacity: 1, radius: 2, seed: 7 };
 }
 
 /** A session: numbers edits and hands them to every app, in order. */
@@ -925,5 +950,151 @@ describe('drawing together: apps', () => {
 		await session.settle();
 		expect(cc.sounds.get('s1-abc.mp3')?.bytes).toEqual(song);
 		expect(cc.tl.scenes[0].audio?.[0].start).toBe(8);
+	});
+
+	it('shares line layers: their strokes stay editable everywhere, from their drawer only', async () => {
+		const session = new FakeSession();
+		const hc = new FakeCanvas(['Ink']);
+		const ink = hc.byName('Ink').id;
+		hc.setLineLayer(ink, true);
+		hc.paint(ink, 0, 0, 10);
+		const d = hc.drawingOf(ink);
+		hc.setLineStrokes(d, [stroke('a', 1), stroke('b', 2)]);
+		const host = new Together(A, 'Ana', hc, session.net(A));
+		session.apps.set(A, host);
+		await host.startHost();
+		await session.settle();
+
+		// Bo joins: a line layer, with the strokes (and the pixels, as tiles)
+		const bc = new FakeCanvas([]);
+		const bo = new Together(B, 'Bo', bc, session.net(B));
+		session.apps.set(B, bo);
+		bo.startJoin(A);
+		await session.settle();
+		const bInk = bc.byName('Ink');
+		expect(bc.isLineLayer(bInk.id)).toBe(true);
+		expect(bc.pixel(bInk.id, 0, 0)).toBe(10);
+		const bd = bc.layerList.find((l) => l.id === bInk.id)!.drawing;
+		expect(bc.lineStrokes(bd).map((s) => s.id)).toEqual(['a', 'b']);
+		expect([...bc.lineStrokes(bd)[1].pts]).toEqual([...stroke('b', 2).pts]);
+
+		// Ana moves a stroke and adds one: only those travel, in place
+		const [a, b] = hc.lineStrokes(d);
+		hc.setLineStrokes(d, [a, transformStroke(b, [1, 0, 0, 1, 5, 0]), stroke('c', 3)]);
+		hc.paint(ink, 1, 0, 20);
+		const sent: unknown[] = [];
+		const net = session.net(A);
+		const spy = { edit: (e: unknown) => (sent.push(e), net.edit(e)), direct: net.direct };
+		(host as unknown as { net: typeof spy }).net = spy;
+		await host.localChanged();
+		await session.settle();
+		const lineSent = sent.filter((e) => (e as { k: string }).k === 'lines') as {
+			del: string[];
+			put: [number, string][];
+		}[];
+		expect(lineSent).toHaveLength(1);
+		expect(lineSent[0].del).toEqual(['b']);
+		expect(lineSent[0].put.map(([i]) => i)).toEqual([1, 2]);
+		expect(bc.lineStrokes(bd).map((s) => s.id)).toEqual(['a', 'b', 'c']);
+		expect(bc.lineStrokes(bd)[1].pts[0]).toBe(7);
+		expect(bc.pixel(bInk.id, 1, 0)).toBe(20);
+		// nothing new: nothing sent
+		sent.length = 0;
+		await host.localChanged();
+		expect(sent.filter((e) => (e as { k: string }).k === 'lines')).toEqual([]);
+
+		// Bo may not change Ana's strokes
+		const lid = bo.lidOf(bInk.id)!;
+		session.net(B).edit({ k: 'lines', lid, did: host.didOf(d), del: ['a'], put: [] });
+		await session.settle();
+		expect(hc.lineStrokes(d).map((s) => s.id)).toEqual(['a', 'b', 'c']);
+		expect(bc.lineStrokes(bd).map((s) => s.id)).toEqual(['a', 'b', 'c']);
+
+		// Ana converts it to pixels: a plain layer for Bo too
+		hc.setLineLayer(ink, false);
+		await host.localChanged();
+		await session.settle();
+		expect(bc.isLineLayer(bInk.id)).toBe(false);
+		expect(host.shared.layers.get(lid)?.lines).toBeUndefined();
+	});
+});
+
+describe('drawing together: line edits', () => {
+	it('checks line edits and new line layers', () => {
+		const lid = 'aaaaaaaaaaaa:1';
+		const did = 'aaaaaaaaaaaa:5';
+		const enc = strokeToShare(stroke('s1', 4));
+		expect(parseEdit({ k: 'layer', lid, name: 'Ink', lines: true })).toEqual({
+			k: 'layer',
+			lid,
+			name: 'Ink',
+			lines: true
+		});
+		// (an adjustment layer is never a line layer)
+		expect(parseEdit({ k: 'layer', lid, name: 'A', adjust: '{}', lines: true })).toEqual({
+			k: 'layer',
+			lid,
+			name: 'A',
+			adjust: '{}'
+		});
+		expect(parseEdit({ k: 'lines', lid, did, del: ['x', 7, '../'], put: [[0, enc]] })).toEqual({
+			k: 'lines',
+			lid,
+			did,
+			del: ['x'],
+			put: [[0, enc]]
+		});
+		expect(parseEdit({ k: 'lines', lid, did: 'nope', del: [], put: [] })).toBeNull();
+		expect(parseEdit({ k: 'lines', lid, did, del: [], put: [[-1, enc]] })).toBeNull();
+		expect(parseEdit({ k: 'lines', lid, did, del: [], put: [[0, '<script>']] })).toBeNull();
+		expect(
+			readLineEdit({ del: [], put: Array.from({ length: 401 }, () => [0, 'AA==']) })
+		).toBeNull();
+		expect(parseEdit({ k: 'pixels', lid })).toEqual({ k: 'pixels', lid });
+		// a stroke that isn't one is dropped as it's put in
+		expect(strokeFromShare('AAAA')).toBeNull();
+		expect(
+			applyLineEdit([], {
+				del: [],
+				put: [
+					[0, 'AAAA'],
+					[1, enc]
+				]
+			}).map((s) => s.id)
+		).toEqual(['s1']);
+	});
+
+	it('lets only writers send strokes, on line layers only', () => {
+		const s = new Shared();
+		const lid = 'aaaaaaaaaaaa:1';
+		const did = 'aaaaaaaaaaaa:5';
+		s.apply(A, { k: 'layer', lid, name: 'Ink', lines: true });
+		s.apply(A, { k: 'layer', lid: 'aaaaaaaaaaaa:2', name: 'Paint' });
+		const e = { k: 'lines' as const, lid, did, del: [], put: [] };
+		expect(s.apply(A, e)).toBe(true);
+		expect(s.apply(B, e)).toBe(false);
+		expect(s.apply(A, { ...e, lid: 'aaaaaaaaaaaa:2' })).toBe(false);
+		expect(s.apply(B, { k: 'pixels', lid })).toBe(false);
+		expect(s.apply(A, { k: 'pixels', lid })).toBe(true);
+		expect(s.apply(A, e)).toBe(false);
+		// kept across a save
+		const t = new Shared();
+		t.load({ layers: [{ lid, owner: A, name: 'Ink', writers: [A], lines: true }], asks: [] });
+		expect(t.layers.get(lid)?.lines).toBe(true);
+	});
+
+	it('splits big changes into several edits that put back the same strokes', () => {
+		const many = Array.from({ length: 900 }, (_, i) => stroke(`s${i}`, i));
+		const edits = lineEdits('aaaaaaaaaaaa:1', 'aaaaaaaaaaaa:5', [], many);
+		expect(edits.length).toBe(3);
+		let list: readonly LineStroke[] = [];
+		for (const e of edits) list = applyLineEdit(list, e);
+		expect(list.map((s) => s.id)).toEqual(many.map((s) => s.id));
+		expect(lineEdits('aaaaaaaaaaaa:1', 'aaaaaaaaaaaa:5', many, many)).toEqual([]);
+		// a deletion alone is one edit
+		const gone = lineEdits('aaaaaaaaaaaa:1', 'aaaaaaaaaaaa:5', many, many.slice(1));
+		expect(gone).toEqual([
+			{ k: 'lines', lid: 'aaaaaaaaaaaa:1', did: 'aaaaaaaaaaaa:5', del: ['s0'], put: [] }
+		]);
 	});
 });

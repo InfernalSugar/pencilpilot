@@ -105,6 +105,16 @@ describe('project packets', () => {
 		expect(back.layers[1].text).toBeUndefined();
 	});
 
+	it('round-trip line layers and their drawings’ strokes (old files have none)', () => {
+		const d = doc();
+		d.layers[0].lines = true;
+		d.drawings![0].lines = Uint8Array.from([0x50, 0x50, 0x4c, 0x31, 9, 9]);
+		const back = unpack(pack(d));
+		expect(back).toEqual(d);
+		expect(back.layers[1].lines).toBeUndefined();
+		expect(back.drawings![1].lines).toBeUndefined();
+	});
+
 	it('start with the magic word and the header length', () => {
 		const p = pack(doc());
 		expect([...p.subarray(0, 4)]).toEqual([0x50, 0x50, 0x53, 0x31]);

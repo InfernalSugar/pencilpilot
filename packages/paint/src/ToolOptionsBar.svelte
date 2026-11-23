@@ -18,16 +18,89 @@
 		tool = $bindable('brush'),
 		status,
 		canvas,
-		measureUnit = 0
+		measureUnit = 0,
+		eraser = false
 	}: {
 		opts: ToolOptions;
 		tool?: string;
+		/** the brush is the eraser */
+		eraser?: boolean;
 		status: CanvasStatus;
 		canvas: ReturnType<typeof PaintCanvas> | undefined;
 		/** the unit marked on the reference, in canvas px (0: measure in pixels) */
 		measureUnit?: number;
 	} = $props();
+
+	const onLines = $derived(!!status.layers.find((l) => l.id === status.active)?.lines);
+	/** how many line strokes are selected (the status bumps on every change) */
+	const picked = $derived.by(() => {
+		void status.version;
+		return canvas?.linesSelected() ?? 0;
+	});
 </script>
+
+{#if tool === 'lines'}
+	<div class="fill-opts" role="group" aria-label="Select line">
+		{#if !onLines}
+			<span class="msg">
+				Select line works on line layers. Make one with “New line layer” in Layers, then draw on it.
+			</span>
+		{:else}
+			{#if picked}
+				<button type="button" class="tool" onclick={() => canvas?.deleteLines()}>Delete</button>
+				<button type="button" class="tool" onclick={() => canvas?.deselectLines()}>
+					Deselect
+				</button>
+			{/if}
+			<span
+				class="msg"
+				data-testid="lines-picked"
+				title={picked
+					? 'Drag to move; the corners scale (Shift: in proportion), the round handle turns, the dots reshape. Arrow keys nudge, Delete removes. The colour, size, opacity and brush you pick change the selected lines.'
+					: 'Shift+tap adds or takes away a line; drag on empty canvas for a box.'}
+			>
+				{picked
+					? `${picked} line${picked === 1 ? '' : 's'} selected · new colour, size or brush changes ${picked === 1 ? 'it' : 'them'}`
+					: 'Tap a line to select it, or drag a box round some'}
+			</span>
+		{/if}
+	</div>
+{/if}
+{#if tool === 'brush' && eraser && onLines}
+	<div class="fill-opts" role="group" aria-label="Line eraser">
+		<span class="opt-label">Erase</span>
+		<div class="seg" role="radiogroup" aria-label="Line eraser">
+			<button
+				type="button"
+				class="tool"
+				role="radio"
+				aria-checked={opts.lineEraser === 'normal'}
+				title="Cut lines where the eraser passes (the rest stays editable)"
+				onclick={() => (opts.lineEraser = 'normal')}
+			>
+				Normal
+			</button>
+			<button
+				type="button"
+				class="tool"
+				role="radio"
+				aria-checked={opts.lineEraser === 'whole'}
+				title="Remove every line the eraser touches"
+				onclick={() => (opts.lineEraser = 'whole')}
+			>
+				Whole lines
+			</button>
+		</div>
+	</div>
+{/if}
+{#if tool === 'fill' && onLines}
+	<div class="fill-opts" role="note">
+		<span class="msg">
+			On a line layer, fills go on the layer under it (a new “Colour” layer if needed), inside its
+			lines.
+		</span>
+	</div>
+{/if}
 
 {#if opts.guidesOpen}
 	<div class="fill-opts guides-opts" role="group" aria-label="Guides">
@@ -678,6 +751,11 @@
 {/if}
 
 <style>
+	.msg {
+		margin: 0;
+		color: var(--pp-on-ink);
+		font-size: 14px;
+	}
 	.tool {
 		min-width: 38px;
 		height: 38px;

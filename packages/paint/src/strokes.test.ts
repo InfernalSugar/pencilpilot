@@ -81,6 +81,30 @@ describe('StrokeLog', () => {
 	});
 });
 
+describe('StrokeLog effects', () => {
+	it('undoes and redoes the app’s own part of a step with it, joined steps too', () => {
+		const log = new StrokeLog();
+		const seen: string[] = [];
+		const fx = (n: string) => ({ undo: () => seen.push(`-${n}`), redo: () => seen.push(`+${n}`) });
+		log.add(s('a'));
+		log.attachLast(fx('a'));
+		log.layerChange();
+		log.attachLast(fx('b'));
+		log.layerChange();
+		log.attachLast(fx('c'));
+		log.joinLast();
+		log.undo();
+		expect(seen).toEqual(['-c', '-b']);
+		log.undo();
+		expect(seen).toEqual(['-c', '-b', '-a']);
+		expect(ids(log)).toEqual([]);
+		log.redo();
+		log.redo();
+		expect(seen.slice(3)).toEqual(['+a', '+b', '+c']);
+		expect(ids(log)).toEqual(['a']);
+	});
+});
+
 describe('StrokeLog batch', () => {
 	it('records several actions as one undo step', () => {
 		const log = new StrokeLog();

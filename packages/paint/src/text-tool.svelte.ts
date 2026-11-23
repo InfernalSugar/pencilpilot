@@ -207,7 +207,13 @@ export class TextTool {
 		this.set({ font: family });
 	}
 
-	/** for `PaintCanvas`: something was about to paint on a text layer */
+	/** the layer asked about is a line layer (not text) */
+	get askingLines() {
+		const id = this.rasterizeAsk;
+		return !!id && !!this.host.status().layers.find((l) => l.id === id)?.lines;
+	}
+
+	/** for `PaintCanvas`: something was about to paint on a text (or line) layer */
 	onrasterize = (id: number) => {
 		this.rasterizeAsk = id;
 	};

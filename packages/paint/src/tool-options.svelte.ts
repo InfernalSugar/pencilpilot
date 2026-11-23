@@ -83,6 +83,8 @@ export class ToolOptions {
 	warp = $state(false);
 	/** feathering the selection: how soft its edge gets (canvas px) */
 	featherPx = $state(16);
+	/** the eraser on a line layer: cut lines where it passes, or remove whole lines */
+	lineEraser = $state<'normal' | 'whole'>('normal');
 	/** hold at the end of a stroke to snap it to a shape */
 	quickShape = $state(true);
 	/** close and fill: a stroke that ends where it began fills inside */

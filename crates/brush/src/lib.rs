@@ -24,6 +24,7 @@ pub mod adjust;
 mod clone;
 pub mod filters;
 pub mod layers;
+mod lines;
 mod select;
 pub mod style;
 mod text;
@@ -57,6 +58,8 @@ pub struct UndoSurface {
     style: Option<std::sync::Arc<texture::DabStyle>>,
     /// a clone stroke: where its dabs copy from (see [`clone`])
     clone: Option<std::sync::Arc<clone::CloneSource>>,
+    /// redrawing line strokes: only dabs touching these tiles are drawn (see [`lines`])
+    only: Option<Box<lines::Area>>,
 }
 
 impl UndoSurface {
@@ -99,6 +102,11 @@ impl TiledSurface for UndoSurface {
     /// libmypaint's dab, then (with a texture) each pixel's change scaled by
     /// how much the grain / tip / dual brush lets through there.
     fn draw_dab(&mut self, dab: &hokusai::Dab) -> bool {
+        if let Some(only) = &self.only
+            && !only.touches(dab)
+        {
+            return false;
+        }
         if let Some(src) = self.clone.clone() {
             return clone::clone_dab(self, dab, &src);
         }
@@ -293,6 +301,7 @@ impl Clone for UndoSurface {
             touched: HashSet::new(),
             style: None,
             clone: None,
+            only: None,
         }
     }
 }
@@ -486,6 +495,12 @@ pub struct Painter {
     adjust_layer_before: Option<(u32, LayerProps)>,
     /// text being typed on a text layer (see `text_begin`)
     text_editing: Option<text::TextEdit>,
+    /// the current stroke is a line stroke (see `begin_line_stroke`)
+    line_stroke: bool,
+    /// line strokes being redrawn into a scratch surface (see `lines_begin`)
+    line_redraw: Option<Box<lines::Redraw>>,
+    /// a line edit not in the history yet: (layer, its tiles before; see `lines_commit`)
+    line_pending: Option<lines::Pending>,
 }
 
 impl Painter {
@@ -522,6 +537,9 @@ impl Painter {
             style: None,
             adjust_layer_before: None,
             text_editing: None,
+            line_stroke: false,
+            line_redraw: None,
+            line_pending: None,
         }
     }
 
@@ -1064,6 +1082,7 @@ impl Painter {
             && self.liquify.is_none()
             && self.adjusting.is_none()
             && self.text_editing.is_none()
+            && self.line_redraw.is_none()
     }
 
     fn stop_mask_editing(&mut self) {
@@ -1413,6 +1432,7 @@ impl Painter {
             props.style = Default::default();
         }
         props.text = self.layers[idx].props.text.clone();
+        props.lines = self.layers[idx].props.lines;
         props.opacity = props.opacity.clamp(0.0, 1.0);
         props.name = props.name.chars().take(60).collect();
         if props.name.trim().is_empty() {
@@ -1441,6 +1461,7 @@ impl Painter {
             before.style = Default::default();
         }
         before.text = self.layers[idx].props.text.clone();
+        before.lines = self.layers[idx].props.lines;
         if self.layers[idx].props == before {
             return false;
         }
@@ -1620,7 +1641,10 @@ impl Painter {
                 }
             }
         }
-        self.clip_to_selection(id);
+        // (the selection doesn't clip line strokes: their redraws couldn't follow it)
+        if !self.line_stroke {
+            self.clip_to_selection(id);
+        }
     }
 
     /// Undo paint that landed outside the selection on the tiles just touched
@@ -1685,7 +1709,10 @@ impl Painter {
             }
         }
         self.sym_states.clear();
-        self.clip_to_selection(id);
+        let line = std::mem::take(&mut self.line_stroke);
+        if !line {
+            self.clip_to_selection(id);
+        }
         let snap = self.layers.iter_mut().find(|l| l.id == id).and_then(|l| {
             l.surface.style = None;
             l.surface.clone = None;
@@ -1695,12 +1722,18 @@ impl Painter {
         self.alpha_lock_stroke = false;
         // Always record a history step, even if no pixels changed, so the
         // web app's history and this undo stack stay one-to-one.
-        self.push_undo(Edit::Tiles {
+        let e = Edit::Tiles {
             drawing: 0,
             layer: id,
             mask: self.editing_mask(id),
             snap: snap.unwrap_or_default(),
-        });
+        };
+        if line {
+            // (a line layer stays one)
+            self.push_line_step(e);
+        } else {
+            self.push_undo(e);
+        }
     }
 
     /// Abandon the stroke in progress (e.g. a second finger turned it into a
@@ -1719,11 +1752,18 @@ impl Painter {
         self.state.reset();
         self.stroke_brush = None;
         self.alpha_lock_stroke = false;
+        self.line_stroke = false;
     }
 
     fn push_undo(&mut self, mut e: Edit) {
-        // paint on a text layer makes it a plain one (undo brings the text back)
-        self.rasterize_painted(&mut e);
+        // paint on a text or line layer makes it a plain one (undo brings it back)
+        self.rasterize_painted(&mut e, true);
+        self.push_step(e);
+    }
+
+    /// [`Self::push_undo`] for line edits: text still becomes plain, line layers stay.
+    fn push_line_step(&mut self, mut e: Edit) {
+        self.rasterize_painted(&mut e, false);
         self.push_step(e);
     }
 
@@ -3848,6 +3888,12 @@ impl Painter {
 
     pub fn undo(&mut self) -> bool {
         self.adjust_cancel();
+        if self.line_redraw.is_some() || self.line_pending.is_some() {
+            // undo while moving lines just cancels the move
+            self.line_redraw = None;
+            self.lines_cancel();
+            return false;
+        }
         if self.text_editing.is_some() {
             // undo while typing drops the change
             self.text_cancel();
@@ -3872,7 +3918,8 @@ impl Painter {
 
     pub fn redo(&mut self) -> bool {
         self.adjust_cancel();
-        if self.text_editing.is_some() {
+        if self.text_editing.is_some() || self.line_redraw.is_some() || self.line_pending.is_some()
+        {
             return false;
         }
         if self.stroking.is_some() {
@@ -4426,7 +4473,7 @@ impl Painter {
             .map(|l| {
                 let p = &l.props;
                 format!(
-                    r#"{{"id":{},"name":{},"visible":{},"opacity":{},"blend":"{}","locked":{},"alphaLock":{},"clip":{},"mask":{},"editingMask":{},"group":{},"imported":{},"empty":{},"drawing":{},"adjust":{},"style":{},"text":{}}}"#,
+                    r#"{{"id":{},"name":{},"visible":{},"opacity":{},"blend":"{}","locked":{},"alphaLock":{},"clip":{},"mask":{},"editingMask":{},"group":{},"imported":{},"empty":{},"drawing":{},"adjust":{},"style":{},"text":{},"lines":{}}}"#,
                     l.id,
                     json_str(&p.name),
                     p.visible,
@@ -4455,7 +4502,8 @@ impl Painter {
                         "null".into()
                     } else {
                         json_str(&p.text)
-                    }
+                    },
+                    p.lines
                 )
             })
             .collect();

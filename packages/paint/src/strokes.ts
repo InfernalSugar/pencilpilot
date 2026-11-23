@@ -36,6 +36,8 @@ type Action = (
 ) & {
 	/** what the history panel calls this step */
 	label?: string;
+	/** the app's own part of the step (a line layer's strokes), undone and redone with it */
+	effect?: { undo(): void; redo(): void };
 };
 
 /** The history panel's name for an action without its own label. */
@@ -162,6 +164,12 @@ export class StrokeLog {
 		if (a) a.label = label;
 	}
 
+	/** Undo and redo `effect` along with the step just recorded (see `labelLast`). */
+	attachLast(effect: { undo(): void; redo(): void }) {
+		const a = this.#collect ? this.#collect.at(-1) : this.#undo.at(-1);
+		if (a) a.effect = effect;
+	}
+
 	/** Step names: `undo` oldest → newest (the last one is the current state), `redo` next → furthest. */
 	history(): { undo: string[]; redo: string[] } {
 		return {
@@ -187,6 +195,7 @@ export class StrokeLog {
 	}
 
 	#revert(a: Action) {
+		a.effect?.undo();
 		if (a.kind === 'stroke') {
 			const i = this.#all.lastIndexOf(a.stroke);
 			if (i >= 0) this.#all.splice(i, 1);
@@ -203,6 +212,7 @@ export class StrokeLog {
 			this.#all = this.#all.filter((s) => !gone.has(s));
 		} else if (a.kind === 'merge') for (const s of a.moved) s.layer = a.to;
 		else if (a.kind === 'batch') for (const x of a.actions) this.#reapply(x);
+		a.effect?.redo();
 	}
 
 	#push(a: Action) {

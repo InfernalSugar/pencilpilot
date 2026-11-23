@@ -96,6 +96,10 @@ pub struct LayerProps {
     /// a text layer: the app's description of its text (font, size…), kept as given;
     /// empty for other layers. Painting on the layer clears it (rasterizes the text).
     pub text: String,
+    /// a line (vector) layer: the app keeps its strokes and redraws its pixels from
+    /// them (see [`crate::Painter::lines_begin`]). Painting on it any other way clears
+    /// it (rasterizes the lines), as for text.
+    pub lines: bool,
 }
 
 impl LayerProps {
@@ -113,6 +117,7 @@ impl LayerProps {
             adjust_spec: String::new(),
             style: Default::default(),
             text: String::new(),
+            lines: false,
         }
     }
 }
