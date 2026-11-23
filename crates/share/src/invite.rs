@@ -38,7 +38,8 @@ pub struct Invite {
 }
 
 impl Invite {
-    pub(crate) fn new(key: [u8; 32], addrs: Vec<EndpointAddr>) -> Self {
+    /// An invite for the project whose secret is `key`, through these members.
+    pub fn new(key: [u8; 32], addrs: Vec<EndpointAddr>) -> Self {
         Self { key, addrs }
     }
 

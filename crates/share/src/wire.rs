@@ -141,7 +141,7 @@ pub struct Presence {
     pub body: serde_json::Value,
 }
 
-pub async fn write(send: &mut SendStream, frame: &Frame) -> Result<()> {
+pub async fn write<T: Serialize>(send: &mut SendStream, frame: &T) -> Result<()> {
     let bytes = serde_json::to_vec(frame).map_err(err)?;
     if bytes.len() > MAX_FRAME {
         return Err(Error("That change is too big to send in one go.".into()));
@@ -155,6 +155,11 @@ pub async fn write(send: &mut SendStream, frame: &Frame) -> Result<()> {
 
 /// The next frame, or `None` when the other side finished the stream.
 pub async fn read(recv: &mut RecvStream) -> Result<Option<Frame>> {
+    read_json(recv).await
+}
+
+/// Any message, framed the same way (the cloud's protocol uses this too).
+pub async fn read_json<T: serde::de::DeserializeOwned>(recv: &mut RecvStream) -> Result<Option<T>> {
     let mut len = [0u8; 4];
     match recv.read_exact(&mut len).await {
         Ok(()) => {}
