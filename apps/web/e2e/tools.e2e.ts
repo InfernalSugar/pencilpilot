@@ -264,7 +264,7 @@ test('QuickShape: hold at the end of a wobbly line or loop to snap it', async ({
 	await expect(page.getByRole('button', { name: /Undo/ })).toBeEnabled();
 
 	// switched off: no snapping
-	await page.getByRole('button', { name: 'QuickShape' }).click();
+	await page.getByRole('button', { name: 'Snap shapes' }).click();
 	b = await box(page);
 	await page.mouse.move(b.x + b.width * 0.1, b.y + b.height * 0.9);
 	await page.mouse.down();
@@ -837,7 +837,7 @@ test('guides: grid, ruler and perspective assist straighten strokes; vanishing p
 	await g.getByRole('radio', { name: '1-point' }).click();
 	await expect(page.locator('svg.guides line.horizon')).toBeAttached();
 	// drawing assist is the layer's (as in Procreate): on for this one
-	const assist = g.getByRole('button', { name: 'Assist' });
+	const assist = g.getByRole('button', { name: 'Guide snap' });
 	await expect(assist).toHaveAttribute('aria-pressed', 'false');
 	await assist.click();
 	await expect(assist).toHaveAttribute('aria-pressed', 'true');
