@@ -333,3 +333,51 @@ export function grayFromImage(
 		}
 	return { w, h, px };
 }
+
+/** The engine calls that texture a canvas's strokes (`PaintCanvas` from the brush engine). */
+interface TexturedCanvas {
+	setTexture(id: number, w: number, h: number, px: Uint8Array): boolean;
+	setDabStyle(
+		grain: number,
+		grainScale: number,
+		grainStrength: number,
+		tip: number,
+		dual: number,
+		dualSize: number,
+		dualScatter: number,
+		dualCount: number
+	): void;
+}
+
+/**
+ * Texture an engine canvas's next strokes with `t` (none: plain dabs). `ids`
+ * remembers which pictures that canvas already has (app id → engine id).
+ */
+export function styleStrokes(
+	paint: TexturedCanvas,
+	t: BrushTexture | null | undefined,
+	ids: Map<string, number>
+) {
+	const engineId = (id: string | null) => {
+		if (!id) return 0;
+		const known = ids.get(id);
+		if (known) return known;
+		const tex = textureById(id);
+		if (!tex) return 0;
+		const n = ids.size + 1;
+		if (!paint.setTexture(n, tex.w, tex.h, tex.px)) return 0;
+		ids.set(id, n);
+		return n;
+	};
+	if (!t || !textureOn(t)) return paint.setDabStyle(0, 1, 0, 0, 0, 0, 0, 1);
+	paint.setDabStyle(
+		engineId(t.grain),
+		t.grainScale,
+		t.grainStrength,
+		engineId(t.tip),
+		engineId(t.dual),
+		t.dualSize,
+		t.dualScatter,
+		t.dualCount
+	);
+}
