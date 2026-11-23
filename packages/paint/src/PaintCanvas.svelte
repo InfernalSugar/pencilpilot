@@ -170,6 +170,15 @@
 	import { cloneBrushSource, cloneOffset } from './clone';
 	import { textureById, type BrushTexture } from './brush-textures';
 	import { Timelapse } from './timelapse';
+	import Rulers from './Rulers.svelte';
+	import {
+		panAfterZoom,
+		paintSize,
+		showLength,
+		VIEW_DEFAULTS,
+		wheelZoomStep,
+		type ViewPrefs
+	} from './view-prefs';
 	import { mapTable, parseSpec, specName, toneTables, type AdjustSpec } from './tone';
 	import { hasStyle, styleNumbers } from './layer-style';
 	import type { FilterSpec } from './filters';
@@ -188,7 +197,7 @@
 		height = 600,
 		brushId,
 		eraser = false,
-		size = 1,
+		size: chosenSize = 1,
 		opacity = 1,
 		color = '#16161a',
 		onchange,
@@ -254,7 +263,9 @@
 		oncursor,
 		ontext,
 		textFrame = null,
-		onrasterize
+		onrasterize,
+		view,
+		undoLimit = 60
 	}: {
 		width?: number;
 		height?: number;
@@ -418,7 +429,17 @@
 		cursors?: RemoteCursor[];
 		/** this person's pointer over the canvas, in canvas pixels (null: it left) */
 		oncursor?: (at: [number, number] | null) => void;
+		/** the app's preferences for the cursor, zoom, rulers, selection and guides */
+		view?: Partial<ViewPrefs>;
+		/** undo steps kept (10–500) */
+		undoLimit?: number;
 	} = $props();
+
+	const prefs = $derived<ViewPrefs>({ ...VIEW_DEFAULTS, ...view });
+	/** the size the brush paints at: capped, and smaller when zoomed in if it follows the zoom */
+	const size = $derived.by(() =>
+		paintSize(chosenSize, zoom, prefs.brushFollowsZoom, prefs.maxBrushSize)
+	);
 
 	let el: HTMLCanvasElement;
 	let ctx: CanvasRenderingContext2D | null = null;
@@ -501,6 +522,18 @@
 		apply();
 	});
 
+	// undo steps kept, in the engine and the log alike
+	$effect(() => {
+		const n = Math.min(500, Math.max(10, Math.round(undoLimit)));
+		if (!ready) return;
+		untrack(() => {
+			if (!paint) return;
+			paint.setUndoLimit(n);
+			log.setLimit(n);
+			notify();
+		});
+	});
+
 	function apply() {
 		const [s, o, c, er] = [size, opacity, color, eraser]; // read props so the effect tracks them
 		if (!brush) return;
@@ -568,6 +601,8 @@
 	let brushR = $state(0);
 	/** where the pointer hovers (canvas px), for the brush outline cursor */
 	let cursorAt = $state<[number, number] | null>(null);
+	/** a stroke is being drawn (the cursor can hide meanwhile) */
+	let strokeDown = $state(false);
 
 	let version = 0;
 
@@ -990,13 +1025,11 @@
 		const k = z / zoom;
 		if (clientX !== undefined && clientY !== undefined) {
 			const r = vp.getBoundingClientRect();
-			const sx = clientX - (r.left + r.width / 2);
-			const sy = clientY - (r.top + r.height / 2);
-			panX = sx - k * (sx - panX);
-			panY = sy - k * (sy - panY);
+			panX = panAfterZoom(panX, k, clientX - (r.left + r.width / 2));
+			panY = panAfterZoom(panY, k, clientY - (r.top + r.height / 2));
 		} else {
-			panX *= k;
-			panY *= k;
+			panX = panAfterZoom(panX, k);
+			panY = panAfterZoom(panY, k);
 		}
 		zoom = z;
 		clampPan();
@@ -1021,11 +1054,19 @@
 		if (done) zoomGoal = null;
 		else zoomRaf = requestAnimationFrame(zoomFrame);
 	}
+	/** Zoom by a step (a change of log(zoom)): gliding or at once, as the preferences say. */
+	function zoomBy(logStep: number, clientX?: number, clientY?: number) {
+		if (prefs.smoothZoom) smoothZoom(logStep, clientX, clientY);
+		else {
+			zoomGoal = null;
+			zoomAt(Math.exp(logStep), clientX, clientY);
+		}
+	}
 	export function zoomIn() {
-		smoothZoom(Math.log(1.25));
+		zoomBy(Math.log(1.25));
 	}
 	export function zoomOut() {
-		smoothZoom(-Math.log(1.25));
+		zoomBy(-Math.log(1.25));
 	}
 
 	/** Ctrl + drag with the wheel (middle button) held: zoom, up = in, around where it started */
@@ -1463,8 +1504,31 @@
 		antsEdges = Int32Array.from(edges);
 		antsBox = { x0, y0, x1, y1 };
 		drawAnts();
+		drawTint(m);
 		notify();
 	}
+
+	let tintEl: HTMLCanvasElement | undefined = $state();
+	/** The area outside the selection, tinted as strongly as the preferences say. */
+	function drawTint(m = paint?.selectionMask()) {
+		const c = tintEl?.getContext('2d');
+		if (!c) return;
+		c.clearRect(0, 0, width, height);
+		const k = prefs.selectionTint;
+		if (!m?.length || k <= 0) return;
+		const img = c.createImageData(width, height);
+		for (let i = 0; i < m.length; i++) {
+			img.data[i * 4] = 22;
+			img.data[i * 4 + 1] = 22;
+			img.data[i * 4 + 2] = 26;
+			img.data[i * 4 + 3] = Math.round((255 - m[i]) * k);
+		}
+		c.putImageData(img, 0, 0);
+	}
+	$effect(() => {
+		void prefs.selectionTint;
+		if (ready) untrack(() => drawTint());
+	});
 
 	function drawAnts() {
 		const c = antsEl?.getContext('2d');
@@ -1487,7 +1551,7 @@
 
 	$effect(() => {
 		const id = setInterval(() => {
-			if (!antsEdges.length) return;
+			if (!antsEdges.length || !prefs.marchingAnts) return;
 			antsPhase = (antsPhase + 1) % 8;
 			drawAnts();
 		}, 140);
@@ -2666,7 +2730,12 @@
 		// Ctrl+Alt + drag: resize the brush, watching its outline (as in Photoshop)
 		if (tool === 'brush' && e.altKey && (e.ctrlKey || e.metaKey) && e.pointerType !== 'touch') {
 			capture(e);
-			sizeDrag = { id: e.pointerId, x: e.clientX, size, at: toCanvas(e.clientX, e.clientY) };
+			sizeDrag = {
+				id: e.pointerId,
+				x: e.clientX,
+				size: chosenSize,
+				at: toCanvas(e.clientX, e.clientY)
+			};
 			return;
 		}
 		// editable shape: grab one of its points
@@ -2873,9 +2942,9 @@
 		}
 		if (penMove(e)) return;
 		if (sizeDrag && e.pointerId === sizeDrag.id) {
-			// right = bigger; the slider's range is ¼× to about 6×
+			// right = bigger; the slider's range is ¼× to the largest size (about 6×)
 			const s = sizeDrag.size * Math.exp((e.clientX - sizeDrag.x) / 120);
-			onsize?.(Math.round(Math.min(6.06, Math.max(0.25, s)) * 100) / 100);
+			onsize?.(Math.round(Math.min(prefs.maxBrushSize, Math.max(0.25, s)) * 100) / 100);
 			cursorAt = sizeDrag.at;
 			return;
 		}
@@ -2899,6 +2968,7 @@
 			(tool === 'brush' || tool === 'clone') && e.pointerType !== 'touch' && !adjustOverlay
 				? toCanvas(e.clientX, e.clientY)
 				: null;
+		strokeDown = !!current;
 		hoverHandle =
 			editShape && cursorAt
 				? shapeHandles(editShape).some(
@@ -2984,6 +3054,7 @@
 	}
 
 	function up(e: PointerEvent) {
+		strokeDown = false;
 		if (textPointer === e.pointerId) {
 			textPointer = null;
 			const [x, y] = toCanvas(e.clientX, e.clientY);
@@ -3103,16 +3174,19 @@
 		}
 	});
 
-	// Ctrl/⌘ + wheel (and trackpad pinch) zooms at the pointer; the plain wheel pans once zoomed in.
+	// Ctrl/⌘ + wheel (and trackpad pinch) zooms at the pointer; the plain wheel pans once
+	// zoomed in. The preferences can swap them (the plain wheel zooms, Ctrl/⌘ pans), zoom
+	// towards the middle instead, change the speed, or jump instead of gliding.
 	$effect(() => {
 		const onWheel = (e: WheelEvent) => {
-			if (e.ctrlKey || e.metaKey) {
+			const ctrl = e.ctrlKey || e.metaKey;
+			// (a trackpad pinch comes as Ctrl + a fraction of a pixel: always a zoom)
+			const pinch = e.ctrlKey && !Number.isInteger(e.deltaY);
+			if (pinch || (prefs.wheel === 'zoom' ? !ctrl : ctrl)) {
 				e.preventDefault();
-				// lines / pages → pixels; a mouse wheel notch is ~100 px, a trackpad pinch a few px
-				const px = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1);
-				const notch = Math.abs(px) >= 40 && Number.isInteger(px);
-				const step = notch ? -Math.sign(px) * Math.log(1.12) : -px * 0.008;
-				smoothZoom(step, e.clientX, e.clientY);
+				const step = wheelZoomStep(e.deltaY, e.deltaMode, prefs.zoomSpeed);
+				if (prefs.zoomToPointer) zoomBy(step, e.clientX, e.clientY);
+				else zoomBy(step);
 			} else if (zoom > 1.01) {
 				e.preventDefault();
 				panX -= e.deltaX;
@@ -4096,6 +4170,7 @@
 			data-ready={ready}
 			style:filter={viewFilter}
 		></canvas>
+		<canvas class="sel-tint" bind:this={tintEl} {width} {height} aria-hidden="true"></canvas>
 		<canvas class="ants" bind:this={antsEl} {width} {height} aria-hidden="true"></canvas>
 		{#if guides && (guideGrid.length || guideRays.length || guides.ruler.on || guideAxes.length)}
 			{@const hr = 8 / Math.max(0.01, fit * zoom)}
@@ -4104,6 +4179,7 @@
 				viewBox="0 0 {width} {height}"
 				preserveAspectRatio="none"
 				aria-hidden="true"
+				style="--grid: {prefs.gridColour}; --guide: {prefs.guideColour}"
 			>
 				{#each guideGrid as [x1, y1, x2, y2], i (i)}
 					<line class="grid" {x1} {y1} {x2} {y2} />
@@ -4280,9 +4356,9 @@
 					? -1
 					: 1) / zoom}, {1 / zoom}) translate(10px, 10px)"
 			>
-				{measureUnit > 0 ? `${(len / measureUnit).toFixed(1)} units` : `${Math.round(len)} px`} · {Math.round(
-					deg
-				)}°
+				{measureUnit > 0
+					? `${(len / measureUnit).toFixed(1)} units`
+					: showLength(len, prefs.units, prefs.ppi)} · {Math.round(deg)}°
 			</span>
 		{/if}
 		{#if lassoFill && lassoFill.length > 1}
@@ -4300,8 +4376,16 @@
 				/>
 			</svg>
 		{/if}
-		{#if showOutline && cursorAt}
+		{#if showOutline && cursorAt && (prefs.cursorWhilePainting || !strokeDown)}
+			{@const px = 1 / Math.max(0.01, fit * zoom)}
 			{@const small = brushR * fit * zoom < 3}
+			{@const look =
+				prefs.cursor === 'outline' && small
+					? prefs.crosshairWhenSmall
+						? 'crosshair'
+						: 'dot'
+					: prefs.cursor}
+			{@const [cx, cy] = cursorAt}
 			<svg
 				class="xf"
 				viewBox="0 0 {width} {height}"
@@ -4309,17 +4393,20 @@
 				aria-hidden="true"
 				data-testid="brush-cursor"
 				data-r={brushR.toFixed(1)}
+				data-look={look}
 			>
-				{#if !small}
-					<circle class="cur-out" cx={cursorAt[0]} cy={cursorAt[1]} r={brushR} />
-					<circle class="cur-in" cx={cursorAt[0]} cy={cursorAt[1]} r={brushR} />
+				{#if look === 'outline'}
+					<circle class="cur-out" {cx} {cy} r={brushR} />
+					<circle class="cur-in" {cx} {cy} r={brushR} />
 				{/if}
-				<circle
-					class="cur-dot"
-					cx={cursorAt[0]}
-					cy={cursorAt[1]}
-					r={1.5 / Math.max(0.01, fit * zoom)}
-				/>
+				{#if look === 'crosshair'}
+					{@const [g, l] = [3 * px, 10 * px]}
+					{@const d = `M${cx - l} ${cy}H${cx - g}M${cx + g} ${cy}H${cx + l}M${cx} ${cy - l}V${cy - g}M${cx} ${cy + g}V${cy + l}`}
+					<path class="cur-out" {d} />
+					<path class="cur-in" {d} />
+				{:else}
+					<circle class="cur-dot" {cx} {cy} r={1.5 * px} />
+				{/if}
 			</svg>
 		{/if}
 		{#if tool === 'clone' && cloneMark}
@@ -4687,6 +4774,21 @@
 			</filter>
 		{/each}
 	</svg>
+	{#if prefs.rulers && ready && rot === 0 && fit}
+		{@const sx = fit * zoom * (flipped ? -1 : 1)}
+		<Rulers
+			{width}
+			{height}
+			viewW={vpW}
+			viewH={vpH}
+			originX={vpW / 2 + panX - (width / 2) * sx}
+			originY={vpH / 2 + panY - (height / 2) * fit * zoom}
+			scaleX={sx}
+			scaleY={fit * zoom}
+			unit={prefs.units}
+			ppi={prefs.ppi}
+		/>
+	{/if}
 	{#if !ready && !error}<p class="status">Warming up the brushes…</p>{/if}
 	{#if error}<p class="status error" role="alert">{error}</p>{/if}
 </div>
@@ -4699,7 +4801,8 @@
 		touch-action: none;
 		cursor: crosshair;
 		border-radius: inherit;
-		background: var(--pp-surface-sunk);
+		/* the app can choose the colour around the canvas */
+		background: var(--pp-canvas-surround, var(--pp-surface-sunk));
 		user-select: none;
 		-webkit-user-select: none;
 	}
@@ -4733,6 +4836,7 @@
 		vector-effect: non-scaling-stroke;
 	}
 	.ants,
+	.sel-tint,
 	.marquee {
 		position: absolute;
 		inset: 0;
@@ -4741,7 +4845,8 @@
 		pointer-events: none;
 	}
 	/* an overlay: it must never hide the drawing (the plain canvas rule paints paper white) */
-	canvas.ants {
+	canvas.ants,
+	canvas.sel-tint {
 		background: transparent;
 	}
 	.shape-bar {
@@ -4834,6 +4939,7 @@
 	.xf .cur-out,
 	.xf .cur-in {
 		fill: none;
+		stroke-linecap: round;
 		vector-effect: non-scaling-stroke;
 	}
 	.xf .cur-out {
@@ -4932,11 +5038,13 @@
 		vector-effect: non-scaling-stroke;
 	}
 	.guides .grid {
-		stroke: rgba(61, 107, 255, 0.28);
+		stroke: var(--grid, #3d6bff);
+		stroke-opacity: 0.28;
 		stroke-width: 1;
 	}
 	.guides .ray {
-		stroke: rgba(232, 73, 47, 0.22);
+		stroke: var(--guide, #e8492f);
+		stroke-opacity: 0.22;
 		stroke-width: 1;
 	}
 	.guides .axis {
@@ -4945,7 +5053,8 @@
 		stroke-dasharray: 8 6;
 	}
 	.guides .horizon {
-		stroke: rgba(232, 73, 47, 0.6);
+		stroke: var(--guide, #e8492f);
+		stroke-opacity: 0.6;
 		stroke-width: 1.5;
 	}
 	.guides .ruler {
@@ -4955,7 +5064,7 @@
 	}
 	.guides .handle {
 		fill: #fff;
-		stroke: #e8492f;
+		stroke: var(--guide, #e8492f);
 		stroke-width: 2;
 		vector-effect: non-scaling-stroke;
 	}

@@ -163,3 +163,53 @@ fn drawings_cross_as_packets_and_go_into_project_files() {
     assert_eq!(t.get(1).unwrap().unwrap().len(), 0);
     assert!(t.put(2, [(0, 0, &clear[..10])]).is_err());
 }
+
+/// The tiles held after every step never pass the budget, peak included.
+#[test]
+fn the_memory_limit_is_never_passed_and_work_carries_on_from_disk() {
+    let dir = temp_dir("cap");
+    // 1080p line drawings, 40 tiles in memory at most
+    let budget = 40 * TILE_BYTES;
+    let mut s = FrameStore::new(budget, Some(dir.clone())).unwrap();
+    for f in 0..30 {
+        put(&mut s, f + 1, &drawing(1920, 1080, f as usize));
+        assert!(s.stats().bytes_in_memory <= budget, "{:?}", s.stats());
+    }
+    // back and forth through the frames, as scrubbing does
+    for round in 0..3 {
+        for f in (0..30).rev().step_by(round + 1) {
+            assert_eq!(got(&mut s, f + 1), sorted(drawing(1920, 1080, f as usize)));
+            assert!(s.stats().bytes_in_memory <= budget, "{:?}", s.stats());
+        }
+    }
+    // never more, not even for a moment
+    assert!(s.stats().peak_in_memory <= budget, "{:?}", s.stats());
+    // a lower limit puts more away now
+    s.set_budget(10 * TILE_BYTES).unwrap();
+    assert!(s.stats().bytes_in_memory <= 10 * TILE_BYTES);
+    assert_eq!(s.stats().budget, 10 * TILE_BYTES);
+    assert_eq!(got(&mut s, 7), sorted(drawing(1920, 1080, 6)));
+    assert!(s.stats().bytes_in_memory <= 10 * TILE_BYTES);
+    drop(s);
+    assert!(!dir.exists());
+}
+
+#[test]
+fn frames_on_disk_move_with_the_folder() {
+    let (a, b) = (temp_dir("move-a"), temp_dir("move-b"));
+    let mut s = FrameStore::new(8 * TILE_BYTES, Some(a.clone())).unwrap();
+    for f in 0..6 {
+        put(&mut s, f + 1, &drawing(1920, 1080, f as usize));
+    }
+    let on_disk = s.stats().bytes_on_disk;
+    assert!(on_disk > 0);
+    s.set_dir(b.clone()).unwrap();
+    assert!(!a.exists(), "the old folder is gone");
+    assert_eq!(std::fs::read_dir(&b).unwrap().count() * TILE_BYTES, on_disk);
+    assert_eq!(s.dir(), Some(b.as_path()));
+    for f in 0..6 {
+        assert_eq!(got(&mut s, f + 1), sorted(drawing(1920, 1080, f as usize)));
+    }
+    drop(s);
+    assert!(!b.exists());
+}

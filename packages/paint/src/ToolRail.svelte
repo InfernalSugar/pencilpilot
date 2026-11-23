@@ -63,7 +63,8 @@
 		adjustOpen = false,
 		onadjust,
 		showOpacity = true,
-		keys = {}
+		keys = {},
+		maxSize = 6.06
 	}: {
 		tools?: ToolId[];
 		/** the active tool (the canvas's tool name; 'brush' covers the eraser too) */
@@ -77,6 +78,8 @@
 		showOpacity?: boolean;
 		/** the keys people chose for the tools (tooltips show them; missing: the usual key) */
 		keys?: Partial<Record<ToolId, string>>;
+		/** the largest size the slider goes to (a multiple of the brush's own size) */
+		maxSize?: number;
 	} = $props();
 
 	const has = (t: ToolId) => tools.includes(t);
@@ -505,9 +508,9 @@
 			<input
 				type="range"
 				min="-2"
-				max="2.6"
+				max={Math.log2(maxSize).toFixed(2)}
 				step="0.05"
-				value={Math.log2(size)}
+				value={Math.log2(Math.min(size, maxSize))}
 				oninput={(e) => (size = +(2 ** +e.currentTarget.value).toFixed(2))}
 			/>
 		</label>

@@ -49,4 +49,99 @@ describe('settings', () => {
 		};
 		expect(cleanSettings(JSON.parse(JSON.stringify(good)))).toEqual(good);
 	});
+
+	it('start every preference as the app always worked', () => {
+		const d = cleanSettings({});
+		expect(d).toMatchObject({
+			uiScale: 1,
+			accent: '',
+			leftHanded: false,
+			tooltips: true,
+			cursor: 'outline',
+			cursorWhilePainting: true,
+			brushFollowsZoom: false,
+			zoomToPointer: true,
+			wheel: 'scroll',
+			smoothZoom: true,
+			rulers: false,
+			units: 'px',
+			selectionTint: 0,
+			marchingAnts: true,
+			undoSteps: 60,
+			frameMemoryMb: 1024,
+			framesFolder: null,
+			exportFormat: 'mp4',
+			exportQuality: 'best',
+			askToSave: true,
+			askToDelete: true,
+			scrubSound: true
+		});
+	});
+
+	it('clean the preferences: ranges clamped, unknown choices and bad colours dropped', () => {
+		const s = cleanSettings({
+			uiScale: 9,
+			accent: 'red',
+			surround: '#123456',
+			checkerSize: 1,
+			checkerColour: '#zzzzzz',
+			cursor: 'arrow',
+			maxBrushSize: 100,
+			wheel: 'zoom',
+			zoomSpeed: -1,
+			units: 'mm',
+			ppi: 72.4,
+			selectionTint: 2,
+			gridColour: '#ABCDEF',
+			newWidth: 10,
+			newFps: 1000,
+			undoSteps: 2,
+			frameMemoryMb: 16384,
+			framesFolder: '',
+			exportFormat: 'avi',
+			exportQuality: 'small',
+			recentCount: -4,
+			askToSave: 'no'
+		});
+		expect(s).toMatchObject({
+			uiScale: 1.5,
+			accent: '',
+			surround: '#123456',
+			checkerSize: 4,
+			checkerColour: '#e9e6de',
+			cursor: 'outline',
+			maxBrushSize: 6.06,
+			wheel: 'zoom',
+			zoomSpeed: 0.25,
+			units: 'px',
+			ppi: 72,
+			selectionTint: 0.8,
+			gridColour: '#ABCDEF',
+			newWidth: 64,
+			newFps: 60,
+			undoSteps: 10,
+			frameMemoryMb: 16384,
+			framesFolder: null,
+			exportFormat: 'mp4',
+			exportQuality: 'small',
+			recentCount: 0,
+			askToSave: true
+		});
+	});
+
+	it('bring the onion skin in from where older versions kept it', () => {
+		const legacy = { onion: { on: true, before: 3, beforeColour: '#112233' } };
+		// settings without one: the old one is used
+		const moved = cleanSettings({ keys: {} }, legacy);
+		expect(moved.onion).toMatchObject({ on: true, before: 3, beforeColour: '#112233' });
+		// settings with one: theirs wins
+		const kept = cleanSettings({ onion: { before: 5 } }, legacy);
+		expect(kept.onion.before).toBe(5);
+		expect(kept.onion.on).toBe(false);
+		// a bad one is cleaned like the rest
+		expect(cleanSettings({ onion: { before: 50, afterColour: 'green' } }).onion).toMatchObject({
+			before: 5,
+			afterColour: DEFAULTS.onion.afterColour
+		});
+	});
 });
