@@ -1254,6 +1254,8 @@
 	let panning: { id: number; x: number; y: number; panX: number; panY: number } | null = null;
 	let moving: { id: number; cx: number; cy: number } | null = null;
 	let spaceHeld = $state(false);
+	/** Ctrl (⌘) held over the canvas: a drag moves the view */
+	let ctrlHeld = $state(false);
 	/** the outline only belongs to the brush (it would linger after switching tools) */
 	const showOutline = $derived(
 		!!cursorAt &&
@@ -3093,6 +3095,10 @@
 		if (e.pointerType === 'mouse' && e.button === 1) return startPan(e);
 		if (spaceHeld) return startPan(e);
 		if (e.pointerType === 'mouse' && e.button !== 0) return;
+		// Ctrl (⌘) + drag moves the view, like Space + drag (Ctrl+Alt still sizes the brush,
+		// and the Transform tool keeps Ctrl + drag for distorting)
+		if ((e.ctrlKey || e.metaKey) && !e.altKey && e.pointerType !== 'touch' && tool !== 'transform')
+			return startPan(e);
 		// Ctrl+Alt + drag: resize the brush, watching its outline (as in Photoshop)
 		if (tool === 'brush' && e.altKey && (e.ctrlKey || e.metaKey) && e.pointerType !== 'touch') {
 			capture(e);
@@ -3660,6 +3666,8 @@
 			e.preventDefault();
 			spaceHeld = true;
 		}
+		if (e.key === 'Control' || e.key === 'Meta') ctrlHeld = hovering && !e.altKey;
+		if (e.key === 'Alt') ctrlHeld = false;
 	}
 	function keyup(e: KeyboardEvent) {
 		if (e.key === 'Shift') {
@@ -3667,6 +3675,7 @@
 			lineHover = null;
 		}
 		if (e.code === 'Space') spaceHeld = false;
+		if (e.key === 'Control' || e.key === 'Meta') ctrlHeld = false;
 	}
 
 	/** The history panel: go `steps` back (negative) or forward (positive) in one go. */
@@ -4659,6 +4668,7 @@
 	onkeyup={keyup}
 	onblur={() => {
 		spaceHeld = false;
+		ctrlHeld = false;
 		shiftHeld = false;
 		lineHover = null;
 	}}
@@ -4666,7 +4676,7 @@
 
 <div
 	class="viewport"
-	class:grab={spaceHeld}
+	class:grab={spaceHeld || (ctrlHeld && tool !== 'transform')}
 	class:moving-overlay={adjustOverlay && !!overlaySrc}
 	class:picker={tool === 'picker'}
 	class:filling={tool === 'fill'}
