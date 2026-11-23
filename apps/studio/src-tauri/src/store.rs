@@ -492,6 +492,7 @@ mod tests {
             drawing_kinds: Default::default(),
             timelapse: vec![],
             fonts: vec![],
+            references: vec![],
         };
         encode(&header, &rgba).unwrap()
     }

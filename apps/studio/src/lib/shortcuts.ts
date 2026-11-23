@@ -42,6 +42,7 @@ export type ActionId =
 	| 'rotate-right'
 	| 'rotate-reset'
 	| 'mirror'
+	| 'reference'
 	| 'prev-frame'
 	| 'next-frame'
 	| 'new-drawing'
@@ -111,6 +112,7 @@ export const ACTIONS: Action[] = [
 	{ id: 'rotate-right', label: 'Rotate right', group: 'View', key: '6' },
 	{ id: 'rotate-reset', label: 'Straighten the view', group: 'View', key: '5' },
 	{ id: 'mirror', label: 'Mirror the view', group: 'View', key: 'H' },
+	{ id: 'reference', label: 'Reference pictures (show / hide)', group: 'View', key: 'Alt+R' },
 	{ id: 'prev-frame', label: 'Previous frame', group: 'Animation', key: ',' },
 	{ id: 'next-frame', label: 'Next frame', group: 'Animation', key: '.' },
 	{ id: 'new-drawing', label: 'New drawing after this one', group: 'Animation', key: 'N' },

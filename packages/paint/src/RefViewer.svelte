@@ -237,6 +237,8 @@
 			draggable="false"
 			style="{view}; filter: {imgFilter}"
 			onload={() => {
+				// (gone already: switched away while it loaded)
+				if (!img) return;
 				natW = img.naturalWidth;
 				natH = img.naturalHeight;
 				pixels = null;

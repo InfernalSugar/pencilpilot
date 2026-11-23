@@ -43,6 +43,16 @@ export interface ProjectDoc {
 	timelapse?: { jpeg: Uint8Array; t: number }[];
 	/** font files text layers use: the family they know it by, the file as imported */
 	fonts?: { family: string; file: string; bytes: Uint8Array }[];
+	/** reference pictures imported to draw from, in order: the name and file as imported */
+	references?: ProjectReference[];
+}
+
+/** A reference picture kept in the project (never part of the drawing or its exports). */
+export interface ProjectReference {
+	name: string;
+	/** the file's name as imported (for its type); saved, it's named by its content */
+	file: string;
+	bytes: Uint8Array;
 }
 
 export interface ProjectDrawing {
@@ -96,6 +106,7 @@ interface Header {
 	}[];
 	timelapse?: { t: number; bytes: [number, number] }[];
 	fonts?: { family: string; file: string; bytes: [number, number] }[];
+	references?: { name: string; file: string; bytes: [number, number] }[];
 }
 
 const MAGIC = [0x50, 0x50, 0x53, 0x31]; // "PPS1"
@@ -144,6 +155,15 @@ export function pack(doc: ProjectDoc): Uint8Array {
 			: {}),
 		...(doc.fonts?.length
 			? { fonts: doc.fonts.map((f) => ({ family: f.family, file: f.file, bytes: put(f.bytes) })) }
+			: {}),
+		...(doc.references?.length
+			? {
+					references: doc.references.map((r) => ({
+						name: r.name,
+						file: r.file,
+						bytes: put(r.bytes)
+					}))
+				}
 			: {}),
 		...(doc.scenes?.length
 			? {
@@ -230,6 +250,15 @@ export function unpack(packet: ArrayBuffer | Uint8Array): ProjectDoc {
 			: {}),
 		...(h.fonts?.length
 			? { fonts: h.fonts.map((f) => ({ family: f.family, file: f.file, bytes: get(f.bytes) })) }
+			: {}),
+		...(h.references?.length
+			? {
+					references: h.references.map((r) => ({
+						name: r.name,
+						file: r.file,
+						bytes: get(r.bytes)
+					}))
+				}
 			: {}),
 		drawings: (h.drawings ?? []).map((d) => ({
 			id: d.id,
