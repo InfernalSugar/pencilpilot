@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { editable, moveHandle, shapeHandles, shapePath, type Pt } from './shape-edit';
+import {
+	curvable,
+	curveThrough,
+	editable,
+	moveHandle,
+	shapeHandles,
+	shapePath,
+	type Pt
+} from './shape-edit';
 
 const ring = (cx: number, cy: number, a: number, b: number): Pt[] =>
 	Array.from({ length: 73 }, (_, i) => {
@@ -125,5 +133,56 @@ describe('perfect shapes', () => {
 			Math.hypot(p[0] - tri.pts[(i + 1) % 3][0], p[1] - tri.pts[(i + 1) % 3][1])
 		);
 		expect(Math.max(...sides) - Math.min(...sides)).toBeLessThan(1e-6);
+	});
+});
+
+describe('curved shapes', () => {
+	const v: Pt[] = [
+		[0, 0],
+		[50, 100],
+		[100, 0]
+	];
+	it('go through every corner, from the first to the last', () => {
+		const c = curveThrough(v, false);
+		expect(c[0]).toEqual([0, 0]);
+		expect(c.at(-1)).toEqual([100, 0]);
+		const near = (p: Pt) => Math.min(...c.map((q) => Math.hypot(q[0] - p[0], q[1] - p[1])));
+		expect(near([50, 100])).toBeLessThan(0.01);
+	});
+
+	it('bend smoothly instead of turning at a corner', () => {
+		const c = curveThrough(v, false, 32);
+		// halfway along the first line the straight version is at (25, 50); the curve bulges out
+		const mid = c[16];
+		expect(Math.hypot(mid[0] - 25, mid[1] - 50)).toBeGreaterThan(2);
+		// no sharp turn anywhere: neighbouring directions differ by less than 30°
+		for (let i = 1; i < c.length - 1; i++) {
+			const a = Math.atan2(c[i][1] - c[i - 1][1], c[i][0] - c[i - 1][0]);
+			const b = Math.atan2(c[i + 1][1] - c[i][1], c[i + 1][0] - c[i][0]);
+			const turn = Math.abs(Math.atan2(Math.sin(b - a), Math.cos(b - a)));
+			expect(turn).toBeLessThan(Math.PI / 6);
+		}
+	});
+
+	it('close back round for closed shapes, and only bend shapes with corners', () => {
+		const sq: Pt[] = [
+			[0, 0],
+			[10, 0],
+			[10, 10],
+			[0, 10]
+		];
+		const c = shapePath({ kind: 'poly', pts: sq, closed: true, pressure: 1, smooth: true });
+		expect(c[0]).toEqual([0, 0]);
+		expect(c.at(-1)).toEqual([0, 0]);
+		expect(c.length).toBeGreaterThan(20);
+		expect(curvable({ kind: 'poly', pts: sq, closed: true, pressure: 1 })).toBe(true);
+		const line: Pt[] = [
+			[0, 0],
+			[5, 5]
+		];
+		expect(curvable({ kind: 'poly', pts: line, closed: false, pressure: 1 })).toBe(false);
+		expect(
+			shapePath({ kind: 'poly', pts: line, closed: false, pressure: 1, smooth: true })
+		).toEqual(line);
 	});
 });

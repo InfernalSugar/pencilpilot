@@ -8,7 +8,14 @@ export type Pt = [number, number];
 
 export type EditShape =
 	/** lines, polylines, triangles, rectangles: dragging moves one corner */
-	| { kind: 'poly'; pts: Pt[]; closed: boolean; pressure: number }
+	| {
+			kind: 'poly';
+			pts: Pt[];
+			closed: boolean;
+			pressure: number;
+			/** a smooth curve through the corners instead of straight lines */
+			smooth?: boolean;
+	  }
 	/** circles and ellipses: centre, end of the first axis, end of the second */
 	| {
 			kind: 'ellipse';
@@ -53,9 +60,72 @@ export function editable(s: Shape, pressure: number): EditShape {
 	};
 }
 
+/** Whether the shape can be curved (it has a corner between lines). */
+export const curvable = (s: EditShape) => s.kind === 'poly' && s.pts.length >= 3;
+
+/**
+ * A smooth curve through the points (centripetal Catmull–Rom: no loops or overshoot at
+ * sharp corners), `per` points along each piece; a closed one comes back round to the start.
+ */
+export function curveThrough(pts: Pt[], closed: boolean, per = 16): Pt[] {
+	const n = pts.length;
+	if (n < 3) return closed && n ? [...pts, pts[0]] : pts;
+	const at = (i: number): Pt =>
+		closed
+			? pts[(i + n) % n]
+			: i < 0
+				? mirror(pts[0], pts[1])
+				: i >= n
+					? mirror(pts[n - 1], pts[n - 2])
+					: pts[i];
+	const out: Pt[] = [];
+	const pieces = closed ? n : n - 1;
+	for (let i = 0; i < pieces; i++) {
+		const [p0, p1, p2, p3] = [at(i - 1), at(i), at(i + 1), at(i + 2)];
+		const t0 = 0;
+		const t1 = t0 + knot(p0, p1);
+		const t2 = t1 + knot(p1, p2);
+		const t3 = t2 + knot(p2, p3);
+		for (let k = 0; k < per; k++) {
+			const t = t1 + ((t2 - t1) * k) / per;
+			out.push(cr(p0, p1, p2, p3, t0, t1, t2, t3, t));
+		}
+	}
+	out.push(closed ? pts[0] : pts[n - 1]);
+	return out;
+}
+/** an extra point beyond an open end, so the curve leaves the end along its line */
+const mirror = (end: Pt, next: Pt): Pt => [2 * end[0] - next[0], 2 * end[1] - next[1]];
+const knot = (p: Pt, q: Pt) => Math.max(1e-6, Math.sqrt(dist(p, q)));
+function cr(
+	p0: Pt,
+	p1: Pt,
+	p2: Pt,
+	p3: Pt,
+	t0: number,
+	t1: number,
+	t2: number,
+	t3: number,
+	t: number
+): Pt {
+	const lerp = (a: Pt, b: Pt, ta: number, tb: number): Pt => {
+		const u = (t - ta) / (tb - ta);
+		return [a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u];
+	};
+	const a1 = lerp(p0, p1, t0, t1);
+	const a2 = lerp(p1, p2, t1, t2);
+	const a3 = lerp(p2, p3, t2, t3);
+	const b1 = lerp(a1, a2, t0, t2);
+	const b2 = lerp(a2, a3, t1, t3);
+	return lerp(b1, b2, t1, t2);
+}
+
 /** The points to draw. */
 export function shapePath(s: EditShape): Pt[] {
-	if (s.kind === 'poly') return s.closed ? [...s.pts, s.pts[0]] : s.pts;
+	if (s.kind === 'poly') {
+		if (s.smooth && s.pts.length >= 3) return curveThrough(s.pts, s.closed);
+		return s.closed ? [...s.pts, s.pts[0]] : s.pts;
+	}
 	const [cs, sn] = [Math.cos(s.theta), Math.sin(s.theta)];
 	return Array.from({ length: 73 }, (_, i) => {
 		const t = (i / 72) * Math.PI * 2;

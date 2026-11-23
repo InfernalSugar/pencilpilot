@@ -157,6 +157,7 @@
 	import { boxToQuad, usableQuad, type Quad } from './homography';
 	import { meshLines, meshNodes, WARP_N } from './warp';
 	import {
+		curvable,
 		editable,
 		moveHandle,
 		perfect,
@@ -1360,7 +1361,10 @@
 		if (!shape) return;
 		const pressure = current.points.reduce((s, p) => s + p.pressure, 0) / current.points.length;
 		snappedShape = editable(shape, pressure);
-		const path = resample(shape.points, 3);
+		// curved last time: shapes with corners come out curved again
+		if (curveShapes && curvable(snappedShape) && snappedShape.kind === 'poly')
+			snappedShape = { ...snappedShape, smooth: true };
+		const path = resample(shapePath(snappedShape), 3);
 		// redraw: drop the hand-drawn stroke, draw the clean one in its place
 		paint.cancelStroke();
 		if (sendLive()) {
@@ -1432,6 +1436,29 @@
 		}
 		schedule();
 		onshape?.(shapeName(sh));
+	}
+
+	/** Snapped shapes with corners: straight lines between them, or a smooth curve (kept). */
+	let curveShapes = $state(readCurve());
+	function readCurve() {
+		try {
+			return localStorage.getItem('pp.shapeCurve') === '1';
+		} catch {
+			return false;
+		}
+	}
+	export function setShapeCurve(on: boolean) {
+		curveShapes = on;
+		try {
+			localStorage.setItem('pp.shapeCurve', on ? '1' : '0');
+		} catch {
+			/* storage blocked: kept for this visit */
+		}
+		const sh = editShape;
+		if (!sh || sh.kind !== 'poly' || !curvable(sh) || !!sh.smooth === on) return;
+		editShape = { ...sh, smooth: on };
+		redrawShape(editShape);
+		notify();
 	}
 
 	/** Edit Shape after the pen lifts: make the snapped shape perfect (or loose again). */
@@ -4646,28 +4673,50 @@
 				line: ['Line', 'Line at 15°']
 			} as Record<string, [string, string]>
 		)[name]}
-		{#if pair}
+		{@const bends = curvable(editShape) && editShape.kind === 'poly'}
+		{#if pair || bends}
 			<div class="shape-bar" role="toolbar" aria-label="Edit shape">
 				<span>Edit shape</span>
-				<button
-					type="button"
-					aria-pressed={!(name === 'circle' || name === 'square')}
-					disabled={editShape.kind !== 'ellipse'}
-					title={editShape.kind === 'ellipse'
-						? 'Free: each axis drags on its own'
-						: 'Drag the corners to change it'}
-					onclick={() => setShapeForm('free')}
-				>
-					{pair[0]}
-				</button>
-				<button
-					type="button"
-					aria-pressed={name === 'circle' || name === 'square'}
-					title="Perfect (tap with another finger, or press Shift, while holding)"
-					onclick={() => setShapeForm('perfect')}
-				>
-					{pair[1]}
-				</button>
+				{#if bends && editShape.kind === 'poly'}
+					<button
+						type="button"
+						aria-pressed={!editShape.smooth}
+						title="Straight lines between the corners"
+						onclick={() => setShapeCurve(false)}
+					>
+						Straight
+					</button>
+					<button
+						type="button"
+						aria-pressed={!!editShape.smooth}
+						title="A smooth curve through the corners (kept for your next shapes)"
+						onclick={() => setShapeCurve(true)}
+					>
+						Curved
+					</button>
+				{/if}
+				{#if pair && bends}<i class="sep" aria-hidden="true"></i>{/if}
+				{#if pair}
+					<button
+						type="button"
+						aria-pressed={!(name === 'circle' || name === 'square')}
+						disabled={editShape.kind !== 'ellipse'}
+						title={editShape.kind === 'ellipse'
+							? 'Free: each axis drags on its own'
+							: 'Drag the corners to change it'}
+						onclick={() => setShapeForm('free')}
+					>
+						{pair[0]}
+					</button>
+					<button
+						type="button"
+						aria-pressed={name === 'circle' || name === 'square'}
+						title="Perfect (tap with another finger, or press Shift, while holding)"
+						onclick={() => setShapeForm('perfect')}
+					>
+						{pair[1]}
+					</button>
+				{/if}
 			</div>
 		{/if}
 	{/if}
@@ -4865,6 +4914,12 @@
 		font: 600 13px var(--pp-font-body);
 		transform: translateX(-50%);
 		box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+	}
+	.shape-bar .sep {
+		width: 1px;
+		height: 20px;
+		margin: 0 4px;
+		background: #3a3a42;
 	}
 	.shape-bar span {
 		margin-right: 6px;

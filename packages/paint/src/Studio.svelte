@@ -860,7 +860,10 @@
 		writing-mode: vertical-rl;
 	}
 	.tabs .dock-fold {
+		position: sticky;
+		right: 0;
 		align-self: center;
+		background: var(--pp-surface-sunk);
 		color: var(--pp-ink-2);
 	}
 	.stage {
@@ -921,10 +924,18 @@
 		padding: 4px;
 		background: var(--pp-surface-sunk);
 		border-radius: 14px;
+		container-type: inline-size;
+		/* never squeeze the names into each other: a narrow dock scrolls them instead */
+		overflow-x: auto;
+		scrollbar-width: none;
+	}
+	.tabs::-webkit-scrollbar {
+		display: none;
 	}
 	.tab {
-		flex: 1 1 0;
-		min-width: 0;
+		flex: 1 0 auto;
+		min-width: max-content;
+		white-space: nowrap;
 		display: flex;
 		flex-direction: column;
 		align-items: center;
@@ -949,6 +960,16 @@
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
+	}
+	/* a narrow dock: smaller names, no second line */
+	@container (max-width: 300px) {
+		.tab {
+			padding: 6px 5px;
+			font-size: 12px;
+		}
+		.tab-meta {
+			display: none;
+		}
 	}
 	.tab[aria-selected='true'] .tab-meta {
 		color: var(--pp-accent-ink);
