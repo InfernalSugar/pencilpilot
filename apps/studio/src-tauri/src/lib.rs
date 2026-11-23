@@ -596,6 +596,13 @@ async fn share_leave(state: State<'_, share::Sharing>) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // an AppImage starts in its own read-only mount: work from home instead, so nothing
+    // relative is ever written in there
+    if let (Some(dir), Some(home)) = (std::env::var_os("APPDIR"), std::env::var_os("HOME"))
+        && std::env::current_dir().is_ok_and(|c| c.starts_with(&dir))
+    {
+        let _ = std::env::set_current_dir(home);
+    }
     tauri::Builder::default()
         .manage(Exporting::default())
         .manage(LipSync::default())
