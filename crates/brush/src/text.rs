@@ -214,9 +214,10 @@ impl Painter {
         }
     }
 
-    /// Text layers whose colour `e` changes become plain layers; `e` then puts their
-    /// text back when it's undone.
-    pub(crate) fn rasterize_painted(&mut self, e: &mut Edit) {
+    /// Text layers whose colour `e` changes become plain layers, and line layers too
+    /// (`lines`; line edits keep them); `e` then puts their text / lines back when it's
+    /// undone.
+    pub(crate) fn rasterize_painted(&mut self, e: &mut Edit, lines: bool) {
         fn painted(e: &Edit, out: &mut Vec<u32>) {
             match e {
                 Edit::Tiles {
@@ -232,13 +233,16 @@ impl Painter {
         let mut back = Vec::new();
         for id in ids {
             if let Some(l) = self.layer_mut(id)
-                && !l.props.text.is_empty()
+                && (!l.props.text.is_empty() || (lines && l.props.lines))
             {
                 back.push(Edit::Props {
                     layer: id,
                     props: l.props.clone(),
                 });
                 l.props.text.clear();
+                if lines {
+                    l.props.lines = false;
+                }
             }
         }
         if !back.is_empty() {

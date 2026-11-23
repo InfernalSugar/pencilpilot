@@ -1052,6 +1052,76 @@ impl PaintCanvas {
         self.inner.set_text_silent(id, spec)
     }
 
+    // ---- line (vector) layers ----
+
+    /// Add an empty line layer above the active one (one undo step). 0 = no room.
+    #[wasm_bindgen(js_name = addLineLayer)]
+    pub fn add_line_layer(&mut self, name: &str) -> u32 {
+        self.inner.add_line_layer(name)
+    }
+
+    /// Make a layer a line layer (or not), not an undo step (opening a project,
+    /// drawing together).
+    #[wasm_bindgen(js_name = setLinesSilent)]
+    pub fn set_lines_silent(&mut self, id: u32, on: bool) -> bool {
+        self.inner.set_lines_silent(id, on)
+    }
+
+    /// "Convert to pixels": a line layer becomes a plain one (one undo step).
+    #[wasm_bindgen(js_name = rasterizeLines)]
+    pub fn rasterize_lines(&mut self, id: u32) -> bool {
+        self.inner.rasterize_lines(id)
+    }
+
+    /// Start a line stroke on the active layer, seeded so `linesStroke` can paint it
+    /// again (symmetry copy k: `seed + k + 1`). Then `strokeTo`… `endStroke`.
+    #[wasm_bindgen(js_name = beginLineStroke)]
+    pub fn begin_line_stroke(&mut self, seed: u32) -> bool {
+        self.inner.begin_line_stroke(seed)
+    }
+
+    /// Start redrawing tiles of a layer: `tiles` = tx, ty, tx, ty… (64 px tiles).
+    #[wasm_bindgen(js_name = linesBegin)]
+    pub fn lines_begin(&mut self, layer: u32, tiles: &[i32]) -> bool {
+        self.inner.lines_begin(layer, tiles)
+    }
+
+    /// Replay one whole stroke into the redraw: `pts` = x, y, pressure, xtilt, ytilt,
+    /// dtime (seconds) per point.
+    #[wasm_bindgen(js_name = linesStroke)]
+    pub fn lines_stroke(&mut self, brush: &PaintBrush, seed: u32, pts: &[f32]) {
+        self.inner.lines_stroke(&brush.inner, seed, pts);
+    }
+
+    /// Put the redrawn tiles on the layer (not an undo step until `linesPush`).
+    #[wasm_bindgen(js_name = linesCommit)]
+    pub fn lines_commit(&mut self) -> bool {
+        self.inner.lines_commit()
+    }
+
+    /// The line edits since the last push become one undo step.
+    #[wasm_bindgen(js_name = linesPush)]
+    pub fn lines_push(&mut self) -> bool {
+        self.inner.lines_push()
+    }
+
+    /// Keep the line edits since the last push without an undo step.
+    #[wasm_bindgen(js_name = linesForget)]
+    pub fn lines_forget(&mut self) {
+        self.inner.lines_forget();
+    }
+
+    /// Undo the line edits since the last push (a cancelled drag).
+    #[wasm_bindgen(js_name = linesCancel)]
+    pub fn lines_cancel(&mut self) {
+        self.inner.lines_cancel();
+    }
+
+    #[wasm_bindgen(js_name = linesPending)]
+    pub fn lines_pending(&self) -> bool {
+        self.inner.lines_pending()
+    }
+
     /// Drawings kept here that aren't showing.
     #[wasm_bindgen(js_name = keptDrawings)]
     pub fn kept_drawings(&self) -> Vec<u32> {
@@ -1184,6 +1254,7 @@ fn layer_props(
         adjust_spec: String::new(),
         style: brush::style::LayerStyle::from_numbers(style).unwrap_or_default(),
         text: String::new(),
+        lines: false,
     }
 }
 

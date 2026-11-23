@@ -473,6 +473,7 @@ mod tests {
                     adjust: None,
                     style: None,
                     text: None,
+                    lines: false,
                 },
                 rgba: [0, rgba.len()],
                 mask: None,

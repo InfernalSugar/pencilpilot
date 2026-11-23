@@ -25,6 +25,13 @@
 
 import { readStyle, sameStyle, type LayerStyle } from '@pencilpilot/paint/layer-style';
 import {
+	decodeLines,
+	diffLines,
+	encodeLines,
+	patchLines,
+	type LineStroke
+} from '@pencilpilot/paint/lines';
+import {
 	DRAWING_KINDS,
 	MOUTH_SHAPES,
 	type Camera,
@@ -53,6 +60,8 @@ export interface SharedLayer {
 	adjust?: string;
 	/** the group it's in */
 	group?: string;
+	/** a line (vector) layer: its strokes travel too (`lines` edits), so they stay editable */
+	lines?: boolean;
 }
 
 /** A shared group of layers (its id is made like a layer's, so ids never clash). */
@@ -123,7 +132,15 @@ const sameLook = (a: Look | undefined, b: Look | undefined) =>
 	sameStyle(a.style, b.style);
 
 export type TogetherEdit =
-	| { k: 'layer'; lid: string; name: string; adjust?: string }
+	| { k: 'layer'; lid: string; name: string; adjust?: string; lines?: boolean }
+	/**
+	 * a line layer's drawing changed (its pixels travel as `tiles`, as for any layer): the
+	 * strokes gone or changed (ids), and the new or changed ones at their place (each a
+	 * base64 of lines.ts's bytes)
+	 */
+	| { k: 'lines'; lid: string; did: string; del: string[]; put: [number, string][] }
+	/** a line layer became a plain one (Convert to pixels) */
+	| { k: 'pixels'; lid: string }
 	| { k: 'adjust'; lid: string; spec: string }
 	| {
 			k: 'mask';
@@ -233,8 +250,20 @@ export function parseEdit(body: unknown): TogetherEdit | null {
 	switch (b.k) {
 		case 'layer': {
 			const adjust = readSpec(b.adjust);
-			return { k: 'layer', lid, name: name || 'Layer', ...(adjust ? { adjust } : {}) };
+			return {
+				k: 'layer',
+				lid,
+				name: name || 'Layer',
+				...(adjust ? { adjust } : !adjust && b.lines === true ? { lines: true } : {})
+			};
 		}
+		case 'lines': {
+			const did = typeof b.did === 'string' && DID.test(b.did) ? b.did : null;
+			const lines = readLineEdit(b);
+			return did && lines ? { k: 'lines', lid, did, ...lines } : null;
+		}
+		case 'pixels':
+			return { k: 'pixels', lid };
 		case 'adjust': {
 			const spec = readSpec(b.spec);
 			return spec ? { k: 'adjust', lid, spec } : null;
@@ -351,9 +380,16 @@ export class Shared {
 					owner: from,
 					name: e.name,
 					writers: [from],
-					...(e.adjust ? { adjust: e.adjust } : {})
+					...(e.adjust ? { adjust: e.adjust } : {}),
+					...(e.lines ? { lines: true } : {})
 				});
 				this.order.push(e.lid);
+				return true;
+			case 'lines':
+				return !!l?.lines && l.writers.includes(from);
+			case 'pixels':
+				if (!l?.lines || !l.writers.includes(from)) return false;
+				delete l.lines;
 				return true;
 			case 'remove':
 				if (!l || l.owner !== from) return false;
@@ -504,7 +540,8 @@ export class Shared {
 				writers: l.writers.map(String),
 				...(readLook(l.look) ? { look: readLook(l.look)! } : {}),
 				...(readSpec(l.adjust) ? { adjust: l.adjust } : {}),
-				...(typeof l.group === 'string' && this.groups.has(l.group) ? { group: l.group } : {})
+				...(typeof l.group === 'string' && this.groups.has(l.group) ? { group: l.group } : {}),
+				...(l.lines === true && !readSpec(l.adjust) ? { lines: true } : {})
 			});
 			this.order.push(l.lid);
 		}
@@ -580,6 +617,85 @@ export function diffTiles(prev: TileMap, next: TileMap) {
 			clear.push([x, y]);
 		}
 	return { set, clear };
+}
+
+/** Strokes in one `lines` edit (more go in more edits), and the most text they may take. */
+const LINES_PER_EDIT = 400;
+const LINE_EDIT_CHARS = 1_500_000;
+const LINE_ID = /^[0-9a-z~._-]{1,40}$/;
+
+/** A `lines` edit's strokes gone and put, checked (the strokes themselves are read as
+ * they're put in: `decodeLines`). */
+export function readLineEdit(b: Record<string, unknown>) {
+	if (!Array.isArray(b.del) || !Array.isArray(b.put)) return null;
+	if (b.del.length > 20000 || b.put.length > LINES_PER_EDIT) return null;
+	const del = b.del.filter((x): x is string => typeof x === 'string' && LINE_ID.test(x));
+	let chars = 0;
+	const put: [number, string][] = [];
+	for (const p of b.put) {
+		if (!Array.isArray(p) || !Number.isInteger(p[0]) || p[0] < 0 || p[0] > 1e6) return null;
+		if (typeof p[1] !== 'string' || !/^[A-Za-z0-9+/=]+$/.test(p[1])) return null;
+		chars += p[1].length;
+		if (chars > LINE_EDIT_CHARS) return null;
+		put.push([p[0], p[1]]);
+	}
+	return { del, put };
+}
+
+/** A line stroke for a `lines` edit. */
+export const strokeToShare = (s: LineStroke) => toBase64(encodeLines([s]));
+/** A line stroke from a `lines` edit (null: not one). */
+export function strokeFromShare(s: string): LineStroke | null {
+	try {
+		const [one, more] = decodeLines(fromBase64(s));
+		return one && !more ? one : null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * The `lines` edits that turn `before` into `after` (several when there's a lot to send);
+ * none when nothing changed.
+ */
+export function lineEdits(
+	lid: string,
+	did: string,
+	before: readonly LineStroke[],
+	after: readonly LineStroke[]
+): Extract<TogetherEdit, { k: 'lines' }>[] {
+	const { del, put } = diffLines(before, after);
+	if (!del.length && !put.length) return [];
+	const out: Extract<TogetherEdit, { k: 'lines' }>[] = [];
+	let part: [number, string][] = [];
+	let chars = 0;
+	const flush = () => {
+		out.push({ k: 'lines', lid, did, del: out.length ? [] : del, put: part });
+		part = [];
+		chars = 0;
+	};
+	for (const [i, s] of put) {
+		const enc = strokeToShare(s);
+		if (part.length && (part.length >= LINES_PER_EDIT || chars + enc.length > LINE_EDIT_CHARS))
+			flush();
+		part.push([i, enc]);
+		chars += enc.length;
+	}
+	if (part.length || !out.length) flush();
+	return out;
+}
+
+/** A `lines` edit put into a drawing's strokes. */
+export function applyLineEdit(
+	list: readonly LineStroke[],
+	e: { del: string[]; put: [number, string][] }
+): LineStroke[] {
+	const put: [number, LineStroke][] = [];
+	for (const [i, enc] of e.put) {
+		const s = strokeFromShare(enc);
+		if (s) put.push([i, s]);
+	}
+	return patchLines(list, e.del, put);
 }
 
 function toBase64(b: Uint8Array): string {
@@ -677,6 +793,14 @@ export interface CanvasPort {
 	setTimeline(tl: Timeline): void;
 	/** every drawing on a layer, on the timeline (and the one showing) */
 	drawingsOfLayer(id: number): number[];
+	/** whether a layer is a line layer (none: the app has no line layers) */
+	isLineLayer?(id: number): boolean;
+	/** make a layer a line layer, or a plain one (not an undo step) */
+	setLineLayer?(id: number, on: boolean): void;
+	/** a drawing's line strokes */
+	lineStrokes?(drawing: number): readonly LineStroke[];
+	/** set a drawing's line strokes (not an undo step; its pixels come as tiles) */
+	setLineStrokes?(drawing: number, list: readonly LineStroke[]): void;
 }
 
 export interface NetPort {
@@ -695,6 +819,7 @@ type Snap =
 			tl: SharedTimeline | null;
 	  }
 	| { k: 'snap.tiles'; lid: string; did: string; set: [number, number, string][] }
+	| { k: 'snap.lines'; lid: string; did: string; del: string[]; put: [number, string][] }
 	| { k: 'snap.end' };
 
 const key = (lid: string, did: string) => `${lid}|${did}`;
@@ -807,6 +932,8 @@ export class Together {
 	#waiting: { needs: { lid: string; own: boolean }[]; run: () => Promise<void> | void }[] = [];
 	/** edits to send once this app's changed tiles have gone (a merged layer's removal) */
 	#afterSend: (() => void)[] = [];
+	/** each shared line drawing's strokes as last synced ("lid|did") */
+	#linesSynced = new Map<string, readonly LineStroke[]>();
 
 	constructor(
 		readonly me: string,
@@ -879,7 +1006,13 @@ export class Together {
 			const lid = this.#newLid();
 			this.ids.set(lid, l.id);
 			if (l.adjust) adjusts.add(l.id);
-			this.net.edit({ k: 'layer', lid, name: l.name, ...(l.adjust ? { adjust: l.adjust } : {}) });
+			const lines = !l.adjust && !!this.canvas.isLineLayer?.(l.id);
+			this.net.edit({
+				k: 'layer',
+				lid,
+				name: l.name,
+				...(l.adjust ? { adjust: l.adjust } : lines ? { lines: true } : {})
+			});
 		}
 		this.#shareGroups();
 		for (const [lid, id] of this.ids)
@@ -893,6 +1026,7 @@ export class Together {
 						return [x, y, px];
 					});
 					if (set.length) await this.#sendTiles(lid, did, set, []);
+					this.#sendLines(lid, id, d);
 				}
 		const tl = this.#sharedTimeline();
 		this.#shareSounds(tl);
@@ -987,11 +1121,28 @@ export class Together {
 		this.#local.add(id);
 	}
 
-	/** A new layer of this app's own (on top, for everyone). */
-	addOwnLayer(name = '') {
+	/** A new layer of this app's own (on top, for everyone); `lines`: a line layer. */
+	addOwnLayer(name = '', lines = false) {
 		const lid = this.#newLid();
 		this.#mine.add(lid);
-		this.net.edit({ k: 'layer', lid, name: name || `${this.myName}’s layer` });
+		this.net.edit({
+			k: 'layer',
+			lid,
+			name: name || `${this.myName}’s ${lines ? 'lines' : 'layer'}`,
+			...(lines ? { lines: true } : {})
+		});
+	}
+
+	/** Send what changed in a line drawing of this app's (none: not a line layer). */
+	#sendLines(lid: string, id: number, d: number) {
+		const c = this.canvas;
+		if (!c.lineStrokes || !c.isLineLayer?.(id)) return;
+		const did = this.didOf(d);
+		const now = c.lineStrokes(d);
+		const was = this.#linesSynced.get(key(lid, did)) ?? [];
+		if (now === was) return;
+		this.#linesSynced.set(key(lid, did), now);
+		for (const e of lineEdits(lid, did, was, now)) this.net.edit(e);
 	}
 
 	/** Delete a shared layer of this app's own, for everyone. */
@@ -1347,6 +1498,14 @@ export class Together {
 					this.ontiles(from);
 				}
 				break;
+			case 'lines':
+				if (from !== this.me) this.#takeLines(e.lid, e.did, e);
+				break;
+			case 'pixels': {
+				const id = this.ids.get(e.lid);
+				if (id && from !== this.me) this.canvas.setLineLayer?.(id, false);
+				break;
+			}
 			case 'sound':
 				if (from !== this.me) await this.#takeSound(e.file, e.name, e.i, e.n, e.data);
 				break;
@@ -1461,6 +1620,11 @@ export class Together {
 				const px = await decodeTile(s);
 				if (px) t.set(`${x},${y}`, px);
 			}
+		} else if (m.k === 'snap.lines' && !this.#synced) {
+			if (!this.shared.layers.get(m.lid)?.lines || typeof m.did !== 'string' || !DID.test(m.did))
+				return;
+			const lines = readLineEdit(m as unknown as Record<string, unknown>);
+			if (lines) this.#takeLines(m.lid, m.did, lines);
 		} else if ((m as { k: string }).k === 'snap.sound' && !this.#synced) {
 			const p = parseEdit({ ...(m as object), k: 'sound' });
 			if (p?.k === 'sound') await this.#takeSound(p.file, p.name, p.i, p.n, p.data);
@@ -1619,6 +1783,14 @@ export class Together {
 					this.cache.set(key(lid, did), next);
 					await this.#sendTiles(lid, did, diff.set, diff.clear);
 				}
+				// line layers: their strokes, and a layer turned into pixels
+				for (const [d, id] of look) {
+					const lid = this.lidOf(id);
+					if (!lid || !d || !this.shared.canDraw(lid, this.me)) continue;
+					this.#sendLines(lid, id, d);
+					if (this.shared.layers.get(lid)?.lines && this.canvas.isLineLayer?.(id) === false)
+						this.net.edit({ k: 'pixels', lid });
+				}
 				// (a merged layer's removal: after the merged pixels)
 				for (const f of this.#afterSend.splice(0)) f();
 			} while (this.#again);
@@ -1677,7 +1849,22 @@ export class Together {
 				this.net.direct(to, { k: 'snap.tiles', lid, did, set });
 			}
 		}
+		for (const [k, list] of this.#linesSynced) {
+			const [lid, did] = k.split('|');
+			if (!this.shared.layers.get(lid)?.lines) continue;
+			for (const e of lineEdits(lid, did, [], list)) this.net.direct(to, { ...e, k: 'snap.lines' });
+		}
 		this.net.direct(to, { k: 'snap.end' });
+	}
+
+	/** Someone's line strokes put into a drawing here (its pixels come as tiles). */
+	#takeLines(lid: string, did: string, e: { del: string[]; put: [number, string][] }) {
+		const c = this.canvas;
+		if (!c.lineStrokes || !c.setLineStrokes) return;
+		const d = this.localOf(did);
+		const next = applyLineEdit(c.lineStrokes(d), e);
+		this.#linesSynced.set(key(lid, did), next);
+		c.setLineStrokes(d, next);
 	}
 
 	async #takeTiles(
@@ -1715,6 +1902,7 @@ export class Together {
 		if (!id) return;
 		this.ids.set(lid, id);
 		if (l.adjust) this.#adjustSent.set(lid, l.adjust);
+		if (l.lines) this.canvas.setLineLayer?.(id, true);
 		if (l.look) this.canvas.setLayer(id, l.look);
 		this.#refreshLock(lid);
 	}

@@ -16,7 +16,8 @@
 		| 'clone'
 		| 'pen'
 		| 'adjust'
-		| 'text';
+		| 'text'
+		| 'lines';
 	export const ALL_TOOLS: ToolId[] = [
 		'brush',
 		'eraser',
@@ -334,6 +335,37 @@
 					aria-hidden="true"
 				>
 					<path d="M5 7V4h14v3M12 4v16M9 20h6" />
+				</svg>
+			</button>
+		{/if}
+		{#if has('lines')}
+			<button
+				type="button"
+				class="tool"
+				aria-pressed={tool === 'lines'}
+				aria-label="Select line ({key('lines', 'K')})"
+				title="Select line ({key(
+					'lines',
+					'K'
+				)}): on a line layer, tap a line to select it, then move, scale, turn or reshape it, change its colour or size, or delete it"
+				onclick={() => (tool = tool === 'lines' ? 'brush' : 'lines')}
+			>
+				<svg
+					width="22"
+					height="22"
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="2.1"
+					stroke-linecap="round"
+					stroke-linejoin="round"
+					aria-hidden="true"
+				>
+					<path d="M4 18c3-9 8-12 16-12" /><circle cx="4" cy="18" r="1.8" /><circle
+						cx="20"
+						cy="6"
+						r="1.8"
+					/><path d="M13 13l5 7 1-3.2 3.2-1Z" />
 				</svg>
 			</button>
 		{/if}
