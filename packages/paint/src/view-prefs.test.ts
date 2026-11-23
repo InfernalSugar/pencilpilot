@@ -89,13 +89,21 @@ describe('zoom', () => {
 
 	it('steps per wheel notch, scaled by the speed', () => {
 		const notch = wheelZoomStep(-100, 0, 1);
-		expect(notch).toBeCloseTo(Math.log(1.12));
-		expect(wheelZoomStep(100, 0, 1)).toBeCloseTo(-Math.log(1.12));
+		expect(notch).toBeCloseTo(Math.log(1.1));
+		expect(wheelZoomStep(100, 0, 1)).toBeCloseTo(-Math.log(1.1));
 		expect(wheelZoomStep(-100, 0, 2)).toBeCloseTo(2 * notch);
 		// lines (Firefox) count as a notch
-		expect(wheelZoomStep(-3, 1, 1)).toBeCloseTo(Math.log(1.12));
+		expect(wheelZoomStep(-3, 1, 1)).toBeCloseTo(Math.log(1.1));
 		// a trackpad's few pixels: a small step
 		expect(Math.abs(wheelZoomStep(-4.5, 0, 1))).toBeLessThan(0.05);
+	});
+
+	it('never moves more than a notch per wheel event', () => {
+		// WebKitGTK's notch comes as a fraction (e.g. 173.33 px): still one notch, not ×4
+		expect(wheelZoomStep(173.33, 0, 1)).toBeCloseTo(-Math.log(1.1));
+		expect(wheelZoomStep(39.5, 0, 1)).toBeGreaterThanOrEqual(-Math.log(1.1));
+		// a big flick: one notch
+		expect(wheelZoomStep(2000, 0, 1)).toBeCloseTo(-Math.log(1.1));
 	});
 });
 
