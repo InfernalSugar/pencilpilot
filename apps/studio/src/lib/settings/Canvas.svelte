@@ -28,10 +28,17 @@
 			{/each}
 		</select>
 	</label>
-	<label class="row">
-		<input type="checkbox" bind:checked={settings.smoothZoom} />
-		<span>Smooth zoom <small>(glides instead of jumping)</small></span>
-	</label>
+	<fieldset>
+		<legend>Zooming feels</legend>
+		<label class="row">
+			<input type="radio" name="zoom-feel" value={true} bind:group={settings.smoothZoom} />
+			<span>Smooth <small>(glides a little at a time)</small></span>
+		</label>
+		<label class="row">
+			<input type="radio" name="zoom-feel" value={false} bind:group={settings.smoothZoom} />
+			<span>Snappy <small>(jumps straight to each step)</small></span>
+		</label>
+	</fieldset>
 	<label class="row">
 		<input type="checkbox" bind:checked={settings.rulers} />
 		<span>Rulers along the canvas</span>

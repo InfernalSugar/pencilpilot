@@ -1050,7 +1050,8 @@
 		const now = Math.log(zoom);
 		const left = zoomGoal.log - now;
 		const done = Math.abs(left) < 0.004;
-		zoomAt(Math.exp(done ? left : left * 0.35), zoomGoal.x, zoomGoal.y);
+		// a fifth of the way each frame: an even glide, not a jump
+		zoomAt(Math.exp(done ? left : left * 0.2), zoomGoal.x, zoomGoal.y);
 		if (done) zoomGoal = null;
 		else zoomRaf = requestAnimationFrame(zoomFrame);
 	}
@@ -1063,10 +1064,10 @@
 		}
 	}
 	export function zoomIn() {
-		zoomBy(Math.log(1.25));
+		zoomBy(Math.log(1.2));
 	}
 	export function zoomOut() {
-		zoomBy(-Math.log(1.25));
+		zoomBy(-Math.log(1.2));
 	}
 
 	/** Ctrl + drag with the wheel (middle button) held: zoom, up = in, around where it started */

@@ -157,7 +157,7 @@ test('zoomed and rotated views still put the stroke under the pointer', async ({
 	await page.getByRole('button', { name: 'Zoom in', exact: true }).click();
 	await page.getByRole('button', { name: 'Zoom in', exact: true }).click();
 	await page.getByRole('button', { name: 'Zoom in', exact: true }).click();
-	await expect(page.getByRole('button', { name: /^Zoom 195%/ })).toBeVisible();
+	await expect(page.getByRole('button', { name: /^Zoom 173%/ })).toBeVisible();
 	await hline(page);
 	await settledInk(page);
 	const zoomed = await inkBox(page);
