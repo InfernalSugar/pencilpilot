@@ -2142,12 +2142,20 @@ test('text: typed on the canvas, one undo step, changed later, kept in the file,
 	await expect(page.getByTestId('text-frame')).toBeVisible();
 	// shown on the canvas as it's typed
 	await expect.poll(() => ink(page, 0.2, 0.4)).toBeGreaterThan(100);
-	const drawn = await ink(page);
+	// (the whole word drawn: the count stops changing)
+	let drawn = -1;
+	await expect
+		.poll(async () => {
+			const was = drawn;
+			drawn = await ink(page);
+			return drawn === was;
+		})
+		.toBe(true);
 	await page.getByRole('group', { name: 'Text' }).getByRole('button', { name: 'Done' }).click();
 	await expect(layersTab).toContainText('2 layers');
 	const badge = page.getByRole('button', { name: /Change the text of/ });
 	await expect(badge).toBeVisible();
-	expect(await ink(page)).toBe(drawn);
+	await expect.poll(() => ink(page)).toBe(drawn);
 
 	// one undo takes it away (layer and all), redo brings it back
 	await page.keyboard.press('Control+z');
