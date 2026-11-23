@@ -111,6 +111,10 @@ export interface Settings {
 
 	// ---- history and performance ----
 	undoSteps: number;
+	/** strokes on a plain layer that stay editable, per drawing (0: none) */
+	editableStrokes: number;
+	/** holding the brush still on a stroke picks it to edit */
+	holdToPick: boolean;
 	/** the most memory the animation's frames may take, in MB; the rest goes to disk */
 	frameMemoryMb: number;
 	/** where frames past that go (null: the app's cache folder) */
@@ -203,6 +207,8 @@ export const DEFAULTS: Settings = {
 	defaultBrush: '',
 
 	undoSteps: 60,
+	editableStrokes: 200,
+	holdToPick: true,
 	frameMemoryMb: 1024,
 	framesFolder: null,
 
@@ -299,6 +305,8 @@ export function cleanSettings(raw: unknown, legacy: { onion?: unknown } = {}): S
 			typeof o.defaultBrush === 'string' && o.defaultBrush.length < 200 ? o.defaultBrush : '',
 
 		undoSteps: int(o.undoSteps, D.undoSteps, 10, 500),
+		editableStrokes: int(o.editableStrokes, D.editableStrokes, 0, 2000),
+		holdToPick: bool(o.holdToPick, D.holdToPick),
 		frameMemoryMb: int(o.frameMemoryMb, D.frameMemoryMb, 256, 262_144),
 		framesFolder: folder(o.framesFolder),
 
@@ -331,6 +339,9 @@ function readLocal(key: string): unknown {
 export const settings: Settings = $state(structuredClone(DEFAULTS));
 /** the last failure to keep the settings ('' when they were kept) */
 export const saving = $state({ error: '' });
+
+/** What editable strokes take now (the studio keeps it up to date for Preferences). */
+export const strokeMemory = $state({ strokes: 0, base: 0, count: 0 });
 let loaded: Promise<void> | null = null;
 let isLoaded = $state(false);
 

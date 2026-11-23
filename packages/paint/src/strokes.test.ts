@@ -103,6 +103,18 @@ describe('StrokeLog effects', () => {
 		expect(seen.slice(3)).toEqual(['+a', '+b', '+c']);
 		expect(ids(log)).toEqual(['a']);
 	});
+
+	it('keeps an effect already attached: the later one undoes first, redoes last', () => {
+		const log = new StrokeLog();
+		const seen: string[] = [];
+		const fx = (n: string) => ({ undo: () => seen.push(`-${n}`), redo: () => seen.push(`+${n}`) });
+		log.add(s('a'));
+		log.attachLast(fx('stroke'));
+		log.attachLast(fx('baked'));
+		log.undo();
+		log.redo();
+		expect(seen).toEqual(['-baked', '-stroke', '+stroke', '+baked']);
+	});
 });
 
 describe('StrokeLog batch', () => {

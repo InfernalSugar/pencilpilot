@@ -37,13 +37,23 @@
 		void status.version;
 		return canvas?.linesSelected() ?? 0;
 	});
+	/** the active layer's editable strokes */
+	const strokes = $derived.by(() => {
+		void status.version;
+		return canvas?.layerStrokes(status.active) ?? 0;
+	});
+	/** a stroke picked with another tool (Move, a held brush) is being edited */
+	const pickedElsewhere = $derived.by(() => {
+		void status.version;
+		return !!canvas?.strokePicked();
+	});
 </script>
 
-{#if tool === 'lines'}
+{#if tool === 'lines' || pickedElsewhere}
 	<div class="fill-opts" role="group" aria-label="Select line">
-		{#if !onLines}
+		{#if !onLines && !strokes}
 			<span class="msg">
-				Select line works on line layers. Make one with “New line layer” in Layers, then draw on it.
+				No editable strokes on this layer. Strokes you draw from now on can be picked here.
 			</span>
 		{:else}
 			{#if picked}
@@ -66,7 +76,7 @@
 		{/if}
 	</div>
 {/if}
-{#if tool === 'brush' && eraser && onLines}
+{#if tool === 'brush' && eraser && (onLines || strokes)}
 	<div class="fill-opts" role="group" aria-label="Line eraser">
 		<span class="opt-label">Erase</span>
 		<div class="seg" role="radiogroup" aria-label="Line eraser">
@@ -75,7 +85,9 @@
 				class="tool"
 				role="radio"
 				aria-checked={opts.lineEraser === 'normal'}
-				title="Cut lines where the eraser passes (the rest stays editable)"
+				title={onLines
+					? 'Cut lines where the eraser passes (the rest stays editable)'
+					: 'Erase pixels (strokes it touches stop being editable)'}
 				onclick={() => (opts.lineEraser = 'normal')}
 			>
 				Normal
@@ -379,7 +391,7 @@
 		</label>
 	</div>
 {/if}
-{#if tool === 'transform'}
+{#if tool === 'transform' && !pickedElsewhere}
 	<div class="fill-opts" role="group" aria-label="Transform">
 		<button
 			type="button"

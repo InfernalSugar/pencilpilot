@@ -68,6 +68,8 @@ describe('settings', () => {
 			selectionTint: 0,
 			marchingAnts: true,
 			undoSteps: 60,
+			editableStrokes: 200,
+			holdToPick: true,
 			frameMemoryMb: 1024,
 			framesFolder: null,
 			exportFormat: 'mp4',

@@ -134,11 +134,20 @@ const sameLook = (a: Look | undefined, b: Look | undefined) =>
 export type TogetherEdit =
 	| { k: 'layer'; lid: string; name: string; adjust?: string; lines?: boolean }
 	/**
-	 * a line layer's drawing changed (its pixels travel as `tiles`, as for any layer): the
-	 * strokes gone or changed (ids), and the new or changed ones at their place (each a
-	 * base64 of lines.ts's bytes)
+	 * a drawing's editable strokes changed (a line layer's, or a plain layer's; its pixels
+	 * travel as `tiles`, as for any layer): the strokes gone or changed (ids), and the new
+	 * or changed ones at their place (each a base64 of lines.ts's bytes). On a plain layer,
+	 * `base`: what changed in the pixels kept under its strokes (base64 of the engine's
+	 * packed base changes), so everyone's copy stays editable.
 	 */
-	| { k: 'lines'; lid: string; did: string; del: string[]; put: [number, string][] }
+	| {
+			k: 'lines';
+			lid: string;
+			did: string;
+			del: string[];
+			put: [number, string][];
+			base?: string;
+	  }
 	/** a line layer became a plain one (Convert to pixels) */
 	| { k: 'pixels'; lid: string }
 	| { k: 'adjust'; lid: string; spec: string }
@@ -386,7 +395,7 @@ export class Shared {
 				this.order.push(e.lid);
 				return true;
 			case 'lines':
-				return !!l?.lines && l.writers.includes(from);
+				return !!l && !l.adjust && l.writers.includes(from);
 			case 'pixels':
 				if (!l?.lines || !l.writers.includes(from)) return false;
 				delete l.lines;
@@ -630,7 +639,14 @@ export function readLineEdit(b: Record<string, unknown>) {
 	if (!Array.isArray(b.del) || !Array.isArray(b.put)) return null;
 	if (b.del.length > 20000 || b.put.length > LINES_PER_EDIT) return null;
 	const del = b.del.filter((x): x is string => typeof x === 'string' && LINE_ID.test(x));
-	let chars = 0;
+	const base =
+		typeof b.base === 'string' &&
+		b.base.length <= LINE_EDIT_CHARS &&
+		/^[A-Za-z0-9+/=]*$/.test(b.base)
+			? b.base
+			: undefined;
+	if (b.base !== undefined && base === undefined) return null;
+	let chars = base?.length ?? 0;
 	const put: [number, string][] = [];
 	for (const p of b.put) {
 		if (!Array.isArray(p) || !Number.isInteger(p[0]) || p[0] < 0 || p[0] > 1e6) return null;
@@ -639,7 +655,109 @@ export function readLineEdit(b: Record<string, unknown>) {
 		if (chars > LINE_EDIT_CHARS) return null;
 		put.push([p[0], p[1]]);
 	}
-	return { del, put };
+	return { del, put, ...(base !== undefined ? { base } : {}) };
+}
+
+/**
+ * A plain layer's base changes (the engine's packing: u32 entries, i32 x, i32 y each;
+ * the tiles with paint as u32 count, then i32 x, i32 y, 64×64 RGBA8 each; u32 entries
+ * gone, i32 x, i32 y each) cut into parts of at most `max` bytes, each a packing of its
+ * own. Null when the bytes don't add up.
+ */
+export function splitBase(bytes: Uint8Array, max = 900_000): Uint8Array[] | null {
+	const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	const u32 = (at: number) => (at + 4 <= bytes.length ? v.getUint32(at, true) : -1);
+	const n = u32(0);
+	if (n < 0) return null;
+	let at = 4;
+	const keys: [number, number][] = [];
+	for (let i = 0; i < n; i++, at += 8) {
+		if (at + 8 > bytes.length) return null;
+		keys.push([v.getInt32(at, true), v.getInt32(at + 4, true)]);
+	}
+	const tn = u32(at);
+	if (tn < 0) return null;
+	at += 4;
+	const tiles = new Map<string, Uint8Array>();
+	for (let i = 0; i < tn; i++, at += 8 + TILE_BYTES) {
+		if (at + 8 + TILE_BYTES > bytes.length) return null;
+		const k = `${v.getInt32(at, true)},${v.getInt32(at + 4, true)}`;
+		tiles.set(k, bytes.subarray(at + 8, at + 8 + TILE_BYTES));
+	}
+	const gn = u32(at);
+	if (gn < 0 || at + 4 + gn * 8 !== bytes.length) return null;
+	at += 4;
+	const gone: [number, number][] = [];
+	for (let i = 0; i < gn; i++, at += 8) gone.push([v.getInt32(at, true), v.getInt32(at + 4, true)]);
+	if (bytes.length <= max) return [bytes];
+	// parts: entries (with their tiles) until one is full, the gone ones in the last
+	const parts: Uint8Array[] = [];
+	const pack = (part: [number, number][], g: [number, number][]) => {
+		const withPx = part.filter(([x, y]) => tiles.has(`${x},${y}`));
+		const out = new Uint8Array(
+			4 + part.length * 8 + 4 + withPx.length * (8 + TILE_BYTES) + 4 + g.length * 8
+		);
+		const w = new DataView(out.buffer);
+		let o = 0;
+		w.setUint32(o, part.length, true);
+		o += 4;
+		for (const [x, y] of part) {
+			w.setInt32(o, x, true);
+			w.setInt32(o + 4, y, true);
+			o += 8;
+		}
+		w.setUint32(o, withPx.length, true);
+		o += 4;
+		for (const [x, y] of withPx) {
+			w.setInt32(o, x, true);
+			w.setInt32(o + 4, y, true);
+			out.set(tiles.get(`${x},${y}`)!, o + 8);
+			o += 8 + TILE_BYTES;
+		}
+		w.setUint32(o, g.length, true);
+		o += 4;
+		for (const [x, y] of g) {
+			w.setInt32(o, x, true);
+			w.setInt32(o + 4, y, true);
+			o += 8;
+		}
+		parts.push(out);
+	};
+	let part: [number, number][] = [];
+	let size = 12;
+	for (const [x, y] of keys) {
+		const s = 8 + (tiles.has(`${x},${y}`) ? 8 + TILE_BYTES : 0);
+		if (part.length && size + s > max) {
+			pack(part, []);
+			part = [];
+			size = 12;
+		}
+		part.push([x, y]);
+		size += s;
+	}
+	pack(part, gone);
+	return parts;
+}
+
+/** The `lines` edits that carry a plain layer's base changes (`bytes`), after `edits`. */
+export function withBase(
+	edits: Extract<TogetherEdit, { k: 'lines' }>[],
+	lid: string,
+	did: string,
+	bytes: Uint8Array | null | undefined
+): Extract<TogetherEdit, { k: 'lines' }>[] {
+	if (!bytes?.length) return edits;
+	const parts = splitBase(bytes) ?? [];
+	const out = [...edits];
+	parts.forEach((p, i) => {
+		const base = toBase64(p);
+		// (the first part rides with the strokes' last edit when there's room)
+		const last = i === 0 ? out.at(-1) : undefined;
+		if (last && !last.base && JSON.stringify(last.put).length + base.length < LINE_EDIT_CHARS)
+			last.base = base;
+		else out.push({ k: 'lines', lid, did, del: [], put: [], base });
+	});
+	return out;
 }
 
 /** A line stroke for a `lines` edit. */
@@ -799,8 +917,19 @@ export interface CanvasPort {
 	setLineLayer?(id: number, on: boolean): void;
 	/** a drawing's line strokes */
 	lineStrokes?(drawing: number): readonly LineStroke[];
-	/** set a drawing's line strokes (not an undo step; its pixels come as tiles) */
-	setLineStrokes?(drawing: number, list: readonly LineStroke[]): void;
+	/**
+	 * set a drawing's line strokes (not an undo step; its pixels come as tiles); `plain`:
+	 * a plain layer's editable strokes
+	 */
+	setLineStrokes?(drawing: number, list: readonly LineStroke[], plain?: boolean): void;
+	/** whether a drawing's strokes are a plain layer's (they have a base) */
+	plainStrokes?(drawing: number): boolean;
+	/** a plain layer drawing's base: what changed since last asked (null/empty: nothing) */
+	baseChanges?(drawing: number): Uint8Array | null;
+	/** all of a plain layer drawing's base (for someone joining) */
+	baseAll?(drawing: number): Uint8Array | null;
+	/** someone else's base changes for a drawing (not an undo step) */
+	putBaseChanges?(drawing: number, bytes: Uint8Array): void;
 }
 
 export interface NetPort {
@@ -819,7 +948,14 @@ type Snap =
 			tl: SharedTimeline | null;
 	  }
 	| { k: 'snap.tiles'; lid: string; did: string; set: [number, number, string][] }
-	| { k: 'snap.lines'; lid: string; did: string; del: string[]; put: [number, string][] }
+	| {
+			k: 'snap.lines';
+			lid: string;
+			did: string;
+			del: string[];
+			put: [number, string][];
+			base?: string;
+	  }
 	| { k: 'snap.end' };
 
 const key = (lid: string, did: string) => `${lid}|${did}`;
@@ -1026,7 +1162,7 @@ export class Together {
 						return [x, y, px];
 					});
 					if (set.length) await this.#sendTiles(lid, did, set, []);
-					this.#sendLines(lid, id, d);
+					this.#sendLines(lid, id, d, true);
 				}
 		const tl = this.#sharedTimeline();
 		this.#shareSounds(tl);
@@ -1133,16 +1269,24 @@ export class Together {
 		});
 	}
 
-	/** Send what changed in a line drawing of this app's (none: not a line layer). */
-	#sendLines(lid: string, id: number, d: number) {
+	/**
+	 * Send what changed in a drawing's editable strokes of this app's: a line layer's, or
+	 * a plain layer's with its base (`all`: the whole base, for a start).
+	 */
+	#sendLines(lid: string, id: number, d: number, all = false) {
 		const c = this.canvas;
-		if (!c.lineStrokes || !c.isLineLayer?.(id)) return;
+		if (!c.lineStrokes) return;
+		const plain = !c.isLineLayer?.(id) && !!c.plainStrokes?.(d);
+		if (!c.isLineLayer?.(id) && !plain) return;
 		const did = this.didOf(d);
 		const now = c.lineStrokes(d);
 		const was = this.#linesSynced.get(key(lid, did)) ?? [];
-		if (now === was) return;
+		let base = plain ? c.baseChanges?.(d) : null;
+		if (plain && all) base = c.baseAll?.(d) ?? base;
+		if (now === was && !base?.length) return;
 		this.#linesSynced.set(key(lid, did), now);
-		for (const e of lineEdits(lid, did, was, now)) this.net.edit(e);
+		const edits = now === was ? [] : lineEdits(lid, did, was, now);
+		for (const e of withBase(edits, lid, did, base)) this.net.edit(e);
 	}
 
 	/** Delete a shared layer of this app's own, for everyone. */
@@ -1621,8 +1765,8 @@ export class Together {
 				if (px) t.set(`${x},${y}`, px);
 			}
 		} else if (m.k === 'snap.lines' && !this.#synced) {
-			if (!this.shared.layers.get(m.lid)?.lines || typeof m.did !== 'string' || !DID.test(m.did))
-				return;
+			const l = this.shared.layers.get(m.lid);
+			if (!l || l.adjust || typeof m.did !== 'string' || !DID.test(m.did)) return;
 			const lines = readLineEdit(m as unknown as Record<string, unknown>);
 			if (lines) this.#takeLines(m.lid, m.did, lines);
 		} else if ((m as { k: string }).k === 'snap.sound' && !this.#synced) {
@@ -1851,20 +1995,35 @@ export class Together {
 		}
 		for (const [k, list] of this.#linesSynced) {
 			const [lid, did] = k.split('|');
-			if (!this.shared.layers.get(lid)?.lines) continue;
-			for (const e of lineEdits(lid, did, [], list)) this.net.direct(to, { ...e, k: 'snap.lines' });
+			const l = this.shared.layers.get(lid);
+			if (!l || l.adjust) continue;
+			// a plain layer's strokes go with the pixels kept under them
+			const d = this.localOf(did);
+			const base = !l.lines && d ? this.canvas.baseAll?.(d) : null;
+			if (!l.lines && !base) continue;
+			for (const e of withBase(lineEdits(lid, did, [], list), lid, did, base))
+				this.net.direct(to, { ...e, k: 'snap.lines' });
 		}
 		this.net.direct(to, { k: 'snap.end' });
 	}
 
-	/** Someone's line strokes put into a drawing here (its pixels come as tiles). */
-	#takeLines(lid: string, did: string, e: { del: string[]; put: [number, string][] }) {
+	/**
+	 * Someone's editable strokes put into a drawing here (its pixels come as tiles); a
+	 * plain layer's with what changed in its base.
+	 */
+	#takeLines(
+		lid: string,
+		did: string,
+		e: { del: string[]; put: [number, string][]; base?: string }
+	) {
 		const c = this.canvas;
 		if (!c.lineStrokes || !c.setLineStrokes) return;
 		const d = this.localOf(did);
+		const plain = !this.shared.layers.get(lid)?.lines;
+		if (plain && e.base) c.putBaseChanges?.(d, fromBase64(e.base));
 		const next = applyLineEdit(c.lineStrokes(d), e);
 		this.#linesSynced.set(key(lid, did), next);
-		c.setLineStrokes(d, next);
+		c.setLineStrokes(d, next, plain);
 	}
 
 	async #takeTiles(

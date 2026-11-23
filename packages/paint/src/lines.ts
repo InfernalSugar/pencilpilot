@@ -36,6 +36,22 @@ export interface LineStroke {
 	texture?: BrushTexture | null;
 	/** a QuickShape: its corners / axes come back to edit when it's selected */
 	shape?: EditShape;
+	/** made with symmetry on: its mirrored / turned twins share `g` (see `Link`) */
+	link?: Link;
+}
+
+/**
+ * Strokes one stroke made with symmetry on are linked: `g` names the group, `k` says
+ * which copy this is (0: the one drawn), and the symmetry they were made with says how
+ * to carry an edit from one to the others.
+ */
+export interface Link {
+	g: string;
+	k: number;
+	mode: SymmetryMode;
+	n: number;
+	cx: number;
+	cy: number;
 }
 
 export interface Box {
@@ -541,6 +557,82 @@ export function symmetryCopies(
 	}
 }
 
+/** The affine that takes the drawn stroke onto copy `k` of a link. */
+export function linkMap(l: Link): Affine {
+	const { mode, k, cx, cy } = l;
+	if (k <= 0) return [1, 0, 0, 1, 0, 0];
+	const flipX: Affine = [-1, 0, 0, 1, 2 * cx, 0];
+	const flipY: Affine = [1, 0, 0, -1, 0, 2 * cy];
+	switch (mode) {
+		case 'vertical':
+			return flipX;
+		case 'horizontal':
+			return flipY;
+		case 'quadrant':
+			return k === 1 ? flipX : k === 2 ? flipY : [-1, 0, 0, -1, 2 * cx, 2 * cy];
+		case 'radial': {
+			const n = Math.min(24, Math.max(2, Math.round(l.n)));
+			return rotateAbout((k * Math.PI * 2) / n, cx, cy);
+		}
+	}
+}
+
+/** `a` after `b` (apply b, then a). */
+export function compose(a: Affine, b: Affine): Affine {
+	return [
+		a[0] * b[0] + a[2] * b[1],
+		a[1] * b[0] + a[3] * b[1],
+		a[0] * b[2] + a[2] * b[3],
+		a[1] * b[2] + a[3] * b[3],
+		a[0] * b[4] + a[2] * b[5] + a[4],
+		a[1] * b[4] + a[3] * b[5] + a[5]
+	];
+}
+
+export function invert(m: Affine): Affine {
+	const det = m[0] * m[3] - m[1] * m[2] || 1;
+	const [a, b, c, d] = [m[3] / det, -m[1] / det, -m[2] / det, m[0] / det];
+	return [a, b, c, d, -(a * m[4] + c * m[5]), -(b * m[4] + d * m[5])];
+}
+
+/** What takes stroke `from` onto its twin `to` (both of one link). */
+export const twinMap = (from: Link, to: Link): Affine =>
+	compose(linkMap(to), invert(linkMap(from)));
+
+/** An edit `m` made to `from`, as its twin `to` gets it (mirrored, turned). */
+export function mirrored(m: Affine, from: Link, to: Link): Affine {
+	const t = twinMap(from, to);
+	return compose(t, compose(m, invert(t)));
+}
+
+/** A drag by (dx, dy) on `from`, as its twin `to` gets it. */
+export function mirroredDelta(dx: number, dy: number, from: Link, to: Link): Pt {
+	const t = twinMap(from, to);
+	return [t[0] * dx + t[2] * dy, t[1] * dx + t[3] * dy];
+}
+
+/** The strokes linked with `s` (itself too), in `list`. */
+export function twins(list: readonly LineStroke[], s: LineStroke): LineStroke[] {
+	const g = s.link?.g;
+	return g ? list.filter((x) => x.link?.g === g) : [s];
+}
+
+/** A stroke and its symmetry copies, linked (see `Link`). */
+export function linkedCopies(
+	s: LineStroke,
+	mode: SymmetryMode,
+	n: number,
+	cx: number,
+	cy: number
+): LineStroke[] {
+	const g = newId();
+	const link = (k: number): Link => ({ g, k, mode, n, cx, cy });
+	return [
+		{ ...s, link: link(0) },
+		...symmetryStrokes(s, mode, n, cx, cy).map((c, i) => ({ ...c, link: link(i + 1) }))
+	];
+}
+
 /** A stroke's mirrored / turned copies (no tilt, as the engine paints them). */
 export function symmetryStrokes(
 	s: LineStroke,
@@ -625,6 +717,7 @@ interface Meta {
 	seed: number;
 	texture?: BrushTexture;
 	shape?: EditShape;
+	link?: Link;
 }
 
 /** Strokes as bytes (a drawing in a project file, or an edit shared with others). */
@@ -639,7 +732,8 @@ export function encodeLines(strokes: readonly LineStroke[]): Uint8Array {
 		radius: s.radius,
 		seed: s.seed,
 		...(s.texture ? { texture: s.texture } : {}),
-		...(s.shape ? { shape: s.shape } : {})
+		...(s.shape ? { shape: s.shape } : {}),
+		...(s.link ? { link: s.link } : {})
 	}));
 	const json = new TextEncoder().encode(JSON.stringify(meta));
 	const head = 8 + json.length;
@@ -755,6 +849,7 @@ export function decodeLines(bytes: Uint8Array): LineStroke[] {
 		}
 		const texture = readTexture(m.texture);
 		const shape = readShape(m.shape);
+		const link = readLink(m.link);
 		out.push({
 			id: m.id,
 			pts,
@@ -765,10 +860,171 @@ export function decodeLines(bytes: Uint8Array): LineStroke[] {
 			radius: m.radius,
 			seed: Math.floor(m.seed) >>> 0,
 			...(texture ? { texture } : {}),
-			...(shape ? { shape } : {})
+			...(shape ? { shape } : {}),
+			...(link ? { link } : {})
 		});
 	}
 	return out;
+}
+
+const BASE_MAGIC = [0x50, 0x50, 0x42, 0x31]; // "PPB1"
+
+/**
+ * A drawing's strokes as saved: `encodeLines`'s bytes, and for a plain layer's drawing
+ * the pixels kept under them (the engine's packed base) after: "PPB1", u32 length, the
+ * bytes. (Readers of plain "PPL1" data stop before it.)
+ */
+export function encodeLineData(strokes: readonly LineStroke[], base?: Uint8Array | null) {
+	const lines = encodeLines(strokes);
+	if (!base) return lines;
+	const out = new Uint8Array(lines.length + 8 + base.length);
+	out.set(lines, 0);
+	out.set(BASE_MAGIC, lines.length);
+	new DataView(out.buffer).setUint32(lines.length + 4, base.length, true);
+	out.set(base, lines.length + 8);
+	return out;
+}
+
+/** `encodeLineData`'s bytes back (throws when they aren't line data). */
+export function decodeLineData(bytes: Uint8Array): {
+	strokes: LineStroke[];
+	base: Uint8Array | null;
+} {
+	const strokes = decodeLines(bytes);
+	const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	const head = 8 + dv.getUint32(4, true);
+	const end =
+		head + ((4 - (head % 4)) % 4) + strokes.reduce((n, s) => n + pointCount(s) * STRIDE * 4, 0);
+	if (end + 8 > bytes.length || BASE_MAGIC.some((m, i) => bytes[end + i] !== m))
+		return { strokes, base: null };
+	const len = dv.getUint32(end + 4, true);
+	if (end + 8 + len > bytes.length) throw new Error('line data is cut short');
+	return { strokes, base: bytes.subarray(end + 8, end + 8 + len) };
+}
+
+const MODES: readonly string[] = ['vertical', 'horizontal', 'quadrant', 'radial'];
+
+function readLink(v: unknown): Link | undefined {
+	const l = v as Link;
+	if (!l || typeof l !== 'object' || typeof l.g !== 'string' || !ID.test(l.g)) return undefined;
+	if (!MODES.includes(l.mode) || !Number.isInteger(l.k) || l.k < 0 || l.k > 24) return undefined;
+	if (!num(l.n, 2, 24) || !num(l.cx, -1e6, 1e6) || !num(l.cy, -1e6, 1e6)) return undefined;
+	return { g: l.g, k: l.k, mode: l.mode, n: l.n, cx: l.cx, cy: l.cy };
+}
+
+// ---- editable strokes on plain layers: what becomes plain pixels ----
+//
+// On a plain layer the engine keeps, per tile, the pixels under the editable strokes
+// (its "base"). When other paint changes tiles, the strokes there become plain pixels
+// ("baked"); so do the oldest past the limit. A tile's base sits under all its editable
+// strokes, so baking a stroke bakes every older one sharing a tile with it too; then on
+// each tile those reached, either no editable stroke is left (the engine forgets the
+// tile) or the baked ones are replayed into its base, under the ones left.
+
+/** The tiles (`tile` px) a stroke's paint can reach, as "x,y" keys. */
+export function strokeTiles(s: LineStroke, tile = 64): string[] {
+	const b = bounds(s);
+	if (!(b.x0 <= b.x1)) return [];
+	const out: string[] = [];
+	for (let ty = Math.floor(b.y0 / tile); ty <= Math.floor(b.y1 / tile); ty++)
+		for (let tx = Math.floor(b.x0 / tile); tx <= Math.floor(b.x1 / tile); tx++)
+			out.push(`${tx},${ty}`);
+	return out;
+}
+
+/**
+ * The strokes (indices) that must become plain pixels when `start` do: those, and
+ * every older stroke sharing a tile with one of them, again and again.
+ */
+export function bakeClosure(strokes: readonly LineStroke[], start: Iterable<number>): Set<number> {
+	const tiles = strokes.map((s) => strokeTiles(s));
+	const onTile = new Map<string, number[]>();
+	tiles.forEach((ts, i) =>
+		ts.forEach((t) => {
+			const at = onTile.get(t);
+			if (at) at.push(i);
+			else onTile.set(t, [i]);
+		})
+	);
+	const out = new Set<number>();
+	const todo = [...start].filter((i) => i >= 0 && i < strokes.length);
+	while (todo.length) {
+		const i = todo.pop()!;
+		if (out.has(i)) continue;
+		out.add(i);
+		for (const t of tiles[i])
+			for (const j of onTile.get(t)!) if (j < i && !out.has(j)) todo.push(j);
+	}
+	return out;
+}
+
+/** The strokes whose paint reaches any of `keys` ("x,y" tiles), as indices. */
+export function strokesOnKeys(strokes: readonly LineStroke[], keys: Set<string>): number[] {
+	const out: number[] = [];
+	strokes.forEach((s, i) => {
+		if (strokeTiles(s).some((t) => keys.has(t))) out.push(i);
+	});
+	return out;
+}
+
+export interface BakePlan {
+	/** the strokes still editable, in order */
+	keep: LineStroke[];
+	/** the strokes becoming plain pixels, in order */
+	baked: LineStroke[];
+	/** tiles where the baked go into the base, under strokes still editable */
+	replay: Int32Array;
+	/** tiles no editable stroke reaches any more: the base forgets them */
+	drop: Int32Array;
+}
+
+const pairsOf = (keys: Iterable<string>) =>
+	new Int32Array([...keys].flatMap((k) => k.split(',').map(Number)));
+
+/**
+ * What baking strokes `start` (indices; and what `bakeClosure` adds) does. `canReplay`
+ * says whether a stroke can be replayed (its brush is loaded): where one can't, the
+ * strokes over it on those tiles become plain pixels too, so nothing needs replaying.
+ */
+export function bakePlan(
+	strokes: readonly LineStroke[],
+	start: Iterable<number>,
+	canReplay: (s: LineStroke) => boolean = () => true
+): BakePlan {
+	let out = bakeClosure(strokes, start);
+	for (;;) {
+		const keepTiles = new Set<string>();
+		strokes.forEach((s, i) => {
+			if (!out.has(i)) for (const t of strokeTiles(s)) keepTiles.add(t);
+		});
+		const bakedTiles = new Set<string>();
+		for (const i of out) for (const t of strokeTiles(strokes[i])) bakedTiles.add(t);
+		const replay = [...bakedTiles].filter((t) => keepTiles.has(t));
+		const stuck = replay.filter((t) =>
+			[...out].some((i) => !canReplay(strokes[i]) && strokeTiles(strokes[i]).includes(t))
+		);
+		if (stuck.length) {
+			out = bakeClosure(strokes, [...out, ...strokesOnKeys(strokes, new Set(stuck))]);
+			continue;
+		}
+		return {
+			keep: strokes.filter((_, i) => !out.has(i)),
+			baked: strokes.filter((_, i) => out.has(i)),
+			replay: pairsOf(replay),
+			drop: pairsOf([...bakedTiles].filter((t) => !keepTiles.has(t)))
+		};
+	}
+}
+
+/** The oldest strokes past `limit` (indices): they become plain pixels. */
+export function overLimit(strokes: readonly LineStroke[], limit: number): number[] {
+	const n = Math.max(0, strokes.length - Math.max(0, limit));
+	return Array.from({ length: n }, (_, i) => i);
+}
+
+/** Roughly the bytes a drawing's strokes take (their points, and the rest). */
+export function strokesBytes(strokes: readonly LineStroke[]): number {
+	return strokes.reduce((n, s) => n + s.pts.byteLength + 240, 0);
 }
 
 // ---- drawing together: what changed in a drawing, as a small edit ----
@@ -813,7 +1069,20 @@ export function patchLines(
  */
 export class LineStore {
 	#docs = new Map<number, readonly LineStroke[]>();
+	/** drawings of plain layers: their strokes lie over pixels (see "editable strokes") */
+	#plain = new Set<number>();
 	onchange: (drawing: number) => void = () => {};
+
+	/** A drawing's strokes lie over a plain layer's pixels (`false`: a line layer's). */
+	setPlain(drawing: number, on = true) {
+		if (!drawing) return;
+		if (on) this.#plain.add(drawing);
+		else this.#plain.delete(drawing);
+	}
+
+	isPlain(drawing: number) {
+		return this.#plain.has(drawing);
+	}
 
 	get(drawing: number): readonly LineStroke[] {
 		return this.#docs.get(drawing) ?? [];
@@ -833,7 +1102,10 @@ export class LineStore {
 	/** A drawing copied (a duplicated frame or layer): the copy gets the same strokes. */
 	copy(from: number, to: number) {
 		const s = this.#docs.get(from);
-		if (s && to) this.set(to, s);
+		if (s && to) {
+			this.setPlain(to, this.#plain.has(from));
+			this.set(to, s);
+		}
 	}
 
 	drawings(): number[] {
@@ -843,9 +1115,11 @@ export class LineStore {
 	/** Forget the drawings not in `keep`. */
 	keepOnly(keep: Set<number>) {
 		for (const d of [...this.#docs.keys()]) if (!keep.has(d)) this.#docs.delete(d);
+		for (const d of [...this.#plain]) if (!keep.has(d)) this.#plain.delete(d);
 	}
 
 	clear() {
 		this.#docs.clear();
+		this.#plain.clear();
 	}
 }

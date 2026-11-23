@@ -8,6 +8,11 @@
  * Every edit is one engine undo step (the tiles it redrew) with the strokes' own undo
  * attached to the matching history entry, so undo / redo bring back pixels and strokes
  * together. Only the tiles an edit touches are redrawn, from the strokes that reach them.
+ *
+ * Plain layers keep their strokes editable too, up to a limit per drawing: the engine
+ * keeps the pixels under them (a "base", see crates/brush/src/lines.rs) and redraws from
+ * it. Strokes become plain pixels ("baked") when other paint lands on them (`tainted`)
+ * or when they're the oldest past the limit (`added`); see `bakePlan` in lines.ts.
  */
 import type { PaintBrush, PaintCanvas as Engine } from './brushes';
 import type { BrushTexture } from './brush-textures';
@@ -15,6 +20,7 @@ import { resample } from './quickshape';
 import { shapePath, type EditShape, type Pt } from './shape-edit';
 import {
 	LineStore,
+	bakePlan,
 	bounds,
 	dragHandle,
 	eraseCut,
@@ -22,12 +28,20 @@ import {
 	handles,
 	hitTest,
 	inBox,
+	mirrored,
+	mirroredDelta,
+	overLimit,
 	pathBox,
 	pointsAlong,
 	rotateAbout,
+	strokesBytes,
+	strokesOnKeys,
 	strokesOnTiles,
 	tilesOf,
+	transformShape,
 	transformStroke,
+	twinMap,
+	twins,
 	type Affine,
 	type Box,
 	type LineStroke
@@ -40,6 +54,10 @@ export interface LineHost {
 	height(): number;
 	/** whether a layer is a line layer */
 	isLineLayer(id: number): boolean;
+	/** symmetry is on: strokes made together (mirrored) are edited together */
+	symmetryOn(): boolean;
+	/** the layer showing a drawing (0: none) */
+	layerShowing(drawing: number): number;
 	/** a loaded brush to redraw strokes with (null: not loaded yet; see `loadBrushes`) */
 	brush(id: string): PaintBrush | null;
 	loadBrushes(ids: string[]): Promise<void>;
@@ -63,6 +81,9 @@ type Drag =
 	| { kind: 'point'; id: string; hs: number[]; h: number; start: Pt; before: readonly LineStroke[] }
 	| { kind: 'box'; start: Pt; add: boolean };
 
+/** An undo / redo of the app's own, to go with an engine step. */
+export type Effect = { undo(): void; redo(): void };
+
 /** Paint brushes reach this far past their radius, to keep tiles from cutting dabs. */
 const SEL_TOL = 6;
 
@@ -70,8 +91,11 @@ export class LineLayers {
 	store = new LineStore();
 	/** bumps when any drawing's strokes change (for the selection overlay) */
 	version = $state(0);
-	/** the selected strokes: on which layer and drawing, and their ids */
-	sel = $state<{ layer: number; drawing: number; ids: string[] } | null>(null);
+	/**
+	 * the selected strokes: on which layer and drawing, and their ids; `primary` is the
+	 * one picked when its mirrored twins came along (edits go to them mirrored)
+	 */
+	sel = $state<{ layer: number; drawing: number; ids: string[]; primary?: string } | null>(null);
 	/** the strokes as a live change shows them (null: as kept) */
 	shown = $state.raw<readonly LineStroke[] | null>(null);
 	/** a box being dragged to select (canvas px) */
@@ -99,8 +123,14 @@ export class LineLayers {
 		return this.host.engine()?.layerDrawing(layer) ?? 0;
 	}
 
+	/**
+	 * A layer's editable strokes (the drawing showing). A plain layer has none but its own
+	 * (a line layer turned into pixels leaves strokes the pixels no longer follow).
+	 */
 	strokesOf(layer: number): readonly LineStroke[] {
-		return this.store.get(this.drawingOf(layer));
+		const d = this.drawingOf(layer);
+		if (!this.host.isLineLayer(layer) && !this.store.isPlain(d)) return [];
+		return this.store.get(d);
 	}
 
 	/** the brushes these strokes need, loaded */
@@ -120,6 +150,16 @@ export class LineLayers {
 		// (nothing on the canvas changes: one tile, so the step still exists)
 		if (!tiles.length) tiles = new Int32Array([0, 0]);
 		if (!e.linesBegin(layer, tiles)) return false;
+		this.#replay(list, tiles);
+		e.linesCommit();
+		this.host.schedule();
+		return true;
+	}
+
+	/** The strokes of `list` that reach `tiles`, replayed into the redraw begun. */
+	#replay(list: readonly LineStroke[], tiles: Int32Array) {
+		const e = this.host.engine();
+		if (!e) return;
 		// (the dab style is set only when it changes; the current brush's comes back after)
 		let style: string | undefined;
 		for (const s of strokesOnTiles(list, tiles)) {
@@ -138,9 +178,78 @@ export class LineLayers {
 			e.linesStroke(b, s.seed, s.pts);
 		}
 		if (style !== undefined) this.host.restoreDabStyle();
-		e.linesCommit();
-		this.host.schedule();
-		return true;
+	}
+
+	// ---- plain layers: strokes becoming plain pixels ----
+
+	/**
+	 * Strokes `start` of drawing `d` (indices in `list`; older ones sharing their tiles
+	 * come along) become plain pixels: the engine's base takes them where strokes stay
+	 * editable over them, and forgets tiles none reach. Joins the last undo step. The
+	 * strokes left editable (null: none baked).
+	 */
+	#bake(
+		layer: number,
+		d: number,
+		list: readonly LineStroke[],
+		start: number[]
+	): readonly LineStroke[] | null {
+		const e = this.host.engine();
+		if (!e || !start.length) return null;
+		const plan = bakePlan(list, start, (s) => !!this.host.brush(s.brush));
+		if (!plan.baked.length) return null;
+		if (plan.replay.length && e.baseBegin(d, layer, plan.replay)) {
+			this.#replay(plan.baked, plan.replay);
+			e.linesCommit();
+		}
+		if (plan.drop.length) e.baseDrop(d, plan.drop);
+		return plan.keep;
+	}
+
+	/**
+	 * Other paint landed on base tiles (the engine's `takeTainted` runs: drawing, count,
+	 * x, y…): the strokes there become plain pixels. What to undo and redo with the step
+	 * that did it (null: nothing changed).
+	 */
+	tainted(runs: Int32Array | number[]): Effect | null {
+		const effects: Effect[] = [];
+		for (let i = 0; i + 1 < runs.length;) {
+			const d = runs[i];
+			const n = runs[i + 1];
+			const keys = new Set<string>();
+			for (let k = 0; k < n; k++) keys.add(`${runs[i + 2 + k * 2]},${runs[i + 3 + k * 2]}`);
+			i += 2 + n * 2;
+			const before = this.store.get(d);
+			const start = strokesOnKeys(before, keys);
+			if (!start.length) continue;
+			const layer = this.host.layerShowing(d) || (this.host.engine()?.activeLayer ?? 0);
+			const after = this.#bake(layer, d, before, start) ?? before;
+			if (after === before) continue;
+			this.store.set(d, after);
+			effects.push({
+				undo: () => this.store.set(d, before),
+				redo: () => this.store.set(d, after)
+			});
+		}
+		if (!effects.length) return null;
+		this.#keepSelection();
+		return {
+			undo: () => [...effects].reverse().forEach((f) => f.undo()),
+			redo: () => effects.forEach((f) => f.redo())
+		};
+	}
+
+	/** Memory editable strokes take: their points, and the pixels kept under them. */
+	memory(): { strokes: number; base: number; count: number } {
+		let strokes = 0;
+		let count = 0;
+		for (const d of this.store.drawings()) {
+			if (!this.store.isPlain(d)) continue;
+			const list = this.store.get(d);
+			strokes += strokesBytes(list);
+			count += list.length;
+		}
+		return { strokes, base: this.host.engine()?.baseBytes(0) ?? 0, count };
 	}
 
 	/** The boxes where `a` and `b` differ (strokes compared as objects). */
@@ -258,13 +367,22 @@ export class LineLayers {
 
 	// ---- a new stroke (drawn live by the brush) ----
 
-	/** A finished stroke (and its symmetry copies), already painted: one undo step's strokes. */
-	added(layer: number, strokes: LineStroke[]) {
+	/**
+	 * A finished stroke (and its symmetry copies), already painted: one undo step's
+	 * strokes. On a plain layer the oldest past `limit` become plain pixels.
+	 */
+	added(layer: number, strokes: LineStroke[], limit = Infinity) {
 		const d = this.drawingOf(layer);
 		if (!d || !strokes.length) return;
 		const before = this.store.get(d);
-		const after = [...before, ...strokes];
+		let after: readonly LineStroke[] = [...this.strokesOf(layer), ...strokes];
+		if (!this.host.isLineLayer(layer)) {
+			this.store.setPlain(d);
+			const over = overLimit(after, limit);
+			if (over.length) after = this.#bake(layer, d, after, over) ?? after;
+		}
 		this.store.set(d, after);
+		this.#keepSelection();
 		return {
 			undo: () => this.store.set(d, before),
 			redo: () => this.store.set(d, after)
@@ -282,9 +400,59 @@ export class LineLayers {
 		return (this.shown ?? this.store.get(s.drawing)).filter((x) => ids.has(x.id));
 	}
 
-	/** the box round the selected paths (canvas px) */
+	/**
+	 * The stroke picked when the selection is it and its linked twins (edits then go to
+	 * the twins mirrored), else null.
+	 */
+	primary(): LineStroke | null {
+		const s = this.sel;
+		if (!s?.primary) return null;
+		const list = this.selected();
+		const p = list.find((x) => x.id === s.primary);
+		if (!p?.link || list.length < 2 || list.some((x) => x.link?.g !== p.link!.g)) return null;
+		return p;
+	}
+
+	/** the box round the selected paths (canvas px); the picked one's, with its twins */
 	selBox(): Box | null {
-		return pathBox(this.selected());
+		const p = this.primary();
+		return pathBox(p ? [p] : this.selected());
+	}
+
+	/** Whether the stroke under (x, y) on `layer` can be picked (its index, or −1). */
+	hit(layer: number, x: number, y: number, scale: number): number {
+		return hitTest(this.strokesOf(layer), x, y, SEL_TOL / scale);
+	}
+
+	/** Whether a press at (x, y) is on the selection: its handles, its box or its strokes. */
+	onSelection(x: number, y: number, scale: number): boolean {
+		const s = this.sel;
+		if (!s) return false;
+		const near = (p: Pt) => Math.hypot(p[0] - x, p[1] - y) <= 12 / scale;
+		if (this.transformHandles(scale).some(near)) return true;
+		if (this.pointHandles()?.pts.some(near)) return true;
+		const b = this.selBox();
+		if (b && x >= b.x0 && x <= b.x1 && y >= b.y0 && y <= b.y1) return true;
+		return hitTest(this.selected(), x, y, SEL_TOL / scale) >= 0;
+	}
+
+	/** Pick the stroke under (x, y) (with its twins while symmetry is on). */
+	pick(layer: number, x: number, y: number, scale: number): boolean {
+		const list = this.strokesOf(layer);
+		const i = hitTest(list, x, y, SEL_TOL / scale);
+		if (i < 0) return false;
+		this.#choose(layer, list, list[i]);
+		return true;
+	}
+
+	/** Select `s` (and its twins while symmetry is on). */
+	#choose(layer: number, list: readonly LineStroke[], s: LineStroke) {
+		const group = this.host.symmetryOn() ? twins(list, s) : [s];
+		this.select(
+			layer,
+			group.map((x) => x.id),
+			group.length > 1 ? s.id : undefined
+		);
 	}
 
 	deselect() {
@@ -292,8 +460,10 @@ export class LineLayers {
 	}
 
 	/** Select strokes by id on a layer (its drawing showing now). */
-	select(layer: number, ids: string[]) {
-		this.sel = ids.length ? { layer, drawing: this.drawingOf(layer), ids } : null;
+	select(layer: number, ids: string[], primary?: string) {
+		this.sel = ids.length
+			? { layer, drawing: this.drawingOf(layer), ids, ...(primary ? { primary } : {}) }
+			: null;
 	}
 
 	/** After undo, a frame change…: strokes that went drop out of the selection. */
@@ -303,7 +473,10 @@ export class LineLayers {
 		if (this.drawingOf(s.layer) !== s.drawing) return void (this.sel = null);
 		const here = new Set(this.store.get(s.drawing).map((x) => x.id));
 		const ids = s.ids.filter((id) => here.has(id));
-		if (ids.length !== s.ids.length) this.sel = ids.length ? { ...s, ids } : null;
+		if (ids.length !== s.ids.length) {
+			const primary = s.primary && ids.includes(s.primary) ? s.primary : undefined;
+			this.sel = ids.length ? { layer: s.layer, drawing: s.drawing, ids, primary } : null;
+		}
 	}
 	check() {
 		this.#keepSelection();
@@ -326,7 +499,8 @@ export class LineLayers {
 
 	/** the single selected stroke's draggable points (none for a QuickShape: its own) */
 	pointHandles(): { id: string; hs: number[]; pts: Pt[] } | null {
-		const [s, more] = this.selected();
+		const p = this.primary();
+		const [s, more] = p ? [p] : this.selected();
 		if (!s || more || s.shape) return null;
 		const hs = handles(s);
 		return { id: s.id, hs, pts: hs.map((i) => [s.pts[i * 6], s.pts[i * 6 + 1]] as Pt) };
@@ -334,7 +508,8 @@ export class LineLayers {
 
 	/** the single selected stroke, when it's a QuickShape */
 	selectedShape(): { id: string; shape: EditShape } | null {
-		const [s, more] = this.selected();
+		const p = this.primary();
+		const [s, more] = p ? [p] : this.selected();
 		return s && !more && s.shape ? { id: s.id, shape: s.shape } : null;
 	}
 
@@ -373,16 +548,20 @@ export class LineLayers {
 		const i = hitTest(list, x, y, tol);
 		if (i >= 0) {
 			const id = list[i].id;
+			const group = (this.host.symmetryOn() ? twins(list, list[i]) : [list[i]]).map((s) => s.id);
 			if (shift) {
-				if (ids.has(id)) ids.delete(id);
-				else ids.add(id);
+				const on = !ids.has(id);
+				for (const g of group) {
+					if (on) ids.add(g);
+					else ids.delete(g);
+				}
 				this.select(layer, [...ids]);
 				return;
 			}
 			if (!ids.has(id)) {
+				this.#choose(layer, list, list[i]);
 				ids.clear();
-				ids.add(id);
-				this.select(layer, [id]);
+				for (const g of group) ids.add(g);
 			}
 			this.#drag = { kind: 'move', start: [x, y], before: list, ids };
 			return;
@@ -410,7 +589,14 @@ export class LineLayers {
 			return;
 		}
 		const ids = 'ids' in d ? d.ids : new Set<string>();
-		const map = (m: Affine) => d.before.map((s) => (ids.has(s.id) ? transformStroke(s, m) : s));
+		// linked twins (mirrored with the one picked) get each edit mirrored
+		const p = this.primary();
+		const map = (m: Affine) =>
+			d.before.map((s) => {
+				if (!ids.has(s.id)) return s;
+				if (!p?.link || !s.link || s.id === p.id) return transformStroke(s, m);
+				return transformStroke(s, mirrored(m, p.link, s.link));
+			});
 		if (d.kind === 'move') {
 			const [dx, dy] = [x - d.start[0], y - d.start[1]];
 			this.#preview(layer, map([1, 0, 0, 1, dx, dy]));
@@ -438,9 +624,16 @@ export class LineLayers {
 			this.#preview(layer, map(rotateAbout(a, d.c[0], d.c[1])));
 		} else if (d.kind === 'point') {
 			const [dx, dy] = [x - d.start[0], y - d.start[1]];
+			const sel = new Set(this.sel?.ids ?? []);
+			const from = d.before.find((s) => s.id === d.id)?.link;
 			this.#preview(
 				layer,
-				d.before.map((s) => (s.id === d.id ? dragHandle(s, d.hs, d.h, dx, dy) : s))
+				d.before.map((s) => {
+					if (s.id === d.id) return dragHandle(s, d.hs, d.h, dx, dy);
+					if (!p || !from || !s.link || !sel.has(s.id) || s.link.g !== from.g) return s;
+					const [mx, my] = mirroredDelta(dx, dy, from, s.link);
+					return dragHandle(s, d.hs, d.h, mx, my);
+				})
 			);
 		}
 	}
@@ -482,9 +675,15 @@ export class LineLayers {
 		if (!s || this.#live) return;
 		const ids = new Set(s.ids);
 		const list = this.strokesOf(s.layer);
+		const p = this.primary();
+		const m: Affine = [1, 0, 0, 1, dx, dy];
 		void this.edit(
 			s.layer,
-			list.map((x) => (ids.has(x.id) ? transformStroke(x, [1, 0, 0, 1, dx, dy]) : x)),
+			list.map((x) => {
+				if (!ids.has(x.id)) return x;
+				if (!p?.link || !x.link || x.id === p.id) return transformStroke(x, m);
+				return transformStroke(x, mirrored(m, p.link, x.link));
+			}),
 			'Move lines'
 		);
 	}
@@ -542,11 +741,20 @@ export class LineLayers {
 	/** A QuickShape stroke changed shape: drawn along its new outline (live, or one step). */
 	reshape(layer: number, id: string, sh: EditShape, live: boolean) {
 		const list = this.#live?.shown ?? this.strokesOf(layer);
-		const next = list.map((s) =>
-			s.id === id
-				? { ...s, shape: sh, pts: pointsAlong(resample(shapePath(sh), 3), sh.pressure) }
-				: s
-		);
+		const along = (s: LineStroke, shape: EditShape) => ({
+			...s,
+			shape,
+			pts: pointsAlong(resample(shapePath(shape), 3), shape.pressure)
+		});
+		// its linked twins take the shape mirrored
+		const from = list.find((s) => s.id === id)?.link;
+		const sel = new Set(this.sel?.ids ?? []);
+		const linked = !!this.primary();
+		const next = list.map((s) => {
+			if (s.id === id) return along(s, sh);
+			if (!linked || !from || !s.link || s.link.g !== from.g || !sel.has(s.id)) return s;
+			return along(s, transformShape(sh, twinMap(from, s.link)));
+		});
 		if (live) this.#preview(layer, next);
 		else void this.edit(layer, next, 'Edit shape');
 	}

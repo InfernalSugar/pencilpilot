@@ -1122,6 +1122,68 @@ impl PaintCanvas {
         self.inner.lines_pending()
     }
 
+    // ---- editable strokes on plain layers: the pixels under them (bases) ----
+
+    /// Start replaying strokes into a drawing's base (strokes becoming plain pixels);
+    /// `linesStroke`… then `linesCommit` (joins the last undo step).
+    #[wasm_bindgen(js_name = baseBegin)]
+    pub fn base_begin(&mut self, drawing: u32, layer: u32, tiles: &[i32]) -> bool {
+        self.inner.base_begin(drawing, layer, tiles)
+    }
+
+    /// Forget base tiles no editable stroke needs (joins the last undo step).
+    #[wasm_bindgen(js_name = baseDrop)]
+    pub fn base_drop(&mut self, drawing: u32, tiles: &[i32]) -> bool {
+        self.inner.base_drop(drawing, tiles)
+    }
+
+    /// Base tiles other paint changed: `drawing, count, x, y, …` runs.
+    #[wasm_bindgen(js_name = takeTainted)]
+    pub fn take_tainted(&mut self) -> Vec<i32> {
+        self.inner.take_tainted()
+    }
+
+    /// Bytes the bases take (drawing 0: all of them).
+    #[wasm_bindgen(js_name = baseBytes)]
+    pub fn base_bytes(&self, drawing: u32) -> usize {
+        self.inner.base_bytes(drawing)
+    }
+
+    #[wasm_bindgen(js_name = baseTiles)]
+    pub fn base_tiles(&self, drawing: u32) -> usize {
+        self.inner.base_tiles(drawing)
+    }
+
+    /// Forget the bases of drawings not in `keep`.
+    #[wasm_bindgen(js_name = keepBases)]
+    pub fn keep_bases(&mut self, keep: &[u32]) {
+        self.inner.keep_bases(keep);
+    }
+
+    /// A drawing's base, packed (saving).
+    #[wasm_bindgen(js_name = basePacked)]
+    pub fn base_packed(&self, drawing: u32) -> Vec<u8> {
+        self.inner.base_packed(drawing)
+    }
+
+    /// Load a drawing's base (opening a project); no undo step.
+    #[wasm_bindgen(js_name = putBasePacked)]
+    pub fn put_base_packed(&mut self, drawing: u32, packed: &[u8]) -> bool {
+        self.inner.put_base_packed(drawing, packed)
+    }
+
+    /// A drawing's base changes since the last call (drawing together).
+    #[wasm_bindgen(js_name = baseChangesPacked)]
+    pub fn base_changes_packed(&mut self, drawing: u32) -> Vec<u8> {
+        self.inner.base_changes_packed(drawing)
+    }
+
+    /// Someone else's base changes; no undo step.
+    #[wasm_bindgen(js_name = putBaseChanges)]
+    pub fn put_base_changes(&mut self, drawing: u32, packed: &[u8]) -> bool {
+        self.inner.put_base_changes(drawing, packed)
+    }
+
     /// Drawings kept here that aren't showing.
     #[wasm_bindgen(js_name = keptDrawings)]
     pub fn kept_drawings(&self) -> Vec<u32> {
