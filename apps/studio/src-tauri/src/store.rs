@@ -343,6 +343,9 @@ pub struct RecentItem {
 pub struct Shared {
     /// the names of the people in its session
     pub with: Vec<String>,
+    /// the project's id (from its invite; the cloud lists it by this)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
 }
 
 /// A project's shared session (`extra.share`), if it has one: only the names leave.
@@ -364,7 +367,10 @@ fn shared_of(extra: &serde_json::Value) -> Option<Shared> {
                 .collect()
         })
         .unwrap_or_default();
-    Some(Shared { with })
+    let project = pencilpilot_share::Invite::decode(code)
+        .ok()
+        .map(|i| i.project());
+    Some(Shared { with, project })
 }
 
 fn recent_file(data: &Path) -> PathBuf {
@@ -609,6 +615,7 @@ mod tests {
         let s = shared_of(&extra).unwrap();
         assert_eq!(s.with, vec!["Sam".to_string(), "Ana".to_string()]);
         assert!(!serde_json::to_string(&s).unwrap().contains("secret"));
+        assert_eq!(s.project, None, "(not a real code)");
         assert_eq!(shared_of(&serde_json::json!({})), None);
         assert_eq!(
             shared_of(&serde_json::json!({ "share": { "code": "nope" } })),

@@ -927,3 +927,232 @@ describe('drawing together: apps', () => {
 		expect(cc.tl.scenes[0].audio?.[0].start).toBe(8);
 	});
 });
+
+const K = 'f'.repeat(64);
+
+/**
+ * The cloud's member (crates/keeper), as far as the apps see it: it keeps every edit, asks
+ * the host for a snapshot, and a snapshot replaces the edits up to it.
+ */
+class FakeKeeper {
+	edits: { seq: number; from: string; body: unknown }[] = [];
+	snap: unknown[] = [];
+	#coming: unknown[] = [];
+	async onEdit(seq: number, from: string, body: unknown) {
+		this.edits.push({ seq, from, body: structuredClone(body) });
+	}
+	async onDirect(_from: string, body: unknown) {
+		const m = body as { k: string; seq?: number };
+		if (m.k === 'snap.begin') this.#coming = [m];
+		else this.#coming.push(m);
+		if (m.k === 'snap.end') {
+			this.snap = this.#coming;
+			const at = (this.snap[0] as { seq: number }).seq;
+			this.edits = this.edits.filter((e) => e.seq > at);
+		}
+	}
+	/** what a member coming back gets */
+	catchUp(): [unknown[], [string, unknown][]] {
+		return [
+			structuredClone(this.snap),
+			this.edits.map((e) => [e.from, structuredClone(e.body)] as [string, unknown])
+		];
+	}
+}
+
+function withKeeper(session: FakeSession) {
+	const k = new FakeKeeper();
+	session.apps.set(K, k as unknown as Together);
+	return k;
+}
+
+describe('drawing together: the cloud', () => {
+	it('catches up when no one is online: own work merges, drawing on others’ is asked for', async () => {
+		const session = new FakeSession();
+		const keeper = withKeeper(session);
+		const hc = new FakeCanvas(['Sky']);
+		const ana = new Together(A, 'Ana', hc, session.net(A));
+		session.apps.set(A, ana);
+		await ana.startHost();
+		await session.settle();
+		// the cloud joins and asks Ana for the project
+		session.net(K).direct(A, { k: 'snap.req' });
+		await session.settle();
+		expect(keeper.snap.at(-1)).toEqual({ k: 'snap.end' });
+
+		const bc = new FakeCanvas();
+		const bo = new Together(B, 'Bo', bc, session.net(B));
+		session.apps.set(B, bo);
+		bo.startJoin(A);
+		await session.settle();
+		const boLayer = bc.byName('Bo’s layer').id;
+		bc.paint(boLayer, 0, 0, 1);
+		// (the page sends its timeline when a drawing starts on it, as here)
+		bo.timelineChanged();
+		await bo.localChanged();
+		await session.settle();
+		// Bo saves and leaves; then Ana draws and leaves too
+		const saved = readSavedShare(
+			JSON.parse(JSON.stringify(bo.save('pp1-code', [{ id: A, name: 'Ana', addr: {} }])))
+		)!;
+		expect(saved.sums!.length).toBeGreaterThan(0);
+		session.apps.delete(B);
+		const sky = hc.byName('Sky').id;
+		hc.paint(sky, 5, 5, 55);
+		await ana.localChanged();
+		await session.settle();
+		const anaSaved = readSavedShare(JSON.parse(JSON.stringify(ana.save('pp1-code', []))))!;
+		session.apps.delete(A);
+
+		// offline, Bo draws on his layer, and on Ana's sky (his copy: nothing is locked)
+		for (const l of bc.layerList) l.locked = false;
+		bc.paint(boLayer, 6, 6, 66);
+		const boSky = bc.byName('Sky').id;
+		bc.paint(boSky, 7, 7, 77);
+
+		// next day, no one else is online: Bo catches up from the cloud and hosts it again
+		const next = new FakeSession();
+		const keeper2 = withKeeper(next);
+		const bo2 = new Together(B, 'Bo', bc, next.net(B));
+		next.apps.set(B, bo2);
+		const notes: string[] = [];
+		bo2.onnote = (t) => notes.push(t);
+		bo2.restore(saved);
+		expect(await bo2.findOffline()).toBe(1);
+		const [snap, edits] = keeper.catchUp();
+		expect(edits.length).toBeGreaterThan(0);
+		await bo2.catchUp(K, snap, edits, true);
+		await next.settle();
+		expect(bo2.synced).toBe(true);
+		// what Ana drew after he left is here; his own layer kept what he drew meanwhile
+		expect(bc.pixel(boSky, 5, 5)).toBe(55);
+		expect(bc.pixel(boLayer, 6, 6)).toBe(66);
+		// his drawing on her sky waits for her: asked for, not put in
+		expect(bc.pixel(boSky, 7, 7)).toBeUndefined();
+		expect(bo2.shared.asks).toEqual([
+			expect.objectContaining({ lid: bo2.lidOf(boSky), from: B, why: 'draw' })
+		]);
+		expect(notes[0]).toMatch(/while away/);
+		expect(bc.layerList.filter((l) => l.name === 'Bo’s layer').length).toBe(1);
+		// the new session's cloud member gets what Bo sends now, numbered from 1
+		expect(keeper2.edits[0].seq).toBe(1);
+		// saved meanwhile, the drawing waiting for Ana stays in the file
+		const waiting = readSavedShare(JSON.parse(JSON.stringify(bo2.save('pp1-code', []))))!;
+		expect(waiting.held).toEqual([
+			[bo2.lidOf(boSky), expect.any(String), [['7,7', expect.any(String)]], []]
+		]);
+
+		// Ana comes back: she joins Bo, sees the ask and says yes; his drawing reaches her
+		const ana2 = new Together(A, 'Ana', hc, next.net(A));
+		next.apps.set(A, ana2);
+		ana2.restore(anaSaved);
+		ana2.rejoin(B);
+		await next.settle();
+		expect(ana2.synced).toBe(true);
+		expect(hc.pixel(hc.byName('Bo’s layer').id, 6, 6)).toBe(66);
+		expect(ana2.shared.asks.length).toBe(1);
+		ana2.grant(ana2.lidOf(sky)!, B);
+		await next.settle();
+		expect(bc.pixel(boSky, 7, 7)).toBe(77);
+		expect(hc.pixel(sky, 7, 7)).toBe(77);
+		expect(hc.pixel(sky, 5, 5)).toBe(55);
+	});
+
+	it('a no from the owner leaves their layer as it was', async () => {
+		const session = new FakeSession();
+		withKeeper(session);
+		const hc = new FakeCanvas(['Sky']);
+		const ana = new Together(A, 'Ana', hc, session.net(A));
+		session.apps.set(A, ana);
+		await ana.startHost();
+		const bc = new FakeCanvas();
+		const bo = new Together(B, 'Bo', bc, session.net(B));
+		session.apps.set(B, bo);
+		bo.startJoin(A);
+		await session.settle();
+		const saved = readSavedShare(JSON.parse(JSON.stringify(bo.save('pp1-code', []))))!;
+		session.apps.delete(B);
+		for (const l of bc.layerList) l.locked = false;
+		const boSky = bc.byName('Sky').id;
+		bc.paint(boSky, 3, 3, 33);
+
+		// Bo comes back while Ana is still online; she says no
+		const bo2 = new Together(B, 'Bo', bc, session.net(B));
+		session.apps.set(B, bo2);
+		const notes: string[] = [];
+		bo2.onnote = (t) => notes.push(t);
+		bo2.restore(saved);
+		await bo2.findOffline();
+		bo2.rejoin(A);
+		await session.settle();
+		expect(ana.shared.asks.length).toBe(1);
+		ana.deny(ana.shared.asks[0].lid, B);
+		await session.settle();
+		expect(notes.at(-1)).toMatch(/said no/);
+		expect(bc.pixel(boSky, 3, 3)).toBeUndefined();
+		expect(hc.pixel(hc.byName('Sky').id, 3, 3)).toBeUndefined();
+	});
+
+	it('opens a project from the cloud on another computer, and answers who asked meanwhile', async () => {
+		const session = new FakeSession();
+		const keeper = withKeeper(session);
+		const hc = new FakeCanvas(['Sky']);
+		hc.paint(1, 2, 2, 22);
+		const ana = new Together(A, 'Ana', hc, session.net(A));
+		session.apps.set(A, ana);
+		await ana.startHost();
+		await session.settle();
+		session.net(K).direct(A, { k: 'snap.req' });
+		await session.settle();
+		// an edit after the snapshot, then everyone leaves
+		hc.paint(1, 3, 3, 33);
+		await ana.localChanged();
+		await session.settle();
+		expect(keeper.edits.length).toBeGreaterThan(0);
+
+		// Cy, on a new computer (a blank canvas), opens it from the Cloud tab
+		const next = new FakeSession();
+		const cc = new FakeCanvas(['Layer 1']);
+		const cy = new Together(C, 'Cy', cc, next.net(C));
+		next.apps.set(C, cy);
+		// someone asks Cy for the project before Cy has it: answered once it's in
+		const dc = new FakeCanvas();
+		const di = new Together(B, 'Di', dc, next.net(B));
+		next.apps.set(B, di);
+		di.startJoin(C);
+		await next.settle();
+		expect(di.synced).toBe(false);
+		const [snap, edits] = keeper.catchUp();
+		await cy.catchUp(K, snap, edits, false);
+		await next.settle();
+		const sky = cc.byName('Sky').id;
+		expect(cc.pixel(sky, 2, 2)).toBe(22);
+		expect(cc.pixel(sky, 3, 3)).toBe(33);
+		// the blank canvas's layer is put aside; Cy gets a layer of their own
+		expect(cc.byName('Layer 1')).toMatchObject({ visible: false, locked: true });
+		expect(cc.byName('Cy’s layer').locked).toBe(false);
+		expect(di.synced).toBe(true);
+		expect(dc.pixel(dc.byName('Sky').id, 3, 3)).toBe(33);
+	});
+
+	it('catches up from the edits alone when the cloud has no snapshot yet', async () => {
+		const session = new FakeSession();
+		const keeper = withKeeper(session);
+		const hc = new FakeCanvas(['Sky']);
+		hc.paint(1, 4, 4, 44);
+		const ana = new Together(A, 'Ana', hc, session.net(A));
+		session.apps.set(A, ana);
+		await ana.startHost();
+		await session.settle();
+		const next = new FakeSession();
+		const cc = new FakeCanvas([]);
+		const cy = new Together(C, 'Cy', cc, next.net(C));
+		next.apps.set(C, cy);
+		const [snap, edits] = keeper.catchUp();
+		expect(snap).toEqual([]);
+		await cy.catchUp(K, snap, edits, false);
+		await next.settle();
+		expect(cc.pixel(cc.byName('Sky').id, 4, 4)).toBe(44);
+		expect(cy.synced).toBe(true);
+	});
+});

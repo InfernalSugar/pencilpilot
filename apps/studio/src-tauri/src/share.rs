@@ -8,6 +8,13 @@
 //! **Signed in only:** hosting and joining need this computer's sign-in pass from the
 //! website ([`crate::account`]); names in the session come from passes.
 //!
+//! **The cloud** (ADR-0014): when a cloud is set (Settings, or built in), every shared
+//! session asks it to keep the project, and its always-on member joins. Coming back to a
+//! shared project then works when no one else is online: the app catches up from the cloud
+//! (`share_catch_up`), hosts the session again and lets the cloud in. The home screen's
+//! Cloud tab lists the projects the account is in (`cloud_list`) and opens one on any
+//! computer (`cloud_open`). Solo projects never reach it.
+//!
 //! **AI generation is a solo act** (the owner's rule, ADR-0013): nothing made by AI is
 //! generated during a shared session. Every AI feature in the shell starts with
 //! [`Sharing::solo_only`], which refuses while a session is live; the session's edits
@@ -15,12 +22,13 @@
 
 use std::path::Path;
 
-use pencilpilot_share::{Event, Identity, Invite, Member, Relays, Session};
+use pencilpilot_share::cloud::{CatchUp, Cloud, CloudProject, OpenState, Opened};
+use pencilpilot_share::{EndpointAddr, Event, Identity, Invite, Member, Relays, Session};
 
 use crate::account::Account;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 /// What the window learns on hosting or joining.
@@ -31,11 +39,35 @@ pub struct Info {
     pub me: Member,
     pub members: Vec<Member>,
     pub host: bool,
+    /// the cloud: "off" (none set), "on" (it keeps this project), "caught_up" (no one was
+    /// online: the cloud's copy is waiting in `share_catch_up`), "unreachable"
+    pub cloud: &'static str,
 }
 
-/// The session in progress (one at a time).
+/// Where the window says to connect (Settings): our own relay, and the cloud's address
+/// (empty: the defaults).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Net {
+    #[serde(default)]
+    pub relay: Option<String>,
+    #[serde(default)]
+    pub cloud: Option<String>,
+}
+
+/// What the cloud lists a project as (from the studio: its name and canvas size).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct About {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub width: u32,
+    #[serde(default)]
+    pub height: u32,
+}
+
+/// The session in progress (one at a time), and the cloud's copy after catching up.
 #[derive(Default)]
-pub struct Sharing(Mutex<Option<Live>>);
+pub struct Sharing(Mutex<Option<Live>>, Mutex<Option<CatchUp>>);
 
 pub struct Live {
     /// kept current by the pump (who's here, who hosts, the code after a hand-over)
@@ -43,12 +75,13 @@ pub struct Live {
     tx: mpsc::UnboundedSender<Cmd>,
 }
 
-fn info_of(s: &Session) -> Info {
+fn info_of(s: &Session, cloud: &'static str) -> Info {
     Info {
         invite: s.invite().encode(),
         me: s.me().clone(),
         members: s.members(),
         host: s.is_host(),
+        cloud,
     }
 }
 
@@ -74,6 +107,37 @@ fn relays(setting: Option<&str>) -> Relays {
     }
 }
 
+/// The cloud's address as text: the app's setting, else `PENCILPILOT_CLOUD` when the app
+/// runs, else `PENCILPILOT_CLOUD_ADDR` when it was built; `off` (or nothing) for none.
+fn cloud_text(setting: Option<&str>) -> Option<String> {
+    let pick = setting
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .or_else(|| {
+            std::env::var("PENCILPILOT_CLOUD")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        })
+        .or_else(|| {
+            option_env!("PENCILPILOT_CLOUD_ADDR")
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+        })?;
+    (pick.trim() != "off").then(|| pick.trim().to_string())
+}
+
+/// Where the cloud is, if one is set (`Err`: set, but the address is wrong).
+async fn cloud_addr(net: &Net) -> Option<Result<EndpointAddr, String>> {
+    let text = cloud_text(net.cloud.as_deref())?;
+    let relay = net.relay.as_deref().filter(|r| !r.trim().is_empty());
+    Some(
+        pencilpilot_share::cloud::resolve(&text, relay)
+            .await
+            .map_err(|e| e.to_string()),
+    )
+}
+
 /// This computer's key (`PENCILPILOT_SHARE_PROFILE` picks another, to try two apps on one
 /// computer).
 fn identity(data: &Path) -> Result<Identity, String> {
@@ -86,21 +150,160 @@ fn identity(data: &Path) -> Result<Identity, String> {
     Identity::load_or_create(&data.join("share").join(file)).map_err(|e| e.to_string())
 }
 
+/// Connect to the cloud as this computer (signed in).
+async fn cloud_connect(data: &Path, account: &Account, net: &Net) -> Result<Option<Cloud>, String> {
+    let Some(addr) = cloud_addr(net).await else {
+        return Ok(None);
+    };
+    let addr = addr?;
+    let id = identity(data)?;
+    let (pass, _) = account.pass(data, &id).await?;
+    Cloud::connect(addr, &id, &pass, relays(net.relay.as_deref()))
+        .await
+        .map(Some)
+        .map_err(|e| e.to_string())
+}
+
+/// Have the cloud keep a session's project and join it (in the background: it never holds
+/// up drawing).
+fn keep_in_cloud(app: &AppHandle, data: &Path, net: &Net, code: String, about: &About) {
+    let (app, data, net, about) = (app.clone(), data.to_path_buf(), net.clone(), about.clone());
+    tauri::async_runtime::spawn(async move {
+        let account = app.state::<Account>();
+        if let Ok(Some(mut c)) = cloud_connect(&data, &account, &net).await {
+            let _ = c.keep(&code, &about.name, about.width, about.height).await;
+            c.close().await;
+        }
+    });
+}
+
+/// The home screen's Cloud tab: the projects, and whether the list is fresh.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CloudList {
+    /// "ok", "off" (no cloud set), "signed_out", "unreachable"
+    pub status: String,
+    pub projects: Vec<CloudProject>,
+    /// when the list was fetched (seconds since 1970; 0: never)
+    pub fetched: u64,
+    #[serde(default)]
+    pub error: String,
+}
+
+fn list_file(data: &Path) -> std::path::PathBuf {
+    data.join("share").join("cloud-list.json")
+}
+
+/// The projects in the cloud this account is a member of. When the cloud can't be reached,
+/// the list from last time.
+pub async fn cloud_list(data: &Path, account: &Account, net: &Net) -> CloudList {
+    let last = || -> CloudList {
+        std::fs::read(list_file(data))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<CloudList>(&b).ok())
+            .unwrap_or(CloudList {
+                status: String::new(),
+                projects: Vec::new(),
+                fetched: 0,
+                error: String::new(),
+            })
+    };
+    if cloud_text(net.cloud.as_deref()).is_none() {
+        return CloudList {
+            status: "off".into(),
+            ..last()
+        };
+    }
+    if account.status(data).await.is_none() {
+        return CloudList {
+            status: "signed_out".into(),
+            projects: Vec::new(),
+            fetched: 0,
+            error: String::new(),
+        };
+    }
+    let got = async {
+        let mut c = cloud_connect(data, account, net)
+            .await?
+            .ok_or("No cloud is set.")?;
+        let list = c.list().await.map_err(|e| e.to_string());
+        c.close().await;
+        list
+    }
+    .await;
+    match got {
+        Ok(projects) => {
+            let fresh = CloudList {
+                status: "ok".into(),
+                projects,
+                fetched: pencilpilot_share::now(),
+                error: String::new(),
+            };
+            let _ = std::fs::create_dir_all(data.join("share"));
+            if let Ok(b) = serde_json::to_vec(&fresh) {
+                let _ = std::fs::write(list_file(data), b);
+            }
+            fresh
+        }
+        Err(e) => CloudList {
+            status: "unreachable".into(),
+            error: e,
+            ..last()
+        },
+    }
+}
+
+/// How to open a project from the cloud (on any computer): its invite and size.
+pub async fn cloud_open(
+    data: &Path,
+    account: &Account,
+    net: &Net,
+    project: &str,
+) -> Result<Opened, String> {
+    let mut c = cloud_connect(data, account, net)
+        .await?
+        .ok_or("No cloud is set: Settings → Drawing together → Cloud.")?;
+    let o = c.open(project).await.map_err(|e| e.to_string());
+    c.close().await;
+    o
+}
+
+/// A shared project's new name or picture, for the cloud's list (best effort).
+pub async fn cloud_touch(
+    data: &Path,
+    account: &Account,
+    net: &Net,
+    project: &str,
+    name: Option<String>,
+    thumb: Option<String>,
+) -> Result<(), String> {
+    let Some(mut c) = cloud_connect(data, account, net).await? else {
+        return Ok(());
+    };
+    let r = c
+        .touch(project, name, thumb)
+        .await
+        .map_err(|e| e.to_string());
+    c.close().await;
+    r
+}
+
 impl Sharing {
     pub async fn host(
         &self,
         app: AppHandle,
         data: &Path,
         account: &Account,
-        relay: Option<&str>,
+        net: &Net,
+        about: &About,
     ) -> Result<Info, String> {
         let id = identity(data)?;
         let (pass, site) = account.pass(data, &id).await?;
         self.leave().await;
-        let s = Session::host(&id, &pass, &site, relays(relay))
+        let s = Session::host(&id, &pass, &site, relays(net.relay.as_deref()))
             .await
             .map_err(|e| e.to_string())?;
-        Ok(self.start(app, s).await)
+        let cloud = self.keep(&app, data, net, &s, about);
+        Ok(self.start(app, s, cloud).await)
     }
 
     pub async fn join(
@@ -109,21 +312,41 @@ impl Sharing {
         data: &Path,
         code: &str,
         account: &Account,
-        relay: Option<&str>,
+        net: &Net,
+        about: &About,
     ) -> Result<Info, String> {
         let invite = Invite::decode(code).map_err(|e| e.to_string())?;
         let id = identity(data)?;
         let (pass, site) = account.pass(data, &id).await?;
         self.leave().await;
-        let s = Session::join(&id, &invite, &pass, &site, relays(relay))
+        let s = Session::join(&id, &invite, &pass, &site, relays(net.relay.as_deref()))
             .await
             .map_err(|e| e.to_string())?;
-        Ok(self.start(app, s).await)
+        let cloud = self.keep(&app, data, net, &s, about);
+        Ok(self.start(app, s, cloud).await)
+    }
+
+    /// The cloud keeps a live session's project (if one is set).
+    fn keep(
+        &self,
+        app: &AppHandle,
+        data: &Path,
+        net: &Net,
+        s: &Session,
+        about: &About,
+    ) -> &'static str {
+        if cloud_text(net.cloud.as_deref()).is_none() {
+            return "off";
+        }
+        keep_in_cloud(app, data, net, s.invite().encode(), about);
+        "on"
     }
 
     /// Come back to a shared project after a break: join whoever of its members is online
-    /// (`code`: its saved invite; `addrs`: the members' addresses as saved), or, when no one
-    /// answers, host it again.
+    /// (`code`: its saved invite; `addrs`: the members' addresses as saved), found directly
+    /// or through the cloud. When no one is online, catch up from the cloud (if one is
+    /// set) and host it again.
+    #[allow(clippy::too_many_arguments)]
     pub async fn rejoin(
         &self,
         app: AppHandle,
@@ -131,43 +354,112 @@ impl Sharing {
         code: &str,
         addrs: Vec<Value>,
         account: &Account,
-        relay: Option<&str>,
+        net: &Net,
+        about: &About,
     ) -> Result<Info, String> {
         let mut invite = Invite::decode(code).map_err(|e| e.to_string())?;
         let id = identity(data)?;
         let (pass, site) = account.pass(data, &id).await?;
         self.leave().await;
+        *self.1.lock().await = None;
         for a in addrs {
-            if let Ok(a) = serde_json::from_value::<pencilpilot_share::EndpointAddr>(a)
+            if let Ok(a) = serde_json::from_value::<EndpointAddr>(a)
                 && a.id.to_string() != id.id()
                 && !invite.addrs.iter().any(|x| x.id == a.id)
             {
                 invite.addrs.push(a);
             }
         }
+        // the cloud first: it knows whether anyone is in, and passes us on to them
+        let mut cloud_state = "off";
+        let mut cloud = None;
+        if cloud_text(net.cloud.as_deref()).is_some() {
+            cloud_state = "unreachable";
+            if let Ok(Some(mut c)) = cloud_connect(data, account, net).await {
+                let project = invite.project();
+                let mut opened = c.open(&project).await;
+                // someone else is opening it this moment: meet them in their session
+                let until = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+                while matches!(&opened, Ok(o) if o.state == OpenState::Starting)
+                    && tokio::time::Instant::now() < until
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                    opened = c.open(&project).await;
+                }
+                match opened {
+                    Ok(o) => {
+                        if let Ok(via) = Invite::decode(&o.code) {
+                            for a in via.addrs.into_iter().rev() {
+                                invite.addrs.retain(|x| x.id != a.id);
+                                invite.addrs.insert(0, a);
+                            }
+                        }
+                        cloud_state = if o.state == OpenState::Idle {
+                            "idle"
+                        } else {
+                            "on"
+                        };
+                        cloud = Some(c);
+                    }
+                    // not kept (yet), or not a member: it's kept once the session starts
+                    Err(_) => {
+                        cloud_state = "on";
+                        c.close().await;
+                    }
+                }
+            }
+        }
         invite.addrs.retain(|a| a.id.to_string() != id.id());
-        let joined = if invite.addrs.is_empty() {
+        let joined = if invite.addrs.is_empty() || cloud_state == "idle" {
             None
         } else {
             tokio::time::timeout(
                 std::time::Duration::from_secs(12),
-                Session::join(&id, &invite, &pass, &site, relays(relay)),
+                Session::join(&id, &invite, &pass, &site, relays(net.relay.as_deref())),
             )
             .await
             .ok()
             .and_then(|r| r.ok())
         };
         let s = match joined {
-            Some(s) => s,
-            None => Session::host_again(&id, &invite, &pass, &site, relays(relay))
-                .await
-                .map_err(|e| e.to_string())?,
+            Some(s) => {
+                if let Some(c) = cloud.take() {
+                    c.close().await;
+                }
+                s
+            }
+            None => {
+                // no one is in: the cloud's copy, then this app hosts it again
+                if let Some(mut c) = cloud.take() {
+                    match c.catch_up(&invite.project()).await {
+                        Ok(got) => {
+                            *self.1.lock().await = Some(got);
+                            cloud_state = "caught_up";
+                        }
+                        Err(_) => cloud_state = "unreachable",
+                    }
+                    c.close().await;
+                }
+                Session::host_again(&id, &invite, &pass, &site, relays(net.relay.as_deref()))
+                    .await
+                    .map_err(|e| e.to_string())?
+            }
         };
-        Ok(self.start(app, s).await)
+        let kept = self.keep(&app, data, net, &s, about);
+        if cloud_state == "idle" || (cloud_state == "off" && kept == "on") {
+            cloud_state = kept;
+        }
+        Ok(self.start(app, s, cloud_state).await)
     }
 
-    async fn start(&self, app: AppHandle, s: Session) -> Info {
-        let info = info_of(&s);
+    /// The cloud's copy from coming back when no one was online (once: it's forgotten as
+    /// it's taken).
+    pub async fn take_catch_up(&self) -> Option<CatchUp> {
+        self.1.lock().await.take()
+    }
+
+    async fn start(&self, app: AppHandle, s: Session, cloud: &'static str) -> Info {
+        let info = info_of(&s, cloud);
         let shared = std::sync::Arc::new(std::sync::Mutex::new(info.clone()));
         let (tx, rx) = mpsc::unbounded_channel();
         tauri::async_runtime::spawn(pump(app, s, rx, shared.clone()));
@@ -307,7 +599,8 @@ async fn pump(
                 Some(e) => {
                     let closed = matches!(e, Event::Closed { .. });
                     if matches!(e, Event::Joined(_) | Event::Left { .. } | Event::HostChanged { .. }) {
-                        *info.lock().unwrap_or_else(|e| e.into_inner()) = info_of(&s);
+                        let mut i = info.lock().unwrap_or_else(|e| e.into_inner());
+                        *i = info_of(&s, i.cloud);
                     }
                     let _ = app.emit("share-event", window_event(e, &s));
                     if closed {
@@ -348,6 +641,7 @@ mod tests {
                 me: me.clone(),
                 members: vec![me],
                 host: true,
+                cloud: "off",
             })),
             tx,
         });
@@ -368,5 +662,26 @@ mod relay_tests {
         );
         // empty: the environment or iroh's public relays
         assert_ne!(relays(Some("")), Relays::Custom(vec![String::new()]));
+    }
+
+    #[test]
+    fn the_setting_picks_the_cloud_and_off_turns_it_off() {
+        assert_eq!(
+            cloud_text(Some(" abc@cloud.example.com:7843 ")).as_deref(),
+            Some("abc@cloud.example.com:7843")
+        );
+        assert_eq!(cloud_text(Some("off")), None);
+    }
+
+    #[tokio::test]
+    async fn no_cloud_set_means_no_cloud_list() {
+        let dir = std::env::temp_dir().join(format!("pp-cloud-list-{}", std::process::id()));
+        let net = Net {
+            relay: None,
+            cloud: Some("off".into()),
+        };
+        let l = cloud_list(&dir, &Account::default(), &net).await;
+        assert_eq!(l.status, "off");
+        assert!(l.projects.is_empty());
     }
 }

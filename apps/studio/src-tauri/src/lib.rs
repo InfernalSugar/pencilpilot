@@ -530,15 +530,25 @@ async fn account_sign_out(
 }
 
 /// Host a drawing-together session: the invite to share, who's here. Needs a sign-in.
+/// `net`: our own relay and cloud (Settings); `about`: the project, for the cloud's list.
 #[tauri::command]
 async fn share_host(
     app: AppHandle,
     state: State<'_, share::Sharing>,
     account: State<'_, account::Account>,
-    relay: Option<String>,
+    net: Option<share::Net>,
+    about: Option<share::About>,
 ) -> Result<share::Info, String> {
     let data = data_dir(&app)?;
-    state.host(app, &data, &account, relay.as_deref()).await
+    state
+        .host(
+            app,
+            &data,
+            &account,
+            &net.unwrap_or_default(),
+            &about.unwrap_or_default(),
+        )
+        .await
 }
 
 /// Join a session from an invite code. Needs a sign-in.
@@ -548,15 +558,24 @@ async fn share_join(
     state: State<'_, share::Sharing>,
     account: State<'_, account::Account>,
     code: String,
-    relay: Option<String>,
+    net: Option<share::Net>,
+    about: Option<share::About>,
 ) -> Result<share::Info, String> {
     let data = data_dir(&app)?;
     state
-        .join(app, &data, &code, &account, relay.as_deref())
+        .join(
+            app,
+            &data,
+            &code,
+            &account,
+            &net.unwrap_or_default(),
+            &about.unwrap_or_default(),
+        )
         .await
 }
 
-/// Come back to a shared project: join a member who's online, or host it again.
+/// Come back to a shared project: join a member who's online (directly or through the
+/// cloud), or catch up from the cloud and host it again.
 #[tauri::command]
 async fn share_rejoin(
     app: AppHandle,
@@ -564,12 +583,74 @@ async fn share_rejoin(
     account: State<'_, account::Account>,
     code: String,
     addrs: Vec<serde_json::Value>,
-    relay: Option<String>,
+    net: Option<share::Net>,
+    about: Option<share::About>,
 ) -> Result<share::Info, String> {
     let data = data_dir(&app)?;
     state
-        .rejoin(app, &data, &code, addrs, &account, relay.as_deref())
+        .rejoin(
+            app,
+            &data,
+            &code,
+            addrs,
+            &account,
+            &net.unwrap_or_default(),
+            &about.unwrap_or_default(),
+        )
         .await
+}
+
+/// The cloud's copy of the project after coming back when no one was online (once).
+#[tauri::command]
+async fn share_catch_up(
+    state: State<'_, share::Sharing>,
+) -> Result<Option<pencilpilot_share::cloud::CatchUp>, String> {
+    Ok(state.take_catch_up().await)
+}
+
+/// The shared projects in the cloud this account is in (the home screen's Cloud tab).
+#[tauri::command]
+async fn cloud_list(
+    app: AppHandle,
+    account: State<'_, account::Account>,
+    net: Option<share::Net>,
+) -> Result<share::CloudList, String> {
+    let data = data_dir(&app)?;
+    Ok(share::cloud_list(&data, &account, &net.unwrap_or_default()).await)
+}
+
+/// How to open a project from the cloud: its invite and canvas size.
+#[tauri::command]
+async fn cloud_open(
+    app: AppHandle,
+    account: State<'_, account::Account>,
+    project: String,
+    net: Option<share::Net>,
+) -> Result<pencilpilot_share::cloud::Opened, String> {
+    let data = data_dir(&app)?;
+    share::cloud_open(&data, &account, &net.unwrap_or_default(), &project).await
+}
+
+/// A shared project's name and picture changed (saved): the cloud's list shows them.
+#[tauri::command]
+async fn cloud_touch(
+    app: AppHandle,
+    account: State<'_, account::Account>,
+    project: String,
+    name: Option<String>,
+    thumb: Option<String>,
+    net: Option<share::Net>,
+) -> Result<(), String> {
+    let data = data_dir(&app)?;
+    share::cloud_touch(
+        &data,
+        &account,
+        &net.unwrap_or_default(),
+        &project,
+        name,
+        thumb,
+    )
+    .await
 }
 
 /// The session in progress, if any.
@@ -710,6 +791,10 @@ pub fn run() {
             share_host,
             share_join,
             share_rejoin,
+            share_catch_up,
+            cloud_list,
+            cloud_open,
+            cloud_touch,
             share_status,
             share_edit,
             share_direct,
