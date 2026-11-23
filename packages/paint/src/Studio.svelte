@@ -461,7 +461,7 @@
 							title="Show the side panel"
 							onclick={() => layout && (layout.dock = true)}
 						>
-							{@render chevron('left')}<span>Panels</span>
+							{@render chevron(leftHanded ? 'right' : 'left')}<span>Panels</span>
 						</button>
 					</div>
 				{/if}
@@ -510,7 +510,7 @@
 									title="Hide the side panel"
 									onclick={() => layout && (layout.dock = false)}
 								>
-									{@render chevron('right')}
+									{@render chevron(leftHanded ? 'left' : 'right')}
 								</button>
 							{/if}
 						</div>
