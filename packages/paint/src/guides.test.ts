@@ -1,11 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import {
+	centredGuides,
 	closestDirection,
 	defaultGuides,
 	gridLines,
+	readGuides,
 	project,
 	rulerLine,
-	snapDirections
+	snapDirections,
+	vpLayout,
+	withPerspective
 } from './guides';
 
 describe('guides', () => {
@@ -79,5 +83,61 @@ describe('guides', () => {
 		expect(gridLines(g, 800, 600)).toHaveLength(7 + 5);
 		g.grid.kind = 'isometric';
 		expect(gridLines(g, 800, 600).length).toBeGreaterThan(20);
+	});
+});
+
+describe('guides in the middle', () => {
+	it('start centred: the mirror line, 1-point and 2-point evenly either side', () => {
+		const g = defaultGuides(1000, 800);
+		expect(g.symmetry.c).toEqual([500, 400]);
+		expect(g.perspective.vps[0]).toEqual([500, 320]);
+		const two = vpLayout(2, 1000, 800);
+		expect(two[0][0] + two[1][0]).toBeCloseTo(1000);
+		expect(two[0][1]).toBe(two[1][1]);
+	});
+
+	it('Centre guides puts every point back, keeping which guides are on', () => {
+		const moved = {
+			...defaultGuides(1000, 800),
+			symmetry: { mode: 'vertical' as const, n: 6, c: [700, 100] as [number, number] },
+			perspective: {
+				points: 2 as const,
+				vps: [
+					[10, 10],
+					[20, 20],
+					[30, 30]
+				] as [number, number][]
+			}
+		};
+		const c = centredGuides(moved, 1000, 800);
+		expect(c.symmetry).toEqual({ mode: 'vertical', n: 6, c: [500, 400] });
+		expect(c.perspective.points).toBe(2);
+		expect(c.perspective.vps).toEqual(vpLayout(2, 1000, 800));
+	});
+
+	it('switching perspective lays the points out again unless they were moved', () => {
+		const g = defaultGuides(1000, 800);
+		const two = withPerspective(withPerspective(g, 1, 1000, 800), 2, 1000, 800);
+		expect(two.perspective.vps).toEqual(vpLayout(2, 1000, 800));
+		const moved = {
+			...two,
+			perspective: {
+				...two.perspective,
+				vps: [
+					[1, 2],
+					[3, 4],
+					[5, 6]
+				] as [number, number][]
+			}
+		};
+		expect(withPerspective(moved, 3, 1000, 800).perspective.vps).toEqual(moved.perspective.vps);
+	});
+
+	it('read back from a project only when whole', () => {
+		const g = defaultGuides(100, 100);
+		expect(readGuides(JSON.parse(JSON.stringify(g)))).toEqual(g);
+		expect(readGuides({ ...g, symmetry: { mode: 'sideways', n: 2, c: [0, 0] } })).toBeNull();
+		expect(readGuides({ ...g, ruler: { on: true, a: [0, 'x'], b: [1, 1] } })).toBeNull();
+		expect(readGuides(null)).toBeNull();
 	});
 });
