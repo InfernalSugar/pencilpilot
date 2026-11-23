@@ -317,3 +317,22 @@ test('undo goes back as many steps as Settings keeps', async ({ page }) => {
 	}
 	expect(n).toBe(10);
 });
+
+test('left-handed: the side panel arrows point the right way; dark: the surround well shows the dark colour', async ({
+	page
+}) => {
+	await stub(page, { leftHanded: true, theme: 'dark' });
+	await studio(page);
+	// the panel is on the left: hiding it points left, showing it again points right
+	const hide = page.getByRole('button', { name: 'Hide the side panel' });
+	await expect(hide.locator('path')).toHaveAttribute('d', 'M15 6l-6 6 6 6');
+	await hide.click();
+	await expect(
+		page.getByRole('button', { name: 'Show the side panel' }).locator('path')
+	).toHaveAttribute('d', 'M9 6l6 6-6 6');
+	await page.getByRole('button', { name: 'Show the side panel' }).click();
+	// Settings → Appearance: following the theme, the well shows the dark theme's colour
+	await page.getByRole('button', { name: 'Settings', exact: true }).click();
+	await page.getByRole('tab', { name: 'Appearance', exact: true }).click();
+	await expect(page.getByLabel('Around the canvas')).toHaveValue('#2d2d34');
+});
