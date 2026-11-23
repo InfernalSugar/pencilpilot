@@ -2053,9 +2053,14 @@
 	let clip: Uint8Array | null = null;
 
 	/** Copy the selected part of the layer (all of it with no selection); `cut` also clears it. */
-	export function copySelection(cut = false): boolean {
+	export function copySelection(cut = false, merged = !cut): boolean {
 		if (!paint || xf) return false;
-		const rgba = paint.layerRgba(paint.activeLayer);
+		// a copy takes what shows in the selection, from every visible layer (not the
+		// paper); a cut (and "copy to a new layer") takes the active layer's own pixels
+		const shown = merged ? renderFrame([], 1, true)?.rgba : null;
+		const rgba = shown
+			? new Uint8Array(shown.buffer, shown.byteOffset, shown.length)
+			: paint.layerRgba(paint.activeLayer);
 		if (!rgba.length) return false;
 		const sel = paint.selectionMask();
 		let any = false;
@@ -3337,6 +3342,8 @@
 		}
 		if (tool === 'transform') {
 			const p = toCanvas(e.clientX, e.clientY);
+			/** the box was there before this press (a tap away from it then accepts it) */
+			const wasOpen = !!xf;
 			if (!xf) {
 				if (!moveStrokes) return;
 				const l = shownLayers().find((x) => x.id === paint!.activeLayer);
@@ -3354,7 +3361,10 @@
 				// off them: the layer moves, as Move does
 				if (!beginTransform() || !xf) return;
 			}
-			const hit: { mode: NonNullable<typeof xfDrag>['mode']; index: number } = xfHit(p) ?? {
+			const handle = xfHit(p);
+			// away from the box: a drag still moves it, a tap accepts it (as Done does)
+			xfAway = !handle && wasOpen ? { x: e.clientX, y: e.clientY } : null;
+			const hit: { mode: NonNullable<typeof xfDrag>['mode']; index: number } = handle ?? {
 				mode: 'move',
 				index: 0
 			};
@@ -3509,6 +3519,8 @@
 
 	/** a Transform press that may be a tap on a stroke (screen px where it began) */
 	let xfTap: { x: number; y: number; p: [number, number] } | null = null;
+	/** a press away from the transform box (where it began, on screen) */
+	let xfAway: { x: number; y: number } | null = null;
 	/** a brush press held still, waiting to see whether it picks a stroke */
 	let holdPick: { id: number; x: number; y: number; p: [number, number]; timer: number } | null =
 		null;
@@ -3783,10 +3795,19 @@
 			const from = xfDrag.from;
 			xfDrag = null;
 			const t = xfTap;
-			xfTap = null;
+			const away = xfAway;
+			xfTap = xfAway = null;
 			if (t && Math.hypot(e.clientX - t.x, e.clientY - t.y) < 4) {
 				xf = from;
 				pickStroke(t.p);
+			} else if (
+				away &&
+				e.type !== 'pointercancel' &&
+				Math.hypot(e.clientX - away.x, e.clientY - away.y) < 4
+			) {
+				// a tap away from the box: done (the tiny nudge of the tap left out)
+				xf = from;
+				transformCommit();
 			}
 			return;
 		}

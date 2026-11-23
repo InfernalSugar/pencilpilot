@@ -3261,7 +3261,7 @@
 		else if (action === 'adjust') toolOpts.openAdjust();
 		else if (action === 'copy' || action === 'cut') toolOpts.copyCut(action === 'cut');
 		else if (action === 'copy-to-layer') {
-			if (canvas?.copySelection(false)) toolOpts.pasteCopied();
+			if (canvas?.copySelection(false, false)) toolOpts.pasteCopied();
 		} else if (action === 'select-all') canvas?.selectAll();
 		else if (action === 'deselect') canvas?.deselect();
 		else if (action === 'invert-selection') canvas?.invertSelection();
