@@ -23,17 +23,88 @@ export const SYMMETRY_MODES = ['off', 'vertical', 'horizontal', 'quadrant', 'rad
 export function defaultGuides(w: number, h: number): GuideSettings {
 	return {
 		grid: { on: false, kind: 'square', size: Math.round(Math.min(w, h) / 8) },
-		perspective: {
-			points: 0,
-			vps: [
-				[w * 0.5, h * 0.4],
-				[w * 1.1, h * 0.4],
-				[w * 0.5, h * 1.6]
-			]
-		},
+		perspective: { points: 0, vps: vpLayout(1, w, h) },
 		ruler: { on: false, a: [w * 0.2, h * 0.5], b: [w * 0.8, h * 0.5] },
 		symmetry: { mode: 'off', n: 6, c: [w / 2, h / 2] }
 	};
+}
+
+/**
+ * Where the vanishing points start, centred on the canvas: 1-point in the middle;
+ * 2-point either side of the middle, as far from it; 3-point adds one below the middle.
+ */
+export function vpLayout(points: number, w: number, h: number): Pt[] {
+	return [
+		points >= 2 ? [w * 0.15, h * 0.4] : [w * 0.5, h * 0.4],
+		[w * 0.85, h * 0.4],
+		[w * 0.5, h * 1.6]
+	];
+}
+
+/** The same guides (which are on, grid kind and size) with every point back in its centred place. */
+export function centredGuides(g: GuideSettings, w: number, h: number): GuideSettings {
+	const d = defaultGuides(w, h);
+	return {
+		grid: { ...g.grid },
+		perspective: { ...g.perspective, vps: vpLayout(g.perspective.points, w, h) },
+		ruler: { ...g.ruler, a: d.ruler.a, b: d.ruler.b },
+		symmetry: { ...g.symmetry, c: d.symmetry.c }
+	};
+}
+
+/** Switching perspective: points still where the old mode put them move to the new mode's places. */
+export function withPerspective(
+	g: GuideSettings,
+	points: 0 | 1 | 2 | 3,
+	w: number,
+	h: number
+): GuideSettings {
+	const near = (a: Pt[], b: Pt[]) =>
+		a.length === b.length && a.every((p, i) => Math.hypot(p[0] - b[i][0], p[1] - b[i][1]) < 1);
+	const untouched =
+		near(g.perspective.vps, vpLayout(g.perspective.points, w, h)) ||
+		near(g.perspective.vps, vpLayout(points ? 1 : 2, w, h));
+	return {
+		...g,
+		perspective: {
+			points,
+			vps: untouched ? vpLayout(points, w, h) : g.perspective.vps
+		}
+	};
+}
+
+/** Guides from a saved project, checked (none: anything missing or not a number). */
+export function readGuides(v: unknown): GuideSettings | null {
+	const pt = (p: unknown): p is Pt =>
+		Array.isArray(p) && p.length === 2 && p.every((n) => typeof n === 'number' && isFinite(n));
+	const g = v as GuideSettings | null;
+	if (!g || typeof g !== 'object') return null;
+	const ok =
+		typeof g.grid?.on === 'boolean' &&
+		(g.grid.kind === 'square' || g.grid.kind === 'isometric') &&
+		typeof g.grid.size === 'number' &&
+		g.grid.size > 0 &&
+		[0, 1, 2, 3].includes(g.perspective?.points) &&
+		Array.isArray(g.perspective.vps) &&
+		g.perspective.vps.length === 3 &&
+		g.perspective.vps.every(pt) &&
+		typeof g.ruler?.on === 'boolean' &&
+		pt(g.ruler.a) &&
+		pt(g.ruler.b) &&
+		(SYMMETRY_MODES as readonly string[]).includes(g.symmetry?.mode) &&
+		typeof g.symmetry.n === 'number' &&
+		pt(g.symmetry.c);
+	return ok
+		? {
+				grid: { ...g.grid },
+				perspective: {
+					points: g.perspective.points,
+					vps: g.perspective.vps.map((p) => [p[0], p[1]])
+				},
+				ruler: { on: g.ruler.on, a: [g.ruler.a[0], g.ruler.a[1]], b: [g.ruler.b[0], g.ruler.b[1]] },
+				symmetry: { mode: g.symmetry.mode, n: g.symmetry.n, c: [g.symmetry.c[0], g.symmetry.c[1]] }
+			}
+		: null;
 }
 
 export const anyGuide = (g: GuideSettings | null | undefined) =>

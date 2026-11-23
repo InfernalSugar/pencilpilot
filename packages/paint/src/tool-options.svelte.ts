@@ -6,7 +6,7 @@
  */
 import type PaintCanvas from './PaintCanvas.svelte';
 import type { CanvasStatus, ImportResult } from './PaintCanvas.svelte';
-import { defaultGuides, type GuideSettings } from './guides';
+import { centredGuides, defaultGuides, withPerspective, type GuideSettings } from './guides';
 import { smoothTool, type SmoothTool } from './stabilizer';
 import { NO_SPEC, parseSpec, specName, type AdjustSpec } from './tone';
 import { pickFilter, type FilterSpec } from './filters';
@@ -23,6 +23,8 @@ export interface ToolHost {
 	setTool(tool: string): void;
 	/** the guides changed (to keep them) */
 	onguides?(g: GuideSettings): void;
+	/** the canvas size (for putting guides back in the middle) */
+	size?(): { width: number; height: number };
 }
 
 export const NO_ADJUST = { hue: 0, saturation: 0, brightness: 0, contrast: 0, blur: 0 };
@@ -142,6 +144,25 @@ export class ToolOptions {
 	setGuides(g: GuideSettings) {
 		this.guides = g;
 		this.host.onguides?.(g);
+	}
+
+	/** whether the guides can be put back in the middle */
+	get canCentre() {
+		return !!this.host.size;
+	}
+	/** every guide point back in its centred place (which guides are on stays) */
+	centreGuides() {
+		const s = this.host.size?.();
+		if (s) this.setGuides(centredGuides(this.guides, s.width, s.height));
+	}
+	/** 1-, 2- or 3-point perspective (or off), the points laid out for it unless moved */
+	setPerspective(points: 0 | 1 | 2 | 3) {
+		const s = this.host.size?.();
+		this.setGuides(
+			s
+				? withPerspective(this.guides, points, s.width, s.height)
+				: { ...this.guides, perspective: { ...this.guides.perspective, points } }
+		);
 	}
 
 	/** a picture came in: place it right away (move / resize), as Procreate does */
