@@ -2568,3 +2568,23 @@ test('line layers: strokes stay editable (select, move, recolour, erase, reshape
 	await page.keyboard.press('Control+z');
 	await expect(page.getByRole('img', { name: 'Line layer' })).toBeVisible();
 });
+
+test('Ctrl + drag moves the view (no ink)', async ({ page }) => {
+	await stubTauri(page);
+	await ready(page);
+	const before = (await canvas(page).boundingBox())!;
+	const inkBefore = await ink(page);
+	const [x, y] = [before.x + before.width * 0.5, before.y + before.height * 0.5];
+	await page.mouse.move(x, y);
+	await page.keyboard.down('Control');
+	await expect(page.locator('.viewport.grab')).toBeVisible();
+	await page.mouse.down();
+	await page.mouse.move(x + 120, y + 60, { steps: 6 });
+	await page.mouse.up();
+	await page.keyboard.up('Control');
+	const after = (await canvas(page).boundingBox())!;
+	expect(after.x - before.x).toBeGreaterThan(60);
+	expect(after.y - before.y).toBeGreaterThan(30);
+	expect(await ink(page)).toBe(inkBefore);
+	await expect(page.locator('.viewport.grab')).toHaveCount(0);
+});

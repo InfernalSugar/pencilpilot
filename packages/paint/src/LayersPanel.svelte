@@ -229,7 +229,7 @@
 			<button
 				type="button"
 				aria-label="New line layer"
-				title="New line layer: every line stays editable (select, move, reshape, recolour, erase whole lines), as Clip Studio’s vector layers"
+				title="New line layer: every line stays editable (select, move, reshape, recolour, erase whole lines)"
 				disabled={status.layers.length >= MAX_LAYERS}
 				onclick={() => controls?.addLineLayer?.()}
 			>
