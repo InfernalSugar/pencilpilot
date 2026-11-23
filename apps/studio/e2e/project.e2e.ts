@@ -646,6 +646,16 @@ test('bars fold away and come back; the timeline and the side panel resize', asy
 	await expect(dock).toBeHidden();
 	await page.getByRole('button', { name: 'Show the side panel' }).click();
 	await expect(dock).toBeVisible();
+	// and the tools on the left
+	const stageWidth = async () =>
+		canvas(page).evaluate((el) => el.closest('.stage')!.getBoundingClientRect().width);
+	const was = await stageWidth();
+	await page.getByRole('button', { name: 'Hide the tools' }).click();
+	await expect(page.getByRole('button', { name: 'Hide the tools' })).toBeHidden();
+	await expect.poll(stageWidth).toBeGreaterThan(was + 20);
+	await expect.poll(async () => (await keptSettings(page))?.layout?.rail).toBe(false);
+	await page.getByRole('button', { name: 'Show the tools' }).click();
+	await expect(page.getByRole('button', { name: 'Hide the tools' })).toBeVisible();
 
 	// resizing: drag the timeline's edge up, or use the arrows on the side panel's edge
 	const before = (await tl.boundingBox())!.height;
