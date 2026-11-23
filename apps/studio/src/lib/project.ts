@@ -263,11 +263,30 @@ export async function openProject(path: string): Promise<ProjectDoc> {
 	return unpack(bytes);
 }
 
-/** A file name inside a folder (none: just the name). */
+/**
+ * Where file dialogs start when no folder is set: Documents (else home). Never the
+ * app's own working folder: an AppImage's is inside its read-only mount, so a save
+ * there fails ("Read-only file system").
+ */
+export async function startFolder(folder?: string | null): Promise<string | undefined> {
+	if (folder) return folder;
+	const path = await import('@tauri-apps/api/path');
+	for (const dir of [path.documentDir, path.homeDir])
+		try {
+			const d = await dir();
+			if (d) return d;
+		} catch {
+			/* not there: the next */
+		}
+	return undefined;
+}
+
+/** A file name inside a folder (the start folder when none is set). */
 async function inFolder(folder: string | null | undefined, name: string): Promise<string> {
-	if (!folder) return name;
+	const dir = await startFolder(folder);
+	if (!dir) return name;
 	const { join } = await import('@tauri-apps/api/path');
-	return join(folder, name);
+	return join(dir, name);
 }
 
 /** Ask where to save (a native dialog, starting in `folder`); null if cancelled. */
@@ -285,7 +304,7 @@ export async function askOpenPath(folder?: string | null): Promise<string | null
 	const p = await open({
 		multiple: false,
 		directory: false,
-		defaultPath: folder ?? undefined,
+		defaultPath: await startFolder(folder),
 		filters: [{ name: 'PencilPilot project', extensions: [EXTENSION] }]
 	});
 	return typeof p === 'string' ? p : null;
