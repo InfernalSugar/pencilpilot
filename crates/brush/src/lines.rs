@@ -1821,8 +1821,9 @@ mod tests {
     // ---- brushes that smudge ----
 
     fn shipped(name: &str) -> Brush {
+        // (the website's copies are in the repository; the app's are fetched at build)
         let path = format!(
-            "{}/../../apps/studio/static/brushes/{name}.myb",
+            "{}/../../apps/web/static/brushes/{name}.myb",
             env!("CARGO_MANIFEST_DIR")
         );
         let mut b = hokusai::myb::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
