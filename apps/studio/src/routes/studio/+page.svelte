@@ -68,6 +68,15 @@
 	import ShareDialog from '#lib/ShareDialog.svelte';
 	import SaveChangesDialog from '#lib/SaveChangesDialog.svelte';
 	import SettingsPanel from '#lib/SettingsPanel.svelte';
+	import CanvasSizeDialog from '#lib/CanvasSizeDialog.svelte';
+	import {
+		checkResize,
+		moveCameras,
+		moveGuides,
+		moveText,
+		planCrop,
+		type ResizePlan
+	} from '#lib/canvas-resize.js';
 	import { takeTogether } from '#lib/together-start.js';
 	import {
 		readSavedShare,
@@ -1468,8 +1477,10 @@
 		recordTimeline();
 		const step = canvas?.undoNote() ?? 0;
 		await reveal(canvas?.undoDrawing() ?? 0);
-		canvas?.undo();
-		if (step) putTimeline(tlSteps.get(step)?.before);
+		await sizeStep(false, () => {
+			canvas?.undo();
+			if (step) putTimeline(tlSteps.get(step)?.before);
+		});
 	}
 	/** The History panel: several steps, each with its drawing brought back first. */
 	async function historyGo(steps: number) {
@@ -1482,8 +1493,129 @@
 		recordTimeline();
 		const step = canvas?.redoNote() ?? 0;
 		await reveal(canvas?.redoDrawing() ?? 0);
-		canvas?.redo();
-		if (step) putTimeline(tlSteps.get(step)?.after);
+		await sizeStep(true, () => {
+			canvas?.redo();
+			if (step) putTimeline(tlSteps.get(step)?.after);
+		});
+	}
+
+	/**
+	 * Undo / redo (`go`): if the step is a canvas size, every drawing it changes is
+	 * brought from the frame store first (it puts them all back as they were), and they
+	 * all go back to the store after. If they can't all come, the step doesn't happen.
+	 */
+	async function sizeStep(redoing: boolean, go: () => void) {
+		const ids = canvas?.canvasStepDrawings(redoing) ?? [];
+		if (!ids.length) return go();
+		// (the others' canvases would stay the size they are)
+		if (sharing) return note('Canvas size can’t change while drawing together.', 3500);
+		switching = true;
+		try {
+			await cache.hold(ids);
+		} catch (e) {
+			// (not all of them came: better not to undo than to lose frames)
+			await cache.release();
+			note(`Couldn’t ${redoing ? 'redo' : 'undo'} the canvas size: ${e}`, 4000);
+			return;
+		} finally {
+			switching = false;
+		}
+		go();
+		await cache.release(ids).catch((e) => note(`Couldn’t keep the frames: ${e}`, 4000));
+	}
+
+	// ---- canvas size (Image → Canvas size…): every frame of every layer, one undo step ----
+	let canvasSizeOpen = $state(false);
+	/** about how much paint the project has, in 64×64 tiles (for the memory check) */
+	let projectTiles = $state(0);
+
+	async function openCanvasSize() {
+		fileOpen = exportOpen = importOpen = false;
+		if (!canvas || !status || busy) return;
+		if (sharing) return note('Canvas size can’t change while drawing together.', 3500);
+		let stored = 0;
+		if (cache.native) {
+			const { invoke } = await import('@tauri-apps/api/core');
+			const st = await invoke<{ placed?: number } | null>('frames_stats').catch(() => null);
+			stored = st?.placed ?? 0;
+		}
+		// (the drawings in the window and the ones in the store: a bit over, never under)
+		projectTiles = canvas.tileCount() + stored;
+		const png = await canvas.thumbnail(240).catch(() => null);
+		sizePicture = png
+			? URL.createObjectURL(new Blob([png as BlobPart], { type: 'image/png' }))
+			: null;
+		canvasSizeOpen = true;
+	}
+	/** the drawing as it shows, for the dialog's preview */
+	let sizePicture = $state<string | null>(null);
+	function closeCanvasSize() {
+		canvasSizeOpen = false;
+		if (sizePicture) URL.revokeObjectURL(sizePicture);
+		sizePicture = null;
+	}
+
+	/**
+	 * Change the canvas size: every drawing of every layer and frame (brought from the
+	 * frame store first: the engine changes them all in one undo step), the masks, text
+	 * layers' boxes, the cuts' cameras and the guides. Nothing changes if any of it can't.
+	 */
+	async function resizeAll(plan: ResizePlan) {
+		if (!canvas || !status || busy) return;
+		if (sharing) return note('Canvas size can’t change while drawing together.', 3500);
+		if (playing) stopPlay();
+		await showQueue;
+		if (toolOpts.adjustOpen) toolOpts.closeAdjust(false);
+		const c = canvas;
+		busy = 'resizing';
+		switching = true;
+		let changed: number[] = [];
+		try {
+			c.ensureDrawings();
+			// whatever the timeline has waiting becomes its own step first
+			recordTimeline();
+			const held = drawingsIn(timeline);
+			await cache.hold(held);
+			const texts = (status?.layers ?? []).flatMap((l) => {
+				const t = l.text ? moveText(l.text, plan) : null;
+				return t ? [[l.id, t] as [number, string]] : [];
+			});
+			const guides = moveGuides($state.snapshot(toolOpts.guides), plan);
+			if (!c.resizeCanvas(plan.to.width, plan.to.height, plan.dx, plan.dy, plan.scale, texts))
+				throw new Error('the canvas is busy (finish the transform or adjustment first)');
+			// what the engine changed: every drawing it had, the held ones among them
+			changed = [...new Set([...held, ...c.canvasStepDrawings(false)])];
+			canvasSize = { ...plan.to };
+			// the guides stay on the drawing (kept for the new size, so they aren't rescaled)
+			keepLocal('pp.app.guides', { w: plan.to.width, h: plan.to.height, g: guides });
+			toolOpts.guides = guides;
+			// the cameras frame the same part of the drawing: one step with the pixels
+			timeline = moveCameras(timeline, plan);
+			[tlLabel, tlJoin] = ['Canvas size', true];
+			docVersion++;
+			recordTimeline();
+			await updateOnion();
+			note(`Canvas: ${plan.to.width} × ${plan.to.height}`);
+		} catch (e) {
+			note(`Couldn’t change the canvas size: ${e}`, 4000);
+		} finally {
+			switching = false;
+			busy = '';
+			await cache
+				.release(changed)
+				.catch((e) => note(`Couldn’t keep the frames in the store: ${e}`, 4000));
+		}
+	}
+
+	/** Image → Crop to selection: the canvas becomes the box around the selection. */
+	function cropToSelection() {
+		fileOpen = false;
+		const box = canvas?.selectionBounds();
+		if (!box) return note('Select something first.');
+		const plan = planCrop(canvasSize, box);
+		const ok = checkResize(plan, 0, Infinity);
+		if (!ok.ok) return note(`Can’t crop to that: ${ok.why}`, 3500);
+		void resizeAll(plan);
 	}
 	// paste a picture (or what was copied) as a new layer
 	$effect(() => {
@@ -1520,7 +1652,7 @@
 	let savedVersion = $state(1);
 	/** the canvas version in the recovery copy */
 	let recoveredVersion = 0;
-	let busy = $state<'' | 'saving' | 'opening' | 'exporting' | 'importing'>('');
+	let busy = $state<'' | 'saving' | 'opening' | 'exporting' | 'importing' | 'resizing'>('');
 	let fileNote = $state('');
 	/** something is drawn, on this frame or another */
 	const drawn = $derived(!!status && (!status.blank || drawingsIn(timeline).length > 0));
@@ -3181,6 +3313,26 @@
 						>
 							<b>Save as…</b><span>A copy under a new name ({keyOf('save-as')})</span>
 						</button>
+						<p class="menu-head">Image</p>
+						<button
+							type="button"
+							disabled={!status}
+							title={sharing ? 'Canvas size can’t change while drawing together' : undefined}
+							onclick={() => void openCanvasSize()}
+						>
+							<b>Canvas size…</b><span>
+								{sharing
+									? 'Not while drawing together'
+									: `${canvasSize.width} × ${canvasSize.height}: every frame changes with it`}
+							</span>
+						</button>
+						<button
+							type="button"
+							disabled={!status?.selection || !!sharing}
+							onclick={cropToSelection}
+						>
+							<b>Crop to selection</b><span>The canvas becomes the box around it</span>
+						</button>
 						<p class="menu-head">Export as</p>
 						<button
 							type="button"
@@ -3449,6 +3601,7 @@
 					fill
 					width={canvasSize.width}
 					height={canvasSize.height}
+					oncanvassize={(s) => (canvasSize = s)}
 					{brushId}
 					{eraser}
 					{size}
@@ -3644,6 +3797,19 @@
 			{/if}
 			{#if settingsOpen}
 				<SettingsPanel onclose={() => (settingsOpen = false)} />
+			{/if}
+			{#if canvasSizeOpen}
+				<CanvasSizeDialog
+					size={canvasSize}
+					tiles={projectTiles}
+					limitBytes={settings.frameMemoryMb * 2 ** 20}
+					picture={sizePicture}
+					onclose={closeCanvasSize}
+					onapply={(plan) => {
+						closeCanvasSize();
+						void resizeAll(plan);
+					}}
+				/>
 			{/if}
 			{#if shareOpen}
 				<ShareDialog

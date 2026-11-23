@@ -417,11 +417,15 @@ enum Edit {
         layer: u32,
         props: LayerProps,
     },
-    /// A new canvas size: every layer's colour and mask tiles, by layer id.
+    /// A new canvas size: every drawing's tiles (by drawing id, wherever it is: showing
+    /// on a layer or kept), every layer's mask (by layer id) and text layers'
+    /// descriptions (their boxes move with the canvas).
     Canvas {
         width: u32,
         height: u32,
-        tiles: Vec<(u32, TileMap, Option<TileMap>)>,
+        drawings: Vec<(u32, TileMap)>,
+        masks: Vec<(u32, TileMap)>,
+        texts: Vec<(u32, String)>,
     },
     Batch(Vec<Edit>),
     /// A step of the app's own (the animation timeline changed): no pixels, just its
@@ -1252,19 +1256,31 @@ impl Painter {
             Edit::Canvas {
                 width,
                 height,
-                tiles,
+                drawings,
+                masks,
+                texts,
             } => {
-                let mut old = Vec::with_capacity(tiles.len());
-                for (id, colour, mask) in tiles {
-                    let Some(l) = self.layers.iter_mut().find(|l| l.id == id) else {
-                        continue;
-                    };
-                    let c = std::mem::replace(&mut l.surface.tiles, colour);
-                    let m = match (l.mask.as_mut(), mask) {
-                        (Some(s), Some(t)) => Some(std::mem::replace(&mut s.tiles, t)),
-                        _ => None,
-                    };
-                    old.push((id, c, m));
+                self.stop_mask_editing();
+                let drawings = drawings
+                    .into_iter()
+                    .map(|(d, t)| (d, self.swap_drawing(d, t)))
+                    .collect();
+                let mut old_masks = Vec::with_capacity(masks.len());
+                for (id, t) in masks {
+                    if let Some(m) = self
+                        .layers
+                        .iter_mut()
+                        .find(|l| l.id == id)
+                        .and_then(|l| l.mask.as_mut())
+                    {
+                        old_masks.push((id, std::mem::replace(&mut m.tiles, t)));
+                    }
+                }
+                let mut old_texts = Vec::with_capacity(texts.len());
+                for (id, spec) in texts {
+                    if let Some(l) = self.layers.iter_mut().find(|l| l.id == id) {
+                        old_texts.push((id, std::mem::replace(&mut l.props.text, spec)));
+                    }
                 }
                 let (ow, oh) = (self.width, self.height);
                 self.width = width;
@@ -1278,7 +1294,9 @@ impl Painter {
                 Edit::Canvas {
                     width: ow,
                     height: oh,
-                    tiles: old,
+                    drawings,
+                    masks: old_masks,
+                    texts: old_texts,
                 }
             }
             Edit::Note(id) => Edit::Note(id),
@@ -2200,7 +2218,9 @@ impl Painter {
     /// Change the canvas size (one undo step). Without `scale`, the drawing
     /// keeps its size and moves by (`dx`, `dy`): a crop, or more room; paint
     /// off the new canvas is dropped. With `scale`, the drawing is resized to
-    /// fill the new canvas (`dx`, `dy` ignored).
+    /// fill the new canvas (`dx`, `dy` ignored). Every drawing changes (an
+    /// animation's other frames too, the ones kept here) and every mask; text
+    /// layers get the descriptions in `texts` (by layer id: the app moves their boxes).
     pub fn resize_canvas(
         &mut self,
         width: u32,
@@ -2208,18 +2228,17 @@ impl Painter {
         dx: i32,
         dy: i32,
         scale: bool,
+        texts: &[(u32, String)],
     ) -> bool {
         if !self.idle() || width == 0 || height == 0 || width > 8192 || height > 8192 {
-            return false;
-        }
-        // (an animation's other frames would keep the old size: not yet)
-        if !self.cels.is_empty() {
             return false;
         }
         if width == self.width && height == self.height && (scale || (dx == 0 && dy == 0)) {
             return false;
         }
         self.stop_mask_editing();
+        // every layer's paint gets a drawing, so each one is resized by its drawing
+        self.ensure_drawings();
         let (ow, oh) = (self.width, self.height);
         let redo = |t: &TileMap| {
             if scale {
@@ -2228,23 +2247,84 @@ impl Painter {
                 shift_tiles(t, dx, dy, width, height)
             }
         };
-        let tiles = self
+        // an animation's every drawing: the ones showing, and the other frames' kept here
+        let drawings = self
             .layers
             .iter()
-            .map(|l| {
-                (
-                    l.id,
-                    redo(&l.surface.tiles),
-                    l.mask.as_ref().map(|m| redo(&m.tiles)),
-                )
-            })
+            .filter(|l| l.drawing != 0)
+            .map(|l| (l.drawing, &l.surface.tiles))
+            .chain(self.cels.iter().map(|(&d, t)| (d, t)))
+            .map(|(d, t)| (d, redo(t)))
+            .collect();
+        let masks = self
+            .layers
+            .iter()
+            .filter_map(|l| l.mask.as_ref().map(|m| (l.id, redo(&m.tiles))))
+            .collect();
+        let known: HashSet<u32> = self.layers.iter().map(|l| l.id).collect();
+        let texts = texts
+            .iter()
+            .filter(|(id, _)| known.contains(id))
+            .cloned()
             .collect();
         self.perform(Edit::Canvas {
             width,
             height,
-            tiles,
+            drawings,
+            masks,
+            texts,
         });
         true
+    }
+
+    /// Put `tiles` in place as a drawing's pixels, wherever it is (showing on a layer,
+    /// or kept), and return what it had (nothing, for a drawing not here).
+    fn swap_drawing(&mut self, drawing: u32, tiles: TileMap) -> TileMap {
+        if let Some(l) = self.layers.iter_mut().find(|l| l.drawing == drawing) {
+            let keys: Vec<TileKey> = l
+                .surface
+                .tiles
+                .keys()
+                .chain(tiles.keys())
+                .copied()
+                .collect();
+            let old = std::mem::replace(&mut l.surface.tiles, tiles);
+            l.surface.dirty.extend(keys);
+            return old;
+        }
+        self.cels.insert(drawing, tiles).unwrap_or_default()
+    }
+
+    /// How many tiles of paint the engine holds: every layer's colour and mask, and the
+    /// drawings kept (what a canvas size change copies).
+    pub fn tile_count(&self) -> usize {
+        self.layers
+            .iter()
+            .map(|l| l.surface.tiles.len() + l.mask.as_ref().map_or(0, |m| m.tiles.len()))
+            .sum::<usize>()
+            + self.cels.values().map(|t| t.len()).sum::<usize>()
+    }
+
+    /// The drawings the next undo (or redo) of a canvas size changes: they must all be
+    /// here first (none: the next step isn't one).
+    pub fn canvas_step_drawings(&self, redo: bool) -> Vec<u32> {
+        fn find(e: &Edit, out: &mut Vec<u32>) {
+            match e {
+                Edit::Canvas { drawings, .. } => out.extend(drawings.iter().map(|(d, _)| *d)),
+                Edit::Batch(list) => list.iter().for_each(|e| find(e, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        let step = if redo {
+            self.redo.last()
+        } else {
+            self.undo.last()
+        };
+        if let Some(e) = step {
+            find(e, &mut out);
+        }
+        out
     }
 
     pub fn select_all(&mut self) {
@@ -3578,6 +3658,7 @@ impl Painter {
                 Edit::Tiles { drawing, .. } => {
                     used.insert(*drawing);
                 }
+                Edit::Canvas { drawings, .. } => used.extend(drawings.iter().map(|(d, _)| *d)),
                 Edit::Batch(list) => list.iter().for_each(|e| collect(e, used)),
                 _ => {}
             }
@@ -3728,6 +3809,7 @@ impl Painter {
                 Edit::Tiles { drawing, .. } if *drawing != 0 => {
                     used.insert(*drawing);
                 }
+                Edit::Canvas { drawings, .. } => used.extend(drawings.iter().map(|(d, _)| *d)),
                 Edit::Batch(list) => list.iter().for_each(|e| collect(e, used)),
                 _ => {}
             }
@@ -5068,7 +5150,7 @@ mod tests {
         p.flush();
         let dark = dark_pixels(&p);
         // crop the left 100 px off
-        assert!(p.resize_canvas(100, 100, -100, 0, false));
+        assert!(p.resize_canvas(100, 100, -100, 0, false, &[]));
         p.flush();
         assert_eq!((p.width(), p.height()), (100, 100));
         assert_eq!(p.rgba().len(), 100 * 100 * 4);
@@ -5084,14 +5166,14 @@ mod tests {
         p.redo();
         p.undo();
         // scale to half size: about half the ink
-        assert!(p.resize_canvas(100, 50, 0, 0, true));
+        assert!(p.resize_canvas(100, 50, 0, 0, true, &[]));
         p.flush();
         assert!(px(&p, 50, 25)[0] < 160, "{:?}", px(&p, 50, 25));
         let half = dark_pixels(&p);
         assert!(half > 0 && half < dark, "{half} vs {dark}");
         // more room: moves the drawing over
         p.undo();
-        assert!(p.resize_canvas(300, 100, 50, 0, false));
+        assert!(p.resize_canvas(300, 100, 50, 0, false, &[]));
         p.flush();
         assert!(px(&p, 120, 50)[0] < 100 && px(&p, 30, 50)[0] > 200);
     }
@@ -5294,6 +5376,70 @@ mod tests {
         p.show_drawings(&[layer, first]);
         p.flush();
         assert!(dark_rows(&p, 20, 40) > 50);
+    }
+
+    /// the rows (y) a drawing has paint on, wherever it is
+    fn ink_rows(p: &Painter, drawing: u32) -> Option<(u32, u32)> {
+        let w = p.width() as usize;
+        let rgba = p.drawing_rgba(drawing);
+        let rows: Vec<u32> = rgba
+            .chunks(w * 4)
+            .enumerate()
+            .filter(|(_, r)| r.chunks(4).any(|px| px[3] > 100))
+            .map(|(y, _)| y as u32)
+            .collect();
+        Some((*rows.first()?, *rows.last()?))
+    }
+
+    #[test]
+    fn canvas_size_changes_every_frame_and_undoes_in_one_step() {
+        let mut p = Painter::new(256, 128);
+        let layer = p.active_layer();
+        let b = pen();
+        line(&mut p, &b, 30.0);
+        let first = p.layer_drawing(layer);
+        p.show_drawings(&[layer, 0]);
+        line(&mut p, &b, 100.0);
+        let second = p.layer_drawing(layer);
+        let (a0, b0) = (ink_rows(&p, first).unwrap(), ink_rows(&p, second).unwrap());
+        // more room, 64 px on every side: both frames move down and right by 64
+        assert!(p.canvas_step_drawings(false).is_empty());
+        assert!(p.resize_canvas(384, 256, 64, 64, false, &[]));
+        assert_eq!((p.width(), p.height()), (384, 256));
+        let mut step = p.canvas_step_drawings(false);
+        step.sort();
+        assert_eq!(step, vec![first, second]);
+        assert_eq!(ink_rows(&p, first), Some((a0.0 + 64, a0.1 + 64)));
+        assert_eq!(ink_rows(&p, second), Some((b0.0 + 64, b0.1 + 64)));
+        // another frame shows before the undo: the drawings still go back by id
+        p.show_drawings(&[layer, first]);
+        p.undo();
+        assert_eq!((p.width(), p.height()), (256, 128));
+        assert_eq!(ink_rows(&p, first), Some(a0));
+        assert_eq!(ink_rows(&p, second), Some(b0));
+        assert_eq!(p.canvas_step_drawings(true).len(), 2);
+        p.redo();
+        assert_eq!(ink_rows(&p, second), Some((b0.0 + 64, b0.1 + 64)));
+        p.undo();
+        // scaled to half: the ink at half the height
+        assert!(p.resize_canvas(128, 64, 0, 0, true, &[]));
+        let (s0, s1) = ink_rows(&p, second).unwrap();
+        assert!(s0.abs_diff(b0.0 / 2) <= 2 && s1.abs_diff(b0.1 / 2) <= 2);
+        p.undo();
+        assert_eq!(ink_rows(&p, second), Some(b0));
+    }
+
+    #[test]
+    fn canvas_size_moves_text_boxes_and_undoes_them() {
+        let mut p = Painter::new(128, 64);
+        let id = p.active_layer();
+        assert!(p.set_text_silent(id, "{\"x\":1}"));
+        assert!(p.resize_canvas(256, 64, 10, 0, false, &[(id, "{\"x\":11}".into())]));
+        assert_eq!(props(&p, id).text, "{\"x\":11}");
+        p.undo();
+        assert_eq!(props(&p, id).text, "{\"x\":1}");
+        p.redo();
+        assert_eq!(props(&p, id).text, "{\"x\":11}");
     }
 
     #[test]

@@ -2234,3 +2234,119 @@ test('the top bar menus close on a press outside them (the canvas too) or Escape
 	await page.getByRole('button', { name: 'Import', exact: true }).click();
 	await expect(page.getByRole('group', { name: 'Import' })).toBeHidden();
 });
+
+/** the box around the ink on the canvas, in canvas px (null: none), and the canvas width */
+async function inkBox(page: Page) {
+	return canvas(page).evaluate((el: HTMLCanvasElement) => {
+		const d = el.getContext('2d')!.getImageData(0, 0, el.width, el.height).data;
+		let [x0, y0, x1, y1] = [el.width, el.height, -1, -1];
+		for (let i = 0; i < d.length; i += 4)
+			if (d[i] < 200) {
+				const p = i / 4;
+				const [x, y] = [p % el.width, Math.floor(p / el.width)];
+				[x0, y0, x1, y1] = [Math.min(x0, x), Math.min(y0, y), Math.max(x1, x), Math.max(y1, y)];
+			}
+		return x1 < 0 ? null : { x0, y0, x1, y1, w: el.width };
+	});
+}
+type Box = { x0: number; y0: number; x1: number; y1: number; w: number };
+
+test('canvas size: every frame moves with it, one undo step, kept in the file', async ({
+	page
+}) => {
+	await stubTauri(page);
+	// one drawing in the window besides the ones showing: the rest come from the store
+	await page.addInitScript(() => localStorage.setItem('pp.dev.keepDrawings', '1'));
+	await ready(page);
+	const tl = page.getByRole('region', { name: 'Timeline' });
+	/** the ink's box once it stops changing (a frame coming from the store, a redraw) */
+	const settled = async () => {
+		let last = '';
+		await expect
+			.poll(async () => {
+				const before = last;
+				last = JSON.stringify(await inkBox(page));
+				return last === before && last !== 'null';
+			})
+			.toBe(true);
+		return JSON.parse(last) as Box;
+	};
+	/** the ink is where `want` was, times k, moved by (dx, dy) */
+	const lands = async (want: Box, w: number, k = 1, dx = 0, dy = 0, slack = 2) => {
+		const at = (b: Box | null) =>
+			!!b &&
+			b.w === w &&
+			[
+				[b.x0, want.x0 * k + dx],
+				[b.x1, want.x1 * k + dx],
+				[b.y0, want.y0 * k + dy],
+				[b.y1, want.y1 * k + dy]
+			].every(([a, e]) => Math.abs(a - e) <= slack);
+		await expect.poll(async () => at(await inkBox(page))).toBe(true);
+	};
+	// three frames: a line at the top, the middle, the bottom
+	const boxes: Box[] = [];
+	for (const [i, y] of [0.2, 0.45, 0.7].entries()) {
+		if (i) await tl.getByRole('button', { name: 'New drawing' }).click();
+		await scribble(page, y);
+		boxes.push(await settled());
+	}
+	expect(boxes[0].w).toBe(1920);
+	const frame = (n: number) => tl.getByRole('button', { name: `Frame ${n}`, exact: true }).click();
+	const openSize = async () => {
+		await page.getByRole('button', { name: 'File', exact: true }).click();
+		await page.getByRole('button', { name: /Canvas size…/ }).click();
+		return page.getByRole('dialog', { name: 'Canvas size' });
+	};
+
+	// more room, anchored in the middle: 2880 × 1620 (the aspect ratio stays locked)
+	let dlg = await openSize();
+	await dlg.getByLabel('Width').fill('2880');
+	await dlg.getByLabel('Width').press('Tab');
+	await expect(dlg.getByLabel('Height')).toHaveValue('1620');
+	await expect(dlg.getByRole('radio', { name: 'Keep the middle in place' })).toHaveAttribute(
+		'aria-checked',
+		'true'
+	);
+	await dlg.getByRole('button', { name: 'Resize canvas' }).click();
+	await expect(dlg).toHaveCount(0);
+	// frame 3 shows: moved by (480, 270); and so are frames 1 and 2 (from the store)
+	await lands(boxes[2], 2880, 1, 480, 270);
+	for (const n of [1, 2]) {
+		await frame(n);
+		await lands(boxes[n - 1], 2880, 1, 480, 270);
+	}
+	// one undo: every frame as it was
+	await page.keyboard.press('Control+z');
+	await lands(boxes[1], 1920);
+	for (const n of [1, 3]) {
+		await frame(n);
+		await lands(boxes[n - 1], 1920);
+	}
+	// redo, and undo again
+	await page.keyboard.press('Control+Shift+z');
+	await lands(boxes[2], 2880, 1, 480, 270);
+	await page.keyboard.press('Control+z');
+	await lands(boxes[2], 1920);
+
+	// half the size, the drawing scaled with it
+	dlg = await openSize();
+	await dlg.getByLabel('Resize the drawing too').check();
+	await dlg.getByLabel('Width').fill('960');
+	await dlg.getByLabel('Width').press('Tab');
+	await expect(dlg.getByLabel('Height')).toHaveValue('540');
+	await dlg.getByRole('button', { name: 'Resize canvas' }).click();
+	await lands(boxes[2], 960, 0.5, 0, 0, 3);
+	await frame(1);
+	await lands(boxes[0], 960, 0.5, 0, 0, 3);
+
+	// saved and opened again: the new size, the frames as they are now
+	await page.keyboard.press('Control+s');
+	await expect(page.getByTestId('project-name')).toHaveText('Walk cycle', { timeout: 20_000 });
+	await page.keyboard.press('Control+o');
+	await expect(tl.getByRole('button', { name: /drawing 3, frame 3$/ })).toBeVisible({
+		timeout: 20_000
+	});
+	await frame(2);
+	await lands(boxes[1], 960, 0.5, 0, 0, 3);
+});
