@@ -411,11 +411,13 @@ impl Sharing {
             }
         }
         invite.addrs.retain(|a| a.id.to_string() != id.id());
-        let joined = if invite.addrs.is_empty() || cloud_state == "idle" {
+        // (the cloud says no one is in: a short try, for a session it was never let into)
+        let wait = if cloud_state == "idle" { 6 } else { 12 };
+        let joined = if invite.addrs.is_empty() {
             None
         } else {
             tokio::time::timeout(
-                std::time::Duration::from_secs(12),
+                std::time::Duration::from_secs(wait),
                 Session::join(&id, &invite, &pass, &site, relays(net.relay.as_deref())),
             )
             .await
