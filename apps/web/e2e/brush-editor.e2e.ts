@@ -41,7 +41,7 @@ test('brush editor: adjust a brush, save it to My brushes, draw with it, keep it
 		'true'
 	);
 	const mine = page.getByRole('list', { name: 'My brushes' });
-	await expect(mine.getByRole('button', { name: 'Crisp pencil' })).toHaveAttribute(
+	await expect(mine.getByRole('button', { name: 'Crisp pencil', exact: true })).toHaveAttribute(
 		'aria-pressed',
 		'true'
 	);
@@ -63,7 +63,7 @@ test('brush editor: adjust a brush, save it to My brushes, draw with it, keep it
 	await expect(canvas(page)).toHaveAttribute('data-ready', 'true', { timeout: 15_000 });
 	await page.getByRole('tab', { name: /^Brushes/ }).click();
 	await page.getByRole('tab', { name: 'My brushes (1)' }).click();
-	await mine.getByRole('button', { name: 'Crisp pencil' }).click();
+	await mine.getByRole('button', { name: 'Crisp pencil', exact: true }).click();
 	await expect(page.locator('.brush-name')).toHaveText('Crisp pencil');
 	await expect(page.getByRole('radio', { name: 'Heavy hand' })).toHaveAttribute(
 		'aria-checked',
