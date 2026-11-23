@@ -196,6 +196,45 @@ test('6. copy, paste as a new layer and move it; cut removes the original', asyn
 	await expect.poll(() => inkNear(page, 0.67, 0.3)).toBe(0);
 });
 
+test('6b. copy takes what shows across layers; a tap away from the box accepts the move', async ({
+	page
+}) => {
+	await ready(page);
+	const block = async (x0: number, x1: number) => {
+		await page.keyboard.press('b');
+		await page.keyboard.press('f');
+		await stroke(page, [
+			[x0, 0.25],
+			[x1, 0.25],
+			[x1, 0.35],
+			[x0, 0.35],
+			[x0, 0.26]
+		]);
+	};
+	// one block on this layer, another on a new one
+	await block(0.15, 0.25);
+	await page.getByRole('button', { name: 'New layer' }).click();
+	await block(0.3, 0.4);
+	// select both, copy, paste: both come along
+	await page.keyboard.press('m');
+	await dragOn(page, await at(page, 0.1, 0.2), await at(page, 0.45, 0.4));
+	await page.keyboard.press('Control+c');
+	await page
+		.getByRole('group', { name: 'Selection' })
+		.getByRole('button', { name: 'Paste' })
+		.click();
+	const done = page.getByRole('button', { name: 'Done' });
+	await expect(done).toBeVisible();
+	await dragOn(page, await at(page, 0.2, 0.3), await at(page, 0.2, 0.65));
+	// a tap away from the box: done, no Enter needed
+	await page.mouse.click(...(await at(page, 0.85, 0.9)));
+	await expect(done).toHaveCount(0);
+	await expect.poll(() => inkNear(page, 0.2, 0.65)).toBeGreaterThan(0);
+	expect(await inkNear(page, 0.35, 0.65)).toBeGreaterThan(0);
+	// (the tap didn't move it: nothing where it was tapped)
+	expect(await inkNear(page, 0.85, 0.9)).toBe(0);
+});
+
 test('7. Ctrl+Alt+drag resizes the brush on the canvas', async ({ page }) => {
 	await ready(page);
 	await page.mouse.move(...(await at(page, 0.5, 0.5)));

@@ -786,7 +786,7 @@
 			toolOpts.copyCut(k === 'x');
 		} else if (mod && k === 'j') {
 			e.preventDefault();
-			if (canvas?.copySelection(false)) toolOpts.pasteCopied();
+			if (canvas?.copySelection(false, false)) toolOpts.pasteCopied();
 		} else if (!mod && k === 'v') tool = tool === 'transform' ? 'brush' : 'transform';
 		else if (!mod && k === 'k') tool = tool === 'liquify' ? 'brush' : 'liquify';
 		else if (tool === 'transform' && e.key === 'Enter') canvas?.transformCommit();
