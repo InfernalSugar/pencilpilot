@@ -10,6 +10,7 @@
 //! | `thumbnail.png` | a small picture for the project browser (optional) |
 //! | `audio/<hash>.<ext>` | a sound file a scene plays (as imported: WAV, MP3, OGG…) |
 //! | `fonts/<hash>.<ext>` | a font file text layers use (as imported: TTF, OTF, WOFF2) |
+//! | `references/<hash>.<ext>` | a reference picture the user imported to draw from (as imported) |
 //! | `lines/<drawing>` | a drawing's editable strokes (the app's own data, kept as given) |
 //! | `timelapse/<n>.jpg` | the timelapse: a small picture after each change (optional) |
 //!
@@ -363,6 +364,18 @@ pub struct Manifest {
     /// font files imported for text layers: `fonts/<file>`
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fonts: Vec<FontFile>,
+    /// reference pictures the user imported to draw from, in order: `references/<file>`
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub references: Vec<RefFile>,
+}
+
+/// A reference picture kept in the project (never part of the drawing or its exports).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RefFile {
+    /// the picture's name as imported (shown to the user)
+    pub name: String,
+    /// the file in the archive: `references/<file>`
+    pub file: String,
 }
 
 /// A font file kept in the project, and the family name text layers know it by.
@@ -393,6 +406,8 @@ pub struct Project {
     pub timelapse: Vec<Vec<u8>>,
     /// font files: name (`<hash>.<ext>`) → bytes
     pub fonts: HashMap<String, Vec<u8>>,
+    /// reference pictures: name (`<hash>.<ext>`) → bytes
+    pub references: HashMap<String, Vec<u8>>,
     /// line layers' strokes: drawing name (`D<n>`, a key of `manifest.drawings`) → the
     /// app's data for it (its own versioned binary, kept as given)
     pub lines: HashMap<String, Vec<u8>>,
@@ -400,6 +415,10 @@ pub struct Project {
 
 /// Font files may be this big (each).
 pub const FONT_MAX: usize = 64 << 20;
+
+/// Reference pictures may be this big (each), and a project may keep this many.
+pub const REFERENCE_MAX: usize = 64 << 20;
+pub const REFERENCES_MAX: usize = 200;
 
 /// A drawing's line data may be this big.
 pub const LINES_MAX: usize = 256 << 20;
@@ -454,6 +473,7 @@ impl Project {
                 extra: serde_json::Value::Null,
                 timelapse: Vec::new(),
                 fonts: Vec::new(),
+                references: Vec::new(),
             },
             tiles: HashMap::new(),
             strokes: b"[]".to_vec(),
@@ -461,6 +481,7 @@ impl Project {
             audio: HashMap::new(),
             timelapse: Vec::new(),
             fonts: HashMap::new(),
+            references: HashMap::new(),
             lines: HashMap::new(),
         }
     }
@@ -514,6 +535,46 @@ impl Project {
         if !self.manifest.fonts.iter().any(|f| f.family == family) {
             self.manifest.fonts.push(FontFile { family, file });
         }
+        Ok(())
+    }
+
+    /// Keep a reference picture (stored once, by its content) after the others, under the
+    /// name it was imported with. The same picture twice is kept once.
+    pub fn put_reference(&mut self, name: &str, bytes: &[u8], ext: &str) -> Result<()> {
+        let ext: String = ext
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .take(5)
+            .collect::<String>()
+            .to_ascii_lowercase();
+        let file = format!(
+            "{}.{}",
+            hash(bytes),
+            if ext.is_empty() { "img" } else { &ext }
+        );
+        if bytes.len() > REFERENCE_MAX {
+            return Err(Error::Invalid(format!(
+                "reference picture {file} is too big"
+            )));
+        }
+        if self.manifest.references.iter().any(|r| r.file == file) {
+            return Ok(());
+        }
+        if self.manifest.references.len() >= REFERENCES_MAX {
+            return Err(Error::Invalid("too many reference pictures".into()));
+        }
+        let name: String = name.trim().chars().take(200).collect();
+        self.references
+            .entry(file.clone())
+            .or_insert_with(|| bytes.to_vec());
+        self.manifest.references.push(RefFile {
+            name: if name.is_empty() {
+                "Reference".into()
+            } else {
+                name
+            },
+            file,
+        });
         Ok(())
     }
 
@@ -661,6 +722,17 @@ impl Project {
                 || f.family.chars().count() > 100
             {
                 return Err(Error::Invalid(format!("font {}", f.file)));
+            }
+        }
+        if m.references.len() > REFERENCES_MAX {
+            return Err(Error::Invalid("too many reference pictures".into()));
+        }
+        for r in &m.references {
+            if !audio_name_ok(&r.file)
+                || !self.references.contains_key(&r.file)
+                || r.name.chars().count() > 200
+            {
+                return Err(Error::Invalid(format!("reference picture {}", r.file)));
             }
         }
         for (name, data) in &self.lines {
@@ -816,6 +888,18 @@ impl Project {
             z.start_file(format!("fonts/{name}"), stored)?;
             z.write_all(bytes)?;
         }
+        // reference pictures (compressed already: stored)
+        let mut refs: Vec<&String> = self.manifest.references.iter().map(|r| &r.file).collect();
+        refs.sort();
+        refs.dedup();
+        for name in refs {
+            let bytes = self
+                .references
+                .get(name)
+                .ok_or_else(|| Error::Invalid(format!("missing reference picture {name}")))?;
+            z.start_file(format!("references/{name}"), stored)?;
+            z.write_all(bytes)?;
+        }
         // line layers' strokes, for the drawings that are there
         let mut lines: Vec<(&String, &Vec<u8>)> = self
             .lines
@@ -864,6 +948,7 @@ impl Project {
         let mut tiles = HashMap::new();
         let mut audio = HashMap::new();
         let mut fonts = HashMap::new();
+        let mut references = HashMap::new();
         let mut lines = HashMap::new();
         let mut timelapse: BTreeMap<usize, Vec<u8>> = BTreeMap::new();
         for i in 0..z.len() {
@@ -899,6 +984,17 @@ impl Project {
                     return Err(Error::Invalid(format!("font file {name}")));
                 }
                 fonts.insert(name, v);
+                continue;
+            }
+            if let Some(name) = f.name()?.strip_prefix("references/").map(str::to_owned) {
+                let mut v = Vec::new();
+                (&mut f)
+                    .take(REFERENCE_MAX as u64 + 1)
+                    .read_to_end(&mut v)?;
+                if v.len() > REFERENCE_MAX || !audio_name_ok(&name) {
+                    return Err(Error::Invalid(format!("reference picture {name}")));
+                }
+                references.insert(name, v);
                 continue;
             }
             if let Some(name) = f.name()?.strip_prefix("lines/").map(str::to_owned) {
@@ -943,6 +1039,7 @@ impl Project {
             audio,
             timelapse: pictures,
             fonts,
+            references,
             lines,
         };
         p.validate()?;
@@ -1337,6 +1434,29 @@ mod tests {
         // a font the file names but doesn't hold
         q.fonts.clear();
         assert!(q.validate().is_err());
+        // reference pictures: kept in order, once each, and back
+        let mut r = p.clone();
+        r.put_reference("cat.png", b"\x89PNG cat", "PNG").unwrap();
+        r.put_reference(" dog photo ", b"\xff\xd8 dog", "jpg")
+            .unwrap();
+        r.put_reference("cat again.png", b"\x89PNG cat", "png")
+            .unwrap();
+        assert_eq!(
+            r.manifest.references.len(),
+            2,
+            "the same picture is kept once"
+        );
+        assert_eq!(r.manifest.references[1].name, "dog photo");
+        let mut buf = std::io::Cursor::new(Vec::new());
+        r.write(&mut buf).unwrap();
+        let back = Project::read(std::io::Cursor::new(buf.into_inner())).unwrap();
+        assert_eq!(back.manifest.references, r.manifest.references);
+        let file = &back.manifest.references[0].file;
+        assert!(file.ends_with(".png"));
+        assert_eq!(back.references.get(file).unwrap(), b"\x89PNG cat");
+        // a picture the file names but doesn't hold
+        r.references.clear();
+        assert!(r.validate().is_err());
         // more times than pictures: the timelapse is cut short, the project still opens
         let mut q = p.clone();
         q.manifest.timelapse.push(1_700_000_009_000);

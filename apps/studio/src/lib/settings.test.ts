@@ -146,4 +146,16 @@ describe('settings', () => {
 			afterColour: DEFAULTS.onion.afterColour
 		});
 	});
+	it('keep the reference where it was put, within limits', () => {
+		const s = cleanSettings({
+			reference: { shown: true, place: 'float', split: 2, float: { x: -5, y: 40, w: 50, h: 'big' } }
+		});
+		expect(s.reference).toEqual({
+			shown: true,
+			place: 'float',
+			split: 0.75,
+			float: { x: 0, y: 40, w: 200, h: DEFAULTS.reference.float.h }
+		});
+		expect(cleanSettings({ reference: { place: 'nowhere' } }).reference.place).toBe('side');
+	});
 });

@@ -43,6 +43,16 @@ export interface ProjectDoc {
 	timelapse?: { jpeg: Uint8Array; t: number }[];
 	/** font files text layers use: the family they know it by, the file as imported */
 	fonts?: { family: string; file: string; bytes: Uint8Array }[];
+	/** reference pictures imported to draw from, in order: the name and file as imported */
+	references?: ProjectReference[];
+}
+
+/** A reference picture kept in the project (never part of the drawing or its exports). */
+export interface ProjectReference {
+	name: string;
+	/** the file's name as imported (for its type); saved, it's named by its content */
+	file: string;
+	bytes: Uint8Array;
 }
 
 export interface ProjectDrawing {
@@ -96,6 +106,7 @@ interface Header {
 	}[];
 	timelapse?: { t: number; bytes: [number, number] }[];
 	fonts?: { family: string; file: string; bytes: [number, number] }[];
+	references?: { name: string; file: string; bytes: [number, number] }[];
 }
 
 const MAGIC = [0x50, 0x50, 0x53, 0x31]; // "PPS1"
@@ -144,6 +155,15 @@ export function pack(doc: ProjectDoc): Uint8Array {
 			: {}),
 		...(doc.fonts?.length
 			? { fonts: doc.fonts.map((f) => ({ family: f.family, file: f.file, bytes: put(f.bytes) })) }
+			: {}),
+		...(doc.references?.length
+			? {
+					references: doc.references.map((r) => ({
+						name: r.name,
+						file: r.file,
+						bytes: put(r.bytes)
+					}))
+				}
 			: {}),
 		...(doc.scenes?.length
 			? {
@@ -231,6 +251,15 @@ export function unpack(packet: ArrayBuffer | Uint8Array): ProjectDoc {
 		...(h.fonts?.length
 			? { fonts: h.fonts.map((f) => ({ family: f.family, file: f.file, bytes: get(f.bytes) })) }
 			: {}),
+		...(h.references?.length
+			? {
+					references: h.references.map((r) => ({
+						name: r.name,
+						file: r.file,
+						bytes: get(r.bytes)
+					}))
+				}
+			: {}),
 		drawings: (h.drawings ?? []).map((d) => ({
 			id: d.id,
 			layer: d.layer,
@@ -263,11 +292,30 @@ export async function openProject(path: string): Promise<ProjectDoc> {
 	return unpack(bytes);
 }
 
-/** A file name inside a folder (none: just the name). */
+/**
+ * Where file dialogs start when no folder is set: Documents (else home). Never the
+ * app's own working folder: an AppImage's is inside its read-only mount, so a save
+ * there fails ("Read-only file system").
+ */
+export async function startFolder(folder?: string | null): Promise<string | undefined> {
+	if (folder) return folder;
+	const path = await import('@tauri-apps/api/path');
+	for (const dir of [path.documentDir, path.homeDir])
+		try {
+			const d = await dir();
+			if (d) return d;
+		} catch {
+			/* not there: the next */
+		}
+	return undefined;
+}
+
+/** A file name inside a folder (the start folder when none is set). */
 async function inFolder(folder: string | null | undefined, name: string): Promise<string> {
-	if (!folder) return name;
+	const dir = await startFolder(folder);
+	if (!dir) return name;
 	const { join } = await import('@tauri-apps/api/path');
-	return join(folder, name);
+	return join(dir, name);
 }
 
 /** Ask where to save (a native dialog, starting in `folder`); null if cancelled. */
@@ -285,7 +333,7 @@ export async function askOpenPath(folder?: string | null): Promise<string | null
 	const p = await open({
 		multiple: false,
 		directory: false,
-		defaultPath: folder ?? undefined,
+		defaultPath: await startFolder(folder),
 		filters: [{ name: 'PencilPilot project', extensions: [EXTENSION] }]
 	});
 	return typeof p === 'string' ? p : null;

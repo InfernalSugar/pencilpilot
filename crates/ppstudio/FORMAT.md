@@ -11,6 +11,7 @@ This crate (`pencilpilot-ppstudio`) reads and writes it.
 | `tiles/<hash>` | deflate | one tile of pixels (below) |
 | `audio/<hash>.<ext>` | stored | a sound file a scene plays, as imported (below) |
 | `fonts/<hash>.<ext>` | stored | a font file text layers use, as imported (below) |
+| `references/<hash>.<ext>` | stored | optional; a reference picture the user imported to draw from, as imported (below) |
 | `lines/<drawing>` | deflate | optional; a drawing's editable strokes, the app's own data (below) |
 | `timelapse/<n>.jpg` | stored | optional; the timelapse, a JPEG after each change (`000000.jpg` first) |
 
@@ -74,7 +75,8 @@ This crate (`pencilpilot-ppstudio`) reads and writes it.
   },
   "extra": { },                  // the app's own settings (brush, colour…), kept as given
   "timelapse": [ 1795279000000, 1795279004200 ], // optional: when each timelapse picture was taken (ms since 1970)
-  "fonts": [ { "family": "My Hand", "file": "5e0c….ttf" } ]  // optional: font files text layers use
+  "fonts": [ { "family": "My Hand", "file": "5e0c….ttf" } ],  // optional: font files text layers use
+  "references": [ { "name": "pose.jpg", "file": "9a1f….jpg" } ]  // optional: reference pictures, in order
 }
 ```
 
@@ -144,6 +146,10 @@ This crate (`pencilpilot-ppstudio`) reads and writes it.
 - `fonts` are the font files the user imported for text layers: `fonts/<file>` (named
   by the BLAKE3 hash of its bytes and its extension), known to `text` by `family`. Only
   fonts the user imported are kept, never the system's.
+- `references` are pictures the user imported to draw from, in the order the app
+  shows them: `references/<file>` (named by the BLAKE3 hash of its bytes and its
+  extension), with the `name` it was imported under. They are the user's own files,
+  never part of the drawing or of any export; at most 200, each at most 64 MiB.
 
 ## Line layers
 

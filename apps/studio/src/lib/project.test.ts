@@ -105,6 +105,16 @@ describe('project packets', () => {
 		expect(back.layers[1].text).toBeUndefined();
 	});
 
+	it('round-trip reference pictures, in order (old files have none)', () => {
+		const d = doc();
+		d.references = [
+			{ name: 'pose.jpg', file: 'pose.jpg', bytes: Uint8Array.from([0xff, 0xd8, 1]) },
+			{ name: 'hands.png', file: 'hands.png', bytes: Uint8Array.from([0x89, 0x50, 2]) }
+		];
+		expect(unpack(pack(d))).toEqual(d);
+		expect(unpack(pack(doc())).references).toBeUndefined();
+	});
+
 	it('round-trip line layers and their drawings’ strokes (old files have none)', () => {
 		const d = doc();
 		d.layers[0].lines = true;

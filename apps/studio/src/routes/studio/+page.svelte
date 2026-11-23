@@ -15,6 +15,7 @@
 		anyGuide,
 		centredGuides,
 		defaultGuides,
+		gridLines,
 		readGuides,
 		type GuideSettings
 	} from '@pencilpilot/paint/guides';
@@ -68,6 +69,9 @@
 	import VersionsMenu from '#lib/VersionsMenu.svelte';
 	import XSheet from '#lib/XSheet.svelte';
 	import { psdStem, psdToDoc, tooBig } from '#lib/psd-open.js';
+	import ReferencePanel from '#lib/ReferencePanel.svelte';
+	import RefSplit from '#lib/RefSplit.svelte';
+	import { RefShelf, skippedNote } from '#lib/references.svelte.js';
 	import { AudioBank, wav } from '#lib/audio.js';
 	import ExportDialog from '#lib/ExportDialog.svelte';
 	import LipSyncDialog from '#lib/LipSyncDialog.svelte';
@@ -441,6 +445,48 @@
 		toggleMarker(s, f);
 		tlLabel = 'Marker';
 		docVersion++;
+	}
+
+	// ---- reference pictures: the user's own, kept in the project (never exported) ----
+	const refShelf = new RefShelf();
+	let refInput = $state<HTMLInputElement>();
+	/** the canvas grid, put on the reference too (the grid method) */
+	const refGrid = () =>
+		toolOpts.guides.grid.on
+			? gridLines(toolOpts.guides, canvasSize.width, canvasSize.height)
+			: null;
+	function showReference(on = !settings.reference.shown) {
+		settings.reference.shown = on;
+	}
+	// in the corner: the side panel shows, so the picture does
+	$effect(() => {
+		if (settings.reference.shown && settings.reference.place === 'corner')
+			untrack(() => {
+				settings.layout.dock = true;
+				dockOpen = true;
+			});
+	});
+	async function importReferences(files: File[]) {
+		if (!files.length) return;
+		showReference(true);
+		try {
+			const r = await refShelf.add(
+				await Promise.all(
+					files.map(async (f) => ({ name: f.name, bytes: new Uint8Array(await f.arrayBuffer()) }))
+				)
+			);
+			if (r.added) docVersion++;
+			const left = skippedNote(r);
+			if (left) note(left, 5000);
+		} catch (e) {
+			note(`Couldn’t import the pictures: ${e}`, 5000);
+		}
+	}
+	/** a colour picked from the reference: paint with it */
+	function refPicked(c: string) {
+		color = c;
+		eraser = false;
+		tool = 'brush';
 	}
 
 	// ---- frames in, for rotoscoping (S3-T04): image sequences, video frames ----
@@ -1681,7 +1727,8 @@
 	/** something is drawn, on this frame or another */
 	const drawn = $derived(!!status && (!status.blank || drawingsIn(timeline).length > 0));
 	const unsaved = $derived(
-		!!status && (savedVersion === -1 || (drawn && docVersion !== savedVersion))
+		!!status &&
+			(savedVersion === -1 || ((drawn || refShelf.pics.length > 0) && docVersion !== savedVersion))
 	);
 	/** a document being loaded, waiting for its canvas (and whether it starts unsaved) */
 	let pending = $state.raw<{ doc: ProjectDoc; unsaved: boolean } | null>(null);
@@ -2229,6 +2276,7 @@
 			}),
 			...(timelapse ? { timelapse: await c.timelapse().saved() } : {}),
 			fonts: fontsUsed(snap.layers.map((l) => parseText(l.text))),
+			references: refShelf.toFile(),
 			drawings
 		};
 	}
@@ -2943,6 +2991,8 @@
 		const doc = p.doc;
 		const anim = !!doc.scenes?.length;
 		const c = canvas;
+		// its reference pictures
+		void refShelf.load(doc.references);
 		// its text layers' fonts (their pixels are there already: needed to change them)
 		if (doc.fonts?.length)
 			void Promise.all(doc.fonts.map((f) => addFont(f.family, f.file, f.bytes))).then(() =>
@@ -3291,7 +3341,7 @@
 		else if (action === 'adjust') toolOpts.openAdjust();
 		else if (action === 'copy' || action === 'cut') toolOpts.copyCut(action === 'cut');
 		else if (action === 'copy-to-layer') {
-			if (canvas?.copySelection(false)) toolOpts.pasteCopied();
+			if (canvas?.copySelection(false, false)) toolOpts.pasteCopied();
 		} else if (action === 'select-all') canvas?.selectAll();
 		else if (action === 'deselect') canvas?.deselect();
 		else if (action === 'invert-selection') canvas?.invertSelection();
@@ -3304,6 +3354,7 @@
 		else if (action === 'rotate-right') canvas?.rotateBy(15);
 		else if (action === 'rotate-reset') canvas?.resetRotation();
 		else if (action === 'mirror') canvas?.toggleMirror();
+		else if (action === 'reference') showReference();
 		else if (action === 'save') void save(false);
 		else if (action === 'save-as') void save(true);
 		else if (action === 'open') void open();
@@ -3334,6 +3385,21 @@
 	}}
 	onblur={endFlip}
 />
+
+{#snippet reference(where: 'corner' | 'side' | 'float')}
+	<ReferencePanel
+		shelf={refShelf}
+		{where}
+		bind:layout={settings.reference}
+		gridLines={refGrid()}
+		{canvasSize}
+		onpick={refPicked}
+		onchange={() => docVersion++}
+	/>
+{/snippet}
+{#snippet refPane()}
+	{@render reference('side')}
+{/snippet}
 
 <div class="app">
 	<Studio
@@ -3507,6 +3573,17 @@
 						>
 							<b>Video frames…</b><span>A frame per frame at {fps} fps, to trace over</span>
 						</button>
+						<button
+							type="button"
+							onclick={() => {
+								importOpen = false;
+								refInput?.click();
+							}}
+						>
+							<b>Reference pictures…</b><span>
+								Your own pictures to draw from, beside the canvas
+							</span>
+						</button>
 					</div>
 				{/if}
 				<input
@@ -3519,6 +3596,19 @@
 						const f = e.currentTarget.files?.[0];
 						e.currentTarget.value = '';
 						if (f) void openPsd(f);
+					}}
+				/>
+				<input
+					bind:this={refInput}
+					type="file"
+					accept="image/*"
+					multiple
+					hidden
+					aria-label="Reference picture files"
+					onchange={(e) => {
+						const files = [...(e.currentTarget.files ?? [])];
+						e.currentTarget.value = '';
+						void importReferences(files);
 					}}
 				/>
 				<input
@@ -3535,6 +3625,16 @@
 					}}
 				/>
 			</div>
+			<button
+				type="button"
+				class="act"
+				aria-pressed={settings.reference.shown}
+				data-testid="reference-toggle"
+				title="Your reference pictures ({keyOf('reference')})"
+				onclick={() => showReference()}
+			>
+				Reference
+			</button>
 			{#if isTauri()}
 				<button
 					type="button"
@@ -3696,101 +3796,113 @@
 			{/if}
 		{/snippet}
 		{#snippet stage()}
-			{#key canvasKey}
-				<PaintCanvas
-					bind:this={canvas}
-					cursors={remoteCursors}
-					oncursor={onCursor}
-					onlive={sharing ? onLive : undefined}
-					onfill={(f) => void carryFill(f)}
-					fill
-					width={canvasSize.width}
-					height={canvasSize.height}
-					oncanvassize={(s) => (canvasSize = s)}
-					{brushId}
-					{eraser}
-					{size}
-					{opacity}
-					{color}
-					tool={tool as never}
-					smoothing={toolOpts.smoothingFor(tool, eraser)}
-					penPressure={settings.penPressure}
-					fingers={settings.fingers}
-					tapGestures={settings.tapGestures}
-					view={viewPrefs}
-					undoLimit={settings.undoSteps}
-					editableStrokes={settings.editableStrokes}
-					holdToPick={settings.holdToPick}
-					brushTexture={texture}
-					allowImport
-					onpick={(c) => (color = c)}
-					onsize={(v) => (size = v)}
-					fillTolerance={toolOpts.fillTolerance}
-					fillAllLayers={toolOpts.fillAllLayers}
-					fillReference={toolOpts.fillReference}
-					distort={toolOpts.distort}
-					warp={toolOpts.warp}
-					quickShape={toolOpts.quickShape}
-					closeFill={toolOpts.closeFill}
-					selectMode={toolOpts.selectMode}
-					selectFill={toolOpts.selectFill}
-					selectShape={toolOpts.selectShape}
-					wandTolerance={toolOpts.wandTolerance}
-					wandContiguous={toolOpts.wandContiguous}
-					wandAllLayers={toolOpts.wandAllLayers}
-					cloneAligned={toolOpts.cloneAligned}
-					cloneAllLayers={toolOpts.cloneAllLayers}
-					cloneHeal={toolOpts.cloneHeal}
-					liquifySize={toolOpts.liquifySize}
-					liquifyStrength={toolOpts.liquifyStrength}
-					smudgeStrength={toolOpts.smudgeStrength}
-					gradientKind={toolOpts.gradientKind}
-					gradientEnd={toolOpts.gradientEndValue}
-					guides={toolOpts.guides}
-					onguides={toolOpts.onguides}
-					onpenpath={toolOpts.onpenpath}
-					onimport={toolOpts.onimport}
-					onshape={(kind) => note(`Snapped to ${/^[aeiou]/.test(kind) ? 'an' : 'a'} ${kind}`, 1800)}
-					ontransformend={(r) => {
-						tool = 'brush';
-						if (r === 'empty') note('Nothing to move on this layer (or it’s locked).');
-					}}
-					onblocked={(why) => {
-						const lid = together && status ? together.lidOf(status.active) : null;
-						const l = lid ? sharedLayers.find((x) => x.lid === lid) : null;
-						note(
-							l && !l.canDraw
-								? `This is ${l.owner}’s layer. Ask to draw on it in Draw together, or pick your own.`
-								: why === 'hidden'
-									? 'This layer is hidden. Show it or pick another layer to draw.'
-									: 'This layer is locked. Unlock it or pick another layer to draw.'
-						);
-					}}
-					ontext={toolOpts.text.ontext}
-					textFrame={toolOpts.text.frame}
-					onrasterize={toolOpts.text.onrasterize}
-					lineEraser={toolOpts.lineEraser}
-					onquickmenu={(x, y) => (quickMenu = { x, y })}
-					onchange={canvasChanged}
-					locked={switching}
-					onionImage={playing ? null : onionImage}
-					camera={cameraOverlay}
-				/>
-			{/key}
-			{#if playing}
-				<canvas
-					class="player"
-					bind:this={playerEl}
-					aria-label="Playing frame {frame + 1}"
-					data-testid="player"
-				></canvas>
-				{#if preparing}
-					<p class="canvas-note" role="status">
-						Getting frames ready… {preparing.done} of {preparing.total}
-					</p>
+			<RefSplit
+				bind:split={settings.reference.split}
+				pane={settings.reference.shown && settings.reference.place === 'side' ? refPane : null}
+				leftHanded={settings.leftHanded}
+			>
+				{#key canvasKey}
+					<PaintCanvas
+						bind:this={canvas}
+						cursors={remoteCursors}
+						oncursor={onCursor}
+						onlive={sharing ? onLive : undefined}
+						onfill={(f) => void carryFill(f)}
+						fill
+						width={canvasSize.width}
+						height={canvasSize.height}
+						oncanvassize={(s) => (canvasSize = s)}
+						{brushId}
+						{eraser}
+						{size}
+						{opacity}
+						{color}
+						tool={tool as never}
+						smoothing={toolOpts.smoothingFor(tool, eraser)}
+						penPressure={settings.penPressure}
+						fingers={settings.fingers}
+						tapGestures={settings.tapGestures}
+						view={viewPrefs}
+						undoLimit={settings.undoSteps}
+						editableStrokes={settings.editableStrokes}
+						holdToPick={settings.holdToPick}
+						brushTexture={texture}
+						allowImport
+						onpick={(c) => (color = c)}
+						onsize={(v) => (size = v)}
+						fillTolerance={toolOpts.fillTolerance}
+						fillAllLayers={toolOpts.fillAllLayers}
+						fillReference={toolOpts.fillReference}
+						distort={toolOpts.distort}
+						warp={toolOpts.warp}
+						quickShape={toolOpts.quickShape}
+						closeFill={toolOpts.closeFill}
+						selectMode={toolOpts.selectMode}
+						selectFill={toolOpts.selectFill}
+						selectShape={toolOpts.selectShape}
+						wandTolerance={toolOpts.wandTolerance}
+						wandContiguous={toolOpts.wandContiguous}
+						wandAllLayers={toolOpts.wandAllLayers}
+						cloneAligned={toolOpts.cloneAligned}
+						cloneAllLayers={toolOpts.cloneAllLayers}
+						cloneHeal={toolOpts.cloneHeal}
+						liquifySize={toolOpts.liquifySize}
+						liquifyStrength={toolOpts.liquifyStrength}
+						smudgeStrength={toolOpts.smudgeStrength}
+						gradientKind={toolOpts.gradientKind}
+						gradientEnd={toolOpts.gradientEndValue}
+						guides={toolOpts.guides}
+						onguides={toolOpts.onguides}
+						onpenpath={toolOpts.onpenpath}
+						onimport={toolOpts.onimport}
+						onshape={(kind) =>
+							note(`Snapped to ${/^[aeiou]/.test(kind) ? 'an' : 'a'} ${kind}`, 1800)}
+						ontransformend={(r) => {
+							tool = 'brush';
+							if (r === 'empty') note('Nothing to move on this layer (or it’s locked).');
+						}}
+						onblocked={(why) => {
+							const lid = together && status ? together.lidOf(status.active) : null;
+							const l = lid ? sharedLayers.find((x) => x.lid === lid) : null;
+							note(
+								l && !l.canDraw
+									? `This is ${l.owner}’s layer. Ask to draw on it in Draw together, or pick your own.`
+									: why === 'hidden'
+										? 'This layer is hidden. Show it or pick another layer to draw.'
+										: 'This layer is locked. Unlock it or pick another layer to draw.'
+							);
+						}}
+						ontext={toolOpts.text.ontext}
+						textFrame={toolOpts.text.frame}
+						onrasterize={toolOpts.text.onrasterize}
+						lineEraser={toolOpts.lineEraser}
+						onquickmenu={(x, y) => (quickMenu = { x, y })}
+						onchange={canvasChanged}
+						locked={switching}
+						onionImage={playing ? null : onionImage}
+						camera={cameraOverlay}
+					/>
+				{/key}
+				{#if playing}
+					<canvas
+						class="player"
+						bind:this={playerEl}
+						aria-label="Playing frame {frame + 1}"
+						data-testid="player"
+					></canvas>
+					{#if preparing}
+						<p class="canvas-note" role="status">
+							Getting frames ready… {preparing.done} of {preparing.total}
+						</p>
+					{/if}
 				{/if}
+				{#if canvasNote}<p class="canvas-note" role="status">{canvasNote}</p>{/if}
+			</RefSplit>
+		{/snippet}
+		{#snippet dockTop()}
+			{#if settings.reference.shown && settings.reference.place === 'corner'}
+				{@render reference('corner')}
 			{/if}
-			{#if canvasNote}<p class="canvas-note" role="status">{canvasNote}</p>{/if}
 		{/snippet}
 		{#snippet bottom()}
 			{#if status && timelineFor === canvasKey}
@@ -3875,6 +3987,9 @@
 			{/if}
 		{/snippet}
 		{#snippet after()}
+			{#if settings.reference.shown && settings.reference.place === 'float'}
+				{@render reference('float')}
+			{/if}
 			{#if quickMenu}
 				<QuickMenu
 					x={quickMenu.x}

@@ -91,6 +91,18 @@ pub struct Header {
     /// font files imported for text layers
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fonts: Vec<PacketFont>,
+    /// reference pictures the user imported to draw from, in order
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub references: Vec<PacketReference>,
+}
+
+/// A reference picture: the name it was imported under, its file name (for its
+/// extension; saved, it's named by its content), and its bytes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PacketReference {
+    pub name: String,
+    pub file: String,
+    pub bytes: [usize; 2],
 }
 
 /// A font file text layers use: the family name they know it by, the file's name as
@@ -256,6 +268,11 @@ pub fn to_project(
         p.put_font(&f.family, slice(blobs, f.bytes)?, ext)
             .map_err(|e| e.to_string())?;
     }
+    for r in &h.references {
+        let ext = r.file.rsplit_once('.').map_or("img", |(_, e)| e);
+        p.put_reference(&r.name, slice(blobs, r.bytes)?, ext)
+            .map_err(|e| e.to_string())?;
+    }
     p.manifest.layers = h.layers.iter().map(|l| l.layer.clone()).collect();
     p.manifest.groups = h.groups;
     p.manifest.active_layer = h.active_layer;
@@ -385,6 +402,18 @@ pub fn from_project(p: &Project, mut frames: Option<&mut FrameStore>) -> Result<
             })
         })
         .collect();
+    let references = m
+        .references
+        .iter()
+        .filter_map(|r| {
+            let bytes = p.references.get(&r.file)?;
+            Some(PacketReference {
+                name: r.name.clone(),
+                file: r.file.clone(),
+                bytes: put(bytes),
+            })
+        })
+        .collect();
     let header = Header {
         canvas: m.canvas.clone(),
         fps: m.timeline.fps,
@@ -403,6 +432,7 @@ pub fn from_project(p: &Project, mut frames: Option<&mut FrameStore>) -> Result<
         drawing_kinds: m.timeline.drawing_kinds.clone(),
         timelapse,
         fonts,
+        references,
     };
     encode(&header, &blobs)
 }
@@ -536,6 +566,7 @@ mod tests {
             drawing_kinds: Default::default(),
             timelapse: vec![],
             fonts: vec![],
+            references: vec![],
         };
         (encode(&header, &blobs).unwrap(), rgba, mask)
     }
@@ -660,6 +691,31 @@ mod tests {
         assert_eq!(ht2.fonts[0].family, "Hand");
         assert!(ht2.fonts[0].file.ends_with(".woff2"));
         assert_eq!(slice(bt2, ht2.fonts[0].bytes).unwrap(), b"wOF2 fake");
+
+        // reference pictures: kept in order, and back
+        let mut hr = h.clone();
+        let mut blobs_r = blobs.clone();
+        let at = blobs_r.len();
+        blobs_r.extend_from_slice(b"\x89PNG one\xff\xd8two");
+        hr.references = vec![
+            PacketReference {
+                name: "one.png".into(),
+                file: "one.png".into(),
+                bytes: [at, 8],
+            },
+            PacketReference {
+                name: "two.jpg".into(),
+                file: "two.jpg".into(),
+                bytes: [at + 8, 5],
+            },
+        ];
+        let pr = to_project(&encode(&hr, &blobs_r).unwrap(), "test", "now", None).unwrap();
+        let pk_r = from_project(&pr, None).unwrap();
+        let (hr2, br2) = decode(&pk_r).unwrap();
+        assert_eq!(hr2.references.len(), 2);
+        assert_eq!(hr2.references[1].name, "two.jpg");
+        assert_eq!(slice(br2, hr2.references[0].bytes).unwrap(), b"\x89PNG one");
+        assert_eq!(slice(br2, hr2.references[1].bytes).unwrap(), b"\xff\xd8two");
 
         // a static layer: one drawing all cut long, so one frame; kept through the file
         let mut hs = h.clone();

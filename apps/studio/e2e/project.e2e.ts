@@ -3143,3 +3143,71 @@ test('open a Photoshop file: its layers, groups and masks become a new project',
 		page.getByText('Couldn’t open print.psd: it’s in CMYK: save it as RGB first')
 	).toBeVisible();
 });
+
+test('reference pictures: your own, in the corner, at the side or popped out, kept in the file', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	// off to start with; Alt+R or the top bar shows it
+	await expect(page.getByTestId('reference-side')).toHaveCount(0);
+	await page.getByTestId('reference-toggle').click();
+	const side = page.getByTestId('reference-side');
+	await expect(side).toBeVisible();
+	await expect(side.getByText(/Import your own pictures/)).toBeVisible();
+	// two pictures in (and something that isn't one, left out)
+	await side.getByLabel('Reference picture files').setInputFiles([
+		{ name: 'red.png', mimeType: 'image/png', buffer: solidPng(40, 20, [220, 30, 30, 255]) },
+		{ name: 'blue.png', mimeType: 'image/png', buffer: solidPng(20, 40, [30, 30, 220, 255]) },
+		{ name: 'notes.txt', mimeType: 'text/plain', buffer: Buffer.from('hello') }
+	]);
+	await expect(side.getByRole('img', { name: 'Reference: red.png' })).toBeVisible();
+	await expect(side.getByText('1 of 2')).toBeVisible();
+	await expect(side.getByText(/notes\.txt isn’t a picture/)).toBeVisible();
+	await expect(page.getByLabel('not saved')).toBeVisible();
+	await side.getByRole('button', { name: 'Next picture' }).click();
+	await expect(side.getByRole('img', { name: 'Reference: blue.png' })).toBeVisible();
+	// the divider resizes the pane beside the canvas
+	const before = (await side.boundingBox())!.width;
+	await page.getByRole('separator', { name: 'Resize the reference' }).focus();
+	for (let i = 0; i < 5; i++) await page.keyboard.press('ArrowRight');
+	await expect.poll(async () => (await side.boundingBox())!.width).toBeGreaterThan(before + 40);
+	// a colour picked from the picture paints with it
+	await side.getByRole('button', { name: 'Pick a colour from the reference' }).click();
+	await side.getByTestId('ref-box').click();
+	// popped out: a window that moves by its bar
+	await side.getByRole('radio', { name: 'Pop out' }).click();
+	const float = page.getByTestId('reference-float');
+	await expect(float).toBeVisible();
+	await expect(page.getByTestId('reference-side')).toHaveCount(0);
+	const at = (await float.boundingBox())!;
+	const bar = float.locator('.title');
+	const b = (await bar.boundingBox())!;
+	await page.mouse.move(b.x + 5, b.y + 5);
+	await page.mouse.down();
+	await page.mouse.move(b.x + 125, b.y + 65, { steps: 5 });
+	await page.mouse.up();
+	await expect.poll(async () => (await float.boundingBox())!.x).toBeGreaterThan(at.x + 100);
+	// in the corner: the top of the side panel
+	await float.getByRole('radio', { name: 'Corner' }).click();
+	const corner = page.getByTestId('reference-corner');
+	await expect(corner).toBeVisible();
+	await expect(corner.getByRole('img', { name: 'Reference: blue.png' })).toBeVisible();
+	// remove one
+	await corner.getByRole('button', { name: 'Remove' }).click();
+	await expect(corner.getByRole('img', { name: 'Reference: red.png' })).toBeVisible();
+	await expect(corner.getByText('1 of')).toHaveCount(0);
+	// hidden and shown again with the key
+	await corner.getByRole('button', { name: 'Hide the reference' }).click();
+	await expect(page.getByTestId('reference-corner')).toHaveCount(0);
+	await page.keyboard.press('Alt+r');
+	await expect(page.getByTestId('reference-corner')).toBeVisible();
+
+	// saved and opened again: the picture comes back from the file
+	await page.keyboard.press('Control+s');
+	await expect(page.getByTestId('project-name')).toHaveText('Walk cycle', { timeout: 20_000 });
+	await page.keyboard.press('Control+o');
+	await expect(
+		page.getByTestId('reference-corner').getByRole('img', { name: 'Reference: red.png' })
+	).toBeVisible({ timeout: 20_000 });
+});
