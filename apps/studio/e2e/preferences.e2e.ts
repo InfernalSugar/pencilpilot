@@ -291,8 +291,7 @@ test('a selection: the area outside it shaded as strongly as Settings says', asy
 	// the shade: half strength outside, none inside
 	const alpha = (fx: number, fy: number) =>
 		page
-			.locator('canvas.ants')
-			.first()
+			.locator('canvas.sel-tint')
 			.evaluate(
 				(el: HTMLCanvasElement, [fx, fy]) =>
 					el

@@ -4170,7 +4170,7 @@
 			data-ready={ready}
 			style:filter={viewFilter}
 		></canvas>
-		<canvas class="ants" bind:this={tintEl} {width} {height} aria-hidden="true"></canvas>
+		<canvas class="sel-tint" bind:this={tintEl} {width} {height} aria-hidden="true"></canvas>
 		<canvas class="ants" bind:this={antsEl} {width} {height} aria-hidden="true"></canvas>
 		{#if guides && (guideGrid.length || guideRays.length || guides.ruler.on || guideAxes.length)}
 			{@const hr = 8 / Math.max(0.01, fit * zoom)}
@@ -4836,6 +4836,7 @@
 		vector-effect: non-scaling-stroke;
 	}
 	.ants,
+	.sel-tint,
 	.marquee {
 		position: absolute;
 		inset: 0;
@@ -4844,7 +4845,8 @@
 		pointer-events: none;
 	}
 	/* an overlay: it must never hide the drawing (the plain canvas rule paints paper white) */
-	canvas.ants {
+	canvas.ants,
+	canvas.sel-tint {
 		background: transparent;
 	}
 	.shape-bar {
