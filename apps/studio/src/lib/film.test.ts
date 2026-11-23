@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ease, liveSchedule, runs, strokesOfFrame } from './film';
+import { ease, liveSchedule, liveSteps, runs, strokesOfFrame } from './film';
 import type { Stroke } from '@pencilpilot/paint/strokes';
 
 const stroke = (layer: number, ts: number[], drawing?: number): Stroke => ({
@@ -52,6 +52,20 @@ describe('films', () => {
 		expect(ease(1)).toBe(1);
 		expect(ease(0.1)).toBeLessThan(0.1);
 		expect(ease(2)).toBe(1);
+	});
+
+	it('holds a drawn-live picture until a stroke moves', () => {
+		// 10 fps: events at 0.05, 0.15, 0.16 and 0.55 s over 8 frames
+		const steps = liveSteps([0.05, 0.15, 0.16, 0.55], 8, 10);
+		expect(steps).toEqual([
+			{ upTo: 1, repeat: 1 },
+			{ upTo: 3, repeat: 4 },
+			{ upTo: 4, repeat: 3 }
+		]);
+		// every frame is covered, once
+		expect(steps.reduce((n, s) => n + s.repeat, 0)).toBe(8);
+		// nothing drawn yet still makes a first picture
+		expect(liveSteps([0.5], 3, 10)).toEqual([{ upTo: 0, repeat: 3 }]);
 	});
 
 	it('joins repeats', () => {
