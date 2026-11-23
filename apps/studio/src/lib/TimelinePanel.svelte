@@ -543,7 +543,7 @@
 	let padDrag: { x: number; y: number } | null = null;
 </script>
 
-<section class="timeline" aria-label="Timeline">
+<section class="timeline pp-ink-bar" aria-label="Timeline">
 	<div class="bar">
 		<label class="pick">
 			<span class="sr">Scene</span>
@@ -1539,9 +1539,13 @@
 		clip: rect(0 0 0 0);
 	}
 	.grid {
+		flex: 1 1 auto;
+		min-height: 0;
 		display: grid;
 		grid-template-columns: 110px calc(var(--cell) * var(--cols));
-		max-height: 168px;
+		align-content: start;
+		/* the layers' rows: as many as fit (the studio lifts the cap when resized) */
+		max-height: var(--pp-bottom-rows, 168px);
 		overflow: auto;
 		scrollbar-width: thin;
 	}

@@ -15,7 +15,8 @@
 		| 'smudge'
 		| 'clone'
 		| 'pen'
-		| 'adjust';
+		| 'adjust'
+		| 'text';
 	export const ALL_TOOLS: ToolId[] = [
 		'brush',
 		'eraser',
@@ -62,7 +63,8 @@
 		adjustOpen = false,
 		onadjust,
 		showOpacity = true,
-		keys = {}
+		keys = {},
+		maxSize = 6.06
 	}: {
 		tools?: ToolId[];
 		/** the active tool (the canvas's tool name; 'brush' covers the eraser too) */
@@ -76,6 +78,8 @@
 		showOpacity?: boolean;
 		/** the keys people chose for the tools (tooltips show them; missing: the usual key) */
 		keys?: Partial<Record<ToolId, string>>;
+		/** the largest size the slider goes to (a multiple of the brush's own size) */
+		maxSize?: number;
 	} = $props();
 
 	const has = (t: ToolId) => tools.includes(t);
@@ -309,6 +313,30 @@
 				</svg>
 			</button>
 		{/if}
+		{#if has('text')}
+			<button
+				type="button"
+				class="tool"
+				aria-pressed={tool === 'text'}
+				aria-label="Text ({key('text', 'T')})"
+				title="Text ({key('text', 'T')}): click to add text, or on a text to change it"
+				onclick={() => (tool = tool === 'text' ? 'brush' : 'text')}
+			>
+				<svg
+					width="22"
+					height="22"
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="2.3"
+					stroke-linecap="round"
+					stroke-linejoin="round"
+					aria-hidden="true"
+				>
+					<path d="M5 7V4h14v3M12 4v16M9 20h6" />
+				</svg>
+			</button>
+		{/if}
 		{#if has('measure')}
 			<button
 				type="button"
@@ -480,9 +508,9 @@
 			<input
 				type="range"
 				min="-2"
-				max="2.6"
+				max={Math.log2(maxSize).toFixed(2)}
 				step="0.05"
-				value={Math.log2(size)}
+				value={Math.log2(Math.min(size, maxSize))}
 				oninput={(e) => (size = +(2 ** +e.currentTarget.value).toFixed(2))}
 			/>
 		</label>

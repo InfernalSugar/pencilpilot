@@ -32,6 +32,8 @@
 		setLayerAssist?(id: number, on: boolean): void;
 		/** select what's on a layer; `op` 0 replace, 1 add, 2 subtract, 3 intersect */
 		selectLayerContents?(id: number, op?: number): void;
+		/** turn a text layer into a plain one */
+		rasterizeLayer?(id: number): void;
 	}
 </script>
 
@@ -43,13 +45,16 @@
 		status,
 		controls,
 		aspect = 4 / 3,
-		onadjustment
+		onadjustment,
+		ontext
 	}: {
 		status: CanvasStatus;
 		controls: LayerControls | undefined;
 		aspect?: number;
 		/** open the Adjust panel: on the given adjustment layer, or (0) to make a new one */
 		onadjustment?: (id: number) => void;
+		/** change a text layer's text (the text tool on it) */
+		ontext?: (id: number) => void;
 	} = $props();
 
 	const BLENDS: { id: BlendMode; label: string }[] = [
@@ -457,6 +462,16 @@
 						}}
 					>
 						New group
+					</button>
+				{/if}
+				{#if active.text && controls?.rasterizeLayer}
+					<button
+						type="button"
+						class="chip"
+						title="Make this text layer a plain layer to paint on (its text can’t be changed after that)"
+						onclick={() => controls?.rasterizeLayer?.(active.id)}
+					>
+						Rasterize
 					</button>
 				{/if}
 				{#if active.mask}
@@ -895,6 +910,17 @@
 							</span>
 						</button>
 					{/if}
+					{#if l.text}
+						<button
+							type="button"
+							class="mini text-badge"
+							aria-label="Change the text of {l.name}"
+							title="Text layer: click to change the text"
+							onclick={() => ontext?.(l.id)}
+						>
+							T
+						</button>
+					{/if}
 					{#if l.locked || l.alphaLock}
 						<span class="badge" title={l.locked ? 'Locked' : 'Alpha locked'}>
 							<svg viewBox="0 0 24 24" aria-label={l.locked ? 'Locked' : 'Alpha locked'} role="img">
@@ -1018,7 +1044,7 @@
 	}
 	.chip[aria-pressed='true'] {
 		background: var(--pp-ink);
-		color: #fff;
+		color: var(--pp-on-ink);
 	}
 	.list {
 		list-style: none;
@@ -1056,8 +1082,9 @@
 		flex: none;
 		border-radius: 6px;
 		border: 1px solid var(--pp-track);
-		/* checkerboard = transparent */
-		background: repeating-conic-gradient(#e9e6de 0 25%, #fff 0 50%) 0 0 / 10px 10px;
+		/* checkerboard = transparent (the app can set its colour and size) */
+		background: repeating-conic-gradient(var(--pp-checker, #e9e6de) 0 25%, #fff 0 50%) 0 0 /
+			var(--pp-checker-size, 10px) var(--pp-checker-size, 10px);
 	}
 	.file {
 		display: none;
@@ -1220,6 +1247,9 @@
 		width: 32px;
 		height: 32px;
 		background: transparent;
+	}
+	.text-badge {
+		font: 700 15px var(--pp-font-display, serif);
 	}
 	.eye-space {
 		flex: none;

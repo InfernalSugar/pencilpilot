@@ -7,10 +7,13 @@
 
 	let {
 		manifest,
-		selected = $bindable()
+		selected = $bindable(),
+		askToDelete = true
 	}: {
 		manifest: BrushManifest;
 		selected: string;
+		/** ask before deleting one of "My brushes" */
+		askToDelete?: boolean;
 	} = $props();
 
 	const FAV_KEY = 'pp.favouriteBrushes';
@@ -74,6 +77,7 @@
 	{#if editing}
 		<BrushEditor
 			{manifest}
+			{askToDelete}
 			bind:selected
 			onclose={() => {
 				editing = false;
@@ -230,7 +234,7 @@
 	}
 	.tabs button[aria-selected='true'] {
 		background: var(--pp-ink);
-		color: #fff;
+		color: var(--pp-on-ink);
 	}
 	.grid {
 		list-style: none;
@@ -261,7 +265,13 @@
 	}
 	.brush[aria-pressed='true'] {
 		border-color: var(--pp-accent);
+		background: var(--pp-surface);
+	}
+	/* dark interface: the previews keep their white paper */
+	:global([data-theme='dark']) .brush img {
+		mix-blend-mode: normal;
 		background: #fff;
+		border-radius: 10px;
 	}
 	.brush img {
 		width: 56px;

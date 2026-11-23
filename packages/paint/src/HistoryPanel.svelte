@@ -89,7 +89,7 @@
 	}
 	button.now {
 		background: var(--pp-ink);
-		color: #fff;
+		color: var(--pp-on-ink);
 	}
 	button.undone {
 		color: var(--pp-muted);

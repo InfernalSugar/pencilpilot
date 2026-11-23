@@ -21,6 +21,7 @@ export type ActionId =
 	| 'select-lasso'
 	| 'select-wand'
 	| 'gradient'
+	| 'text'
 	| 'adjust'
 	| 'smaller'
 	| 'bigger'
@@ -83,6 +84,7 @@ export const ACTIONS: Action[] = [
 	{ id: 'select-lasso', label: 'Lasso select', group: 'Tools', key: 'L' },
 	{ id: 'select-wand', label: 'Magic wand', group: 'Tools', key: 'W' },
 	{ id: 'gradient', label: 'Gradient', group: 'Tools', key: 'Shift+G' },
+	{ id: 'text', label: 'Text', group: 'Tools', key: 'T' },
 	{ id: 'adjust', label: 'Adjust the layer', group: 'Tools', key: 'Ctrl+U' },
 	{ id: 'smaller', label: 'Smaller brush', group: 'Brush', key: '[' },
 	{ id: 'bigger', label: 'Bigger brush', group: 'Brush', key: ']' },

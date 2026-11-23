@@ -196,6 +196,7 @@ pub fn build(spec: &Spec, base: &Path, out: &Path) -> Result<serde_json::Value, 
             group: 0,
             adjust: None,
             style: None,
+            text: None,
         })
         .collect();
     p.manifest.active_layer = spec.layers.len() as u32;

@@ -5,6 +5,10 @@
 //! A frame comes with how many output frames it's held for (`repeat`), so a drawing on
 //! twos crosses over once. GIF and APNG keep a held frame as one frame shown longer;
 //! a PNG sequence and video write it out each time.
+//!
+//! The pixels are sRGB, and files say so (PNGs carry an sRGB chunk, videos sRGB / BT.709
+//! colour tags). Text about the work (software, author, credits) goes into PNGs as
+//! `tEXt` chunks and into videos as metadata; GIFs get none.
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -59,6 +63,59 @@ pub struct Spec {
     /// the sound (a WAV file) to put in a video, if any
     #[serde(skip)]
     pub audio: Option<PathBuf>,
+    /// video: how hard to squeeze (smaller files, softer lines)
+    #[serde(default)]
+    pub quality: Quality,
+    /// what to write into the file about the work: (key, text), e.g. ("Author", "Ana")
+    #[serde(default)]
+    pub meta: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Quality {
+    #[default]
+    Best,
+    Good,
+    Small,
+}
+
+impl Quality {
+    /// x264's and VP9's constant quality (lower is better)
+    fn crf(self, format: Format) -> u32 {
+        match (format, self) {
+            (Format::Webm, Quality::Best) => 28,
+            (Format::Webm, Quality::Good) => 33,
+            (Format::Webm, Quality::Small) => 40,
+            (_, Quality::Best) => 16,
+            (_, Quality::Good) => 20,
+            (_, Quality::Small) => 26,
+        }
+    }
+}
+
+/// PNG's keywords are Latin-1, 1–79 characters; text goes in as Latin-1 where it can.
+fn png_text(key: &str, text: &str) -> Option<(String, String)> {
+    let key: String = key
+        .chars()
+        .filter(|c| (' '..='~').contains(c))
+        .take(79)
+        .collect();
+    let text: String = text
+        .chars()
+        .map(|c| if (c as u32) < 256 { c } else { '?' })
+        .collect();
+    (!key.trim().is_empty()).then_some((key, text))
+}
+
+/// A PNG encoder's colour and text: sRGB, and the work's metadata.
+fn tag_png<W: Write>(enc: &mut png::Encoder<'_, W>, meta: &[(String, String)]) {
+    enc.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
+    for (k, v) in meta {
+        if let Some((k, v)) = png_text(k, v) {
+            let _ = enc.add_text_chunk(k, v);
+        }
+    }
 }
 
 enum Writer {
@@ -196,7 +253,7 @@ fn ffmpeg_args(spec: &Spec, out: &Path) -> Vec<String> {
             "-pix_fmt",
             "yuv420p",
             "-crf",
-            "16",
+            "{crf}",
             "-preset",
             "slow",
             "-tune",
@@ -232,7 +289,7 @@ fn ffmpeg_args(spec: &Spec, out: &Path) -> Vec<String> {
             "-b:v",
             "0",
             "-crf",
-            "28",
+            "{crf}",
             "-row-mt",
             "1",
         ],
@@ -244,13 +301,38 @@ fn ffmpeg_args(spec: &Spec, out: &Path) -> Vec<String> {
             "-b:v",
             "0",
             "-crf",
-            "28",
+            "{crf}",
             "-row-mt",
             "1",
         ],
         _ => &[],
     };
-    a.extend(enc.iter().map(|s| s.to_string()));
+    let crf = spec.quality.crf(spec.format).to_string();
+    a.extend(enc.iter().map(|s| s.replace("{crf}", &crf)));
+    // the pixels are sRGB: say so (BT.709 primaries are sRGB's)
+    a.extend(
+        [
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "iec61966-2-1",
+            "-colorspace",
+            "bt709",
+        ]
+        .iter()
+        .map(|s| s.to_string()),
+    );
+    for (k, v) in &spec.meta {
+        let key = match k.as_str() {
+            "Author" => "artist",
+            "Software" => "encoder",
+            "Copyright" => "copyright",
+            "Creation Time" => "creation_time",
+            "Title" => "title",
+            _ => "comment",
+        };
+        a.extend(["-metadata".into(), format!("{key}={v}")]);
+    }
     a.push(out.to_string_lossy().into_owned());
     a
 }
@@ -314,6 +396,7 @@ impl Job {
                 let mut enc = png::Encoder::new(file()?, spec.width, spec.height);
                 enc.set_color(png::ColorType::Rgba);
                 enc.set_depth(png::BitDepth::Eight);
+                tag_png(&mut enc, &spec.meta);
                 enc.set_animated(spec.frames, if spec.once { 1 } else { 0 })
                     .map_err(|e| e.to_string())?;
                 let w = enc.write_header().map_err(|e| e.to_string())?;
@@ -375,6 +458,7 @@ impl Job {
                     enc.set_color(png::ColorType::Rgba);
                     enc.set_depth(png::BitDepth::Eight);
                     enc.set_compression(png::Compression::Fast);
+                    tag_png(&mut enc, &self.spec.meta);
                     let mut wr = enc.write_header().map_err(|e| e.to_string())?;
                     wr.write_image_data(rgba).map_err(|e| e.to_string())?;
                 }
@@ -541,6 +625,8 @@ mod tests {
             total: 0,
             once: false,
             audio: None,
+            quality: Quality::Best,
+            meta: Vec::new(),
         }
     }
 
@@ -583,6 +669,58 @@ mod tests {
         let mut buf = vec![0; r.output_buffer_size().unwrap()];
         r.next_frame(&mut buf).unwrap();
         assert_eq!(buf[3], 0);
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn pngs_say_srgb_and_carry_the_credits() {
+        let d = tmp();
+        let mut s = spec(Format::Png, &d, "walk.png", 1);
+        s.meta = vec![
+            ("Software".into(), "PencilPilot".into()),
+            ("Author".into(), "Zoë".into()),
+            ("Credits".into(), "Drawn with Ana and 李".into()),
+        ];
+        let mut j = Job::begin(s).unwrap();
+        j.frame(&frame(255, 255), 1).unwrap();
+        let p = j.end().unwrap();
+        let r = png::Decoder::new(std::io::BufReader::new(File::open(&p).unwrap()))
+            .read_info()
+            .unwrap();
+        let info = r.info();
+        assert!(info.srgb.is_some(), "an sRGB chunk");
+        let text: Vec<_> = info
+            .uncompressed_latin1_text
+            .iter()
+            .map(|t| (t.keyword.as_str(), t.text.as_str()))
+            .collect();
+        assert_eq!(
+            text,
+            [
+                ("Software", "PencilPilot"),
+                ("Author", "Zoë"),
+                // (PNG text is Latin-1)
+                ("Credits", "Drawn with Ana and ?")
+            ]
+        );
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn videos_get_their_quality_colour_tags_and_metadata() {
+        let d = tmp();
+        let mut s = spec(Format::Mp4, &d, "a.mp4", 1);
+        let args = |s: &Spec| ffmpeg_args(s, Path::new("/x/a.mp4")).join(" ");
+        assert!(args(&s).contains("-crf 16"));
+        assert!(args(&s).contains("-color_primaries bt709 -color_trc iec61966-2-1"));
+        assert!(!args(&s).contains("-metadata"));
+        s.quality = Quality::Small;
+        s.meta = vec![("Author".into(), "Ana".into())];
+        assert!(args(&s).contains("-crf 26"));
+        assert!(args(&s).contains("-metadata artist=Ana"));
+        s.format = Format::Webm;
+        s.quality = Quality::Good;
+        assert!(args(&s).contains("-crf 33"));
         std::fs::remove_dir_all(d).unwrap();
     }
 

@@ -22,7 +22,8 @@ use tauri::ipc::{InvokeBody, Request, Response};
 use tauri::{AppHandle, Manager, State};
 
 /// The animation's drawings (crates/anim): the window keeps only the frames it's working
-/// on; the rest live here, in memory up to [`FRAMES_IN_MEMORY`] and on disk past it.
+/// on; the rest live here, in memory up to the `frameMemoryMb` setting and on disk past it
+/// (in the `framesFolder` setting's folder, or the app's cache).
 struct Frames(Mutex<FrameStore>);
 
 /// The export being written, if any (one at a time), and the sound for the next one.
@@ -36,9 +37,6 @@ struct VideoIn(Mutex<Option<video_in::Reader>>);
 /// Lip-sync: the recording to listen to next, and the run going.
 #[derive(Default)]
 struct LipSync(Mutex<Option<PathBuf>>, lipsync::Running);
-
-/// Bytes of drawing tiles kept in memory before the oldest go to disk.
-const FRAMES_IN_MEMORY: usize = 1 << 30;
 
 fn frames<'a>(state: &'a State<'_, Frames>) -> MutexGuard<'a, FrameStore> {
     // a panic mid-change can't leave the store half-done in a way that matters more
@@ -130,8 +128,27 @@ fn settings_get(app: AppHandle) -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
-fn settings_set(app: AppHandle, settings: serde_json::Value) -> Result<(), String> {
-    store::settings_set(&data_dir(&app)?, &settings)
+fn settings_set(
+    app: AppHandle,
+    settings: serde_json::Value,
+    store: State<'_, Frames>,
+) -> Result<(), String> {
+    let data = data_dir(&app)?;
+    store::settings_set(&data, &settings)?;
+    // the frames' memory limit and folder take effect straight away
+    let mut s = frames(&store);
+    s.set_budget(store::frames_budget(&data))
+        .map_err(|e| format!("couldn't put frames away: {e}"))?;
+    if let Some(dir) = store::frames_folder(&data, frames_cache(&app)) {
+        s.set_dir(dir)
+            .map_err(|e| format!("couldn't use that folder for frames: {e}"))?;
+    }
+    Ok(())
+}
+
+/// The app's own folder for frames past the memory limit.
+fn frames_cache(app: &AppHandle) -> Option<PathBuf> {
+    app.path().app_cache_dir().ok().map(|d| d.join("frames"))
 }
 
 /// Where the app keeps its own files (shown in Settings).
@@ -254,6 +271,8 @@ fn frames_stats(store: State<'_, Frames>) -> serde_json::Value {
         "placed": st.placed,
         "bytesInMemory": st.bytes_in_memory,
         "bytesOnDisk": st.bytes_on_disk,
+        "budget": st.budget,
+        "peakInMemory": st.peak_in_memory,
     })
 }
 
@@ -630,13 +649,23 @@ pub fn run() {
             {
                 w.eval("location.replace('/dev/bench')")?;
             }
-            // the frame store spills to this run's own folder in the app's cache
-            let dir = app
-                .path()
-                .app_cache_dir()
-                .ok()
-                .map(|d| d.join("frames").join(std::process::id().to_string()));
-            app.manage(Frames(Mutex::new(FrameStore::new(FRAMES_IN_MEMORY, dir)?)));
+            // the frame store: up to the memory limit set, then to this run's own folder
+            // (the one chosen, or the app's cache)
+            let handle = app.handle();
+            let data = data_dir(handle).unwrap_or_default();
+            let budget = store::frames_budget(&data);
+            let cache = frames_cache(handle);
+            let store = store::frames_folder(&data, cache.clone())
+                .and_then(|d| FrameStore::new(budget, Some(d)).ok())
+                .map_or_else(
+                    // the chosen folder can't be used (a disk unplugged): the cache
+                    || {
+                        let d = cache.map(|d| d.join(std::process::id().to_string()));
+                        FrameStore::new(budget, d)
+                    },
+                    Ok,
+                )?;
+            app.manage(Frames(Mutex::new(store)));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

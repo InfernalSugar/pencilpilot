@@ -407,11 +407,11 @@
 		justify-content: space-between;
 	}
 	.help {
-		color: var(--pp-ink-muted, #6b6b74);
+		color: var(--pp-muted);
 		font-size: 12px;
 	}
 	.msg {
-		color: #b3261e;
+		color: var(--pp-error);
 		font-size: 12px;
 	}
 	.sheet {
@@ -420,8 +420,8 @@
 		max-height: 70vh;
 		overflow: auto;
 		border-radius: 12px;
-		background: #fffdf6;
-		box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12);
+		background: var(--pp-paper, #fffdf6);
+		box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 12%, transparent);
 		outline: none;
 	}
 	.sheet:focus-visible {
@@ -437,8 +437,8 @@
 	td {
 		height: 20px;
 		padding: 0 4px;
-		border-right: 1px solid rgba(0, 0, 0, 0.1);
-		border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+		border-right: 1px solid color-mix(in srgb, currentColor 10%, transparent);
+		border-bottom: 1px solid color-mix(in srgb, currentColor 6%, transparent);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -448,7 +448,7 @@
 		top: 0;
 		z-index: 2;
 		height: 26px;
-		background: #f1ecdf;
+		background: var(--pp-surface-sunk);
 		font: 700 11px var(--pp-font-body);
 		text-align: left;
 	}
@@ -457,9 +457,9 @@
 		left: 0;
 		z-index: 1;
 		width: 44px;
-		background: #f7f3e8;
+		background: var(--pp-ground);
 		font: 600 11px var(--pp-font-body);
-		color: #55555e;
+		color: var(--pp-ink-2);
 		text-align: right;
 	}
 	thead .fno {
@@ -485,6 +485,7 @@
 	}
 	.lay.on {
 		background: #ffe9a8;
+		color: #16161a;
 	}
 	td {
 		cursor: cell;
@@ -502,7 +503,7 @@
 		background-image: radial-gradient(
 			circle,
 			transparent 0 8px,
-			var(--pp-ink, #16161a) 8px 9.5px,
+			var(--pp-ink, var(--pp-ink)) 8px 9.5px,
 			transparent 9.5px
 		);
 	}
@@ -521,8 +522,8 @@
 		background: linear-gradient(
 			90deg,
 			transparent calc(50% - 1px),
-			#16161a calc(50% - 1px),
-			#16161a calc(50% + 1px),
+			var(--pp-ink) calc(50% - 1px),
+			var(--pp-ink) calc(50% + 1px),
 			transparent calc(50% + 1px)
 		);
 	}
@@ -531,11 +532,11 @@
 	}
 	tr.half td,
 	tr.half th {
-		border-bottom: 1px solid rgba(0, 0, 0, 0.22);
+		border-bottom: 1px solid color-mix(in srgb, currentColor 22%, transparent);
 	}
 	tr.sec td,
 	tr.sec th {
-		border-bottom: 2px solid #16161a;
+		border-bottom: 2px solid var(--pp-ink);
 	}
 	tr.now th {
 		background: var(--pp-accent-strong, #e8492f);
@@ -552,7 +553,7 @@
 		height: 18px;
 		padding: 0 2px;
 		border: 0;
-		background: #fff;
+		background: var(--pp-surface);
 		font: inherit;
 	}
 </style>

@@ -1,7 +1,8 @@
 <script lang="ts">
 	/**
-	 * Home: start something new (templates, or any size), open a recent project or any
-	 * file, and recover work left unsaved when the app last closed.
+	 * Home: start something new (templates, or any size), draw together (host, join, or
+	 * go back to a shared project), open a recent project or any file, and recover work
+	 * left unsaved when the app last closed.
 	 */
 	import { resolve } from '$app/paths';
 	import { goto } from '$app/navigation';
@@ -9,6 +10,7 @@
 	import Logo from '@pencilpilot/ui/Logo.svelte';
 	import { onMount } from 'svelte';
 	import { loadSettings, settings } from '#lib/settings.svelte.js';
+	import { fromUnits, showLength, toUnits } from '@pencilpilot/paint/view-prefs';
 	import {
 		ago,
 		askOpenPath,
@@ -25,8 +27,17 @@
 		type RecoveryItem,
 		type StudioStart
 	} from '#lib/project.js';
+	import { cleanInvite } from '#lib/share.js';
+	import { askTogether } from '#lib/together-start.js';
 
 	let recent = $state<RecentItem[] | null>(null);
+	/** projects drawn together get their own row; the others stay in Recent */
+	const shared = $derived((recent ?? []).filter((r) => r.shared));
+	const solo = $derived(recent && recent.filter((r) => !r.shared));
+	/** Draw together is the desktop app's (it connects peer to peer) */
+	const together = isTauri();
+	let invite = $state('');
+	const inviteCode = $derived(cleanInvite(invite));
 	let recovery = $state<RecoveryItem[]>([]);
 	let customOpen = $state(false);
 	let custom = $state({ width: 1920, height: 1080, fps: 24 });
@@ -38,13 +49,40 @@
 			custom.fps <= 60
 	);
 
+	/** a side in the units Settings names (2 decimals; pixels whole) */
+	const side = (px: number) => +toUnits(px, settings.units, settings.ppi).toFixed(2);
+	const setSide = (k: 'width' | 'height', v: number) =>
+		(custom[k] = fromUnits(v, settings.units, settings.ppi));
+
+	const sideRange = $derived(
+		settings.units === 'px'
+			? `${SIDE_MIN}–${SIDE_MAX} px`
+			: `${showLength(SIDE_MIN, settings.units, settings.ppi)}–${showLength(SIDE_MAX, settings.units, settings.ppi)}`
+	);
+
 	onMount(() => {
+		// the size and frame rate Settings gives new projects
+		void loadSettings().then(() => {
+			custom = { width: settings.newWidth, height: settings.newHeight, fps: settings.newFps };
+		});
+		// the first time home shows after the app starts: the last project, if Settings says
+		let first = false;
+		try {
+			first = !sessionStorage.getItem('pp.started');
+			sessionStorage.setItem('pp.started', '1');
+		} catch {
+			/* storage blocked */
+		}
 		if (!isTauri()) {
 			recent = [];
 			return;
 		}
 		listRecent()
-			.then((r) => (recent = r))
+			.then(async (r) => {
+				recent = r;
+				await loadSettings();
+				if (first && settings.reopenLast && r[0]?.found) void go({ kind: 'open', path: r[0].path });
+			})
 			.catch(() => (recent = []));
 		listRecovery()
 			.then((r) => (recovery = r))
@@ -58,6 +96,27 @@
 		const path = await askOpenPath(settings.projectFolder);
 		if (path) await go({ kind: 'open', path });
 	}
+
+	/** a new canvas (HD), then Draw together hosts or joins */
+	function host() {
+		askTogether({ what: 'host' });
+		void go({ kind: 'new', width: 1920, height: 1080, fps: 24 });
+	}
+	function join() {
+		if (!inviteCode) return;
+		askTogether({ what: 'join', code: inviteCode });
+		void go({ kind: 'new', width: 1920, height: 1080, fps: 24 });
+	}
+	function rejoin(item: RecentItem) {
+		askTogether({ what: 'rejoin' });
+		void go({ kind: 'open', path: item.path });
+	}
+	const names = (w: string[]) =>
+		!w.length
+			? 'Shared'
+			: w.length <= 3
+				? `With ${w.join(', ')}`
+				: `With ${w.slice(0, 2).join(', ')} and ${w.length - 2} more`;
 
 	async function forget(item: RecentItem) {
 		recent = (recent ?? []).filter((r) => r.path !== item.path);
@@ -152,34 +211,76 @@
 					if (customOk) void go({ kind: 'new', ...custom });
 				}}
 			>
-				<label>
-					Width <input type="number" min={SIDE_MIN} max={SIDE_MAX} bind:value={custom.width} />
-				</label>
-				<label>
-					Height <input type="number" min={SIDE_MIN} max={SIDE_MAX} bind:value={custom.height} />
-				</label>
+				{#each [['width', 'Width'], ['height', 'Height']] as const as [k, label] (k)}
+					<label>
+						{label} ({settings.units})
+						<input
+							type="number"
+							min={side(SIDE_MIN)}
+							max={side(SIDE_MAX)}
+							step={settings.units === 'px' ? 1 : 0.01}
+							value={side(custom[k])}
+							oninput={(e) => setSide(k, +e.currentTarget.value)}
+						/>
+					</label>
+				{/each}
 				<label>
 					Frames a second <input type="number" min="1" max="60" bind:value={custom.fps} />
 				</label>
 				<button type="submit" class="primary" disabled={!customOk}>Create</button>
+				{#if settings.units !== 'px'}
+					<span class="px" data-testid="custom-px">
+						{custom.width} × {custom.height} px at {settings.ppi} ppi
+					</span>
+				{/if}
 				{#if !customOk}
 					<span class="why" role="alert">
-						Sides {SIDE_MIN}–{SIDE_MAX} px, 1–60 frames a second.
+						Sides {sideRange}, 1–60 frames a second.
 					</span>
 				{/if}
 			</form>
 		{/if}
 	</section>
 
-	<section aria-labelledby="recent-h">
-		<h2 id="recent-h">Recent</h2>
-		{#if recent === null}
-			<p class="muted">Loading…</p>
-		{:else if !recent.length}
-			<p class="muted">Projects you save or open show up here.</p>
-		{:else}
+	{#if together}
+		<section aria-labelledby="together-h">
+			<h2 id="together-h">Draw together</h2>
 			<ul class="recent">
-				{#each recent as item (item.path)}
+				<li>
+					<button type="button" class="card start" onclick={host}>
+						<span class="blank big" aria-hidden="true">
+							<svg viewBox="0 0 24 24">
+								<circle cx="9" cy="8" r="3.2" /><path d="M3.5 19a5.5 5.5 0 0 1 11 0" /><path
+									d="M17 8v6M14 11h6"
+								/>
+							</svg>
+						</span>
+						<b>Host a session</b>
+						<small>A new canvas, and a code to invite others</small>
+					</button>
+				</li>
+				<li>
+					<form
+						class="card start join"
+						onsubmit={(e) => {
+							e.preventDefault();
+							join();
+						}}
+					>
+						<label for="invite"><b>Join with a code</b></label>
+						<small>Paste the code someone sent you</small>
+						<input
+							id="invite"
+							placeholder="pp1-…"
+							autocomplete="off"
+							spellcheck="false"
+							aria-invalid={!!invite.trim() && !inviteCode}
+							bind:value={invite}
+						/>
+						<button type="submit" class="primary" disabled={!inviteCode}>Join</button>
+					</form>
+				</li>
+				{#each shared as item (item.path)}
 					<li class:gone={!item.found}>
 						<button
 							type="button"
@@ -195,15 +296,19 @@
 							{/if}
 							<b>{projectName(item.path)}</b>
 							<small>
-								{#if item.found}
-									{item.width} × {item.height} · {item.layers} layer{item.layers === 1 ? '' : 's'} · {ago(
-										item.modified
-									)}
-								{:else}
-									Moved or deleted
-								{/if}
+								{names(item.shared?.with ?? [])}{item.found ? ` · ${ago(item.modified)}` : ''}
 							</small>
 						</button>
+						{#if item.found}
+							<button
+								type="button"
+								class="primary rejoin"
+								aria-label="Rejoin {projectName(item.path)}"
+								onclick={() => rejoin(item)}
+							>
+								Rejoin
+							</button>
+						{/if}
 						<button
 							type="button"
 							class="forget"
@@ -216,8 +321,68 @@
 					</li>
 				{/each}
 			</ul>
-		{/if}
-	</section>
+		</section>
+	{/if}
+
+	{#if settings.recentCount > 0}
+		<section aria-labelledby="recent-h">
+			<h2 id="recent-h">Recent</h2>
+			{#if solo === null}
+				<p class="muted">Loading…</p>
+			{:else if !solo.length}
+				<p class="muted">Projects you save or open show up here.</p>
+			{:else}
+				<ul class="recent">
+					{#each solo.slice(0, settings.recentCount) as item (item.path)}
+						<li class:gone={!item.found}>
+							<button
+								type="button"
+								class="card"
+								disabled={!item.found}
+								title={item.path}
+								onclick={() => go({ kind: 'open', path: item.path })}
+							>
+								{#if item.thumbnail}
+									<img src="data:image/png;base64,{item.thumbnail}" alt="" />
+								{:else}
+									<span class="blank" aria-hidden="true"></span>
+								{/if}
+								<b>{projectName(item.path)}</b>
+								<small>
+									{#if item.found}
+										{item.width} × {item.height} · {item.layers} layer{item.layers === 1 ? '' : 's'} ·
+										{ago(item.modified)}
+									{:else}
+										<span class="blank" aria-hidden="true"></span>
+									{/if}
+									<b>{projectName(item.path)}</b>
+									<small>
+										{#if item.found}
+											{item.width} × {item.height} · {item.layers} layer{item.layers === 1
+												? ''
+												: 's'} ·
+											{ago(item.modified)}
+										{:else}
+											Moved or deleted
+										{/if}
+									</small>
+								</small>
+							</button>
+							<button
+								type="button"
+								class="forget"
+								aria-label="Remove {projectName(item.path)} from the list"
+								title="Remove from the list (the file stays)"
+								onclick={() => forget(item)}
+							>
+								×
+							</button>
+						</li>
+					{/each}
+				</ul>
+			{/if}
+		</section>
+	{/if}
 </main>
 
 <style>
@@ -355,6 +520,11 @@
 		color: var(--pp-accent-ink);
 		font-size: 13px;
 	}
+	.px {
+		align-self: center;
+		color: var(--pp-muted);
+		font-size: 13px;
+	}
 	.recent {
 		display: grid;
 		grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
@@ -400,6 +570,59 @@
 	.card small {
 		color: var(--pp-muted);
 	}
+	.start {
+		align-content: start;
+		min-height: 100%;
+	}
+	.blank.big {
+		display: grid;
+		place-items: center;
+		color: var(--pp-accent);
+		background: var(--pp-lilac);
+		outline: 0;
+	}
+	.blank.big svg {
+		width: 56px;
+		height: 56px;
+		fill: none;
+		stroke: currentColor;
+		stroke-width: 1.8;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+	}
+	.join {
+		grid-template-columns: minmax(0, 1fr);
+		cursor: default;
+		gap: 6px;
+		padding: 14px;
+	}
+	.join input {
+		width: 100%;
+		min-width: 0;
+		min-height: 44px;
+		margin-top: auto;
+		padding: 0 12px;
+		border: 2px solid var(--pp-surface-sunk);
+		border-radius: 12px;
+		background: var(--pp-ground);
+		color: var(--pp-ink);
+		font: 15px var(--pp-font-body);
+	}
+	.join input[aria-invalid='true'] {
+		border-color: var(--pp-accent);
+	}
+	li:has(.rejoin) .card b,
+	li:has(.rejoin) .card small {
+		padding-right: 84px;
+	}
+	.rejoin {
+		position: absolute;
+		right: 16px;
+		bottom: 14px;
+		min-height: 36px;
+		padding: 0 14px;
+		font-size: 14px;
+	}
 	.forget {
 		position: absolute;
 		top: 16px;
@@ -424,6 +647,11 @@
 		padding: 16px 20px;
 		border-radius: 20px;
 		background: var(--pp-yellow);
+		/* yellow in both themes: dark words on it */
+		color: #16161a;
+	}
+	.recover li {
+		color: var(--pp-ink);
 	}
 	.recover h2 {
 		margin-top: 0;
