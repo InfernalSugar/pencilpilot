@@ -146,6 +146,21 @@ test('brush creator: every setting changes the sample stroke', async ({ page }) 
 	// (tilt needs a pen that leans: the sample stroke is upright)
 	const skip = new Set(['Lean the pen → wider']);
 	const failed: string[] = [];
+	/** wait until the preview has redrawn for every change so far */
+	const settle = async () => {
+		const count = async () => Number(await preview.getAttribute('data-drawn'));
+		let last = -1;
+		await expect
+			.poll(
+				async () => {
+					const was = last;
+					last = await count();
+					return last === was;
+				},
+				{ intervals: [300] }
+			)
+			.toBe(true);
+	};
 	for (const group of ['Shape', 'Stroke', 'Pressure and speed', 'Colour']) {
 		await win.getByRole('tab', { name: group }).click();
 		for (const slider of await win.getByRole('slider').all()) {
@@ -156,6 +171,7 @@ test('brush creator: every setting changes the sample stroke', async ({ page }) 
 				await win.getByRole('slider', { name: 'Blend with the paint underneath' }).fill('0.8');
 			if (name === 'Tip angle')
 				await win.getByRole('slider', { name: 'Tip', exact: true }).fill('5');
+			await settle();
 			const drawn = Number(await preview.getAttribute('data-drawn'));
 			const before = await pixels(canvas);
 			const [min, max, now] = await slider.evaluate((el: HTMLInputElement) => [
