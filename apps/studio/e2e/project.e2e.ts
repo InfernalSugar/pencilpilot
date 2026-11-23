@@ -3066,6 +3066,84 @@ test('editable strokes: holding the brush still on one picks it; dots and holds 
 	await expect.poll(() => ink(page)).toBeGreaterThan(before);
 });
 
+test('open a Photoshop file: its layers, groups and masks become a new project', async ({
+	page
+}) => {
+	const { writePsd } = await import('../../../packages/paint/src/psd');
+	const W = 400;
+	const H = 300;
+	const box = (rgba: number[], x0: number, y0: number, x1: number, y1: number) => {
+		const px = new Uint8Array(W * H * 4);
+		for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) px.set(rgba, (y * W + x) * 4);
+		return px;
+	};
+	const layer = (name: string, rgba: Uint8Array, more = {}) => ({
+		kind: 'layer' as const,
+		name,
+		rgba,
+		opacity: 1,
+		blend: 'normal',
+		visible: true,
+		clip: false,
+		...more
+	});
+	const psd = writePsd({
+		width: W,
+		height: H,
+		composite: new Uint8Array(W * H * 4),
+		items: [
+			layer('Sky', box([120, 170, 230, 255], 0, 0, W, H / 2)),
+			{
+				kind: 'group',
+				name: 'Hero',
+				opacity: 1,
+				visible: true,
+				children: [
+					layer('Body', box([20, 20, 20, 255], 150, 100, 250, 280), { blend: 'multiply' }),
+					layer('Face', box([240, 200, 170, 255], 170, 60, 230, 120))
+				]
+			}
+		]
+	});
+	await stubTauri(page);
+	await ready(page);
+	await page.getByRole('button', { name: 'File', exact: true }).click();
+	await page.getByRole('button', { name: /^Open a Photoshop file…/ }).click();
+	await page.getByLabel('Photoshop file').setInputFiles({
+		name: 'Hero sheet.psd',
+		mimeType: 'image/vnd.adobe.photoshop',
+		buffer: Buffer.from(psd)
+	});
+	await expect(page.getByTestId('project-name')).toHaveText('Hero sheet', { timeout: 15_000 });
+	await expect(canvas(page)).toHaveAttribute('data-ready', 'true');
+	await expect(page.getByRole('tab', { name: /Layers/ })).toContainText('3 layers');
+	const list = page.getByRole('list', { name: 'Layers, top to bottom' });
+	await expect(list.getByRole('button', { name: 'Hide group Hero' })).toBeVisible();
+	for (const name of ['Face', 'Body Multiply', 'Sky'])
+		await expect(list.getByRole('button', { name, exact: true })).toBeVisible();
+	// the drawing shows, and it's new work: unsaved, offered under the file's name
+	await expect.poll(() => ink(page)).toBeGreaterThan(1000);
+	await expect(page.getByLabel('not saved')).toBeVisible();
+	await page.keyboard.press('Control+s');
+	await expect
+		.poll(async () => (await calls(page)).some((c) => c.cmd === 'project_save'))
+		.toBe(true);
+
+	// a CMYK file: refused, saying why
+	await page.getByRole('button', { name: 'File', exact: true }).click();
+	await page.getByRole('button', { name: /^Open a Photoshop file…/ }).click();
+	const cmyk = Buffer.from(psd);
+	cmyk[25] = 4; // colour mode: CMYK
+	await page.getByLabel('Photoshop file').setInputFiles({
+		name: 'print.psd',
+		mimeType: 'image/vnd.adobe.photoshop',
+		buffer: cmyk
+	});
+	await expect(
+		page.getByText('Couldn’t open print.psd: it’s in CMYK: save it as RGB first')
+	).toBeVisible();
+});
+
 test('reference pictures: your own, in the corner, at the side or popped out, kept in the file', async ({
 	page
 }) => {
