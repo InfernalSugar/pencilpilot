@@ -82,8 +82,8 @@ pub struct Reading {
 }
 
 impl Reading {
-    /// The snapshot's messages, then each edit since: `f` gets `Ok(message)` for a snapshot
-    /// message and `Err((from, edit))` for an edit, in order.
+    /// The snapshot's messages, then each edit since, in order: `Ok(message)` for a snapshot
+    /// message, `Err((from, edit))` for an edit.
     pub fn lines(self) -> impl Iterator<Item = Result<Value, (String, Value)>> {
         let snap = self
             .snap
