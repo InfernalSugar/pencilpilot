@@ -1,8 +1,12 @@
 <script lang="ts">
 	/** Preferences: undo, the memory frames may take, and where the rest goes. */
 	import { isTauri } from '@tauri-apps/api/core';
-	import { settings, tidySettings } from '../settings.svelte';
+	import { settings, strokeMemory, tidySettings } from '../settings.svelte';
 	import './prefs.css';
+
+	/** bytes as people read them */
+	const mb = (n: number) =>
+		n < 1024 * 1024 ? `${Math.max(0, Math.round(n / 1024))} KB` : `${(n / 1048576).toFixed(1)} MB`;
 
 	const gb = $derived(+(settings.frameMemoryMb / 1024).toFixed(2));
 
@@ -22,6 +26,31 @@
 		<span>Undo steps</span>
 		<input type="number" min="10" max="500" bind:value={settings.undoSteps} />
 		<small>10–500; more takes more memory</small>
+	</label>
+	<label class="row">
+		<span>Editable strokes per layer</span>
+		<input
+			type="number"
+			min="0"
+			max="2000"
+			bind:value={settings.editableStrokes}
+			data-testid="editable-strokes"
+		/>
+		<small>0–2000; 0 turns it off</small>
+	</label>
+	<p class="hint">
+		Strokes stay editable on every layer: pick one with Move (a tap) or Select line, then move,
+		reshape or recolour it. Past this many on a layer, the oldest become plain pixels.
+		<span data-testid="stroke-memory">
+			Now: {strokeMemory.count}
+			{strokeMemory.count === 1 ? 'stroke' : 'strokes'}, {mb(
+				strokeMemory.strokes + strokeMemory.base
+			)}.
+		</span>
+	</p>
+	<label class="row">
+		<input type="checkbox" bind:checked={settings.holdToPick} />
+		<span>Hold the brush still on a stroke to pick it</span>
 	</label>
 	<label class="row">
 		<span>Memory for frames, at most</span>

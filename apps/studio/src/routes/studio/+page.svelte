@@ -60,7 +60,7 @@
 		type ProjectDoc
 	} from '#lib/project.js';
 	import { beforeNavigate, goto } from '$app/navigation';
-	import { loadSettings, saveSettings, settings } from '#lib/settings.svelte.js';
+	import { loadSettings, saveSettings, settings, strokeMemory } from '#lib/settings.svelte.js';
 	import { exportText, tagPng } from '#lib/png-meta.js';
 	import type { ViewPrefs } from '@pencilpilot/paint/view-prefs';
 	import { actionFor, comboOf, showKey, type ActionId } from '#lib/shortcuts.js';
@@ -246,6 +246,7 @@
 
 	function canvasChanged(s: CanvasStatus) {
 		status = s;
+		if (canvas) Object.assign(strokeMemory, canvas.strokeMemory());
 		togetherChanged();
 		if (quiet) return;
 		docVersion++;
@@ -1734,7 +1735,11 @@
 			isLineLayer: (id) => c.isLines(id),
 			setLineLayer: (id, on) => c.setLinesLayerQuiet(id, on),
 			lineStrokes: (d) => c.lineStrokes(d),
-			setLineStrokes: (d, list) => c.setLinesQuiet(d, list),
+			setLineStrokes: (d, list, plain) => c.setLinesQuiet(d, list, false, plain),
+			plainStrokes: (d) => c.plainStrokes(d),
+			baseChanges: (d) => c.baseChanges(d),
+			baseAll: (d) => c.baseAll(d),
+			putBaseChanges: (d, bytes) => c.putBaseChanges(d, bytes),
 			drawingsOfLayer: (id) =>
 				timeline.scenes.flatMap((sc) =>
 					sc.cuts.flatMap((cut) => (cut.tracks[id] ?? []).map((e) => e.drawing).filter((d) => d))
@@ -2166,8 +2171,8 @@
 		const drawings = drawingsIn(timeline).flatMap((id) => {
 			const layer = layerOfDrawing(timeline, id);
 			if (layer === null || !layerIds.includes(layer)) return [];
-			// a line layer's drawing keeps its strokes
-			const lines = c.isLines(layer) ? c.lineData(id) : null;
+			// editable strokes: a line layer's, and a plain layer's (with the pixels under them)
+			const lines = c.isLines(layer) || c.plainStrokes(id) ? c.lineData(id) : null;
 			const withLines = lines ? { lines } : {};
 			if (cache.native) return [{ id, layer, ...withLines }];
 			// (no store: the pixels go in the packet; an empty drawing as no bytes)
@@ -3184,22 +3189,23 @@
 		// Settings over the canvas has the keys (it may be choosing a new one)
 		if (settingsOpen) return;
 		if ((e.target as HTMLElement).closest('input, textarea, select')) return;
-		// keys that belong to the tool in use
-		if (tool === 'transform' && e.key === 'Enter') return canvas?.transformCommit();
-		if (tool === 'transform' && e.key === 'Escape') return canvas?.transformCancel();
+		// keys that belong to the tool in use (a stroke picked with Move or the brush first)
+		const picked = !!canvas?.strokePicked();
+		if (tool === 'transform' && !picked && e.key === 'Enter') return canvas?.transformCommit();
+		if (tool === 'transform' && !picked && e.key === 'Escape') return canvas?.transformCancel();
 		if (tool === 'pen' && e.key === 'Enter') {
 			if (canvas?.penStroke(toolOpts.penTaper)) canvas.penClear();
 			return;
 		}
 		if (tool === 'pen' && e.key === 'Escape') return canvas?.penClear();
 		if (tool === 'text' && e.key === 'Escape') return toolOpts.text.cancel();
-		if (tool === 'lines' && canvas?.linesSelected()) {
+		if ((tool === 'lines' || picked) && canvas?.linesSelected()) {
 			const k = e.key;
 			if (k === 'Delete' || k === 'Backspace') {
 				e.preventDefault();
 				return canvas.deleteLines();
 			}
-			if (k === 'Escape') return canvas.deselectLines();
+			if (k === 'Escape' || (picked && k === 'Enter')) return canvas.deselectLines();
 			const step = e.shiftKey ? 10 : 1;
 			const arrows: Record<string, [number, number]> = {
 				ArrowLeft: [-step, 0],
@@ -3664,6 +3670,8 @@
 					tapGestures={settings.tapGestures}
 					view={viewPrefs}
 					undoLimit={settings.undoSteps}
+					editableStrokes={settings.editableStrokes}
+					holdToPick={settings.holdToPick}
 					brushTexture={texture}
 					allowImport
 					onpick={(c) => (color = c)}

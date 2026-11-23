@@ -10,7 +10,7 @@
 //! | `thumbnail.png` | a small picture for the project browser (optional) |
 //! | `audio/<hash>.<ext>` | a sound file a scene plays (as imported: WAV, MP3, OGG…) |
 //! | `fonts/<hash>.<ext>` | a font file text layers use (as imported: TTF, OTF, WOFF2) |
-//! | `lines/<drawing>` | a line layer drawing's strokes (the app's own data, kept as given) |
+//! | `lines/<drawing>` | a drawing's editable strokes (the app's own data, kept as given) |
 //! | `timelapse/<n>.jpg` | the timelapse: a small picture after each change (optional) |
 //!
 //! Pixels are cut into 64×64 tiles. Empty tiles (fully transparent, or a mask that

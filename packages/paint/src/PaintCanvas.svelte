@@ -141,11 +141,12 @@
 	import {
 		STRIDE,
 		boilStrokes,
-		decodeLines,
+		decodeLineData,
+		encodeLineData,
 		encodeLines,
 		newId,
 		newSeed,
-		symmetryStrokes,
+		linkedCopies,
 		transformStroke,
 		type Affine,
 		type LineStroke,
@@ -285,7 +286,9 @@
 		view,
 		undoLimit = 60,
 		lineEraser = 'normal',
-		onlines
+		onlines,
+		editableStrokes = 0,
+		holdToPick = false
 	}: {
 		width?: number;
 		height?: number;
@@ -458,6 +461,13 @@
 		lineEraser?: LineEraser;
 		/** a drawing's line-layer strokes changed (drawing together shares them) */
 		onlines?: (drawing: number) => void;
+		/**
+		 * strokes on a plain layer stay editable, this many per drawing (0: none): older
+		 * ones become plain pixels (the studio sets it; elsewhere strokes stay plain)
+		 */
+		editableStrokes?: number;
+		/** holding the brush still on a stroke for a moment picks it to edit */
+		holdToPick?: boolean;
 	} = $props();
 
 	const prefs = $derived<ViewPrefs>({ ...VIEW_DEFAULTS, ...view });
@@ -494,6 +504,8 @@
 		width: () => width,
 		height: () => height,
 		isLineLayer: (id) => isLineLayer(id),
+		symmetryOn: () => !!guides?.symmetry && guides.symmetry.mode !== 'off',
+		layerShowing: (d) => (d ? (layerList().find((l) => l.drawing === d)?.id ?? 0) : 0),
 		brush: (id) => lineBrushes.get(id) ?? null,
 		loadBrushes: async (ids) => {
 			await Promise.all(
@@ -524,6 +536,46 @@
 	/** whether layer `id` is a line layer */
 	function isLineLayer(id: number) {
 		return !!layerList().find((l) => l.id === id)?.lines;
+	}
+
+	/** how many strokes stay editable on a plain layer (0: none) */
+	const strokeLimit = () => Math.max(0, Math.min(2000, Math.round(editableStrokes)));
+
+	/**
+	 * Whether a brush stroke starting now on the active layer is kept editable: on a line
+	 * layer always; on a plain one when the limit allows and what it paints can be drawn
+	 * again exactly (not the eraser, nor clipped by a selection or alpha lock, nor a mask).
+	 */
+	function keepsStroke(): boolean {
+		if (!paint || eraser || paint.isEditingMask()) return false;
+		const l = layerList().find((x) => x.id === paint!.activeLayer);
+		if (!l || l.adjust || l.text) return false;
+		if (l.lines) return true;
+		return strokeLimit() > 0 && !l.alphaLock && !paint.hasSelection();
+	}
+
+	/** the layer has strokes the Select line tool (or a pick) can take */
+	const hasStrokes = (layer: number) => lines.strokesOf(layer).length > 0;
+
+	/** a stroke picked to edit from another tool (Transform, a held brush): it acts as Select line */
+	let picking2 = $state(false);
+	/** the Select line tool, or a stroke picked from another tool */
+	const lineTool = $derived(tool === 'lines' || picking2);
+
+	/** Edit memory: what editable strokes on plain layers take (points, and pixels under them). */
+	export function strokeMemory() {
+		return lines.memory();
+	}
+
+	// paint over editable strokes made them plain pixels: their part goes with that step
+	let bakeQueued = false;
+	function bakeTainted() {
+		bakeQueued = false;
+		if (!paint || lines.busy) return;
+		const t = paint.takeTainted();
+		if (!t.length) return;
+		const effect = lines.tainted(t);
+		if (effect) log.attachLast(effect);
 	}
 
 	/** the live stroke on a line layer: its points as painted (`STRIDE` each) and its seed */
@@ -582,12 +634,13 @@
 			...(shape ? { shape } : {})
 		};
 		const sym = guides?.symmetry;
-		const copies =
+		// with symmetry, the copies are linked: picking one picks them all, edits mirror
+		const all =
 			sym && sym.mode !== 'off'
-				? symmetryStrokes(stroke, sym.mode as SymmetryMode, sym.n ?? 6, sym.c[0], sym.c[1])
-				: [];
+				? linkedCopies(stroke, sym.mode as SymmetryMode, sym.n ?? 6, sym.c[0], sym.c[1])
+				: [stroke];
 		if (!lineBrushes.has(brushId)) void lines.ready([stroke]);
-		return { strokes: [stroke, ...copies] };
+		return { strokes: all };
 	}
 
 	let current: Stroke | null = null;
@@ -767,6 +820,10 @@
 
 	function notify() {
 		if (!paint) return;
+		if (!bakeQueued) {
+			bakeQueued = true;
+			queueMicrotask(bakeTainted);
+		}
 		if (paint.width !== width || paint.height !== height)
 			oncanvassize?.({ width: paint.width, height: paint.height });
 		const layers = layerList().map((l) => ({ ...l, assist: assistLayers.has(l.id) }));
@@ -2198,7 +2255,7 @@
 	// entering the tool lifts the pixels; leaving it keeps the result
 	$effect(() => {
 		if (!ready || !paint) return;
-		if (tool === 'transform' && !xf && !paint.isTransforming()) {
+		if (tool === 'transform' && !xf && !picking2 && !paint.isTransforming()) {
 			const b = paint.transformBegin();
 			if (b.length !== 4) return void ontransformend?.('empty');
 			xf = { box: [b[0], b[1], b[2], b[3]], tx: 0, ty: 0, sx: 1, sy: 1, rot: 0, fx: 1, fy: 1 };
@@ -2259,11 +2316,19 @@
 	$effect(() => {
 		if (tool !== 'brush' && tool !== 'lines') editShape = null;
 		if (tool !== 'measure') measureSeg = null;
-		if (tool !== 'lines') untrack(() => lines.deselect());
+		if (tool !== 'lines')
+			untrack(() => {
+				lines.deselect();
+				picking2 = false;
+			});
+	});
+	// a stroke picked from another tool: done when nothing is selected any more
+	$effect(() => {
+		if (picking2 && !lines.sel && !lines.dragging) picking2 = false;
 	});
 	// Select line: a QuickShape selected on its own shows its Edit shape handles
 	$effect(() => {
-		if (tool !== 'lines') return;
+		if (!lineTool) return;
 		const sh = lines.selectedShape();
 		const layer = lines.sel?.layer ?? 0;
 		untrack(() => {
@@ -2280,7 +2345,7 @@
 		untrack(() => {
 			const was = lineStyleWas;
 			lineStyleWas = now;
-			if (tool !== 'lines' || !lines.sel || lines.busy) return;
+			if (!lineTool || !lines.sel || lines.busy) return;
 			const patch: Partial<LineStroke> = {};
 			if (now.color !== was.color) patch.color = color;
 			if (now.chosenSize !== was.chosenSize) patch.size = size;
@@ -2350,7 +2415,7 @@
 		if (!paint || !brush || penPath.anchors.length < 2) return false;
 		// on a line layer the path becomes a line (editable, as any stroke there)
 		const layer = paint.activeLayer;
-		const asLine = !eraser && !paint.isEditingMask() && isLineLayer(layer);
+		const asLine = keepsStroke();
 		if (asLine) lineSeed = newSeed();
 		if (!(asLine ? paint.beginLineStroke(lineSeed) : paint.beginStroke())) {
 			const l = shownLayers().find((x) => x.id === paint!.activeLayer);
@@ -2383,7 +2448,7 @@
 		});
 		const line = asLine ? finishLineStroke(null) : null;
 		paint.endStroke(brush);
-		const effect = line ? lines.added(layer, line.strokes) : undefined;
+		const effect = line ? lines.added(layer, line.strokes, strokeLimit()) : undefined;
 		changed(
 			true,
 			() => {
@@ -2799,8 +2864,8 @@
 		if (xf) transformCancel();
 		penPath = EMPTY_PATH;
 		lastEnd = null;
-		// line layers' strokes move (or scale) with their pixels: every frame's, not only
-		// the ones showing (the engine resizes every drawing's pixels in the same step)
+		// editable strokes (line layers' and plain ones') move or scale with their pixels: every
+		// frame's, not only the ones showing (the engine resizes every drawing in the same step)
 		const m: Affine = scale
 			? [w / width, 0, 0, h / height, 0, 0]
 			: [1, 0, 0, 1, Math.round(dx), Math.round(dy)];
@@ -3111,7 +3176,7 @@
 			return;
 		}
 		// editable shape: grab one of its points
-		if ((tool === 'brush' || tool === 'lines') && editShape && !locked) {
+		if ((tool === 'brush' || lineTool) && editShape && !locked) {
 			const p = toCanvas(e.clientX, e.clientY);
 			const r = 14 / Math.max(0.01, fit * zoom);
 			const i = shapeHandles(editShape).findIndex((q) => Math.hypot(p[0] - q[0], p[1] - q[1]) <= r);
@@ -3154,18 +3219,28 @@
 			// a line layer takes the brush (strokes), the eraser and fills; the rest paint pixels
 			if (l?.lines && tool !== 'brush' && tool !== 'fill') return onrasterize(l.id);
 		}
-		// line layers: Select line, and the eraser (whole strokes, or cut where it passes)
+		// Select line (or a stroke picked from another tool), and the eraser on a line
+		// layer (whole strokes, or cut where it passes) or, set to whole lines, on the
+		// editable strokes of a plain one
 		const onLines = !paint.isEditingMask() && isLineLayer(paint.activeLayer);
-		if (tool === 'lines' || (onLines && tool === 'brush' && eraser)) {
-			if (!onLines) return;
+		const strokesHere = !paint.isEditingMask() && hasStrokes(paint.activeLayer);
+		const wholeHere = strokesHere && lineEraser === 'whole';
+		if (lineTool || ((onLines || wholeHere) && tool === 'brush' && eraser)) {
+			const [x, y] = toCanvas(e.clientX, e.clientY);
+			// a stroke picked from another tool: a press away from it puts that tool back
+			if (picking2 && tool !== 'lines' && !lines.onSelection(x, y, fit * zoom)) {
+				lines.deselect();
+				picking2 = false;
+				return;
+			}
+			if (!onLines && !strokesHere) return;
 			const l = shownLayers().find((x) => x.id === paint!.activeLayer);
 			if (l && (l.locked || !l.visible)) return onblocked?.(l.visible ? 'locked' : 'hidden');
 			if (lines.busy) return;
 			capture(e);
 			linePointer = e.pointerId;
-			const [x, y] = toCanvas(e.clientX, e.clientY);
-			if (tool === 'lines') lines.down(paint.activeLayer, x, y, e.shiftKey, fit * zoom);
-			else lines.eraseBegin(paint.activeLayer, x, y, brushR, lineEraser);
+			if (lineTool) lines.down(paint.activeLayer, x, y, e.shiftKey, fit * zoom);
+			else lines.eraseBegin(paint.activeLayer, x, y, brushR, onLines ? lineEraser : 'whole');
 			return;
 		}
 		if (tool === 'transform') {
@@ -3175,6 +3250,14 @@
 				mode: 'move',
 				index: 0
 			};
+			// a tap (not a drag) on an editable stroke picks it to edit on its own
+			xfTap =
+				hit.mode === 'move' &&
+				!e.shiftKey &&
+				strokesHere &&
+				lines.hit(paint.activeLayer, p[0], p[1], fit * zoom) >= 0
+					? { x: e.clientX, y: e.clientY, p }
+					: null;
 			// Distort (or Ctrl/Cmd + a corner, as in Photoshop): corners move on their own
 			if (!xf.quad && !xf.mesh && (distort || e.ctrlKey || e.metaKey) && hit.mode !== 'rotate')
 				xf = { ...xf, quad: xfCorners(xf) };
@@ -3256,7 +3339,7 @@
 				: null;
 		if (tool === 'clone' && !off) return;
 		// on a line layer the stroke is kept as a line (seeded: redrawn, it paints the same)
-		const asLine = !off && onLines && tool === 'brush';
+		const asLine = !off && tool === 'brush' && keepsStroke();
 		if (asLine) lineSeed = newSeed();
 		const began = off
 			? paint.beginCloneStroke(off[0], off[1], cloneAllLayers, cloneHeal)
@@ -3281,6 +3364,9 @@
 		}
 		lastT = e.timeStamp;
 		stab.reset();
+		// the brush held still on an editable stroke for a moment picks it
+		if (holdToPick && tool === 'brush' && !eraser && !off && strokesHere && !e.shiftKey)
+			startHoldPick(e);
 		startSnap(toCanvas(e.clientX, e.clientY));
 		snapped = false;
 		holdAnchor = null;
@@ -3311,6 +3397,58 @@
 		schedule();
 	}
 
+	// ---- picking a stroke to edit from another tool ----
+
+	/** a Transform press that may be a tap on a stroke (screen px where it began) */
+	let xfTap: { x: number; y: number; p: [number, number] } | null = null;
+	/** a brush press held still, waiting to see whether it picks a stroke */
+	let holdPick: { id: number; x: number; y: number; p: [number, number]; timer: number } | null =
+		null;
+	/** how long the brush must stay still on a stroke to pick it (ms) */
+	const HOLD_PICK_MS = 500;
+
+	function endHoldPick() {
+		if (holdPick) clearTimeout(holdPick.timer);
+		holdPick = null;
+	}
+
+	function startHoldPick(e: PointerEvent) {
+		endHoldPick();
+		const p = toCanvas(e.clientX, e.clientY);
+		const id = e.pointerId;
+		const timer = window.setTimeout(() => {
+			const h = holdPick;
+			holdPick = null;
+			if (!h || h.id !== id || !current || !paint || snapped) return;
+			if (lines.hit(paint.activeLayer, h.p[0], h.p[1], fit * zoom) < 0) return;
+			// not a stroke after all: what it painted goes, and the line under it is picked
+			paint.cancelStroke();
+			linePts = null;
+			current = null;
+			strokeDown = false;
+			clearTimeout(shapeTimer);
+			if (sendLive()) {
+				flushLive();
+				onlive?.({ type: 'cancel', k: liveK });
+			}
+			pickStroke(h.p);
+		}, HOLD_PICK_MS);
+		holdPick = { id, x: e.clientX, y: e.clientY, p, timer };
+	}
+
+	/** Pick the editable stroke at `p` (and its twins with symmetry on) to edit, from another tool. */
+	function pickStroke(p: [number, number]) {
+		if (!paint) return;
+		if (xf) {
+			xf = null;
+			paint.transformCancel();
+		}
+		editShape = null;
+		picking2 = lines.pick(paint.activeLayer, p[0], p[1], fit * zoom);
+		schedule();
+		notify();
+	}
+
 	let picking: number | null = null;
 	/** the text tool's press, while it lasts */
 	let textPointer: number | null = null;
@@ -3330,6 +3468,11 @@
 
 	function move(e: PointerEvent) {
 		if (oncursor) oncursor(toCanvas(e.clientX, e.clientY));
+		if (
+			holdPick?.id === e.pointerId &&
+			Math.hypot(e.clientX - holdPick.x, e.clientY - holdPick.y) > 3
+		)
+			endHoldPick();
 		if (textPointer === e.pointerId) {
 			const [x, y] = toCanvas(e.clientX, e.clientY);
 			return ontext?.(x, y, 'move');
@@ -3465,6 +3608,7 @@
 
 	function up(e: PointerEvent) {
 		strokeDown = false;
+		if (holdPick?.id === e.pointerId) endHoldPick();
 		if (textPointer === e.pointerId) {
 			textPointer = null;
 			const [x, y] = toCanvas(e.clientX, e.clientY);
@@ -3517,7 +3661,14 @@
 			return;
 		}
 		if (xfDrag) {
+			const from = xfDrag.from;
 			xfDrag = null;
+			const t = xfTap;
+			xfTap = null;
+			if (t && Math.hypot(e.clientX - t.x, e.clientY - t.y) < 4) {
+				xf = from;
+				pickStroke(t.p);
+			}
 			return;
 		}
 		if (lassoFill) return commitLassoFill();
@@ -3558,11 +3709,14 @@
 		const lineLayer = current.layer ?? 0;
 		const line = linePts ? finishLineStroke(snapped ? snappedShape : null) : null;
 		paint.endStroke(brush);
+		/** a plain layer's stroke kept editable: its part of the step */
+		let kept: ReturnType<typeof lines.added> = undefined;
 		if (line) {
 			// its drawing is known now (a first stroke gives an empty cel one)
-			const effect = lines.added(lineLayer, line.strokes);
+			const effect = lines.added(lineLayer, line.strokes, strokeLimit());
 			shapeOf = editShape && effect ? { layer: lineLayer, id: line.strokes[0].id } : null;
-			if (effect) {
+			if (effect && !isLineLayer(lineLayer)) kept = effect;
+			else if (effect) {
 				log.add(current);
 				log.labelLast(snapped ? 'Shape' : 'Line');
 				log.attachLast(effect);
@@ -3586,6 +3740,7 @@
 		if (maskStroke) log.layerChange();
 		else {
 			log.add(current);
+			if (kept) log.attachLast(kept);
 			if (lineStroke) log.labelLast('Straight line');
 			else if (
 				closeFill &&
@@ -3611,7 +3766,7 @@
 			const layer = current.layer ?? 0;
 			const line = linePts ? finishLineStroke(null) : null;
 			paint.endStroke(brush);
-			const effect = line ? lines.added(layer, line.strokes) : null;
+			const effect = line ? lines.added(layer, line.strokes, strokeLimit()) : null;
 			if (effect) {
 				log.add(current);
 				log.attachLast(effect);
@@ -3786,6 +3941,10 @@
 	export const nudgeLines = (dx: number, dy: number) => lines.nudge(dx, dy);
 	/** how many line strokes are selected */
 	export const linesSelected = () => lines.sel?.ids.length ?? 0;
+	/** How many editable strokes a layer has (the drawing showing). */
+	export const layerStrokes = (id: number) => lines.strokesOf(id).length;
+	/** A stroke picked with another tool (Move, a held brush) is being edited. */
+	export const strokePicked = () => picking2;
 	/** a drawing's line strokes */
 	export const lineStrokes = (drawing: number): readonly LineStroke[] => lines.store.get(drawing);
 	/** the drawings that have line strokes */
@@ -3793,13 +3952,19 @@
 	/** a drawing's line strokes as bytes, for the project file (null: none) */
 	export function lineData(drawing: number): Uint8Array | null {
 		const list = lines.store.get(drawing);
-		return list.length ? encodeLines(list) : null;
+		if (!list.length) return null;
+		// a plain layer's: with the pixels under its strokes
+		return lines.store.isPlain(drawing)
+			? encodeLineData(list, paint?.basePacked(drawing) ?? null)
+			: encodeLines(list);
 	}
 	/** Put a drawing's line strokes back from the project file (no undo step; the pixels
 	 * come with the drawing). False if the bytes aren't line data. */
 	export function putLineData(drawing: number, bytes: Uint8Array): boolean {
 		try {
-			const list = decodeLines(bytes);
+			const { strokes: list, base } = decodeLineData(bytes);
+			if (base && !paint?.putBasePacked(drawing, base)) return false;
+			lines.store.setPlain(drawing, !!base);
 			lines.store.set(drawing, list);
 			void lines.ready(list);
 			return true;
@@ -3807,12 +3972,29 @@
 			return false;
 		}
 	}
+	/** A plain layer drawing's base changes since last asked (drawing together sends them). */
+	export const baseChanges = (drawing: number) => paint?.baseChangesPacked(drawing) ?? null;
+	/** All of a plain layer drawing's base (someone joining). */
+	export const baseAll = (drawing: number) => paint?.basePacked(drawing) ?? null;
+	/** Someone else's base changes for a drawing (no undo step). */
+	export function putBaseChanges(drawing: number, bytes: Uint8Array) {
+		lines.store.setPlain(drawing);
+		return paint?.putBaseChanges(drawing, bytes) ?? false;
+	}
+	/** Whether a drawing's strokes lie over a plain layer's pixels. */
+	export const plainStrokes = (drawing: number) => lines.store.isPlain(drawing);
 	/**
 	 * Set a drawing's line strokes without an undo step (drawing together: someone else's
 	 * change, whose pixels arrive as tiles). `redraw`: draw its pixels from them too, when
 	 * it shows (they don't come with it).
 	 */
-	export function setLinesQuiet(drawing: number, list: readonly LineStroke[], redraw = false) {
+	export function setLinesQuiet(
+		drawing: number,
+		list: readonly LineStroke[],
+		redraw = false,
+		plain = false
+	) {
+		if (plain) lines.store.setPlain(drawing);
 		lines.store.set(drawing, list);
 		void lines.ready(list);
 		lines.check();
@@ -3866,7 +4048,9 @@
 	export function boilDrawing(drawing: number, amount: number, seed: number) {
 		if (!paint) return 0;
 		const strokes = lines.store.get(drawing);
-		if (!strokes.length) return paint.boilDrawing(drawing, amount, seed);
+		// (a plain layer's strokes lie over pixels: those wobble, and the copy keeps none)
+		if (!strokes.length || lines.store.isPlain(drawing))
+			return paint.boilDrawing(drawing, amount, seed);
 		const id = paint.copyDrawing(drawing);
 		if (!id) return 0;
 		lines.store.set(id, boilStrokes(strokes, amount, seed));
@@ -4686,7 +4870,7 @@
 	class:transforming={tool === 'transform'}
 	class:liquifying={tool === 'liquify'}
 	class:texting={tool === 'text'}
-	class:line-select={tool === 'lines'}
+	class:line-select={lineTool}
 	class:editing-guides={tool === 'guides'}
 	bind:this={vp}
 	style={fill ? 'height: 100%' : `aspect-ratio: ${width} / ${height}; max-height: ${maxHeight}`}
@@ -4791,7 +4975,7 @@
 				<circle class="grad" cx={grad.to[0]} cy={grad.to[1]} r={hr} />
 			</svg>
 		{/if}
-		{#if tool === 'lines' && (lines.sel || lines.marquee)}
+		{#if lineTool && (lines.sel || lines.marquee)}
 			{@const k = Math.max(0.01, fit * zoom)}
 			{@const hr = 5 / k}
 			{@const th = lines.transformHandles(k)}
@@ -4839,7 +5023,7 @@
 				{/if}
 			</svg>
 		{/if}
-		{#if editShape && (tool === 'brush' || tool === 'lines')}
+		{#if editShape && (tool === 'brush' || lineTool)}
 			{@const hr = 6 / Math.max(0.01, fit * zoom)}
 			<svg
 				class="xf"
@@ -5238,7 +5422,7 @@
 				: 'Alt+click (⌥+click) where to copy from, then paint'}
 		</div>
 	{/if}
-	{#if editShape && (tool === 'brush' || tool === 'lines') && ready}
+	{#if editShape && (tool === 'brush' || lineTool) && ready}
 		{@const name = shapeName(editShape)}
 		{@const pair = (
 			{
