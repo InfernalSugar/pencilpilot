@@ -3095,6 +3095,21 @@
 </script>
 
 <svelte:window
+	onpointerdowncapture={(e) => {
+		// a press anywhere outside the open menu (the canvas too) closes it
+		if (!(fileOpen || exportOpen || importOpen)) return;
+		// pressing inside the open one (or its button) is left to it
+		if ((e.target as Element | null)?.closest?.('.export')?.querySelector('.menu')) return;
+		fileOpen = exportOpen = importOpen = false;
+		// only closes it: no dot on the canvas (a click on another button still goes through)
+		e.stopPropagation();
+	}}
+	onkeydowncapture={(e) => {
+		if (e.key === 'Escape' && (fileOpen || exportOpen || importOpen)) {
+			fileOpen = exportOpen = importOpen = false;
+			e.stopPropagation();
+		}
+	}}
 	onkeydown={onkey}
 	onkeyup={(e) => {
 		// letting go of the flip key: back where flipping started

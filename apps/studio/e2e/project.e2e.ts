@@ -2205,3 +2205,32 @@ test('text: typed on the canvas, one undo step, changed later, kept in the file,
 	await scribble(page, 0.3);
 	await expect.poll(() => ink(page)).toBeGreaterThan(longer);
 });
+
+test('the top bar menus close on a press outside them (the canvas too) or Escape', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	const file = page.getByRole('group', { name: 'File' });
+	await page.getByRole('button', { name: 'File', exact: true }).click();
+	await expect(file).toBeVisible();
+	// a press on the canvas: closes it without drawing a dot
+	const before = await ink(page);
+	const b = (await canvas(page).boundingBox())!;
+	await page.mouse.click(b.x + b.width * 0.6, b.y + b.height * 0.6);
+	await expect(file).toBeHidden();
+	expect(await ink(page)).toBe(before);
+	// Escape
+	await page.getByRole('button', { name: 'File', exact: true }).click();
+	await expect(file).toBeVisible();
+	await page.keyboard.press('Escape');
+	await expect(file).toBeHidden();
+	// another menu: only that one stays open
+	await page.getByRole('button', { name: 'File', exact: true }).click();
+	await page.getByRole('button', { name: 'Import', exact: true }).click();
+	await expect(file).toBeHidden();
+	await expect(page.getByRole('group', { name: 'Import' })).toBeVisible();
+	// its own button closes it again
+	await page.getByRole('button', { name: 'Import', exact: true }).click();
+	await expect(page.getByRole('group', { name: 'Import' })).toBeHidden();
+});
