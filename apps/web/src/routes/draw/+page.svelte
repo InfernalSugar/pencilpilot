@@ -607,7 +607,8 @@
 			if (!timeUp) tool = t as Tool;
 		},
 		onguides: (g: GuideSettings) =>
-			remember('pp.guides', { w: canvasSize.width, h: canvasSize.height, g })
+			remember('pp.guides', { w: canvasSize.width, h: canvasSize.height, g }),
+		size: () => canvasSize
 	});
 	let seconds = $state(0);
 	let timerOn = $state(true);
@@ -1702,7 +1703,7 @@
 			<section aria-label="Brushes">
 				{#if manifest}
 					<BrushPicker {manifest} bind:selected={brushId} />
-					<BrushTexturePanel {brushId} onpick={(id) => (brushId = id)} />
+					<BrushTexturePanel {brushId} />
 				{:else}
 					<p class="muted">Loading brushes…</p>
 				{/if}

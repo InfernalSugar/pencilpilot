@@ -1,9 +1,11 @@
 <script lang="ts">
 	import { untrack } from 'svelte';
 	import { previewUrl, type BrushManifest } from './brushes';
-	import BrushEditor from './BrushEditor.svelte';
+	import BrushCreator from './BrushCreator.svelte';
+	import MyBrushThumb from './MyBrushThumb.svelte';
 	import PenFeel from './PenFeel.svelte';
 	import { customBrushes, isCustom, onCustomBrushes, type CustomBrush } from './custom-brushes';
+	import { BRUSH_FILES, importBrushFiles, importNote } from './my-brush-import';
 
 	let {
 		manifest,
@@ -29,7 +31,34 @@
 	// Open on the favourites tab if there are any, else on the selected brush's category.
 	let mine = $state<CustomBrush[]>(customBrushes());
 	$effect(() => onCustomBrushes(() => (mine = [...customBrushes()])));
-	let editing = $state(false);
+	/** the brush creator, open on a brush (or on a new one: null) */
+	let creator = $state<{ start: string | null; n: number } | null>(null);
+	let opened = 0;
+	const create = (start: string | null) => (creator = { start, n: ++opened });
+	let note = $state('');
+	let busy = $state(false);
+	let files = $state<HTMLInputElement>();
+
+	/** Bring brushes from other apps into My brushes, and open the first in the creator. */
+	async function importFiles(list: File[], thenEdit: boolean): Promise<string> {
+		if (!list.length) return '';
+		busy = true;
+		note = '';
+		try {
+			const r = await importBrushFiles(list);
+			note = importNote(r);
+			const first = r.brushes[0]?.id;
+			if (first) {
+				selected = first;
+				category = 'mine';
+				query = '';
+				if (thenEdit) create(first);
+			}
+			return note;
+		} finally {
+			busy = false;
+		}
+	}
 
 	let category = $state(
 		untrack(() =>
@@ -74,118 +103,156 @@
 </script>
 
 <div class="picker">
-	{#if editing}
-		<BrushEditor
-			{manifest}
-			{askToDelete}
-			bind:selected
-			onclose={() => {
-				editing = false;
-				if (isCustom(selected)) category = 'mine';
+	<div class="make">
+		<button type="button" class="action" onclick={() => create(null)}>
+			<svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+				<path d="M12 5v14M5 12h14" />
+			</svg>
+			New brush
+		</button>
+		<button type="button" class="action" disabled={busy} onclick={() => files?.click()}>
+			<svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+				<path d="M12 4v11M7 10l5 5 5-5M5 20h14" />
+			</svg>
+			{busy ? 'Reading…' : 'Import brushes…'}
+		</button>
+		<input
+			bind:this={files}
+			class="visually-hidden"
+			type="file"
+			multiple
+			accept={BRUSH_FILES}
+			tabindex="-1"
+			aria-label="Brush files to import"
+			onchange={(e) => {
+				const list = [...(e.currentTarget.files ?? [])];
+				e.currentTarget.value = '';
+				void importFiles(list, false);
 			}}
 		/>
-	{:else}
-		<button type="button" class="adjust" onclick={() => (editing = true)}>
-			{isCustom(selected)
-				? `Adjust “${selectedName}”`
-				: `Adjust “${selectedName}” and save as my brush`}
-		</button>
-		<label class="search">
-			<span class="visually-hidden">Search brushes</span>
-			<input
-				type="search"
-				placeholder="Search {manifest.brushes.length} brushes…"
-				bind:value={query}
-			/>
-		</label>
-		{#if !query}
-			<div class="tabs" role="tablist" aria-label="Brush categories">
-				{#each tabs as t (t.id)}
+	</div>
+	{#if note}<p class="note" role="status">{note}</p>{/if}
+	<button type="button" class="adjust" onclick={() => create(selected)}>
+		{isCustom(selected) ? `Edit “${selectedName}”` : `Adjust “${selectedName}” and save as mine`}
+	</button>
+	<label class="search">
+		<span class="visually-hidden">Search brushes</span>
+		<input
+			type="search"
+			placeholder="Search {manifest.brushes.length} brushes…"
+			bind:value={query}
+		/>
+	</label>
+	{#if !query}
+		<div class="tabs" role="tablist" aria-label="Brush categories">
+			{#each tabs as t (t.id)}
+				<button
+					type="button"
+					role="tab"
+					aria-selected={category === t.id}
+					onclick={() => (category = t.id)}
+				>
+					{t.name}
+				</button>
+			{/each}
+		</div>
+	{/if}
+	{#if category === 'mine' && !query}
+		<ul class="grid" aria-label="My brushes">
+			{#each mine as b (b.id)}
+				<li>
 					<button
 						type="button"
-						role="tab"
-						aria-selected={category === t.id}
-						onclick={() => (category = t.id)}
+						class="brush"
+						aria-pressed={selected === b.id}
+						title={b.source ? b.name : `${b.name} · based on ${builtIn(b.base)?.name ?? b.base}`}
+						onclick={() => (selected = b.id)}
 					>
-						{t.name}
+						{#key b}<MyBrushThumb brush={b} />{/key}
+						<span class="name">{b.name}</span>
 					</button>
-				{/each}
-			</div>
-		{/if}
-		{#if category === 'mine' && !query}
-			<ul class="grid" aria-label="My brushes">
-				{#each mine as b (b.id)}
-					<li>
-						<button
-							type="button"
-							class="brush"
-							aria-pressed={selected === b.id}
-							title="{b.name} · based on {builtIn(b.base)?.name ?? b.base}"
-							onclick={() => (selected = b.id)}
-						>
-							{#if builtIn(b.base)?.preview}
-								<img src={previewUrl(b.base)} alt="" loading="lazy" width="64" height="64" />
-							{/if}
-							<span class="name">{b.name}</span>
-						</button>
-					</li>
-				{:else}
-					<li class="empty">Pick any brush and press “Adjust” above to make one that’s yours.</li>
-				{/each}
-			</ul>
-		{:else}
-			<ul class="grid" aria-label="Brushes">
-				{#each shown as b (b.id)}
-					<li>
-						<button
-							type="button"
-							class="brush"
-							aria-pressed={selected === b.id}
-							title="{b.name} · {b.author}"
-							onclick={() => (selected = b.id)}
-						>
-							{#if b.preview}
-								<img src={previewUrl(b.id)} alt="" loading="lazy" width="64" height="64" />
-							{/if}
-							<span class="name">{b.name}</span>
-						</button>
-						<button
-							type="button"
-							class="fav"
-							aria-label="{favourites.includes(b.id)
-								? 'Remove'
-								: 'Add'} {b.name} {favourites.includes(b.id) ? 'from' : 'to'} favourites"
-							aria-pressed={favourites.includes(b.id)}
-							onclick={() => toggleFav(b.id)}
-						>
-							<svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true">
-								<path
-									d="M12 3l2.7 5.6 6.1.8-4.5 4.2 1.1 6.1L12 16.8l-5.4 2.9 1.1-6.1-4.5-4.2 6.1-.8Z"
-								/>
-							</svg>
-						</button>
-					</li>
-				{:else}
-					<li class="empty">
-						{category === 'favourites' && !query
-							? 'Tap the star on any brush to keep it here.'
-							: 'No brushes match.'}
-					</li>
-				{/each}
-			</ul>
-		{/if}
-		<PenFeel />
-		<p class="credit">
-			Brushes: <a
-				href="https://github.com/mypaint/mypaint-brushes"
-				target="_blank"
-				rel="noreferrer"
-			>
-				MyPaint brush pack
-			</a> (CC0) by its artists.
-		</p>
+					<button
+						type="button"
+						class="corner"
+						aria-label="Edit {b.name}"
+						title="Edit"
+						onclick={() => {
+							selected = b.id;
+							create(b.id);
+						}}
+					>
+						<svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true">
+							<path d="M4 20h4L19 9l-4-4L4 16Z M14 6l4 4" />
+						</svg>
+					</button>
+				</li>
+			{:else}
+				<li class="empty">
+					Make one with “New brush”, adjust any brush, or import brushes from another app.
+				</li>
+			{/each}
+		</ul>
+	{:else}
+		<ul class="grid" aria-label="Brushes">
+			{#each shown as b (b.id)}
+				<li>
+					<button
+						type="button"
+						class="brush"
+						aria-pressed={selected === b.id}
+						title="{b.name} · {b.author}"
+						onclick={() => (selected = b.id)}
+					>
+						{#if b.preview}
+							<img src={previewUrl(b.id)} alt="" loading="lazy" width="64" height="64" />
+						{/if}
+						<span class="name">{b.name}</span>
+					</button>
+					<button
+						type="button"
+						class="corner fav"
+						aria-label="{favourites.includes(b.id)
+							? 'Remove'
+							: 'Add'} {b.name} {favourites.includes(b.id) ? 'from' : 'to'} favourites"
+						aria-pressed={favourites.includes(b.id)}
+						onclick={() => toggleFav(b.id)}
+					>
+						<svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true">
+							<path
+								d="M12 3l2.7 5.6 6.1.8-4.5 4.2 1.1 6.1L12 16.8l-5.4 2.9 1.1-6.1-4.5-4.2 6.1-.8Z"
+							/>
+						</svg>
+					</button>
+				</li>
+			{:else}
+				<li class="empty">
+					{category === 'favourites' && !query
+						? 'Tap the star on any brush to keep it here.'
+						: 'No brushes match.'}
+				</li>
+			{/each}
+		</ul>
 	{/if}
+	<PenFeel />
 </div>
+
+{#if creator}
+	{#key creator.n}
+		<BrushCreator
+			{manifest}
+			{askToDelete}
+			start={creator.start}
+			ondone={(id) => {
+				creator = null;
+				if (id) {
+					selected = id;
+					if (isCustom(id)) category = 'mine';
+				}
+			}}
+			onimport={(list) => importFiles(list, true)}
+		/>
+	{/key}
+{/if}
 
 <style>
 	.picker {
@@ -193,6 +260,47 @@
 		flex-direction: column;
 		gap: 12px;
 		min-height: 0;
+	}
+	.make {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 8px;
+	}
+	.action {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		gap: 6px;
+		flex: 1 1 auto;
+		min-height: 40px;
+		padding: 0 10px;
+		border: 0;
+		border-radius: 12px;
+		white-space: nowrap;
+		background: var(--pp-ink);
+		color: var(--pp-on-ink);
+		font: 600 13px var(--pp-font-body);
+		cursor: pointer;
+	}
+	.action + .action {
+		background: var(--pp-ground);
+		color: var(--pp-ink);
+	}
+	.action:disabled {
+		opacity: 0.6;
+		cursor: default;
+	}
+	.action svg {
+		fill: none;
+		stroke: currentColor;
+		stroke-width: 2.4;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+	}
+	.note {
+		margin: -4px 0 0;
+		font-size: 13px;
+		color: var(--pp-ink-2);
 	}
 	.adjust {
 		padding: 10px 12px;
@@ -286,7 +394,7 @@
 		white-space: nowrap;
 		max-width: 100%;
 	}
-	.fav {
+	.corner {
 		position: absolute;
 		top: 4px;
 		right: 4px;
@@ -301,6 +409,10 @@
 		fill: none;
 		stroke: var(--pp-muted);
 		stroke-width: 2;
+		stroke-linejoin: round;
+	}
+	.corner:hover {
+		stroke: var(--pp-ink);
 	}
 	.fav[aria-pressed='true'] {
 		fill: var(--pp-yellow);
@@ -311,11 +423,6 @@
 		padding: 20px;
 		color: var(--pp-muted);
 		font-size: 14px;
-	}
-	.credit {
-		margin: 0;
-		font-size: 12px;
-		color: var(--pp-muted);
 	}
 	.visually-hidden {
 		position: absolute;

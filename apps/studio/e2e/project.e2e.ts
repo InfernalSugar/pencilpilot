@@ -2350,3 +2350,55 @@ test('canvas size: every frame moves with it, one undo step, kept in the file', 
 	await frame(2);
 	await lands(boxes[1], 960, 0.5, 0, 0, 3);
 });
+
+test('a new canvas starts with its guides in the middle; Re-centre puts moved ones back', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	/** the mirror line's x as a share of the canvas width */
+	const axisAt = () =>
+		page.evaluate(() => {
+			const line = document.querySelector('line.axis');
+			const c = document.querySelector('canvas[aria-label*="Drawing canvas"]') as HTMLCanvasElement;
+			return line ? Number(line.getAttribute('x1')) / c.width : null;
+		});
+	// last time: a vertical mirror moved far to the right (as kept by the app)
+	await page.evaluate(() =>
+		localStorage.setItem(
+			'pp.app.guides',
+			JSON.stringify({
+				w: 1000,
+				h: 800,
+				g: {
+					grid: { on: false, kind: 'square', size: 100 },
+					perspective: {
+						points: 0,
+						vps: [
+							[500, 320],
+							[850, 320],
+							[500, 1280]
+						]
+					},
+					ruler: { on: false, a: [200, 400], b: [800, 400] },
+					symmetry: { mode: 'vertical', n: 6, c: [900, 100] }
+				}
+			})
+		)
+	);
+	// reopening the app (a new canvas): the mirror is still on, but in the middle
+	await ready(page);
+	await expect.poll(axisAt).toBeCloseTo(0.5, 2);
+
+	// moved by hand, then Re-centre
+	await page.getByRole('button', { name: 'Guides' }).click();
+	await page.getByRole('button', { name: 'Move guides' }).click();
+	const h = (await page.locator('circle.handle.sym').boundingBox())!;
+	await page.mouse.move(h.x + h.width / 2, h.y + h.height / 2);
+	await page.mouse.down();
+	await page.mouse.move(h.x + 150, h.y + 40, { steps: 5 });
+	await page.mouse.up();
+	await expect.poll(axisAt).toBeGreaterThan(0.55);
+	await page.getByRole('button', { name: 'Re-centre' }).click();
+	await expect.poll(axisAt).toBeCloseTo(0.5, 2);
+});

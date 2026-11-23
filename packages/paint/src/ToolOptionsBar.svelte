@@ -9,7 +9,7 @@
 	import TextOptions from './TextOptions.svelte';
 	import type PaintCanvas from './PaintCanvas.svelte';
 	import type { CanvasStatus } from './PaintCanvas.svelte';
-	import { SYMMETRY_MODES, symmetryOn } from './guides';
+	import { anyGuide, SYMMETRY_MODES, symmetryOn } from './guides';
 	import { MAP_PRESETS } from './tone';
 	import type { ToolOptions } from './tool-options.svelte';
 
@@ -79,11 +79,7 @@
 					class="tool"
 					role="radio"
 					aria-checked={opts.guides.perspective.points === n}
-					onclick={() =>
-						opts.setGuides({
-							...opts.guides,
-							perspective: { ...opts.guides.perspective, points: n as 0 | 1 | 2 | 3 }
-						})}
+					onclick={() => opts.setPerspective(n as 0 | 1 | 2 | 3)}
 				>
 					{n ? `${n}-point` : 'Off'}
 				</button>
@@ -156,6 +152,16 @@
 				onclick={() => (tool = tool === 'guides' ? 'brush' : 'guides')}
 			>
 				Move guides
+			</button>
+		{/if}
+		{#if opts.canCentre && anyGuide(opts.guides)}
+			<button
+				type="button"
+				class="tool"
+				title="Put the mirror line, vanishing points and ruler back in the middle of the canvas"
+				onclick={() => opts.centreGuides()}
+			>
+				Re-centre
 			</button>
 		{/if}
 	</div>

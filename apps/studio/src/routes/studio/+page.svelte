@@ -11,7 +11,13 @@
 	import QuickMenu, { type QuickAction } from '@pencilpilot/paint/QuickMenu.svelte';
 	import TimelapsePlayer from '@pencilpilot/paint/TimelapsePlayer.svelte';
 	import { ToolOptions } from '@pencilpilot/paint/tool-options.svelte.js';
-	import { anyGuide, defaultGuides, type GuideSettings } from '@pencilpilot/paint/guides';
+	import {
+		anyGuide,
+		centredGuides,
+		defaultGuides,
+		readGuides,
+		type GuideSettings
+	} from '@pencilpilot/paint/guides';
 	import { smoothTool, type SmoothTool } from '@pencilpilot/paint/stabilizer';
 	import PaintCanvas, {
 		BLANK_STATUS,
@@ -1356,7 +1362,8 @@
 		status: () => status ?? BLANK_STATUS,
 		color: () => color,
 		setTool: (t) => (tool = t),
-		onguides: (g) => keepLocal('pp.app.guides', { w: canvasSize.width, h: canvasSize.height, g })
+		onguides: (g) => keepLocal('pp.app.guides', { w: canvasSize.width, h: canvasSize.height, g }),
+		size: () => canvasSize
 	});
 	function keepLocal(key: string, value: unknown) {
 		try {
@@ -1372,29 +1379,39 @@
 			return fallback;
 		}
 	}
-	/** guides kept for another canvas size are scaled to this one */
+	/**
+	 * The guides for a canvas: a saved project's own (where they were moved to), or for a
+	 * new canvas the ones last switched on (grid, perspective, symmetry…), every point in
+	 * the middle: a mirror line moved on one drawing never carries over to the next.
+	 */
+	let projectGuides: GuideSettings | null = null;
 	function loadGuides(w: number, h: number) {
+		const own = projectGuides;
+		projectGuides = null;
+		if (own) {
+			toolOpts.guides = own;
+			return;
+		}
 		const saved = readLocal<{ w: number; h: number; g: GuideSettings } | null>(
 			'pp.app.guides',
 			null
 		);
-		if (!saved?.g) {
+		const last = readGuides(saved?.g);
+		if (!last || !saved) {
 			toolOpts.guides = defaultGuides(w, h);
 			return;
 		}
-		const [kx, ky] = [w / saved.w, h / saved.h];
-		const sc = (p: [number, number]): [number, number] => [p[0] * kx, p[1] * ky];
-		const g = saved.g;
-		toolOpts.guides = {
-			grid: { ...g.grid, size: Math.round(g.grid.size * Math.min(kx, ky)) },
-			perspective: { ...g.perspective, vps: g.perspective.vps.map(sc) },
-			ruler: { ...g.ruler, a: sc(g.ruler.a), b: sc(g.ruler.b) },
-			symmetry: g.symmetry ? { ...g.symmetry, c: sc(g.symmetry.c) } : defaultGuides(w, h).symmetry
-		};
+		const k = Math.min(w / saved.w, h / saved.h);
+		toolOpts.guides = centredGuides(
+			{ ...last, grid: { ...last.grid, size: Math.max(2, Math.round(last.grid.size * k)) } },
+			w,
+			h
+		);
 	}
+	// a new canvas or an opened project (not a resize: Canvas size moves the guides itself)
 	$effect(() => {
-		const { width, height } = canvasSize;
-		untrack(() => loadGuides(width, height));
+		void canvasKey;
+		untrack(() => loadGuides(canvasSize.width, canvasSize.height));
 	});
 	toolOpts.smoothing = {
 		brush: 0.2,
@@ -2167,6 +2184,8 @@
 				scene,
 				cut: cutIndex,
 				frame,
+				// this project's guides, where they were moved to
+				guides: $state.snapshot(toolOpts.guides),
 				// a shared project keeps its session, to rejoin later
 				...(together && sharing
 					? { share: together.save(sharing.invite, everyone(sharing.members)) }
@@ -2279,6 +2298,7 @@
 		if (typeof x.color === 'string') color = x.color;
 		if (typeof x.size === 'number') size = x.size;
 		if (typeof x.opacity === 'number') opacity = x.opacity;
+		projectGuides = readGuides(x.guides);
 		status = null;
 		canvasSize = { width: doc.width, height: doc.height };
 		canvasKey++;
@@ -3739,7 +3759,7 @@
 			{:else if t === 'brushes'}
 				{#if manifest}
 					<BrushPicker {manifest} bind:selected={brushId} askToDelete={settings.askToDelete} />
-					<BrushTexturePanel {brushId} onpick={(id) => (brushId = id)} />
+					<BrushTexturePanel {brushId} />
 				{:else}
 					<p>Loading brushes…</p>
 				{/if}
