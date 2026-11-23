@@ -1,7 +1,8 @@
 name: Release
 
 # Publishes a preview release from installers the App workflow already built (no rebuild):
-# Actions → Release → Run workflow, with that App run's id. The installers aren't signed
+# Actions → Release → Run workflow, with that App run's id. Running it again with an
+# existing tag moves the tag to the new build and replaces the release's files. The installers aren't signed
 # yet (S11-T01), so Windows shows "Windows protected your PC": More info → Run anyway.
 
 on:
@@ -52,5 +53,16 @@ jobs:
 
           This is a preview: save often, and tell us what breaks.
           EOF
-          gh release create "${{ inputs.tag }}" out/* --target "$SHA" --prerelease \
-            --title "PencilPilot ${{ inputs.tag }} (preview)" --notes-file notes.md
+          tag="${{ inputs.tag }}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            # Already published: move the tag to this build and swap the files in place.
+            gh api -X PATCH "repos/$GH_REPO/git/refs/tags/$tag" -f sha="$SHA" -F force=true
+            for old in $(gh release view "$tag" --json assets --jq '.assets[].name'); do
+              [ -e "out/$old" ] || gh release delete-asset "$tag" "$old" -y
+            done
+            gh release upload "$tag" out/* --clobber
+            gh release edit "$tag" --target "$SHA" --prerelease --notes-file notes.md
+          else
+            gh release create "$tag" out/* --target "$SHA" --prerelease \
+              --title "PencilPilot $tag (preview)" --notes-file notes.md
+          fi
