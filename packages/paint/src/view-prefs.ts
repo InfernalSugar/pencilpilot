@@ -139,11 +139,19 @@ export function rulerTicks(
  * The zoom step for a wheel event, as a change of log(zoom): a mouse wheel's notch is a
  * fixed step, a trackpad's few pixels a small one. `speed` scales both.
  */
+/** one wheel notch: ×1.1 */
+export const WHEEL_NOTCH = Math.log(1.1);
+
 export function wheelZoomStep(deltaY: number, deltaMode: number, speed: number): number {
-	// lines / pages → pixels; a mouse wheel notch is ~100 px, a trackpad pinch a few px
+	// lines / pages → pixels; a mouse wheel notch is ~40–120 px (WebKitGTK gives fractions,
+	// so don't go by whole numbers), a trackpad pinch a few px. Each event moves at most a
+	// notch, so one fast flick can't throw the view from 100% to 25%.
 	const px = deltaY * (deltaMode === 1 ? 16 : deltaMode === 2 ? 400 : 1);
-	const notch = Math.abs(px) >= 40 && Number.isInteger(px);
-	return (notch ? -Math.sign(px) * Math.log(1.12) : -px * 0.008) * speed;
+	const step =
+		Math.abs(px) >= 40
+			? Math.sign(px) * WHEEL_NOTCH
+			: Math.sign(px) * Math.min(WHEEL_NOTCH, Math.abs(px) * 0.004);
+	return -step * speed;
 }
 
 /**

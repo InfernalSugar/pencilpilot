@@ -187,8 +187,8 @@ test('the scroll wheel zooms when Settings says so (towards the pointer)', async
 	const at = { x: b.x + b.width * 0.25, y: b.y + b.height * 0.25 };
 	await page.mouse.move(at.x, at.y);
 	await page.mouse.wheel(0, -100);
-	// two steps of 12% (the speed doubles it), at once (no glide)
-	await expect(zoomLabel()).toHaveAccessibleName('Zoom 125%, reset view');
+	// two steps of 10% (the speed doubles it), at once (no glide)
+	await expect(zoomLabel()).toHaveAccessibleName('Zoom 121%, reset view');
 	// the point under the pointer stayed there: the canvas grew away from it
 	const after = (await canvas(page).boundingBox())!;
 	expect(after.x).toBeLessThan(b.x);
@@ -255,8 +255,8 @@ test('the brush keeps its size on screen when zooming, if Settings says so', asy
 	await stub(page, { smoothZoom: false, brushFollowsZoom: true });
 	await studio(page);
 	expect(await radiusAt(false)).toBeCloseTo(r, 0);
-	// zoomed in ×1.25: smaller on the canvas, the same on screen
-	expect(await radiusAt(true)).toBeCloseTo(r / 1.25, 0);
+	// zoomed in ×1.2: smaller on the canvas, the same on screen
+	expect(await radiusAt(true)).toBeCloseTo(r / 1.2, 0);
 });
 
 test('interface: accent colour, the colour around the canvas, tooltips off', async ({ page }) => {
