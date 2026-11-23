@@ -34,6 +34,7 @@ pub use layers::{Blend, LayerProps};
 use layers::{
     TileSource, composite_pixel_on, json_str, mask_value, merge_pixel, premul_fix15, unpremul_srgb,
 };
+pub use lines::{paint_reach, smudge_reach};
 
 pub(crate) type TileKey = (i32, i32);
 pub(crate) type TileMap = HashMap<TileKey, Box<TilePixels>>;
@@ -60,6 +61,9 @@ pub struct UndoSurface {
     clone: Option<std::sync::Arc<clone::CloneSource>>,
     /// redrawing line strokes: only dabs touching these tiles are drawn (see [`lines`])
     only: Option<Box<lines::Area>>,
+    /// line strokes and their redraws: smudge sampling starts its random sparse pattern
+    /// afresh each time, so a replay samples exactly as the stroke did (see [`lines`])
+    fixed_sampling: bool,
 }
 
 impl UndoSurface {
@@ -97,6 +101,29 @@ impl TiledSurface for UndoSurface {
 
     fn tile_lookup(&self, tx: i32, ty: i32) -> Option<&TilePixels> {
         self.tiles.get(&(tx, ty)).map(|b| &**b)
+    }
+
+    fn get_color(&self, x: f32, y: f32, radius: f32) -> hokusai::color::RgbaF32 {
+        if self.fixed_sampling {
+            hokusai::brushmodes::reset_get_color_rng();
+        }
+        hokusai::brushmodes::get_color_default(self, x, y, radius)
+    }
+
+    fn get_color_pigment(
+        &self,
+        x: f32,
+        y: f32,
+        radius: f32,
+        paint: f32,
+    ) -> hokusai::color::RgbaF32 {
+        if paint < 0.0 {
+            return self.get_color(x, y, radius);
+        }
+        if self.fixed_sampling {
+            hokusai::brushmodes::reset_get_color_rng();
+        }
+        hokusai::brushmodes::get_color_pigment_default(self, x, y, radius, paint)
     }
 
     /// libmypaint's dab, then (with a texture) each pixel's change scaled by
@@ -302,6 +329,7 @@ impl Clone for UndoSurface {
             style: None,
             clone: None,
             only: None,
+            fixed_sampling: false,
         }
     }
 }
@@ -509,6 +537,8 @@ pub struct Painter {
     line_redraw: Option<Box<lines::Redraw>>,
     /// a line edit not in the history yet: (layer, its tiles before; see `lines_commit`)
     line_pending: Option<lines::Pending>,
+    /// the last transform kept, for its editable strokes to follow (see `lines`)
+    xf_stash: Option<Box<lines::XfStash>>,
     /// editable strokes on plain layers: per drawing, the pixels under them (see [`lines`])
     bases: HashMap<u32, lines::Base>,
     /// base tiles other paint changed (their strokes must become plain pixels): the app
@@ -555,6 +585,7 @@ impl Painter {
             line_stroke: false,
             line_redraw: None,
             line_pending: None,
+            xf_stash: None,
             bases: HashMap::new(),
             tainted: Vec::new(),
             base_changed: HashMap::new(),
@@ -1753,6 +1784,9 @@ impl Painter {
         }
         self.sym_states.clear();
         let line = std::mem::take(&mut self.line_stroke);
+        if let Some(l) = self.layers.iter_mut().find(|l| l.id == id) {
+            l.surface.fixed_sampling = false;
+        }
         if !line {
             self.clip_to_selection(id);
         }
@@ -1806,6 +1840,9 @@ impl Painter {
         self.stroke_brush = None;
         self.alpha_lock_stroke = false;
         self.line_stroke = false;
+        for l in &mut self.layers {
+            l.surface.fixed_sampling = false;
+        }
     }
 
     fn push_undo(&mut self, mut e: Edit) {
@@ -2499,6 +2536,7 @@ impl Painter {
         if self.transform.is_some() || self.stroking.is_some() || self.adjusting.is_some() {
             return Vec::new();
         }
+        self.xf_stash = None;
         let (w, h) = (self.width as i64, self.height as i64);
         let active = self.active;
         let Some(li) = self.index_of(active) else {
@@ -2800,12 +2838,20 @@ impl Painter {
 
     /// Keep the transform (one undo step); the selection follows the pixels.
     pub fn transform_commit(&mut self) -> bool {
+        self.transform_commit_keeping(false)
+    }
+
+    /// `transform_commit`; `lines`: a line layer stays one (its strokes are moved along
+    /// by the app, see `lines`). Either way, what the transform did is kept for the
+    /// editable strokes to follow (`xf_*`).
+    pub fn transform_commit_keeping(&mut self, lines: bool) -> bool {
         let Some(t) = self.transform.take() else {
             return false;
         };
         let Some(li) = self.index_of(t.layer) else {
             return false;
         };
+        let stash_sel = self.selection.clone();
         let now = &self.layers[li].surface.tiles;
         let mut snap = Snapshot::new();
         for key in t.original.keys().chain(now.keys()) {
@@ -2851,12 +2897,33 @@ impl Painter {
         if snap.is_empty() {
             return false;
         }
-        self.push_undo(Edit::Tiles {
-            drawing: 0,
-            layer: t.layer,
-            mask: self.editing_mask(t.layer),
-            snap,
+        let drawing = self.layers[li].drawing;
+        let layer = t.layer;
+        let mask = self.editing_mask(layer);
+        let t = *t;
+        self.xf_stash = (!mask).then(|| {
+            Box::new(lines::XfStash {
+                layer,
+                drawing,
+                base: self.bases.get(&drawing).cloned().unwrap_or_default(),
+                m: t.m,
+                lifted: (t.fx0, t.fy0, t.fw, t.fh),
+                sel: stash_sel,
+                original: t.original,
+                without: TileMap::new(),
+            })
         });
+        let e = Edit::Tiles {
+            drawing: 0,
+            layer,
+            mask,
+            snap,
+        };
+        if lines {
+            self.push_line_step(e);
+        } else {
+            self.push_undo(e);
+        }
         true
     }
 
@@ -3594,7 +3661,7 @@ impl Painter {
     }
 
     /// The tiles of a drawing, wherever it is (showing on a layer, or kept).
-    fn drawing_tiles(&self, drawing: u32) -> Option<&TileMap> {
+    pub(crate) fn drawing_tiles(&self, drawing: u32) -> Option<&TileMap> {
         if drawing == 0 {
             return None;
         }
@@ -4781,7 +4848,7 @@ fn flood(src: &[[u8; 4]], w: usize, h: usize, x: usize, y: usize, tol: i32) -> V
 const H_IDENTITY: [f32; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
 
 /// `h` applied to (x, y); None behind the camera (w ≤ 0) or at infinity.
-fn h_apply(h: [f32; 9], x: f32, y: f32) -> Option<(f32, f32)> {
+pub(crate) fn h_apply(h: [f32; 9], x: f32, y: f32) -> Option<(f32, f32)> {
     let w = h[6] * x + h[7] * y + h[8];
     if w <= 1e-6 {
         return None;
@@ -4895,7 +4962,7 @@ pub(crate) fn lerp_px(a: [u16; 4], b: [u16; 4], t: f32) -> [u16; 4] {
 }
 
 /// Inverse of a 3×3 matrix; None if singular.
-fn h_invert(m: [f32; 9]) -> Option<[f32; 9]> {
+pub(crate) fn h_invert(m: [f32; 9]) -> Option<[f32; 9]> {
     let m = m.map(|v| v as f64);
     let c0 = m[4] * m[8] - m[5] * m[7];
     let c1 = m[5] * m[6] - m[3] * m[8];

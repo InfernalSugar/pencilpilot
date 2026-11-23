@@ -110,6 +110,67 @@ impl BaseTile {
     }
 }
 
+/// How far past a dab a brush that smudges reads the paint around it, as a multiple of
+/// the dab's radius (0: it doesn't smudge). Its strokes' redraws must take in every tile
+/// that far away, drawn as it was (see `lines`'s smudge notes).
+pub fn smudge_reach(b: &Brush) -> f32 {
+    use hokusai::BrushSetting as S;
+    let smudge = b.get(S::Smudge);
+    let length = b.get(S::SmudgeLength);
+    let active = (smudge.base_value != 0.0 || !smudge.inputs.is_empty())
+        && (length.base_value < 1.0 || !length.inputs.is_empty());
+    if !active {
+        return 0.0;
+    }
+    // the most the sampling radius's log can reach with its inputs
+    let r = b.get(S::SmudgeRadiusLog);
+    let most = r.base_value
+        + r.inputs
+            .iter()
+            .map(|m| m.points.iter().map(|p| p.1.abs()).fold(0.0, f32::max))
+            .sum::<f32>();
+    most.exp().max(1.0)
+}
+
+/// The most a setting reaches: its base and every input's largest output.
+fn most(b: &Brush, s: hokusai::BrushSetting) -> f32 {
+    let v = b.get(s);
+    v.base_value.abs()
+        + v.inputs
+            .iter()
+            .map(|m| m.points.iter().map(|p| p.1.abs()).fold(0.0, f32::max))
+            .sum::<f32>()
+}
+
+/// How far from the path a brush's strokes can paint, or read paint to smudge, as a
+/// multiple of its radius: its dabs grow with their inputs and random size, move with
+/// their offsets and tracking noise, and smudging reads around them. A redraw must take
+/// in every tile that far from a stroke for it to come out as it was painted.
+pub fn paint_reach(b: &Brush) -> f32 {
+    use hokusai::BrushSetting as S;
+    let grow = (most(b, S::Radius) - b.get(S::Radius).base_value.abs()).max(0.0)
+        + most(b, S::RadiusByRandom);
+    let dab = grow.exp();
+    let offsets = (most(b, S::OffsetByRandom)
+        + most(b, S::OffsetX)
+        + most(b, S::OffsetY)
+        + most(b, S::OffsetAngle)
+        + most(b, S::OffsetAngleAsc)
+        + most(b, S::OffsetAngleView)
+        + most(b, S::OffsetAngle2)
+        + most(b, S::OffsetAngle2Asc)
+        + most(b, S::OffsetAngle2View))
+        * most(b, S::OffsetMultiplier).exp()
+        + most(b, S::OffsetBySpeed)
+        + most(b, S::TrackingNoise);
+    let pick = smudge_reach(b).max(1.0);
+    // (summed, the inputs' extremes can make it absurd: past this, the whole canvas)
+    (dab * (offsets + pick) + 1.0).min(MOST_REACH)
+}
+
+/// The farthest `paint_reach` goes: any farther is the whole canvas anyway.
+pub const MOST_REACH: f32 = 1000.0;
+
 /// A drawing's base: per tile, the pixels under its editable strokes.
 pub(crate) type Base = HashMap<TileKey, BaseTile>;
 /// Base entries as they were before an edit (`None`: not there).
@@ -233,6 +294,83 @@ pub(crate) struct Redraw {
     scratch: UndoSurface,
     /// replaying into this drawing's base, not the layer (see `base_begin`)
     into_base: Option<u32>,
+    /// strokes of one group (made together with symmetry), waiting to be replayed
+    /// point by point together, as they were painted (see `lines_stroke`)
+    queue: Vec<Queued>,
+    queue_group: u32,
+    /// replaying into the last transform's stash (`xf_without_begin`)
+    into_stash: bool,
+}
+
+/// The last transform kept (see `transform_commit_keeping`), for editable strokes to
+/// follow it: the layer as it was, its base then, what was lifted (the box, and the
+/// selection), and the matrix.
+pub(crate) struct XfStash {
+    pub(crate) layer: u32,
+    pub(crate) drawing: u32,
+    pub(crate) original: TileMap,
+    pub(crate) base: Base,
+    pub(crate) m: [f32; 9],
+    /// the lifted box: x0, y0, width, height (canvas px)
+    pub(crate) lifted: (i64, i64, usize, usize),
+    pub(crate) sel: Option<Vec<u8>>,
+    /// the layer as it was without the strokes that follow the transform (their tiles)
+    pub(crate) without: TileMap,
+}
+
+/// A stroke waiting in a group: its brush, seed, points and dab style.
+struct Queued {
+    brush: Brush,
+    seed: u32,
+    pts: Vec<f32>,
+    style: Option<std::sync::Arc<crate::texture::DabStyle>>,
+}
+
+impl Redraw {
+    fn new(layer: u32, scratch: UndoSurface, into_base: Option<u32>) -> Self {
+        Self {
+            layer,
+            scratch: UndoSurface {
+                fixed_sampling: true,
+                ..scratch
+            },
+            into_base,
+            queue: Vec::new(),
+            queue_group: 0,
+            into_stash: false,
+        }
+    }
+
+    /// Replay the strokes waiting: point by point, each stroke in turn (as symmetry
+    /// paints its copies), then each finished.
+    fn flush(&mut self) {
+        let queue = std::mem::take(&mut self.queue);
+        self.queue_group = 0;
+        let mut states: Vec<BrushState> = queue.iter().map(|q| BrushState::new(q.seed)).collect();
+        let most = queue.iter().map(|q| q.pts.len() / 6).max().unwrap_or(0);
+        for i in 0..most {
+            for (q, st) in queue.iter().zip(states.iter_mut()) {
+                let Some(p) = q.pts.get(i * 6..i * 6 + 6) else {
+                    continue;
+                };
+                self.scratch.style = q.style.clone();
+                q.brush.stroke_to(
+                    st,
+                    &mut self.scratch,
+                    p[0],
+                    p[1],
+                    p[2],
+                    p[3],
+                    p[4],
+                    p[5] as f64,
+                );
+            }
+        }
+        for (q, st) in queue.iter().zip(states.iter_mut()) {
+            self.scratch.style = q.style.clone();
+            q.brush.finish_stroke(st, &mut self.scratch);
+        }
+    }
 }
 
 /// A line edit not in the history yet: its layer, the drawing it's on (0: none yet)
@@ -317,6 +455,11 @@ impl Painter {
         for (k, st) in self.sym_states.iter_mut().enumerate() {
             *st = BrushState::new(seed.wrapping_add(k as u32 + 1));
         }
+        // (smudge sampling as a replay will do it)
+        let active = self.active;
+        if let Some(l) = self.layer_mut(active) {
+            l.surface.fixed_sampling = true;
+        }
         self.alpha_lock_stroke = false;
         self.line_stroke = true;
         true
@@ -362,16 +505,16 @@ impl Painter {
                 }
             }
         }
-        self.line_redraw = Some(Box::new(Redraw {
+        self.line_redraw = Some(Box::new(Redraw::new(
             layer,
-            scratch: UndoSurface {
+            UndoSurface {
                 tiles: start,
                 style: self.style.clone(),
                 only: Some(Box::new(Area::new(keys))),
                 ..Default::default()
             },
-            into_base: None,
-        }));
+            None,
+        )));
         true
     }
 
@@ -400,17 +543,184 @@ impl Painter {
             .iter()
             .filter_map(|k| base.and_then(|b| b.get(k)?.pixels()).map(|t| (*k, t)))
             .collect();
-        self.line_redraw = Some(Box::new(Redraw {
+        self.line_redraw = Some(Box::new(Redraw::new(
             layer,
-            scratch: UndoSurface {
+            UndoSurface {
                 tiles: start,
                 style: self.style.clone(),
                 only: Some(Box::new(Area::new(keys))),
                 ..Default::default()
             },
-            into_base: Some(drawing),
-        }));
+            Some(drawing),
+        )));
         true
+    }
+
+    /// Tiles a stroke that smudges read from without painting them (its pick-up reaches
+    /// past its paint) join the drawing's base as they are now, so a replay reads what
+    /// it read (joins the last undo step). The tiles: (x, y) pairs.
+    pub fn base_cover(&mut self, drawing: u32, tiles: &[i32]) -> bool {
+        if drawing == 0 || !tiles.len().is_multiple_of(2) {
+            return false;
+        }
+        let Some(px) = self.drawing_tiles(drawing) else {
+            return false;
+        };
+        let base = self.bases.get(&drawing);
+        let snap: BaseSnap = tiles
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&[x, y]| (x, y))
+            .filter(|k| !base.is_some_and(|b| b.contains_key(k)))
+            .map(|k| (k, Some(BaseTile::of(px.get(&k).map(|t| &**t)))))
+            .collect();
+        if snap.is_empty() {
+            return false;
+        }
+        let old = self.base_swap(drawing, snap);
+        self.join_last(Edit::Base { drawing, snap: old });
+        true
+    }
+
+    // ---- editable strokes following a transform ----
+
+    /// The last transform kept was of drawing `drawing` (0: none, or another).
+    pub fn xf_drawing(&self) -> u32 {
+        self.xf_stash.as_ref().map_or(0, |s| s.drawing)
+    }
+
+    /// Start working out the layer as it was before the last transform without its
+    /// editable strokes but those that became plain pixels with it: on every tile its
+    /// base then had, from that base, the strokes that became plain pixels are replayed
+    /// (`lines_stroke`…, `lines_commit`). Not an undo step. False without a transform
+    /// kept, or busy.
+    pub fn xf_without_begin(&mut self) -> bool {
+        if !self.idle() {
+            return false;
+        }
+        let Some(st) = self.xf_stash.as_ref() else {
+            return false;
+        };
+        let keys: HashSet<TileKey> = st.base.keys().copied().collect();
+        let start: TileMap = st
+            .base
+            .iter()
+            .filter_map(|(k, b)| b.pixels().map(|t| (*k, t)))
+            .collect();
+        let mut r = Redraw::new(
+            st.layer,
+            UndoSurface {
+                tiles: start,
+                style: self.style.clone(),
+                only: Some(Box::new(Area::new(keys))),
+                ..Default::default()
+            },
+            None,
+        );
+        r.into_stash = true;
+        self.line_redraw = Some(Box::new(r));
+        true
+    }
+
+    /// The pixels under the strokes that followed the last transform, at their new
+    /// `tiles`: the layer as it was without them (see `xf_without_begin`), moved as the
+    /// transform moved what it lifted, become the drawing's base there (joins the last
+    /// undo step). The stash goes. False without one.
+    #[allow(clippy::needless_range_loop)] // (pixels by row and column, mapped to the canvas)
+    pub fn xf_base(&mut self, tiles: &[i32]) -> bool {
+        let Some(st) = self.xf_stash.take() else {
+            return false;
+        };
+        let Some(inv) = crate::h_invert(st.m) else {
+            return false;
+        };
+        let (w, h) = (self.width as i64, self.height as i64);
+        let ts = TILE_SIZE as i64;
+        let (fx0, fy0, fw, fh) = st.lifted;
+        let at = |cx: i64, cy: i64| -> [u16; 4] {
+            let key = (cx.div_euclid(ts) as i32, cy.div_euclid(ts) as i32);
+            st.without
+                .get(&key)
+                .or_else(|| st.original.get(&key))
+                .map_or([0; 4], |t| {
+                    t[cy.rem_euclid(ts) as usize][cx.rem_euclid(ts) as usize]
+                })
+        };
+        // lifted as `transform_begin` lifted (its paint in the box, inside the selection)
+        let lifted = |cx: i64, cy: i64| {
+            cx >= fx0
+                && cy >= fy0
+                && cx < fx0 + fw as i64
+                && cy < fy0 + fh as i64
+                && st.sel.as_ref().is_none_or(|s| {
+                    cx >= 0 && cy >= 0 && cx < w && cy < h && s[(cy * w + cx) as usize] > 0
+                })
+        };
+        let float = |xi: i64, yi: i64| -> [f32; 4] {
+            if lifted(xi, yi) {
+                at(xi, yi).map(|v| v as f32)
+            } else {
+                [0.0; 4]
+            }
+        };
+        let mut snap = BaseSnap::new();
+        for &[tx, ty] in tiles.as_chunks::<2>().0 {
+            let mut tile = empty_tile();
+            for py in 0..TILE_SIZE {
+                for px in 0..TILE_SIZE {
+                    let (cx, cy) = (tx as i64 * ts + px as i64, ty as i64 * ts + py as i64);
+                    let rest = if lifted(cx, cy) { [0; 4] } else { at(cx, cy) };
+                    // (as `render_float` samples: bilinear, premultiplied)
+                    let mut s = [0u16; 4];
+                    if cx >= 0
+                        && cy >= 0
+                        && cx < w
+                        && cy < h
+                        && let Some((sx, sy)) =
+                            crate::h_apply(inv, cx as f32 + 0.5, cy as f32 + 0.5)
+                    {
+                        let (x, y) = (sx - 0.5, sy - 0.5);
+                        let (x0, y0) = (x.floor(), y.floor());
+                        let (dx, dy) = (x - x0, y - y0);
+                        let (x0, y0) = (x0 as i64, y0 as i64);
+                        let (p00, p10, p01, p11) = (
+                            float(x0, y0),
+                            float(x0 + 1, y0),
+                            float(x0, y0 + 1),
+                            float(x0 + 1, y0 + 1),
+                        );
+                        for k in 0..4 {
+                            let v = p00[k] * (1.0 - dx) * (1.0 - dy)
+                                + p10[k] * dx * (1.0 - dy)
+                                + p01[k] * (1.0 - dx) * dy
+                                + p11[k] * dx * dy;
+                            s[k] = v.round().clamp(0.0, 32768.0) as u16;
+                        }
+                    }
+                    tile[py][px] = if s[3] > 0 {
+                        crate::merge_pixel(rest, s, 1.0, crate::Blend::Normal)
+                    } else {
+                        rest
+                    };
+                }
+            }
+            snap.insert((tx, ty), Some(BaseTile::of(Some(&tile))));
+        }
+        if snap.is_empty() {
+            return true;
+        }
+        let old = self.base_swap(st.drawing, snap);
+        self.join_last(Edit::Base {
+            drawing: st.drawing,
+            snap: old,
+        });
+        true
+    }
+
+    /// Forget the last transform kept.
+    pub fn xf_forget(&mut self) {
+        self.xf_stash = None;
     }
 
     /// Forget base tiles no editable stroke needs any more (joins the last undo step).
@@ -442,24 +752,29 @@ impl Painter {
     /// y tilt, seconds since the previous point (6 numbers a point; a partial point at
     /// the end is ignored), painted with `brush`, the dab style set now and a brush
     /// state seeded with `seed`. Nothing without a redraw begun.
-    pub fn lines_stroke(&mut self, brush: &Brush, seed: u32, pts: &[f32]) {
+    ///
+    /// `group` (0: none) gathers strokes made together (symmetry's copies, given one
+    /// after the other with the same number): they're replayed point by point
+    /// together, as they were painted, when the group ends. (It matters for brushes
+    /// that smudge: each copy picks up the paint the others just put down.)
+    pub fn lines_stroke(&mut self, brush: &Brush, seed: u32, pts: &[f32], group: u32) {
+        let style = self.style.clone();
         let Some(r) = self.line_redraw.as_mut() else {
             return;
         };
-        let mut state = BrushState::new(seed);
-        for p in pts.as_chunks::<6>().0 {
-            brush.stroke_to(
-                &mut state,
-                &mut r.scratch,
-                p[0],
-                p[1],
-                p[2],
-                p[3],
-                p[4],
-                p[5] as f64,
-            );
+        if group == 0 || group != r.queue_group {
+            r.flush();
         }
-        brush.finish_stroke(&mut state, &mut r.scratch);
+        r.queue_group = group;
+        r.queue.push(Queued {
+            brush: brush.clone(),
+            seed,
+            pts: pts[..pts.len() / 6 * 6].to_vec(),
+            style,
+        });
+        if group == 0 {
+            r.flush();
+        }
     }
 
     /// The redrawn tiles replace the layer's (fully transparent ones are dropped).
@@ -470,14 +785,28 @@ impl Painter {
         let Some(r) = self.line_redraw.take() else {
             return false;
         };
+        let mut r = r;
+        r.flush();
         let Redraw {
             layer,
             mut scratch,
             into_base,
+            into_stash,
+            ..
         } = *r;
         let Some(area) = scratch.only.take() else {
             return false;
         };
+        if into_stash {
+            let Some(st) = self.xf_stash.as_mut() else {
+                return false;
+            };
+            for key in area.tiles {
+                let t = scratch.tiles.remove(&key).unwrap_or_else(empty_tile);
+                st.without.insert(key, t);
+            }
+            return true;
+        }
         if let Some(drawing) = into_base {
             let snap: BaseSnap = area
                 .tiles
@@ -957,7 +1286,7 @@ mod tests {
     fn redraw(p: &mut Painter, layer: u32, tiles: &[i32], b: &Brush, strokes: &[(u32, &[f32])]) {
         assert!(p.lines_begin(layer, tiles));
         for (seed, pts) in strokes {
-            p.lines_stroke(b, *seed, pts);
+            p.lines_stroke(b, *seed, pts, 0);
         }
         assert!(p.lines_commit());
     }
@@ -1081,7 +1410,7 @@ mod tests {
         p.lines_cancel();
         assert!(p.idle());
         // nothing begun: replaying is a no-op
-        p.lines_stroke(&b, 1, &wave(0.0, 100.0, 50.0));
+        p.lines_stroke(&b, 1, &wave(0.0, 100.0, 50.0), 0);
         assert!(!p.lines_pending());
         // locked layers refuse
         let mut props = p.layers[p.index_of(a).unwrap()].props.clone();
@@ -1326,7 +1655,7 @@ mod tests {
         // the first stroke becomes plain pixels: replayed into the base
         let all = keys(&done);
         assert!(p.base_begin(d, layer, &all));
-        p.lines_stroke(&b, 1, &a);
+        p.lines_stroke(&b, 1, &a, 0);
         assert!(p.lines_commit());
         assert_eq!(p.undo.len(), steps);
         // deleting the second now leaves the first, as pixels
@@ -1487,6 +1816,319 @@ mod tests {
                 t.elapsed()
             );
         }
+    }
+
+    // ---- brushes that smudge ----
+
+    fn shipped(name: &str) -> Brush {
+        // (the website's copies are in the repository; the app's are fetched at build)
+        let path = format!(
+            "{}/../../apps/web/static/brushes/{name}.myb",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let mut b = hokusai::myb::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        set_brush_rgb(&mut b, 200, 40, 30);
+        b
+    }
+
+    /// the brush creator's "Blend with the paint underneath" on a round brush
+    fn blending() -> Brush {
+        let mut b = pen();
+        b.get_mut(BrushSetting::Radius).base_value = 2.5;
+        b.get_mut(BrushSetting::Smudge).base_value = 0.6;
+        b.get_mut(BrushSetting::SmudgeLength).base_value = 0.5;
+        b.get_mut(BrushSetting::SmudgeRadiusLog).base_value = 0.7;
+        b
+    }
+
+    /// the tiles within `reach` px of a stroke's points
+    fn near(pts: &[f32], reach: f32) -> Vec<i32> {
+        let ts = TILE_SIZE as f32;
+        let mut keys = HashSet::new();
+        // (a 400×300 canvas and the ring of tiles round it)
+        let tx = |v: f32| ((v / ts).floor() as i32).clamp(-1, 7);
+        let ty = |v: f32| ((v / ts).floor() as i32).clamp(-1, 5);
+        for p in pts.as_chunks::<6>().0 {
+            let (x0, x1) = (tx(p[0] - reach), tx(p[0] + reach));
+            let (y0, y1) = (ty(p[1] - reach), ty(p[1] + reach));
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    keys.insert((x, y));
+                }
+            }
+        }
+        keys.into_iter().flat_map(|k| [k.0, k.1]).collect()
+    }
+
+    /// how far a brush's paint and pick-up reach past the path (px), as the app works it out
+    fn reach_of(b: &Brush) -> f32 {
+        b.get(BrushSetting::Radius).base_value.exp() * paint_reach(b).max(2.5) + 3.0
+    }
+
+    #[test]
+    fn strokes_that_smudge_replay_exactly_over_the_paint_under_them() {
+        for (name, b) in [
+            ("blend", blending()),
+            ("blend, mixing as pigment", {
+                // (wide pick-up mixed as pigment: its sampling skips pixels at random)
+                let mut b = blending();
+                b.get_mut(BrushSetting::Paint).base_value = 1.0;
+                b
+            }),
+            ("classic-blend-paint", shipped("classic-blend-paint")),
+            ("classic-blending-knife", shipped("classic-blending-knife")),
+            ("classic-impressionism", shipped("classic-impressionism")),
+            ("dieterle-blender", shipped("dieterle-blender")),
+            ("dieterle-fan-1", shipped("dieterle-fan-1")),
+        ] {
+            assert!(smudge_reach(&b) > 0.0, "{name} smudges");
+            let mut p = Painter::new(400, 300);
+            let layer = p.active_layer();
+            // paint to smudge, of other colours, then some smudging first (the sampling's
+            // random pattern moves on)
+            let mut under = pen();
+            set_brush_rgb(&mut under, 20, 60, 220);
+            plain(&mut p, &under, 140.0);
+            plain(&mut p, &b, 170.0);
+            let first = wave(20.0, 380.0, 150.0);
+            live(&mut p, &b, 5, &first);
+            let second = wave(60.0, 340.0, 160.0);
+            live(&mut p, &b, 6, &second);
+            let drawn = painted(&p, layer);
+            // every tile the strokes reach, redrawn from the base
+            let reach = reach_of(&b);
+            let mut tiles = near(&first, reach);
+            tiles.extend(near(&second, reach));
+            redraw(&mut p, layer, &tiles, &b, &[(5, &first), (6, &second)]);
+            p.lines_push();
+            assert_eq!(painted(&p, layer), drawn, "{name}: replayed as painted");
+            // moved and moved back: as it was
+            let moved = shifted(&second, 15.0, 20.0);
+            let mut both = tiles.clone();
+            both.extend(near(&moved, reach));
+            redraw(&mut p, layer, &both, &b, &[(5, &first), (6, &moved)]);
+            p.lines_push();
+            assert_ne!(painted(&p, layer), drawn);
+            redraw(&mut p, layer, &both, &b, &[(5, &first), (6, &second)]);
+            p.lines_push();
+            assert_eq!(painted(&p, layer), drawn, "{name}: moved back");
+        }
+    }
+
+    #[test]
+    fn smudging_symmetry_copies_replay_together_as_they_were_painted() {
+        let b = blending();
+        let mut p = Painter::new(300, 200);
+        let layer = p.active_layer();
+        plain(&mut p, &pen(), 100.0);
+        p.set_symmetry(Some(Symmetry {
+            mode: SymmetryMode::Vertical,
+            cx: 150.0,
+            cy: 100.0,
+        }));
+        // across the axis: each copy smudges into the other's fresh paint
+        let pts = wave(60.0, 200.0, 100.0);
+        live(&mut p, &b, 40, &pts);
+        p.set_symmetry(None);
+        let drawn = painted(&p, layer);
+        let mirrored: Vec<f32> = pts
+            .as_chunks::<6>()
+            .0
+            .iter()
+            .flat_map(|q| [300.0 - q[0], q[1], q[2], 0.0, 0.0, q[5]])
+            .collect();
+        let tiles = tiles_of(300, 200);
+        assert!(p.lines_begin(layer, &tiles));
+        p.lines_stroke(&b, 40, &pts, 7);
+        p.lines_stroke(&b, 41, &mirrored, 7);
+        assert!(p.lines_commit());
+        p.lines_push();
+        assert_eq!(painted(&p, layer), drawn);
+    }
+
+    #[test]
+    fn a_smudging_strokes_pick_up_joins_the_base() {
+        let b = blending();
+        let mut p = Painter::new(300, 200);
+        let layer = p.active_layer();
+        let s = wave(20.0, 280.0, 100.0);
+        live(&mut p, &b, 3, &s);
+        let d = p.layer_drawing(layer);
+        let n = p.base_tiles(d);
+        let around = tiles_of(300, 200);
+        assert!(p.base_cover(d, &around));
+        assert!(p.base_tiles(d) >= around.len() / 2);
+        assert!(!p.base_cover(d, &around));
+        p.undo();
+        assert_eq!(p.base_tiles(d), 0);
+        p.redo();
+        assert!(p.base_tiles(d) >= around.len() / 2);
+        assert!(n > 0);
+        assert_eq!(smudge_reach(&pen()), 0.0);
+        // a plain pen reaches about its radius and its scatter
+        assert!((paint_reach(&pen()) - 2.6).abs() < 0.01);
+    }
+
+    // ---- strokes following a transform ----
+
+    /// stroke points under an affine (a, b, c, d, e, f as canvas 2D takes it)
+    fn mapped(pts: &[f32], m: [f32; 6]) -> Vec<f32> {
+        pts.as_chunks::<6>()
+            .0
+            .iter()
+            .flat_map(|q| {
+                [
+                    m[0] * q[0] + m[2] * q[1] + m[4],
+                    m[1] * q[0] + m[3] * q[1] + m[5],
+                    q[2],
+                    q[3],
+                    q[4],
+                    q[5],
+                ]
+            })
+            .collect()
+    }
+
+    /// Transform the active layer by `m` (with `sel`, a selection), as the app does with
+    /// editable strokes `moving` following it: returns the tiles redrawn.
+    fn transform_with_strokes(
+        p: &mut Painter,
+        b: &Brush,
+        m: [f32; 6],
+        all: &[(u32, Vec<f32>)],
+        moving: &[usize],
+    ) -> Vec<i32> {
+        let layer = p.active_layer();
+        assert!(p.transform_begin().len() == 4);
+        assert!(p.transform_preview(m));
+        assert!(p.transform_commit_keeping(false));
+        assert_eq!(p.xf_drawing(), p.layer_drawing(layer));
+        let _ = p.take_tainted();
+        // the layer without its editable strokes (none became plain pixels: none replayed)
+        let reach = b.get(BrushSetting::Radius).base_value.exp() * 2.5 + 3.0;
+        assert!(p.xf_without_begin());
+        assert!(p.lines_commit());
+        // where they go: the base, then the strokes drawn there
+        let now: Vec<(u32, Vec<f32>)> = all
+            .iter()
+            .enumerate()
+            .map(|(i, (s, pts))| {
+                (
+                    *s,
+                    if moving.contains(&i) {
+                        mapped(pts, m)
+                    } else {
+                        pts.clone()
+                    },
+                )
+            })
+            .collect();
+        let new: Vec<i32> = moving
+            .iter()
+            .flat_map(|&i| near(&now[i].1, reach))
+            .collect();
+        assert!(p.xf_base(&new));
+        let list: Vec<(u32, &[f32])> = now.iter().map(|(s, v)| (*s, v.as_slice())).collect();
+        redraw(p, layer, &new, b, &list);
+        assert!(p.lines_push());
+        assert!(p.join_last_edits());
+        new
+    }
+
+    #[test]
+    fn strokes_follow_a_transform_and_stay_editable() {
+        let b = pen();
+        let mut under = pen();
+        set_brush_rgb(&mut under, 30, 160, 60);
+        // turned a little, a bit bigger, moved
+        let (c, s) = (0.2f32.cos() * 1.1, 0.2f32.sin() * 1.1);
+        let m = [c, s, -s, c, 20.0, -10.0];
+        for selected in [false, true] {
+            let mut p = Painter::new(400, 300);
+            let layer = p.active_layer();
+            plain(&mut p, &under, 120.0);
+            let a = wave(60.0, 200.0, 110.0);
+            let d2 = wave(250.0, 380.0, 240.0);
+            let all = vec![(1, a.clone()), (2, d2.clone())];
+            live(&mut p, &b, 1, &a);
+            live(&mut p, &b, 2, &d2);
+            let before = painted(&p, layer);
+            // the same plain paint, moved alone (what's under the strokes afterwards)
+            let mut q = Painter::new(400, 300);
+            let ql = q.active_layer();
+            plain(&mut q, &under, 120.0);
+            let mut sel = vec![0u8; 400 * 300];
+            if selected {
+                // the top part: the first stroke and the paint, not the second
+                for v in &mut sel[..400 * 200] {
+                    *v = 255;
+                }
+                p.set_selection(&sel, 0);
+                q.set_selection(&sel, 0);
+            }
+            q.transform_begin();
+            q.transform_preview(m);
+            q.transform_commit();
+            let moving: Vec<usize> = if selected { vec![0] } else { vec![0, 1] };
+            let steps = p.undo.len();
+            let new = transform_with_strokes(&mut p, &b, m, &all, &moving);
+            assert_eq!(p.undo.len(), steps + 1, "one undo step");
+            let moved = painted(&p, layer);
+            // drawn again as they are: nothing changes (they're editable)
+            let mut now = all.clone();
+            for &i in &moving {
+                now[i].1 = mapped(&all[i].1, m);
+            }
+            let list: Vec<(u32, &[f32])> = now.iter().map(|(s, v)| (*s, v.as_slice())).collect();
+            redraw(&mut p, layer, &new, &b, &list);
+            p.lines_push();
+            assert_eq!(painted(&p, layer), moved, "selected: {selected}");
+            // the moved strokes deleted: what's left is the paint, moved alone
+            let rest: Vec<(u32, &[f32])> = list
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !moving.contains(i))
+                .map(|(_, x)| *x)
+                .collect();
+            redraw(&mut p, layer, &new, &b, &rest);
+            p.lines_push();
+            let got = painted(&p, layer);
+            let want = painted(&q, ql);
+            for k in new.as_chunks::<2>().0 {
+                let k = (k[0], k[1]);
+                if selected && k.1 >= 3 {
+                    continue; // (the second stroke stays there)
+                }
+                assert_eq!(
+                    got.get(&k),
+                    want.get(&k),
+                    "tile {k:?}, selected: {selected}"
+                );
+            }
+            // undo: as before the transform
+            p.undo();
+            p.undo();
+            p.undo();
+            assert_eq!(painted(&p, layer), before);
+        }
+    }
+
+    #[test]
+    fn a_line_layer_can_stay_one_through_a_transform() {
+        let b = pen();
+        let mut p = Painter::new(300, 200);
+        let l = p.add_line_layer("");
+        live(&mut p, &b, 1, &wave(20.0, 200.0, 60.0));
+        p.transform_begin();
+        p.transform_preview([1.0, 0.0, 0.0, 1.0, 10.0, 20.0]);
+        assert!(p.transform_commit_keeping(true));
+        assert!(is_lines(&p, l));
+        p.xf_forget();
+        assert_eq!(p.xf_drawing(), 0);
+        p.transform_begin();
+        p.transform_preview([1.0, 0.0, 0.0, 1.0, 10.0, 20.0]);
+        assert!(p.transform_commit());
+        assert!(!is_lines(&p, l));
     }
 
     /// How long redraws take: `cargo test -p brush --release -- --ignored --nocapture

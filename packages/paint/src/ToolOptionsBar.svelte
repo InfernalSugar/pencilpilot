@@ -42,6 +42,11 @@
 		void status.version;
 		return canvas?.layerStrokes(status.active) ?? 0;
 	});
+	/** Move shows the layer's editable strokes (no layer box yet) */
+	const strokesShown = $derived.by(() => {
+		void status.version;
+		return !!canvas?.moveShowsStrokes();
+	});
 	/** a stroke picked with another tool (Move, a held brush) is being edited */
 	const pickedElsewhere = $derived.by(() => {
 		void status.version;
@@ -49,7 +54,9 @@
 	});
 </script>
 
-{#if tool === 'lines' || pickedElsewhere}
+<!-- (picked with Move, its bar takes Move's place; with the brush held still, no bar
+	comes: the canvas mustn't shift under the pen) -->
+{#if tool === 'lines' || (pickedElsewhere && tool === 'transform')}
 	<div class="fill-opts" role="group" aria-label="Select line">
 		{#if !onLines && !strokes}
 			<span class="msg">
@@ -391,7 +398,13 @@
 		</label>
 	</div>
 {/if}
-{#if tool === 'transform' && !pickedElsewhere}
+{#if tool === 'transform' && !pickedElsewhere && strokesShown}
+	<div class="fill-opts move-hint" role="group" aria-label="Move">
+		<span class="msg" data-testid="move-strokes-hint">
+			Tap a stroke to change it, or drag it. Drag anywhere else to move the whole layer.
+		</span>
+	</div>
+{:else if tool === 'transform' && !pickedElsewhere}
 	<div class="fill-opts" role="group" aria-label="Transform">
 		<button
 			type="button"
@@ -427,6 +440,12 @@
 			Done
 		</button>
 		<button type="button" class="tool" onclick={() => canvas?.transformCancel()}> Cancel </button>
+		{#if strokes}
+			<span class="msg" data-testid="transform-strokes-note">
+				Strokes stay editable when moved, scaled, turned or flipped. Distort and Warp make them
+				plain pixels.
+			</span>
+		{/if}
 	</div>
 {/if}
 {#if tool.startsWith('select') || status.selection}
@@ -862,6 +881,10 @@
 	}
 	.fill-opts > * {
 		flex: none;
+	}
+	/* (as tall as a row of buttons: the canvas stays put when Move's box comes) */
+	.move-hint {
+		min-height: 38px;
 	}
 	.fill-opts .slider {
 		flex: none;
