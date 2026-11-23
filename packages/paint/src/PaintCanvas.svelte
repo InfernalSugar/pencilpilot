@@ -5184,7 +5184,7 @@
 		<div
 			class="drop-tol"
 			role="group"
-			aria-label="ColorDrop threshold"
+			aria-label="Drop fill spread"
 			data-testid="colordrop-threshold"
 			style="left: {dropFill.screen[0]}px; top: {dropFill.screen[1]}px"
 		>

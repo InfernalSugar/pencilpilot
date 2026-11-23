@@ -165,10 +165,10 @@
 				class="tool"
 				aria-pressed={!!layer?.assist}
 				disabled={!layer}
-				title="Drawing assist on this layer: strokes snap to the grid, isometric or perspective directions (each layer has its own, in Layers)"
+				title="Guide snap on this layer: strokes snap to the grid, isometric or perspective directions (each layer has its own, in Layers)"
 				onclick={() => layer && canvas?.setLayerAssist(layer.id, !layer.assist)}
 			>
-				Assist
+				Guide snap
 			</button>
 		{/if}
 		<button

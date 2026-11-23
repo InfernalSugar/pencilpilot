@@ -448,10 +448,10 @@
 						type="button"
 						class="chip"
 						aria-pressed={!!active.assist}
-						title="Drawing assist: strokes on this layer snap to the grid, isometric or perspective guide"
+						title="Guide snap: strokes on this layer snap to the grid, isometric or perspective guide"
 						onclick={() => controls?.setLayerAssist?.(active.id, !active.assist)}
 					>
-						Drawing assist
+						Guide snap
 					</button>
 				{/if}
 				{#if controls?.selectLayerContents}
@@ -938,7 +938,7 @@
 							<span class="meta">
 								{#if l.blend !== 'normal'}{BLENDS.find((b) => b.id === l.blend)?.label}{/if}
 								{#if l.opacity < 1}{Math.round(l.opacity * 100)}%{/if}
-								{#if l.assist}Assisted{/if}
+								{#if l.assist}Guide snap{/if}
 							</span>
 						</button>
 					{/if}

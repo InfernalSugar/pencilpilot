@@ -1315,7 +1315,7 @@
 					step="0.05"
 					bind:value={toolOpts.smoothing[smoothKind]}
 					onchange={() => remember('pp.smoothingTools', $state.snapshot(toolOpts.smoothing))}
-					title="Steadies wobbly lines (like StreamLine). The brush, eraser and smudge each keep their own."
+					title="Steadies wobbly lines. The brush, eraser and smudge each keep their own."
 				/>
 			</label>
 		{/if}
@@ -1345,13 +1345,13 @@
 			type="button"
 			class="tool"
 			aria-pressed={toolOpts.quickShape}
-			title="QuickShape: hold at the end of a stroke to snap it to a line, circle or rectangle"
+			title="Snap shapes: hold at the end of a stroke to snap it to a line, circle or rectangle"
 			onclick={() => {
 				toolOpts.quickShape = !toolOpts.quickShape;
 				remember('pp.quickShape', toolOpts.quickShape);
 			}}
 		>
-			QuickShape
+			Snap shapes
 		</button>
 		<button
 			type="button"

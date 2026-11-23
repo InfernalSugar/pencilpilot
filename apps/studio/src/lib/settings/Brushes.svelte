@@ -11,7 +11,7 @@
 		<input type="checkbox" bind:checked={settings.brushFollowsZoom} />
 		<span>
 			The brush keeps its size on screen when you zoom
-			<small>(smaller on the canvas zoomed in, like Procreate’s dynamic brush scaling)</small>
+			<small>(smaller on the canvas when zoomed in, so it stays the same size on screen)</small>
 		</span>
 	</label>
 	<label class="row">
