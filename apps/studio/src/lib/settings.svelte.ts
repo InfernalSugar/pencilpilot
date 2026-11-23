@@ -22,10 +22,28 @@ export const BOTTOM_MAX = 640;
 export const DOCK_MIN = 260;
 export const DOCK_MAX = 640;
 
+/** Where the reference pictures show: the top of the side panel, beside the canvas, or a window of their own. */
+export const REF_PLACES = ['corner', 'side', 'float'] as const;
+export type RefPlace = (typeof REF_PLACES)[number];
+/** the reference pane's share of the drawing area beside the canvas */
+export const REF_SPLIT_MIN = 0.15;
+export const REF_SPLIT_MAX = 0.75;
+
+export interface RefLayout {
+	/** the reference is showing */
+	shown: boolean;
+	place: RefPlace;
+	split: number;
+	/** the floating window, in px */
+	float: { x: number; y: number; w: number; h: number };
+}
+
 export interface Settings {
 	/** the interface's colours (the paper stays white) */
 	theme: Theme;
 	layout: StudioLayout;
+	/** the reference pictures' place and size */
+	reference: RefLayout;
 	keys: Keymap;
 	/** use the pen's pressure and tilt (off: every stroke at a steady medium pressure) */
 	penPressure: boolean;
@@ -160,6 +178,7 @@ export const DEFAULT_LAYOUT: StudioLayout = {
 export const DEFAULTS: Settings = {
 	theme: 'light',
 	layout: DEFAULT_LAYOUT,
+	reference: { shown: false, place: 'side', split: 0.35, float: { x: 80, y: 120, w: 360, h: 420 } },
 	keys: loadKeymap(null),
 	penPressure: true,
 	fingers: 'auto',
@@ -257,6 +276,7 @@ export function cleanSettings(raw: unknown, legacy: { onion?: unknown } = {}): S
 				l.bottomHeight === 0 ? 0 : int(l.bottomHeight, L.bottomHeight, BOTTOM_MIN, BOTTOM_MAX),
 			dockWidth: int(l.dockWidth, L.dockWidth, DOCK_MIN, DOCK_MAX)
 		},
+		reference: cleanRef(o.reference),
 		keys: loadKeymap(o.keys),
 		penPressure: bool(o.penPressure, D.penPressure),
 		fingers: one(o.fingers, ['auto', 'draw', 'move'] as const, 'auto'),
@@ -319,6 +339,28 @@ export function cleanSettings(raw: unknown, legacy: { onion?: unknown } = {}): S
 		askToSave: bool(o.askToSave, D.askToSave),
 		askToDelete: bool(o.askToDelete, D.askToDelete),
 		scrubSound: bool(o.scrubSound, D.scrubSound)
+	};
+}
+
+/** The reference's layout, sensible whatever was kept. */
+function cleanRef(raw: unknown): RefLayout {
+	const o = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+	const D = DEFAULTS.reference;
+	const f = (o.float && typeof o.float === 'object' ? o.float : {}) as Record<string, unknown>;
+	const num = (v: unknown, d: number, lo: number, hi: number) =>
+		typeof v === 'number' && Number.isFinite(v)
+			? Math.round(Math.min(hi, Math.max(lo, v)) * 1000) / 1000
+			: d;
+	return {
+		shown: typeof o.shown === 'boolean' ? o.shown : D.shown,
+		place: REF_PLACES.includes(o.place as RefPlace) ? (o.place as RefPlace) : D.place,
+		split: num(o.split, D.split, REF_SPLIT_MIN, REF_SPLIT_MAX),
+		float: {
+			x: num(f.x, D.float.x, 0, 10_000),
+			y: num(f.y, D.float.y, 0, 10_000),
+			w: num(f.w, D.float.w, 200, 4000),
+			h: num(f.h, D.float.h, 200, 4000)
+		}
 	};
 }
 
