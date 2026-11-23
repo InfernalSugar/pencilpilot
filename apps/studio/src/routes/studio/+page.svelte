@@ -67,6 +67,7 @@
 	import { page } from '$app/state';
 	import VersionsMenu from '#lib/VersionsMenu.svelte';
 	import XSheet from '#lib/XSheet.svelte';
+	import { psdStem, psdToDoc, tooBig } from '#lib/psd-open.js';
 	import { AudioBank, wav } from '#lib/audio.js';
 	import ExportDialog from '#lib/ExportDialog.svelte';
 	import LipSyncDialog from '#lib/LipSyncDialog.svelte';
@@ -1664,6 +1665,10 @@
 
 	// ---- the project file ----
 	let path = $state<string | null>(null);
+	/** an unsaved document's name (a Photoshop file opened: its name) */
+	let unsavedName = $state<string | null>(null);
+	/** the project's name, as shown and offered when saving */
+	const docName = $derived(path ? projectName(path) : (unsavedName ?? projectName(null)));
 	let created = $state<string | undefined>(undefined);
 	/** this document's recovery copy (a new one for each opened or new document) */
 	let docId = newDocId();
@@ -2230,8 +2235,7 @@
 
 	async function save(as = false) {
 		if (!canvas || busy) return;
-		const target =
-			as || !path ? await askSavePath(projectName(path), settings.projectFolder) : path;
+		const target = as || !path ? await askSavePath(docName, settings.projectFolder) : path;
 		if (!target) return;
 		busy = 'saving';
 		fileNote = '';
@@ -2301,8 +2305,12 @@
 	let fileOpen = $state(false);
 
 	/** Put a document on a fresh canvas of its size. */
-	function load(doc: ProjectDoc, opts: { path: string | null; unsaved: boolean; id?: string }) {
+	function load(
+		doc: ProjectDoc,
+		opts: { path: string | null; unsaved: boolean; id?: string; name?: string }
+	) {
 		path = opts.path;
+		unsavedName = opts.name ?? null;
 		created = doc.created;
 		fps = doc.fps;
 		docId = opts.id ?? newDocId();
@@ -2343,6 +2351,28 @@
 		});
 	}
 
+	/** A Photoshop file as a new, unsaved project (File → Open a Photoshop file…). */
+	let psdInput = $state<HTMLInputElement>();
+	async function openPsd(file: File) {
+		if (busy || !(await okToDrop('open'))) return;
+		const old = docId;
+		busy = 'opening';
+		fileNote = '';
+		try {
+			const { readPsd } = await import('@pencilpilot/paint/psd-read');
+			const r = await readPsd(new Uint8Array(await file.arrayBuffer()));
+			const big = tooBig(r.width, r.height);
+			if (big) throw new Error(big);
+			load(psdToDoc(r, settings.newFps), { path: null, unsaved: true, name: psdStem(file.name) });
+			await dropRecovery(old);
+			await tick();
+			if (r.notes.length) fileNote = `Opened ${file.name}. ${r.notes.join(' ')}`;
+		} catch (e) {
+			fileNote = `Couldn’t open ${file.name}: ${e instanceof Error ? e.message : e}`;
+			busy = '';
+		}
+	}
+
 	async function openOldVersion(id: string) {
 		if (!path || busy || !(await okToDrop('version'))) return;
 		const file = path;
@@ -2353,7 +2383,7 @@
 
 	async function exportAs(kind: 'png' | 'psd') {
 		if (!canvas || busy) return;
-		const target = await askExportPath(projectName(path), kind, settings.projectFolder);
+		const target = await askExportPath(docName, kind, settings.projectFolder);
 		if (!target) return;
 		busy = 'exporting';
 		fileNote = '';
@@ -2437,7 +2467,7 @@
 		if (!f || !canvas || busy) return;
 		const s = $state.snapshot(filmSettings) as FilmSettings;
 		const target = await askExportPath(
-			`${projectName(path)} ${s.kind === 'live' ? 'drawn live' : 'timelapse'}`,
+			`${docName} ${s.kind === 'live' ? 'drawn live' : 'timelapse'}`,
 			s.format,
 			settings.projectFolder
 		);
@@ -2649,7 +2679,7 @@
 		const s = $state.snapshot(exportSettings) as ExportSettings;
 		const f = FORMATS.find((x) => x.id === s.format)!;
 		const kind = s.format === 'png' ? 'png-seq' : s.format === 'psd' ? 'psd-seq' : s.format;
-		const target = await askExportPath(projectName(path), kind, settings.projectFolder);
+		const target = await askExportPath(docName, kind, settings.projectFolder);
 		if (!target) return;
 		await showQueue;
 		const outFps = s.fps || fps;
@@ -3316,7 +3346,7 @@
 	>
 		{#snippet title()}
 			<div class="brand">
-				<Logo /><span data-testid="project-name">{projectName(path)}</span>
+				<Logo /><span data-testid="project-name">{docName}</span>
 				{#if unsaved}<span class="dot" title="Not saved yet" aria-label="not saved">●</span>{/if}
 			</div>
 		{/snippet}
@@ -3348,6 +3378,15 @@
 							}}
 						>
 							<b>Open…</b><span>A project ({keyOf('open')})</span>
+						</button>
+						<button
+							type="button"
+							onclick={() => {
+								fileOpen = false;
+								psdInput?.click();
+							}}
+						>
+							<b>Open a Photoshop file…</b><span>Its layers, groups and masks (.psd, .psb)</span>
 						</button>
 						<button
 							type="button"
@@ -3470,6 +3509,18 @@
 						</button>
 					</div>
 				{/if}
+				<input
+					bind:this={psdInput}
+					type="file"
+					accept=".psd,.psb,image/vnd.adobe.photoshop"
+					hidden
+					aria-label="Photoshop file"
+					onchange={(e) => {
+						const f = e.currentTarget.files?.[0];
+						e.currentTarget.value = '';
+						if (f) void openPsd(f);
+					}}
+				/>
 				<input
 					bind:this={sequenceInput}
 					type="file"
@@ -3849,7 +3900,7 @@
 			{#if saveAsk}
 				<SaveChangesDialog
 					title={saveAsk.title}
-					name={projectName(path)}
+					name={docName}
 					onanswer={(c) => saveAsk?.answer(c)}
 				/>
 			{/if}
