@@ -484,21 +484,23 @@
 				{#if dockTop}<div class="dock-top">{@render dockTop()}</div>{/if}
 				{#if panel && tabs.length}
 					{#if tabs.length > 1}
-						<div class="tabs" role="tablist" aria-label="Panels">
-							{#each tabs as t (t.id)}
-								<button
-									type="button"
-									role="tab"
-									id="tab-{t.id}"
-									aria-selected={tab === t.id}
-									aria-controls="panel-{t.id}"
-									class="tab"
-									onclick={() => (tab = t.id)}
-								>
-									{t.label}
-									{#if t.meta}<span class="tab-meta">{t.meta}</span>{/if}
-								</button>
-							{/each}
+						<div class="tab-row">
+							<div class="tabs" role="tablist" aria-label="Panels">
+								{#each tabs as t (t.id)}
+									<button
+										type="button"
+										role="tab"
+										id="tab-{t.id}"
+										aria-selected={tab === t.id}
+										aria-controls="panel-{t.id}"
+										class="tab"
+										onclick={() => (tab = t.id)}
+									>
+										{t.label}
+										{#if t.meta}<span class="tab-meta">{t.meta}</span>{/if}
+									</button>
+								{/each}
+							</div>
 							{#if layout}
 								<button
 									type="button"
@@ -859,11 +861,10 @@
 	.dock-strip .fold span {
 		writing-mode: vertical-rl;
 	}
-	.tabs .dock-fold {
-		position: sticky;
-		right: 0;
+	/* the hide arrow sits beside the tabs, never over them */
+	.tab-row .dock-fold {
+		flex: none;
 		align-self: center;
-		background: var(--pp-surface-sunk);
 		color: var(--pp-ink-2);
 	}
 	.stage {
@@ -917,14 +918,20 @@
 	.dock.folded {
 		display: none;
 	}
-	.tabs {
+	.tab-row {
 		flex: none;
 		display: flex;
-		gap: 4px;
+		gap: 2px;
 		padding: 4px;
 		background: var(--pp-surface-sunk);
 		border-radius: 14px;
 		container-type: inline-size;
+	}
+	.tabs {
+		flex: 1 1 auto;
+		min-width: 0;
+		display: flex;
+		gap: 4px;
 		/* never squeeze the names into each other: a narrow dock scrolls them instead */
 		overflow-x: auto;
 		scrollbar-width: none;
@@ -962,13 +969,19 @@
 		text-overflow: ellipsis;
 	}
 	/* a narrow dock: smaller names, no second line */
-	@container (max-width: 300px) {
+	@container (max-width: 360px) {
 		.tab {
 			padding: 6px 5px;
 			font-size: 12px;
 		}
 		.tab-meta {
 			display: none;
+		}
+	}
+	/* too narrow for one row: the tabs wrap, so every one stays in sight */
+	@container (max-width: 310px) {
+		.tabs {
+			flex-wrap: wrap;
 		}
 	}
 	.tab[aria-selected='true'] .tab-meta {
