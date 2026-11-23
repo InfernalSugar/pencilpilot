@@ -164,10 +164,26 @@ export class StrokeLog {
 		if (a) a.label = label;
 	}
 
-	/** Undo and redo `effect` along with the step just recorded (see `labelLast`). */
+	/**
+	 * Undo and redo `effect` along with the step just recorded (see `labelLast`). One
+	 * attached already stays: the new one undoes first and redoes last.
+	 */
 	attachLast(effect: { undo(): void; redo(): void }) {
 		const a = this.#collect ? this.#collect.at(-1) : this.#undo.at(-1);
-		if (a) a.effect = effect;
+		if (!a) return;
+		const had = a.effect;
+		a.effect = had
+			? {
+					undo: () => {
+						effect.undo();
+						had.undo();
+					},
+					redo: () => {
+						had.redo();
+						effect.redo();
+					}
+				}
+			: effect;
 	}
 
 	/** Step names: `undo` oldest → newest (the last one is the current state), `redo` next → furthest. */

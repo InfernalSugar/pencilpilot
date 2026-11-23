@@ -435,6 +435,14 @@ enum Edit {
         drawings: Vec<(u32, TileMap)>,
         masks: Vec<(u32, TileMap)>,
         texts: Vec<(u32, String)>,
+        /// editable strokes' bases (see [`lines`]), by drawing
+        bases: Vec<(u32, lines::Base)>,
+    },
+    /// Swap entries of a drawing's base (the pixels under its editable strokes; see
+    /// [`lines`]): `None` = the entry wasn't there.
+    Base {
+        drawing: u32,
+        snap: lines::BaseSnap,
     },
     Batch(Vec<Edit>),
     /// A step of the app's own (the animation timeline changed): no pixels, just its
@@ -501,6 +509,13 @@ pub struct Painter {
     line_redraw: Option<Box<lines::Redraw>>,
     /// a line edit not in the history yet: (layer, its tiles before; see `lines_commit`)
     line_pending: Option<lines::Pending>,
+    /// editable strokes on plain layers: per drawing, the pixels under them (see [`lines`])
+    bases: HashMap<u32, lines::Base>,
+    /// base tiles other paint changed (their strokes must become plain pixels): the app
+    /// takes them with `take_tainted`
+    tainted: Vec<(u32, Vec<TileKey>)>,
+    /// base tiles changed since the app last asked (drawing together sends them)
+    base_changed: HashMap<u32, HashSet<TileKey>>,
 }
 
 impl Painter {
@@ -540,6 +555,9 @@ impl Painter {
             line_stroke: false,
             line_redraw: None,
             line_pending: None,
+            bases: HashMap::new(),
+            tainted: Vec::new(),
+            base_changed: HashMap::new(),
         }
     }
 
@@ -1278,8 +1296,24 @@ impl Painter {
                 drawings,
                 masks,
                 texts,
+                bases,
             } => {
                 self.stop_mask_editing();
+                let bases = bases
+                    .into_iter()
+                    .map(|(d, b)| {
+                        self.base_changed.entry(d).or_default().extend(
+                            b.keys()
+                                .chain(self.bases.get(&d).into_iter().flat_map(|o| o.keys())),
+                        );
+                        let old = if b.is_empty() {
+                            self.bases.remove(&d)
+                        } else {
+                            self.bases.insert(d, b)
+                        };
+                        (d, old.unwrap_or_default())
+                    })
+                    .collect();
                 let drawings = drawings
                     .into_iter()
                     .map(|(d, t)| (d, self.swap_drawing(d, t)))
@@ -1316,8 +1350,13 @@ impl Painter {
                     drawings,
                     masks: old_masks,
                     texts: old_texts,
+                    bases,
                 }
             }
+            Edit::Base { drawing, snap } => Edit::Base {
+                drawing,
+                snap: self.base_swap(drawing, snap),
+            },
             Edit::Note(id) => Edit::Note(id),
             Edit::Batch(edits) => {
                 let mut inv: Vec<Edit> = edits.into_iter().map(|e| self.apply(e)).collect();
@@ -1380,6 +1419,10 @@ impl Painter {
         } else {
             self.new_drawing()
         };
+        let from = self.layers[idx].drawing;
+        if copy.drawing != 0 {
+            self.copy_base(from, copy.drawing);
+        }
         copy.props.name = format!("{} copy", copy.props.name)
             .chars()
             .take(60)
@@ -1720,17 +1763,27 @@ impl Painter {
         });
         self.state.reset();
         self.alpha_lock_stroke = false;
+        let mask = self.editing_mask(id);
+        // an editable stroke on a plain layer: the pixels it went over join the base
+        let under = if line && !mask {
+            self.base_candidates(id, snap.as_ref())
+        } else {
+            None
+        };
         // Always record a history step, even if no pixels changed, so the
         // web app's history and this undo stack stay one-to-one.
         let e = Edit::Tiles {
             drawing: 0,
             layer: id,
-            mask: self.editing_mask(id),
+            mask,
             snap: snap.unwrap_or_default(),
         };
         if line {
             // (a line layer stays one)
             self.push_line_step(e);
+            if let Some(under) = under {
+                self.base_add(id, under);
+            }
         } else {
             self.push_undo(e);
         }
@@ -1758,6 +1811,8 @@ impl Painter {
     fn push_undo(&mut self, mut e: Edit) {
         // paint on a text or line layer makes it a plain one (undo brings it back)
         self.rasterize_painted(&mut e, true);
+        // and paint over editable strokes makes them plain pixels (see `lines`)
+        self.taint(&mut e);
         self.push_step(e);
     }
 
@@ -2301,6 +2356,20 @@ impl Painter {
             .iter()
             .filter_map(|l| l.mask.as_ref().map(|m| (l.id, redo(&m.tiles))))
             .collect();
+        let bases = self
+            .bases
+            .iter()
+            .map(|(&d, b)| {
+                (
+                    d,
+                    lines::transform_base(
+                        b,
+                        |t| redo(t),
+                        |k| lines::moved_keys(k, ow, oh, width, height, dx, dy, scale),
+                    ),
+                )
+            })
+            .collect();
         let known: HashSet<u32> = self.layers.iter().map(|l| l.id).collect();
         let texts = texts
             .iter()
@@ -2313,6 +2382,7 @@ impl Painter {
             drawings,
             masks,
             texts,
+            bases,
         });
         true
     }
@@ -3540,6 +3610,7 @@ impl Painter {
         let tiles = self.drawing_tiles(drawing).cloned().unwrap_or_default();
         let id = self.new_drawing();
         self.cels.insert(id, tiles);
+        self.copy_base(drawing, id);
         id
     }
 
@@ -4924,7 +4995,7 @@ fn rgb_to_hsv(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
 }
 
 /// Tiles as the file packs them: u32 count; per tile i32 x, i32 y, 64×64 straight RGBA8.
-fn pack_tiles(tiles: Option<&TileMap>) -> Vec<u8> {
+pub(crate) fn pack_tiles(tiles: Option<&TileMap>) -> Vec<u8> {
     let ts = TILE_SIZE;
     let list: Vec<(&TileKey, &Box<TilePixels>)> = tiles
         .map(|t| {
@@ -4958,7 +5029,7 @@ fn pack_tiles(tiles: Option<&TileMap>) -> Vec<u8> {
 }
 
 /// Tiles packed as [`pack_tiles`] makes them, back (None if the bytes don't add up).
-fn unpack_tiles(packed: &[u8]) -> Option<TileMap> {
+pub(crate) fn unpack_tiles(packed: &[u8]) -> Option<TileMap> {
     let ts = TILE_SIZE;
     let tile_bytes = ts * ts * 4;
     if packed.len() < 4 {

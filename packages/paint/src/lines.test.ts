@@ -2,7 +2,22 @@ import { describe, expect, it } from 'vitest';
 import {
 	STRIDE,
 	LineStore,
+	bakeClosure,
+	bakePlan,
 	boilStrokes,
+	compose,
+	decodeLineData,
+	encodeLineData,
+	invert,
+	linkedCopies,
+	mirrored,
+	mirroredDelta,
+	overLimit,
+	strokeTiles,
+	strokesBytes,
+	strokesOnKeys,
+	twinMap,
+	twins,
 	bounds,
 	boxToBox,
 	decodeLines,
@@ -293,5 +308,136 @@ describe('the store', () => {
 		st.keepOnly(new Set([9]));
 		expect(st.drawings()).toEqual([]);
 		expect(heard).toEqual([3, 4, 3]);
+	});
+});
+
+describe('linked mirror strokes', () => {
+	const pts = (s: LineStroke) => [...s.pts].filter((_, i) => i % STRIDE < 2);
+
+	it('links a stroke with its copies, and maps each onto the others', () => {
+		const s = line(10, 20, 60, 40);
+		for (const [mode, n] of [
+			['vertical', 6],
+			['horizontal', 6],
+			['quadrant', 6],
+			['radial', 5]
+		] as const) {
+			const all = linkedCopies(s, mode, n, 100, 80);
+			expect(all).toHaveLength(symmetryStrokes(s, mode, n, 100, 80).length + 1);
+			const g = all[0].link!.g;
+			expect(all.every((x, k) => x.link?.g === g && x.link.k === k)).toBe(true);
+			expect(all[0].id).toBe(s.id);
+			// twin j is twin i mapped
+			for (const a of all)
+				for (const b of all) {
+					const mapped = transformStroke(a, twinMap(a.link!, b.link!));
+					pts(mapped).forEach((v, i) => expect(v).toBeCloseTo(pts(b)[i], 2));
+				}
+		}
+		expect(twins(linkedCopies(s, 'quadrant', 6, 0, 0), s)).toHaveLength(1);
+	});
+
+	it('carries an edit to the twins mirrored', () => {
+		const [a, b] = linkedCopies(line(10, 20, 60, 20), 'vertical', 6, 100, 0);
+		// a moves right and down: its mirror twin moves left and down
+		const m = mirrored([1, 0, 0, 1, 5, 7], a.link!, b.link!);
+		const moved = transformStroke(b, m);
+		expect(moved.pts[0]).toBeCloseTo(b.pts[0] - 5);
+		expect(moved.pts[1]).toBeCloseTo(b.pts[1] + 7);
+		expect(mirroredDelta(5, 7, a.link!, b.link!)).toEqual([-5, 7]);
+		// a turn about a's middle turns b the other way about b's
+		const r = rotateAbout(0.3, 35, 20);
+		const turned = transformStroke(b, mirrored(r, a.link!, b.link!));
+		const want = transformStroke(b, rotateAbout(-0.3, 165, 20));
+		pts(turned).forEach((v, i) => expect(v).toBeCloseTo(pts(want)[i], 3));
+		// radial: a move of copy 0 turns for copy 1
+		const [c0, c1] = linkedCopies(line(110, 20, 160, 20), 'radial', 4, 100, 100);
+		const [dx, dy] = mirroredDelta(10, 0, c0.link!, c1.link!);
+		expect(dx).toBeCloseTo(0);
+		expect(dy).toBeCloseTo(10);
+		expect(compose(invert(r), r).map((v) => Math.round(v * 1e6) / 1e6)).toEqual([1, 0, 0, 1, 0, 0]);
+	});
+
+	it('keeps links in the saved bytes, and drops bad ones', () => {
+		const all = linkedCopies(line(10, 20, 60, 40), 'radial', 6, 100, 80);
+		const back = decodeLines(encodeLines(all));
+		expect(back.map((s) => s.link)).toEqual(all.map((s) => s.link));
+		const bad = { ...all[0], link: { ...all[0].link!, mode: 'spiral' } } as unknown as LineStroke;
+		expect(decodeLines(encodeLines([bad]))[0].link).toBeUndefined();
+	});
+});
+
+describe('editable strokes on plain layers', () => {
+	// tiles are 64 px: a (0–1 across), b crosses a, c far away, d over b only
+	const a = { ...line(10, 30, 120, 30), id: 'a' };
+	const b = { ...line(100, 10, 100, 200), id: 'b' };
+	const c = { ...line(400, 300, 500, 300), id: 'c' };
+	const d = { ...line(90, 180, 110, 180), id: 'd' };
+	const list = [a, b, c, d];
+
+	it('bakes the strokes and every older one sharing a tile', () => {
+		expect([...bakeClosure(list, [1])].sort()).toEqual([0, 1]);
+		expect([...bakeClosure(list, [0])]).toEqual([0]);
+		expect([...bakeClosure(list, [3])].sort()).toEqual([0, 1, 3]);
+		expect([...bakeClosure(list, [2])]).toEqual([2]);
+		expect(strokesOnKeys(list, new Set(['7,4']))).toEqual([2]);
+	});
+
+	it('plans where the baked go into the base and which tiles it forgets', () => {
+		// a alone: its tiles where b stays are replayed, the rest forgotten
+		const p = bakePlan(list, [0]);
+		expect(p.baked.map((s) => s.id)).toEqual(['a']);
+		expect(p.keep.map((s) => s.id)).toEqual(['b', 'c', 'd']);
+		const pairs = (t: Int32Array) =>
+			[...t].reduce<string[]>((o, v, i) => (i % 2 ? o : [...o, `${v},${t[i + 1]}`]), []);
+		const replay = pairs(p.replay);
+		const drop = pairs(p.drop);
+		expect(replay.length).toBeGreaterThan(0);
+		for (const t of replay)
+			expect(strokeTiles(b).includes(t) || strokeTiles(d).includes(t)).toBe(true);
+		for (const t of drop) expect(strokeTiles(b).includes(t)).toBe(false);
+		expect(new Set([...replay, ...drop])).toEqual(new Set(strokeTiles(a)));
+		// all of them: nothing to replay
+		const all = bakePlan(list, [0, 1, 2, 3]);
+		expect(all.keep).toEqual([]);
+		expect(all.replay.length).toBe(0);
+	});
+
+	it('bakes the strokes over one it can’t replay instead', () => {
+		const p = bakePlan(list, [0], (s) => s.id !== 'a');
+		// (b shares a's tiles; d only b's, which no baked stroke needs replayed under it)
+		expect(p.baked.map((s) => s.id)).toEqual(['a', 'b']);
+		expect(p.keep.map((s) => s.id)).toEqual(['c', 'd']);
+	});
+
+	it('keeps the newest up to the limit, and counts their memory', () => {
+		expect(overLimit(list, 2)).toEqual([0, 1]);
+		expect(overLimit(list, 10)).toEqual([]);
+		expect(overLimit(list, 0)).toEqual([0, 1, 2, 3]);
+		expect(strokesBytes([a])).toBe(a.pts.byteLength + 240);
+	});
+
+	it('saves the pixels under them after the strokes; older readers see only strokes', () => {
+		const base = new Uint8Array([1, 2, 3, 4, 5]);
+		const bytes = encodeLineData(list, base);
+		expect(decodeLines(bytes).map((s) => s.id)).toEqual(['a', 'b', 'c', 'd']);
+		const back = decodeLineData(bytes);
+		expect(back.strokes.map((s) => s.id)).toEqual(['a', 'b', 'c', 'd']);
+		expect([...back.base!]).toEqual([1, 2, 3, 4, 5]);
+		expect(decodeLineData(encodeLineData(list)).base).toBeNull();
+		expect(decodeLineData(encodeLineData([], new Uint8Array())).base).toEqual(new Uint8Array());
+		expect(() => decodeLineData(bytes.subarray(0, bytes.length - 2))).toThrow();
+	});
+
+	it('keeps which drawings lie over pixels in the store', () => {
+		const st = new LineStore();
+		st.setPlain(3);
+		st.set(3, [a]);
+		st.copy(3, 4);
+		expect(st.isPlain(4)).toBe(true);
+		st.keepOnly(new Set([4]));
+		expect(st.isPlain(3)).toBe(false);
+		st.setPlain(4, false);
+		expect(st.isPlain(4)).toBe(false);
 	});
 });

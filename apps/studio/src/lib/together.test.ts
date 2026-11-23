@@ -16,7 +16,15 @@ import {
 } from './together';
 import { newTimeline, type Timeline } from './timeline';
 import { STRIDE, transformStroke, type LineStroke } from '@pencilpilot/paint/lines';
-import { applyLineEdit, lineEdits, readLineEdit, strokeFromShare, strokeToShare } from './together';
+import {
+	applyLineEdit,
+	lineEdits,
+	readLineEdit,
+	splitBase,
+	strokeFromShare,
+	strokeToShare,
+	withBase
+} from './together';
 
 const A = 'a'.repeat(64);
 const B = 'b'.repeat(64);
@@ -274,9 +282,53 @@ class FakeCanvas implements CanvasPort {
 	lineStrokes(d: number) {
 		return this.strokes.get(d) ?? [];
 	}
-	setLineStrokes(d: number, list: readonly LineStroke[]) {
+	setLineStrokes(d: number, list: readonly LineStroke[], plain?: boolean) {
 		this.strokes.set(d, list);
+		if (plain) this.plain.add(d);
 	}
+	// plain layers' editable strokes: which drawings, their base changes and all of it
+	plain = new Set<number>();
+	baseOut = new Map<number, Uint8Array>();
+	baseFull = new Map<number, Uint8Array>();
+	baseIn: [number, Uint8Array][] = [];
+	plainStrokes(d: number) {
+		return this.plain.has(d);
+	}
+	baseChanges(d: number) {
+		const b = this.baseOut.get(d) ?? null;
+		this.baseOut.delete(d);
+		return b;
+	}
+	baseAll(d: number) {
+		return this.baseFull.get(d) ?? null;
+	}
+	putBaseChanges(d: number, bytes: Uint8Array) {
+		this.baseIn.push([d, bytes]);
+	}
+}
+
+/** a packed base (as the engine packs it): `keys` there (clear), `gone` keys gone */
+function basePack(keys: [number, number][], gone: [number, number][] = []) {
+	const out = new Uint8Array(4 + keys.length * 8 + 4 + 4 + gone.length * 8);
+	const v = new DataView(out.buffer);
+	let o = 0;
+	v.setUint32(o, keys.length, true);
+	o += 4;
+	for (const [x, y] of keys) {
+		v.setInt32(o, x, true);
+		v.setInt32(o + 4, y, true);
+		o += 8;
+	}
+	v.setUint32(o, 0, true);
+	o += 4;
+	v.setUint32(o, gone.length, true);
+	o += 4;
+	for (const [x, y] of gone) {
+		v.setInt32(o, x, true);
+		v.setInt32(o + 4, y, true);
+		o += 8;
+	}
+	return out;
 }
 
 /** a line stroke from (x, 0) to (x, 10) */
@@ -1017,6 +1069,67 @@ describe('drawing together: apps', () => {
 		expect(bc.isLineLayer(bInk.id)).toBe(false);
 		expect(host.shared.layers.get(lid)?.lines).toBeUndefined();
 	});
+
+	it('shares a plain layer’s editable strokes with the pixels under them', async () => {
+		const session = new FakeSession();
+		const hc = new FakeCanvas(['Paint']);
+		const paint = hc.byName('Paint').id;
+		hc.paint(paint, 0, 0, 10);
+		const d = hc.drawingOf(paint);
+		hc.setLineStrokes(d, [stroke('a', 1)], true);
+		hc.baseFull.set(d, basePack([[0, 0]]));
+		hc.baseOut.set(d, basePack([[0, 0]]));
+		const host = new Together(A, 'Ana', hc, session.net(A));
+		session.apps.set(A, host);
+		await host.startHost();
+		await session.settle();
+
+		// Bo joins: the strokes, and the base whole
+		const bc = new FakeCanvas([]);
+		const bo = new Together(B, 'Bo', bc, session.net(B));
+		session.apps.set(B, bo);
+		bo.startJoin(A);
+		await session.settle();
+		const bPaint = bc.byName('Paint');
+		expect(bc.isLineLayer(bPaint.id)).toBe(false);
+		const bd = bc.layerList.find((l) => l.id === bPaint.id)!.drawing;
+		expect(bc.lineStrokes(bd).map((s) => s.id)).toEqual(['a']);
+		expect(bc.plainStrokes(bd)).toBe(true);
+		expect(bc.baseIn.map(([x]) => x)).toContain(bd);
+		expect([...bc.baseIn.at(-1)![1]]).toEqual([...basePack([[0, 0]])]);
+
+		// Ana draws another: the stroke and the base's change travel in one edit
+		bc.baseIn.length = 0;
+		hc.setLineStrokes(d, [...hc.lineStrokes(d), stroke('b', 2)], true);
+		hc.baseOut.set(d, basePack([[1, 0]]));
+		hc.paint(paint, 1, 0, 20);
+		const sent: unknown[] = [];
+		const net = session.net(A);
+		const spy = { edit: (e: unknown) => (sent.push(e), net.edit(e)), direct: net.direct };
+		(host as unknown as { net: typeof spy }).net = spy;
+		await host.localChanged();
+		await session.settle();
+		const lineSent = sent.filter((e) => (e as { k: string }).k === 'lines') as {
+			put: unknown[];
+			base?: string;
+		}[];
+		expect(lineSent).toHaveLength(1);
+		expect(lineSent[0].put).toHaveLength(1);
+		expect(lineSent[0].base).toBeTruthy();
+		expect(bc.lineStrokes(bd).map((s) => s.id)).toEqual(['a', 'b']);
+		expect([...bc.baseIn[0][1]]).toEqual([...basePack([[1, 0]])]);
+		// a base change alone (strokes baked by a fill) still travels
+		hc.baseOut.set(d, basePack([], [[1, 0]]));
+		await host.localChanged();
+		await session.settle();
+		expect([...bc.baseIn.at(-1)![1]]).toEqual([...basePack([], [[1, 0]])]);
+
+		// Bo may not change them
+		const lid = bo.lidOf(bPaint.id)!;
+		session.net(B).edit({ k: 'lines', lid, did: host.didOf(d), del: ['a'], put: [] });
+		await session.settle();
+		expect(hc.lineStrokes(d).map((s) => s.id)).toEqual(['a', 'b']);
+	});
 });
 
 describe('drawing together: line edits', () => {
@@ -1064,7 +1177,7 @@ describe('drawing together: line edits', () => {
 		).toEqual(['s1']);
 	});
 
-	it('lets only writers send strokes, on line layers only', () => {
+	it('lets only writers send strokes, on any layer but adjustment layers', () => {
 		const s = new Shared();
 		const lid = 'aaaaaaaaaaaa:1';
 		const did = 'aaaaaaaaaaaa:5';
@@ -1073,14 +1186,71 @@ describe('drawing together: line edits', () => {
 		const e = { k: 'lines' as const, lid, did, del: [], put: [] };
 		expect(s.apply(A, e)).toBe(true);
 		expect(s.apply(B, e)).toBe(false);
-		expect(s.apply(A, { ...e, lid: 'aaaaaaaaaaaa:2' })).toBe(false);
+		// a plain layer's editable strokes too, from its writers only
+		expect(s.apply(A, { ...e, lid: 'aaaaaaaaaaaa:2' })).toBe(true);
+		expect(s.apply(B, { ...e, lid: 'aaaaaaaaaaaa:2' })).toBe(false);
+		s.apply(A, { k: 'layer', lid: 'aaaaaaaaaaaa:3', name: 'Tone', adjust: '{}' });
+		expect(s.apply(A, { ...e, lid: 'aaaaaaaaaaaa:3' })).toBe(false);
 		expect(s.apply(B, { k: 'pixels', lid })).toBe(false);
 		expect(s.apply(A, { k: 'pixels', lid })).toBe(true);
-		expect(s.apply(A, e)).toBe(false);
+		expect(s.apply(A, e)).toBe(true);
 		// kept across a save
 		const t = new Shared();
 		t.load({ layers: [{ lid, owner: A, name: 'Ink', writers: [A], lines: true }], asks: [] });
 		expect(t.layers.get(lid)?.lines).toBe(true);
+	});
+
+	it('reads a base with the strokes, and splits big bases into parts', () => {
+		const lid = 'aaaaaaaaaaaa:1';
+		const did = 'aaaaaaaaaaaa:5';
+		expect(parseEdit({ k: 'lines', lid, did, del: [], put: [], base: 'AAAA' })).toEqual({
+			k: 'lines',
+			lid,
+			did,
+			del: [],
+			put: [],
+			base: 'AAAA'
+		});
+		expect(parseEdit({ k: 'lines', lid, did, del: [], put: [], base: '<x>' })).toBeNull();
+		expect(parseEdit({ k: 'lines', lid, did, del: [], put: [], base: 5 })).toBeNull();
+		// 40 tiles with paint, 3 clear, 2 gone: parts under the size, the same entries in all
+		const keys: [number, number][] = Array.from({ length: 43 }, (_, i) => [i, 1]);
+		const tiles = 40;
+		const big = new Uint8Array(4 + 43 * 8 + 4 + tiles * (8 + 16384) + 4 + 2 * 8);
+		const v = new DataView(big.buffer);
+		let o = 0;
+		v.setUint32(o, 43, true);
+		o += 4;
+		for (const [x, y] of keys) {
+			v.setInt32(o, x, true);
+			v.setInt32(o + 4, y, true);
+			o += 8;
+		}
+		v.setUint32(o, tiles, true);
+		o += 4;
+		for (let i = 0; i < tiles; i++) {
+			v.setInt32(o, i, true);
+			v.setInt32(o + 4, 1, true);
+			big[o + 8] = i + 1;
+			o += 8 + 16384;
+		}
+		v.setUint32(o, 2, true);
+		v.setInt32(o + 4, 99, true);
+		v.setInt32(o + 12, 98, true);
+		const parts = splitBase(big, 200_000)!;
+		expect(parts.length).toBeGreaterThan(3);
+		expect(parts.every((p) => p.length <= 200_000)).toBe(true);
+		const count = (p: Uint8Array) => new DataView(p.buffer).getUint32(0, true);
+		expect(parts.reduce((n, p) => n + count(p), 0)).toBe(43);
+		expect(splitBase(big.subarray(0, big.length - 1))).toBeNull();
+		expect(splitBase(big)).toHaveLength(1);
+		// edits: the first part rides with the strokes, the rest on their own
+		const edits = withBase(lineEdits(lid, did, [], [stroke('a', 1)]), lid, did, basePack([[0, 0]]));
+		expect(edits).toHaveLength(1);
+		expect(edits[0].put).toHaveLength(1);
+		expect(edits[0].base).toBeTruthy();
+		expect(withBase([], lid, did, basePack([[0, 0]]))).toHaveLength(1);
+		expect(withBase([], lid, did, null)).toEqual([]);
 	});
 
 	it('splits big changes into several edits that put back the same strokes', () => {

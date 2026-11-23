@@ -760,7 +760,7 @@ test('studio layout: each tool shows its options, as on the website', async ({ p
 	await expect(opts('Selection')).toHaveCount(0);
 
 	// guides: a grid, kept for next time
-	await page.getByRole('button', { name: 'Guides' }).click();
+	await page.getByRole('button', { name: 'Guides', exact: true }).click();
 	await opts('Guides').getByRole('radio', { name: 'Square' }).click();
 	await expect(page.getByRole('button', { name: 'Guides' })).toHaveAttribute(
 		'aria-pressed',
@@ -2391,7 +2391,7 @@ test('a new canvas starts with its guides in the middle; Re-centre puts moved on
 	await expect.poll(axisAt).toBeCloseTo(0.5, 2);
 
 	// moved by hand, then Re-centre
-	await page.getByRole('button', { name: 'Guides' }).click();
+	await page.getByRole('button', { name: 'Guides', exact: true }).click();
 	await page.getByRole('button', { name: 'Move guides' }).click();
 	const h = (await page.locator('circle.handle.sym').boundingBox())!;
 	await page.mouse.move(h.x + h.width / 2, h.y + h.height / 2);
@@ -2563,7 +2563,7 @@ test('line layers: strokes stay editable (select, move, recolour, erase, reshape
 	await fresh();
 	await expect(page.getByRole('img', { name: 'Line layer' })).toHaveCount(0);
 	await expect(page.getByRole('group', { name: 'Select line' })).toContainText(
-		'works on line layers'
+		'No editable strokes on this layer'
 	);
 	await page.keyboard.press('Control+z');
 	await expect(page.getByRole('img', { name: 'Line layer' })).toBeVisible();
@@ -2587,4 +2587,281 @@ test('Ctrl + drag moves the view (no ink)', async ({ page }) => {
 	expect(after.y - before.y).toBeGreaterThan(30);
 	expect(await ink(page)).toBe(inkBefore);
 	await expect(page.locator('.viewport.grab')).toHaveCount(0);
+});
+
+// ---- editable strokes on plain layers ----
+
+/** dark pixels in a box of the canvas (fractions) */
+async function inkIn(page: Page, x0: number, y0: number, x1: number, y1: number) {
+	return canvas(page).evaluate(
+		(el: HTMLCanvasElement, [x0, y0, x1, y1]) => {
+			const [l, t] = [Math.round(el.width * x0), Math.round(el.height * y0)];
+			const w = Math.max(1, Math.round(el.width * (x1 - x0)));
+			const h = Math.max(1, Math.round(el.height * (y1 - y0)));
+			const d = el.getContext('2d')!.getImageData(l, t, w, h).data;
+			let n = 0;
+			for (let i = 0; i < d.length; i += 4) if (d[i] < 200) n++;
+			return n;
+		},
+		[x0, y0, x1, y1]
+	);
+}
+
+/** reddish pixels in a box of the canvas (fractions) */
+async function redIn(page: Page, x0: number, y0: number, x1: number, y1: number) {
+	return canvas(page).evaluate(
+		(el: HTMLCanvasElement, [x0, y0, x1, y1]) => {
+			const [l, t] = [Math.round(el.width * x0), Math.round(el.height * y0)];
+			const w = Math.max(1, Math.round(el.width * (x1 - x0)));
+			const h = Math.max(1, Math.round(el.height * (y1 - y0)));
+			const d = el.getContext('2d')!.getImageData(l, t, w, h).data;
+			let n = 0;
+			for (let i = 0; i < d.length; i += 4) if (d[i] - d[i + 1] > 20) n++;
+			return n;
+		},
+		[x0, y0, x1, y1]
+	);
+}
+
+/** helpers to draw at canvas fractions (the canvas is looked up again with `fresh`) */
+async function strokeKit(page: Page) {
+	let b = (await canvas(page).boundingBox())!;
+	const at = (x: number, y: number) => [b.x + b.width * x, b.y + b.height * y] as const;
+	return {
+		at,
+		fresh: async () => {
+			await page.waitForTimeout(100);
+			b = (await canvas(page).boundingBox())!;
+		},
+		/** a straight stroke from (x0, y0) to (x1, y1) */
+		line: async (x0: number, y0: number, x1: number, y1: number) => {
+			await page.mouse.move(...at(x0, y0));
+			await page.mouse.down();
+			await page.mouse.move(...at(x1, y1), { steps: 20 });
+			await page.mouse.up();
+			await page.waitForTimeout(50);
+		},
+		drag: async (x0: number, y0: number, x1: number, y1: number) => {
+			await page.mouse.move(...at(x0, y0));
+			await page.mouse.down();
+			await page.mouse.move(...at(x1, y1), { steps: 8 });
+			await page.mouse.up();
+		}
+	};
+}
+
+test('editable strokes on a plain layer: Move picks one, it moves over what is under it, recolour, undo', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	for (let i = 0; i < 4; i++) await page.keyboard.press(']');
+	const k = await strokeKit(page);
+	// across, then down through it (on top)
+	await k.line(0.2, 0.4, 0.8, 0.4);
+	await k.line(0.5, 0.2, 0.5, 0.7);
+	await page.waitForTimeout(300);
+	const left = await inkIn(page, 0.25, 0.35, 0.4, 0.45);
+	expect(left).toBeGreaterThan(100);
+	const crossing = await inkIn(page, 0.46, 0.37, 0.54, 0.43);
+	const column = await inkIn(page, 0.46, 0.25, 0.54, 0.31);
+
+	// Move: a tap on the stroke across picks it (not the layer)
+	await page.keyboard.press('v');
+	await k.fresh();
+	await page.mouse.click(...k.at(0.3, 0.4));
+	const sel = page.getByTestId('line-selection');
+	await expect(sel).toHaveAttribute('data-count', '1');
+	// (its options show instead of Move's: the canvas may move)
+	await k.fresh();
+	// a drag moves it down; the stroke down stays whole where they crossed
+	await k.drag(0.3, 0.4, 0.3, 0.6);
+	await expect.poll(() => inkIn(page, 0.25, 0.35, 0.4, 0.45)).toBe(0);
+	await expect.poll(() => inkIn(page, 0.25, 0.55, 0.4, 0.65)).toBeGreaterThan(left * 0.9);
+	const there = await inkIn(page, 0.46, 0.37, 0.54, 0.43);
+	expect(there).toBeGreaterThan(column * 0.8);
+	expect(there).toBeLessThan(crossing);
+	expect(await inkIn(page, 0.6, 0.37, 0.75, 0.43)).toBe(0);
+	// one undo step
+	await page.keyboard.press('Control+z');
+	await expect.poll(() => inkIn(page, 0.25, 0.35, 0.4, 0.45)).toBe(left);
+	expect(await inkIn(page, 0.46, 0.37, 0.54, 0.43)).toBe(crossing);
+	await page.keyboard.press('Control+Shift+z');
+	await expect.poll(() => inkIn(page, 0.25, 0.35, 0.4, 0.45)).toBe(0);
+
+	// recolour: only it turns red
+	await expect(sel).toHaveAttribute('data-count', '1');
+	await page.getByRole('radio', { name: 'Colour #e8492f' }).click();
+	await expect.poll(() => redIn(page, 0.25, 0.55, 0.4, 0.65)).toBeGreaterThan(left * 0.3);
+	expect(await redIn(page, 0.46, 0.2, 0.54, 0.5)).toBe(0);
+	// a tap away puts Move back: the next drag moves the whole layer
+	await page.mouse.click(...k.at(0.9, 0.9));
+	await expect(sel).toHaveCount(0);
+	await k.fresh();
+	const red = await redIn(page, 0, 0, 1, 1);
+	await k.drag(0.5, 0.3, 0.5, 0.35);
+	await page.keyboard.press('Enter');
+	await expect.poll(() => redIn(page, 0.25, 0.6, 0.4, 0.7)).toBeGreaterThan(0);
+	expect(await redIn(page, 0, 0, 1, 1)).toBeGreaterThan(red * 0.8);
+});
+
+test('editable strokes: a fill bakes them, the limit in Preferences, saved and opened again', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	for (let i = 0; i < 4; i++) await page.keyboard.press(']');
+	// the limit: 2 strokes a layer
+	await page.getByRole('button', { name: 'Settings', exact: true }).click();
+	const dialog = page.getByRole('dialog', { name: 'Settings' });
+	await dialog.getByRole('tab', { name: 'History and memory' }).click();
+	await page.getByLabel('Editable strokes per layer').fill('2');
+	await page.getByLabel('Editable strokes per layer').blur();
+	await page.keyboard.press('Escape');
+	await expect(dialog).toHaveCount(0);
+	const k = await strokeKit(page);
+	await k.line(0.2, 0.2, 0.8, 0.2);
+	await k.line(0.2, 0.5, 0.8, 0.5);
+	await k.line(0.2, 0.8, 0.8, 0.8);
+	await page.waitForTimeout(300);
+	// the first is plain pixels now; the others can be picked
+	await page.keyboard.press('Shift+V');
+	await k.fresh();
+	const sel = page.getByTestId('line-selection');
+	await page.mouse.click(...k.at(0.3, 0.2));
+	await expect(sel).toHaveCount(0);
+	await page.mouse.click(...k.at(0.3, 0.5));
+	await expect(sel).toHaveAttribute('data-count', '1');
+	await page.keyboard.press('Escape');
+	await page.mouse.click(...k.at(0.3, 0.8));
+	await expect(sel).toHaveAttribute('data-count', '1');
+	await page.keyboard.press('Escape');
+	// memory shown in Preferences
+	await page.getByRole('button', { name: 'Settings', exact: true }).click();
+	await dialog.getByRole('tab', { name: 'History and memory' }).click();
+	await expect(page.getByTestId('stroke-memory')).toContainText('2 strokes');
+	await page.getByLabel('Editable strokes per layer').fill('200');
+	await page.getByLabel('Editable strokes per layer').blur();
+	await page.keyboard.press('Escape');
+
+	// saved and opened again: still editable
+	await page.keyboard.press('Control+s');
+	await expect(page.getByTestId('project-name')).toHaveText('Walk cycle', { timeout: 20_000 });
+	const saved = await ink(page);
+	await page.keyboard.press('Control+o');
+	await expect.poll(() => ink(page)).toBe(saved);
+	const selectLine = page.getByRole('button', { name: /Select line/ });
+	if ((await selectLine.getAttribute('aria-pressed')) !== 'true') await selectLine.click();
+	await k.fresh();
+	await page.mouse.click(...k.at(0.3, 0.5));
+	await expect(sel).toHaveAttribute('data-count', '1');
+	await page.keyboard.press('Delete');
+	await expect.poll(() => inkIn(page, 0.2, 0.45, 0.8, 0.55)).toBe(0);
+	expect(await inkIn(page, 0.2, 0.75, 0.8, 0.85)).toBeGreaterThan(100);
+	expect(await inkIn(page, 0.2, 0.15, 0.8, 0.25)).toBeGreaterThan(100);
+	await page.keyboard.press('Control+z');
+	await expect.poll(() => inkIn(page, 0.2, 0.45, 0.8, 0.55)).toBeGreaterThan(100);
+
+	// a fill over the strokes: they become plain pixels (undo: editable again)
+	await page.keyboard.press('g');
+	await k.fresh();
+	await page.mouse.click(...k.at(0.5, 0.65));
+	await page.waitForTimeout(200);
+	await page.keyboard.press('Shift+V');
+	await k.fresh();
+	await page.mouse.click(...k.at(0.3, 0.8));
+	await expect(sel).toHaveCount(0);
+	await page.keyboard.press('Control+z');
+	await page.waitForTimeout(200);
+	await page.mouse.click(...k.at(0.3, 0.8));
+	await expect(sel).toHaveAttribute('data-count', '1');
+});
+
+test('mirrored strokes are linked: picking one picks its twin, moving it moves both (plain and line layers)', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	for (let i = 0; i < 4; i++) await page.keyboard.press(']');
+	await page.getByRole('button', { name: 'Guides', exact: true }).click();
+	await page
+		.getByRole('radiogroup', { name: 'Symmetry' })
+		.getByRole('radio', { name: 'Vertical' })
+		.click();
+	await page.getByRole('button', { name: 'Guides', exact: true }).click();
+	const k = await strokeKit(page);
+	for (const layer of ['plain', 'lines']) {
+		if (layer === 'lines') {
+			await page.getByRole('tab', { name: /Layers/ }).click();
+			await page.getByRole('button', { name: 'New line layer' }).click();
+			await page.keyboard.press('b');
+		}
+		await k.fresh();
+		const y = layer === 'plain' ? 0.25 : 0.7;
+		await k.line(0.15, y, 0.35, y);
+		await page.waitForTimeout(300);
+		// the copy on the right is there
+		const copy = await inkIn(page, 0.65, y - 0.04, 0.85, y + 0.04);
+		expect(copy).toBeGreaterThan(50);
+		// a tap on the copy picks both
+		await page.keyboard.press('Shift+V');
+		await k.fresh();
+		await page.mouse.click(...k.at(0.75, y));
+		const sel = page.getByTestId('line-selection');
+		await expect(sel).toHaveAttribute('data-count', '2');
+		await k.fresh();
+		// moved right and down: the twin goes left and down
+		await k.drag(0.75, y, 0.8, y + 0.1);
+		await expect.poll(() => inkIn(page, 0.1, y - 0.03, 0.9, y + 0.03)).toBe(0);
+		await expect.poll(() => inkIn(page, 0.7, y + 0.07, 0.9, y + 0.13)).toBeGreaterThan(copy * 0.8);
+		expect(await inkIn(page, 0.1, y + 0.07, 0.3, y + 0.13)).toBeGreaterThan(copy * 0.8);
+		await page.keyboard.press('Escape');
+		await page.keyboard.press('b');
+	}
+});
+
+test('editable strokes: holding the brush still on one picks it; dots and holds elsewhere still draw', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	for (let i = 0; i < 4; i++) await page.keyboard.press(']');
+	const k = await strokeKit(page);
+	await k.line(0.2, 0.4, 0.8, 0.4);
+	await page.waitForTimeout(300);
+	const drawn = await ink(page);
+	/** a press at (x, y) held still `ms`, then drawn `dx` across */
+	const press = async (x: number, y: number, ms: number, dx: number) => {
+		const [px, py] = k.at(x, y);
+		await page.mouse.move(px, py);
+		await page.mouse.down();
+		await page.waitForTimeout(ms);
+		await page.mouse.move(px + dx, py + 1, { steps: Math.max(1, Math.round(dx / 3)) });
+		await page.mouse.up();
+	};
+	const sel = page.getByTestId('line-selection');
+	// a short stroke on it, not held: it draws, nothing is picked
+	await press(0.5, 0.4, 0, 12);
+	await expect.poll(() => ink(page)).toBeGreaterThan(drawn);
+	await expect(sel).toHaveCount(0);
+	const dotted = await ink(page);
+	// held still on empty canvas, then drawn: a stroke, nothing picked
+	await press(0.5, 0.8, 800, 40);
+	await expect(sel).toHaveCount(0);
+	await expect.poll(() => ink(page)).toBeGreaterThan(dotted);
+	const held = await ink(page);
+	// held still on the stroke: it's picked, and the press paints nothing
+	await press(0.3, 0.4, 800, 0);
+	await expect(sel).toHaveAttribute('data-count', '1');
+	expect(await ink(page)).toBe(held);
+	await k.fresh();
+	await k.drag(0.3, 0.4, 0.3, 0.3);
+	await expect.poll(() => inkIn(page, 0.25, 0.37, 0.4, 0.43)).toBe(0);
+	// a press away: done, and the brush draws again
+	await page.mouse.click(...k.at(0.9, 0.9));
+	await expect(sel).toHaveCount(0);
+	await k.fresh();
+	const before = await ink(page);
+	await k.line(0.2, 0.9, 0.4, 0.9);
+	await expect.poll(() => ink(page)).toBeGreaterThan(before);
 });

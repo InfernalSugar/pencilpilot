@@ -86,7 +86,7 @@ export const ACTIONS: Action[] = [
 	{ id: 'select-wand', label: 'Magic wand', group: 'Tools', key: 'W' },
 	{ id: 'gradient', label: 'Gradient', group: 'Tools', key: 'Shift+G' },
 	{ id: 'text', label: 'Text', group: 'Tools', key: 'T' },
-	{ id: 'lines', label: 'Select line (line layers)', group: 'Tools', key: 'Shift+V' },
+	{ id: 'lines', label: 'Select line', group: 'Tools', key: 'Shift+V' },
 	{ id: 'adjust', label: 'Adjust the layer', group: 'Tools', key: 'Ctrl+U' },
 	{ id: 'smaller', label: 'Smaller brush', group: 'Brush', key: '[' },
 	{ id: 'bigger', label: 'Bigger brush', group: 'Brush', key: ']' },

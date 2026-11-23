@@ -11,7 +11,7 @@ This crate (`pencilpilot-ppstudio`) reads and writes it.
 | `tiles/<hash>` | deflate | one tile of pixels (below) |
 | `audio/<hash>.<ext>` | stored | a sound file a scene plays, as imported (below) |
 | `fonts/<hash>.<ext>` | stored | a font file text layers use, as imported (below) |
-| `lines/<drawing>` | deflate | optional; a line layer drawing's strokes, the app's own data (below) |
+| `lines/<drawing>` | deflate | optional; a drawing's editable strokes, the app's own data (below) |
 | `timelapse/<n>.jpg` | stored | optional; the timelapse, a JPEG after each change (`000000.jpg` first) |
 
 ## manifest.json
@@ -155,6 +155,12 @@ This crate (`pencilpilot-ppstudio`) reads and writes it.
   `D<number>`): the app's own versioned binary, kept as given. A drawing of a line layer
   without an entry has no strokes kept. Each entry is at most 256 MiB; an entry for a
   drawing that isn't in `drawings` is damage.
+- **Plain layers keep editable strokes too** (up to a limit the app sets). Their drawings'
+  `lines/<drawing>` entries hold the strokes the same way, followed by the pixels under
+  them: `"PPB1"`, a u32 length, then the tiles under the strokes (u32 count, i32 x, i32 y
+  each; u32 count of tiles with paint, each i32 x, i32 y and 64×64 straight-alpha sRGB
+  RGBA8; u32 0). Readers of strokes alone stop before it. A plain layer's drawing without
+  that part has no editable strokes.
 - Added within version 1: older apps open these files and see plain layers.
 
 ## Rules for readers
