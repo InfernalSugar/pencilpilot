@@ -148,6 +148,7 @@ export const DEFAULT_LAYOUT: StudioLayout = {
 	context: true,
 	bottom: true,
 	dock: true,
+	rail: true,
 	bottomHeight: 0,
 	dockWidth: 330
 };
@@ -244,6 +245,7 @@ export function cleanSettings(raw: unknown, legacy: { onion?: unknown } = {}): S
 			context: bool(l.context, L.context),
 			bottom: bool(l.bottom, L.bottom),
 			dock: bool(l.dock, L.dock),
+			rail: bool(l.rail, L.rail ?? true),
 			// 0 (as tall as it needs) or within the limits
 			bottomHeight:
 				l.bottomHeight === 0 ? 0 : int(l.bottomHeight, L.bottomHeight, BOTTOM_MIN, BOTTOM_MAX),

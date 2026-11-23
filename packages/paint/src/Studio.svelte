@@ -16,6 +16,8 @@
 		bottom: boolean;
 		/** the dock is open (wide windows; narrower ones slide it in) */
 		dock: boolean;
+		/** the tool strip is open (phones always show it) */
+		rail?: boolean;
 		/** the bottom bar's height in px (0: as tall as it needs) */
 		bottomHeight: number;
 		/** the dock's width in px */
@@ -275,7 +277,35 @@
 	</header>
 
 	<div class="work" class:lefty={leftHanded}>
-		<div class="rail pp-ink-bar">{@render rail()}</div>
+		{#if layout && layout.rail === false}
+			<div class="rail-strip pp-ink-bar">
+				<button
+					type="button"
+					class="fold"
+					aria-expanded="false"
+					aria-label="Show the tools"
+					title="Show the tools"
+					onclick={() => layout && (layout.rail = true)}
+				>
+					{@render chevron(leftHanded ? 'left' : 'right')}<span>Tools</span>
+				</button>
+			</div>
+		{/if}
+		<div class="rail pp-ink-bar" class:folded={layout && layout.rail === false}>
+			{@render rail()}
+			{#if layout}
+				<button
+					type="button"
+					class="fold rail-fold"
+					aria-expanded="true"
+					aria-label="Hide the tools"
+					title="Hide the tools"
+					onclick={() => layout && (layout.rail = false)}
+				>
+					{@render chevron(leftHanded ? 'right' : 'left')}
+				</button>
+			{/if}
+		</div>
 
 		<div class="center">
 			{#if options}
@@ -375,7 +405,9 @@
 							title={layout.bottom ? 'Hide the timeline' : 'Show the timeline'}
 							onclick={() => layout && (layout.bottom = !layout.bottom)}
 						>
-							{@render chevron(layout.bottom ? 'down' : 'up')}<span>Timeline</span>
+							{@render chevron(layout.bottom ? 'down' : 'up')}{#if !layout.bottom}<span>
+									Timeline
+								</span>{/if}
 						</button>
 					</div>
 				{/if}
@@ -721,11 +753,10 @@
 	.bottom-edge .fold {
 		position: relative;
 		z-index: 1;
-		height: 22px;
-		margin-top: -5px;
-		padding: 0 8px;
-		background: var(--pp-ground);
-		border-radius: 8px 8px 0 0;
+		height: 20px;
+		min-width: 20px;
+		margin-top: -4px;
+		padding: 0 2px;
 	}
 	.bottom-edge.folded {
 		height: auto;
@@ -778,6 +809,38 @@
 	.dock-edge::after {
 		width: 4px;
 		height: 44px;
+	}
+	.rail-fold {
+		position: sticky;
+		bottom: 0;
+		align-self: center;
+		margin-top: auto;
+		background: var(--pp-ink);
+	}
+	.rail-fold:hover,
+	.rail-fold:focus-visible {
+		background: #2a2a30;
+	}
+	.rail.folded {
+		display: none;
+	}
+	.rail-strip {
+		flex: none;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		padding: 6px 2px;
+		background: var(--pp-ink);
+		color: var(--pp-on-ink);
+		border-radius: 14px;
+	}
+	.rail-strip .fold {
+		flex-direction: column;
+		height: auto;
+		padding: 8px 2px;
+	}
+	.rail-strip .fold span {
+		writing-mode: vertical-rl;
 	}
 	.dock-strip {
 		flex: none;
@@ -1010,6 +1073,14 @@
 		.rail {
 			overflow: visible;
 			padding: 6px;
+		}
+		/* phones keep their tools along the bottom */
+		.rail.folded {
+			display: flex;
+		}
+		.rail-strip,
+		.rail-fold {
+			display: none;
 		}
 		.opts {
 			padding: 6px 8px;
