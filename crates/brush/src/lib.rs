@@ -64,6 +64,12 @@ pub struct UndoSurface {
     /// line strokes and their redraws: smudge sampling starts its random sparse pattern
     /// afresh each time, so a replay samples exactly as the stroke did (see [`lines`])
     fixed_sampling: bool,
+    /// replaying a piece of a stroke (see `lines_span`): only its dabs `from..to` (in
+    /// the order the stroke paints them) are drawn; `dab_no` counts them
+    span: Option<(u32, u32)>,
+    dab_no: u32,
+    /// where a stroke's dabs fall, not drawn (see `lines_dabs`): x, y, radius each
+    probe: Option<Vec<f32>>,
 }
 
 impl UndoSurface {
@@ -129,6 +135,17 @@ impl TiledSurface for UndoSurface {
     /// libmypaint's dab, then (with a texture) each pixel's change scaled by
     /// how much the grain / tip / dual brush lets through there.
     fn draw_dab(&mut self, dab: &hokusai::Dab) -> bool {
+        if let Some(p) = self.probe.as_mut() {
+            p.extend([dab.x, dab.y, dab.radius]);
+            return false;
+        }
+        if let Some((from, to)) = self.span {
+            let k = self.dab_no;
+            self.dab_no += 1;
+            if k < from || k >= to {
+                return false;
+            }
+        }
         if let Some(only) = &self.only
             && !only.touches(dab)
         {
@@ -330,6 +347,9 @@ impl Clone for UndoSurface {
             clone: None,
             only: None,
             fixed_sampling: false,
+            span: None,
+            dab_no: 0,
+            probe: None,
         }
     }
 }

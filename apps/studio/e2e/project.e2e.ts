@@ -3263,6 +3263,272 @@ test('editable strokes: holding the brush still on one picks it; dots and holds 
 	await expect.poll(() => ink(page)).toBeGreaterThan(before);
 });
 
+/** every pixel of the canvas, hashed (equal: the same picture, to the last bit) */
+const pixelHash = (page: Page) =>
+	canvas(page).evaluate((el: HTMLCanvasElement) => {
+		const d = el.getContext('2d')!.getImageData(0, 0, el.width, el.height).data;
+		let h = 0x811c9dc5;
+		for (let i = 0; i < d.length; i++) h = Math.imul(h ^ d[i], 0x01000193);
+		return h >>> 0;
+	});
+
+test('the eraser cuts editable strokes exactly: pieces stay editable, redrawn to the last pixel (plain and line layers)', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	for (let i = 0; i < 4; i++) await page.keyboard.press(']');
+	const k = await strokeKit(page);
+	const colour = page.getByRole('radio', { name: /^Colour #/, checked: true });
+	const original = (await colour.getAttribute('aria-label'))!;
+	const sel = page.getByTestId('line-selection');
+	for (const layer of ['plain', 'lines']) {
+		const y = layer === 'plain' ? 0.25 : 0.65;
+		if (layer === 'lines') {
+			await page.getByRole('tab', { name: /Layers/ }).click();
+			await page.getByRole('button', { name: 'New line layer' }).click();
+		}
+		await page.keyboard.press('b');
+		await k.fresh();
+		// two lines across, then the eraser down through both
+		await k.line(0.2, y, 0.8, y);
+		await k.line(0.2, y + 0.07, 0.8, y + 0.07);
+		const gap = () => inkIn(page, 0.495, y - 0.03, 0.505, y + 0.1);
+		const whole = await gap();
+		expect(whole).toBeGreaterThan(50);
+		await page.keyboard.press('e');
+		for (let i = 0; i < 8; i++) await page.keyboard.press(']');
+		await k.fresh();
+		await k.line(0.5, y - 0.06, 0.5, y + 0.13);
+		await page.waitForTimeout(300);
+		// (the brush and the eraser share their size: back as it was)
+		for (let i = 0; i < 8; i++) await page.keyboard.press('[');
+		await expect.poll(gap).toBeLessThan(whole * 0.5);
+		const left = await inkIn(page, 0.2, y - 0.03, 0.45, y + 0.1);
+		const right = await inkIn(page, 0.55, y - 0.03, 0.8, y + 0.1);
+		expect(left).toBeGreaterThan(200);
+		expect(right).toBeGreaterThan(200);
+		const erased = await pixelHash(page);
+
+		// the pieces are strokes of their own: a tap picks one
+		await page.keyboard.press('Shift+V');
+		await k.fresh();
+		await page.mouse.click(...k.at(0.3, y));
+		await expect(sel).toHaveAttribute('data-count', '1');
+		// redrawn (another colour, then the one it had): every pixel as the eraser left it
+		await page.getByRole('radio', { name: 'Colour #e8492f' }).click();
+		await expect.poll(() => redIn(page, 0.2, y - 0.03, 0.45, y + 0.03)).toBeGreaterThan(50);
+		await page.getByRole('radio', { name: original }).click();
+		await expect.poll(() => redIn(page, 0, 0, 1, 1)).toBe(0);
+		await expect.poll(() => pixelHash(page)).toBe(erased);
+		// the same with the lower right piece (its dabs start halfway along the stroke)
+		await page.mouse.click(...k.at(0.7, y + 0.07));
+		await expect(sel).toHaveAttribute('data-count', '1');
+		await page.getByRole('radio', { name: 'Colour #e8492f' }).click();
+		await expect.poll(() => redIn(page, 0.55, y + 0.04, 0.8, y + 0.1)).toBeGreaterThan(50);
+		expect(await redIn(page, 0.2, y + 0.04, 0.45, y + 0.1)).toBe(0);
+		await page.getByRole('radio', { name: original }).click();
+		await expect.poll(() => redIn(page, 0, 0, 1, 1)).toBe(0);
+		await expect.poll(() => pixelHash(page)).toBe(erased);
+
+		// moved down on its own: the piece on the left stays, the cut end goes with it
+		await k.fresh();
+		const lowerLeft = await inkIn(page, 0.2, y + 0.04, 0.45, y + 0.1);
+		await k.drag(0.7, y + 0.07, 0.7, y + 0.17);
+		await expect.poll(() => inkIn(page, 0.55, y + 0.04, 0.8, y + 0.1)).toBe(0);
+		await expect.poll(() => inkIn(page, 0.55, y + 0.14, 0.8, y + 0.2)).toBeGreaterThan(50);
+		expect(await inkIn(page, 0.2, y + 0.04, 0.45, y + 0.1)).toBe(lowerLeft);
+		expect(await inkIn(page, 0.47, y + 0.14, 0.5, y + 0.2)).toBe(0);
+		// undo the move and the colours; then the eraser: the whole lines are back, one
+		// stroke each
+		await page.keyboard.press('Control+z');
+		await expect.poll(() => pixelHash(page)).toBe(erased);
+		await page.keyboard.press('Escape');
+		// (the colour changes, back and forth, are one step)
+		await page.keyboard.press('Control+z');
+		await expect.poll(() => pixelHash(page)).toBe(erased);
+		await page.keyboard.press('Control+z');
+		await expect.poll(gap).toBe(whole);
+		await page.mouse.click(...k.at(0.3, y));
+		await expect(sel).toHaveAttribute('data-count', '1');
+		await k.fresh();
+		await k.drag(0.3, y, 0.3, y - 0.05);
+		await expect.poll(() => inkIn(page, 0.55, y - 0.03, 0.8, y + 0.03)).toBe(0);
+		expect(await inkIn(page, 0.48, y - 0.08, 0.52, y - 0.03)).toBeGreaterThan(20);
+		await page.keyboard.press('Control+z');
+		await page.keyboard.press('Escape');
+	}
+});
+
+test('copy and paste lines: picked strokes copy as strokes, paste editable and picked, across layers and frames', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	for (let i = 0; i < 4; i++) await page.keyboard.press(']');
+	const k = await strokeKit(page);
+	const sel = page.getByTestId('line-selection');
+	const tl = page.getByRole('region', { name: 'Timeline' });
+	const history = page.getByRole('region', { name: 'History' });
+	await k.line(0.2, 0.3, 0.6, 0.3);
+	await page.waitForTimeout(300);
+	const one = await inkIn(page, 0.15, 0.25, 0.65, 0.35);
+	// Move: a tap picks the stroke; Ctrl+C copies it, Ctrl+V pastes it a little further on
+	await page.keyboard.press('v');
+	await k.fresh();
+	await page.mouse.click(...k.at(0.4, 0.3));
+	await expect(sel).toHaveAttribute('data-count', '1');
+	await page.keyboard.press('Control+c');
+	await page.keyboard.press('Control+v');
+	await expect.poll(() => inkIn(page, 0.15, 0.25, 0.65, 0.4)).toBeGreaterThan(one * 1.5);
+	await expect(sel).toHaveAttribute('data-count', '1');
+	await page.getByRole('tab', { name: /History/ }).click();
+	await expect(history.getByRole('button', { name: 'Paste lines' })).toBeVisible();
+	// the copy is picked: a drag moves it (not the first)
+	await k.fresh();
+	const box = (await sel.locator('rect.line-box').boundingBox())!;
+	const c = (await canvas(page).boundingBox())!;
+	await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+	await page.mouse.down();
+	await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2 + c.height * 0.2, {
+		steps: 8
+	});
+	await page.mouse.up();
+	await expect.poll(() => inkIn(page, 0.15, 0.25, 0.65, 0.35)).toBeGreaterThan(one * 0.8);
+	await expect.poll(() => inkIn(page, 0.15, 0.45, 0.65, 0.6)).toBeGreaterThan(one * 0.8);
+	// pasted again: another copy, further on again (not on top of the first copy)
+	await page.keyboard.press('Control+v');
+	await expect.poll(() => inkIn(page, 0.15, 0.25, 0.65, 0.4)).toBeGreaterThan(one * 1.5);
+	// one undo step each
+	await page.keyboard.press('Control+z');
+	await expect.poll(() => inkIn(page, 0.15, 0.25, 0.65, 0.4)).toBeLessThan(one * 1.3);
+
+	// onto a line layer: in the same place, a line there
+	await page.keyboard.press('Escape');
+	await page.getByRole('tab', { name: /Layers/ }).click();
+	await page.getByRole('button', { name: 'New line layer' }).click();
+	await page.keyboard.press('Shift+V');
+	await k.fresh();
+	await page.keyboard.press('Control+v');
+	await expect(sel).toHaveAttribute('data-count', '1');
+	await page.keyboard.press('Escape');
+	await page.mouse.click(...k.at(0.4, 0.3));
+	await expect(sel).toHaveAttribute('data-count', '1');
+	await page.keyboard.press('Delete');
+	// (the stroke on the plain layer under it is still there)
+	await expect.poll(() => inkIn(page, 0.15, 0.25, 0.65, 0.35)).toBeGreaterThan(one * 0.8);
+
+	// onto another frame: a new, empty drawing; the copy lands where it was copied from
+	await tl.getByRole('button', { name: 'New drawing' }).click();
+	await expect(tl.getByTestId('frame')).toHaveText('2');
+	await page.keyboard.press('Control+v');
+	await expect(sel).toHaveAttribute('data-count', '1');
+	await page.keyboard.press('Escape');
+	await expect(sel).toHaveCount(0);
+	await page.mouse.click(...k.at(0.4, 0.3));
+	await expect(sel).toHaveAttribute('data-count', '1');
+	// cut: Ctrl+X takes the picked stroke away (one step)
+	await page.keyboard.press('Control+x');
+	await expect(sel).toHaveCount(0);
+	await page.mouse.click(...k.at(0.4, 0.3));
+	await expect(sel).toHaveCount(0);
+	await page.keyboard.press('Control+z');
+	await page.mouse.click(...k.at(0.4, 0.3));
+	await expect(sel).toHaveAttribute('data-count', '1');
+	// frame 1's drawing of the line layer is as it was (its stroke deleted)
+	await tl.getByRole('button', { name: 'Frame 1', exact: true }).click();
+	await expect(sel).toHaveCount(0);
+	await page.mouse.click(...k.at(0.4, 0.3));
+	await expect(sel).toHaveCount(0);
+});
+
+test('copy and paste mirrored lines: they paste as a linked pair', async ({ page }) => {
+	await stubTauri(page);
+	await ready(page);
+	for (let i = 0; i < 4; i++) await page.keyboard.press(']');
+	const guides = page.getByRole('button', { name: 'Guides', exact: true });
+	await guides.click();
+	await page
+		.getByRole('radiogroup', { name: 'Symmetry' })
+		.getByRole('radio', { name: 'Vertical' })
+		.click();
+	await guides.click();
+	const k = await strokeKit(page);
+	await k.line(0.15, 0.25, 0.35, 0.25);
+	await page.waitForTimeout(300);
+	await page.keyboard.press('Shift+V');
+	await k.fresh();
+	await page.mouse.click(...k.at(0.75, 0.25));
+	const sel = page.getByTestId('line-selection');
+	await expect(sel).toHaveAttribute('data-count', '2');
+	await page.keyboard.press('Control+c');
+	await page.keyboard.press('Control+v');
+	await expect(sel).toHaveAttribute('data-count', '2');
+	// the pasted pair moved down (both), and right: the twin (on the right) goes left
+	await k.fresh();
+	const box = (await sel.locator('rect.line-box').boundingBox())!;
+	const [cx, cy] = [box.x + box.width / 2, box.y + box.height / 2];
+	const c = (await canvas(page).boundingBox())!;
+	await page.mouse.move(cx, cy);
+	await page.mouse.down();
+	await page.mouse.move(cx + c.width * 0.05, cy + c.height * 0.2, { steps: 8 });
+	await page.mouse.up();
+	await expect.poll(() => inkIn(page, 0.2, 0.4, 0.42, 0.5)).toBeGreaterThan(50);
+	const left = await inkIn(page, 0, 0.4, 0.5, 0.5);
+	const right = await inkIn(page, 0.5, 0.4, 1, 0.5);
+	expect(Math.abs(left - right) / left).toBeLessThan(0.3);
+	expect(await inkIn(page, 0.58, 0.4, 0.8, 0.5)).toBeGreaterThan(50);
+	expect(await inkIn(page, 0.05, 0.4, 0.18, 0.5)).toBe(0);
+	expect(await inkIn(page, 0.82, 0.4, 0.95, 0.5)).toBe(0);
+	// the strokes copied stay where they were
+	expect(await inkIn(page, 0.1, 0.23, 0.4, 0.26)).toBeGreaterThan(50);
+	expect(await inkIn(page, 0.6, 0.23, 0.9, 0.26)).toBeGreaterThan(50);
+});
+
+test('picked strokes and frames: a new frame drops the pick (no handles left), a duplicate keeps it', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	for (let i = 0; i < 4; i++) await page.keyboard.press(']');
+	const k = await strokeKit(page);
+	const tl = page.getByRole('region', { name: 'Timeline' });
+	const sel = page.getByTestId('line-selection');
+	await k.line(0.2, 0.3, 0.6, 0.3);
+	await page.waitForTimeout(300);
+	await page.keyboard.press('Shift+V');
+	await k.fresh();
+	await page.mouse.click(...k.at(0.4, 0.3));
+	await expect(sel).toHaveAttribute('data-count', '1');
+	// a new, empty drawing: nothing picked, no handles
+	await tl.getByRole('button', { name: 'New drawing' }).click();
+	await expect(tl.getByTestId('frame')).toHaveText('2');
+	await expect(sel).toHaveCount(0);
+	await expect(page.locator('.line-h, .line-pt')).toHaveCount(0);
+	// back on frame 1: still nothing picked (it's picked again with a tap)
+	await tl.getByRole('button', { name: 'Frame 1', exact: true }).click();
+	await expect.poll(() => inkIn(page, 0.15, 0.25, 0.65, 0.35)).toBeGreaterThan(100);
+	await expect(sel).toHaveCount(0);
+	await page.mouse.click(...k.at(0.4, 0.3));
+	await expect(sel).toHaveAttribute('data-count', '1');
+	// duplicated: the copy shows the same stroke, still picked; moving it changes the copy only
+	await page.keyboard.press('Shift+D');
+	await expect(tl.getByTestId('frame')).toHaveText('2');
+	await expect(sel).toHaveAttribute('data-count', '1');
+	await k.fresh();
+	await k.drag(0.4, 0.3, 0.4, 0.5);
+	await expect.poll(() => inkIn(page, 0.15, 0.45, 0.65, 0.55)).toBeGreaterThan(100);
+	expect(await inkIn(page, 0.15, 0.25, 0.65, 0.35)).toBe(0);
+	// back on frame 1: the stroke there is the same one, still picked, its handles on it
+	await tl.getByRole('button', { name: 'Frame 1', exact: true }).click();
+	await expect.poll(() => inkIn(page, 0.15, 0.25, 0.65, 0.35)).toBeGreaterThan(100);
+	expect(await inkIn(page, 0.15, 0.45, 0.65, 0.55)).toBe(0);
+	await expect(sel).toHaveAttribute('data-count', '1');
+	const c = (await canvas(page).boundingBox())!;
+	const box = (await sel.locator('rect.line-box').boundingBox())!;
+	expect(Math.abs((box.y + box.height / 2 - c.y) / c.height - 0.3)).toBeLessThan(0.03);
+});
+
 test('open a Photoshop file: its layers, groups and masks become a new project', async ({
 	page
 }) => {
