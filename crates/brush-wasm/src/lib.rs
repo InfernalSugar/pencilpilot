@@ -820,7 +820,10 @@ impl PaintCanvas {
     }
 
     /// New canvas size (one undo step): moved by (dx, dy), or with `scale` resized to fit.
+    /// Every drawing (an animation's other frames too) and mask changes with it; text
+    /// layers `text_ids` get the descriptions in `texts` (joined by U+0001).
     #[wasm_bindgen(js_name = resizeCanvas)]
+    #[allow(clippy::too_many_arguments)]
     pub fn resize_canvas(
         &mut self,
         width: u32,
@@ -828,8 +831,33 @@ impl PaintCanvas {
         dx: i32,
         dy: i32,
         scale: bool,
+        text_ids: &[u32],
+        texts: &str,
     ) -> bool {
-        self.inner.resize_canvas(width, height, dx, dy, scale)
+        let specs: Vec<(u32, String)> = if text_ids.is_empty() {
+            Vec::new()
+        } else {
+            text_ids
+                .iter()
+                .copied()
+                .zip(texts.split('\u{1}').map(str::to_string))
+                .collect()
+        };
+        self.inner
+            .resize_canvas(width, height, dx, dy, scale, &specs)
+    }
+
+    /// The drawings the next undo (`redo` false) or redo of a canvas size changes (none:
+    /// the next step isn't one). They must all be here first.
+    #[wasm_bindgen(js_name = canvasStepDrawings)]
+    pub fn canvas_step_drawings(&self, redo: bool) -> Vec<u32> {
+        self.inner.canvas_step_drawings(redo)
+    }
+
+    /// Tiles of paint held here (layers, masks and kept drawings).
+    #[wasm_bindgen(js_name = tileCount)]
+    pub fn tile_count(&self) -> u32 {
+        self.inner.tile_count() as u32
     }
 
     #[wasm_bindgen(js_name = selectAll)]

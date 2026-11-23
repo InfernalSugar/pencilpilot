@@ -2072,6 +2072,28 @@
 		paint?.invertSelection();
 		refreshAnts();
 	}
+	/** The box around the selection, canvas px (null: nothing selected). */
+	export function selectionBounds(): {
+		x: number;
+		y: number;
+		width: number;
+		height: number;
+	} | null {
+		const m = paint?.selectionMask();
+		if (!m?.length) return null;
+		let [x0, y0, x1, y1] = [width, height, -1, -1];
+		for (let y = 0; y < height; y++) {
+			const row = y * width;
+			for (let x = 0; x < width; x++)
+				if (m[row + x] >= 128) {
+					if (x < x0) x0 = x;
+					if (x > x1) x1 = x;
+					if (y < y0) y0 = y;
+					y1 = y;
+				}
+		}
+		return x1 < 0 ? null : { x: x0, y: y0, width: x1 - x0 + 1, height: y1 - y0 + 1 };
+	}
 
 	// ---- transform: move / scale / rotate / flip the selection or the layer ----
 
@@ -2759,21 +2781,38 @@
 	/**
 	 * A new canvas size, keeping the drawing (one undo step): moved by (dx, dy)
 	 * canvas px (a crop, or more room), or with `scale` resized to fit. The page
-	 * hears the new size through `oncanvassize`.
+	 * hears the new size through `oncanvassize`. Every drawing changes with it (an
+	 * animation's other frames too, the ones the engine has), and every mask; text layers
+	 * get the descriptions in `texts` ([layer id, text JSON]: their boxes, moved).
 	 */
-	export function resizeCanvas(w: number, h: number, dx: number, dy: number, scale: boolean) {
+	export function resizeCanvas(
+		w: number,
+		h: number,
+		dx: number,
+		dy: number,
+		scale: boolean,
+		texts: [number, string][] = []
+	) {
 		if (!paint) return false;
 		if (xf) transformCancel();
 		penPath = EMPTY_PATH;
-		// line layers' strokes move (or scale) with their pixels
+		lastEnd = null;
+		// line layers' strokes move (or scale) with their pixels: every frame's, not only
+		// the ones showing (the engine resizes every drawing's pixels in the same step)
 		const m: Affine = scale
 			? [w / width, 0, 0, h / height, 0, 0]
 			: [1, 0, 0, 1, Math.round(dx), Math.round(dy)];
-		const drawings = layerList()
-			.filter((l) => l.lines && l.drawing)
-			.map((l) => l.drawing);
+		const drawings = lines.store.drawings();
 		return changed(
-			paint.resizeCanvas(w, h, Math.round(dx), Math.round(dy), scale),
+			paint.resizeCanvas(
+				w,
+				h,
+				Math.round(dx),
+				Math.round(dy),
+				scale,
+				new Uint32Array(texts.map(([id]) => id)),
+				texts.map(([, t]) => t).join('\u0001')
+			),
 			() => {
 				log.layerChange();
 				if (drawings.length) log.attachLast(transformLinesStep(drawings, m));
@@ -2798,6 +2837,13 @@
 			redo: () => now.forEach(([d, list]) => lines.store.set(d, list))
 		};
 	}
+
+	/** The drawings the next undo (or redo) of a canvas size changes (none: it isn't one). */
+	export const canvasStepDrawings = (redo = false): number[] => [
+		...(paint?.canvasStepDrawings(redo) ?? [])
+	];
+	/** Tiles (64×64) of paint the engine holds: layers, masks and kept drawings. */
+	export const tileCount = () => paint?.tileCount() ?? 0;
 
 	/** keep the adjustment (one undo step) */
 	export function adjustCommit() {
