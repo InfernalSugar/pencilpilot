@@ -13,6 +13,8 @@ import {
 	mirrored,
 	mirroredDelta,
 	overLimit,
+	replayGroups,
+	smudgeArea,
 	strokeTiles,
 	strokesBytes,
 	strokesOnKeys,
@@ -439,5 +441,71 @@ describe('editable strokes on plain layers', () => {
 		expect(st.isPlain(3)).toBe(false);
 		st.setPlain(4, false);
 		expect(st.isPlain(4)).toBe(false);
+	});
+});
+
+describe('strokes that smudge, and snapped shapes with symmetry', () => {
+	it('takes in all a smudging stroke reaches, and its twins', () => {
+		const plain = { ...line(10, 10, 50, 10), id: 'p' };
+		const smudge = { ...line(100, 100, 400, 100), id: 's', smudge: true, reach: 6 };
+		const [a, b] = linkedCopies(
+			{ ...line(600, 300, 640, 300), smudge: true },
+			'vertical',
+			6,
+			800,
+			0
+		);
+		const list = [plain, smudge, a, b];
+		const keysOf = (t: Int32Array) => {
+			const out = new Set<string>();
+			for (let i = 0; i + 1 < t.length; i += 2) out.add(`${t[i]},${t[i + 1]}`);
+			return out;
+		};
+		// a tile on the smudging stroke: all it reaches comes along
+		const one = new Int32Array([3, 1]);
+		const area = keysOf(smudgeArea(list, one, 1600, 800));
+		for (const t of strokeTiles(smudge)) if (!t.startsWith('-')) expect(area.has(t)).toBe(true);
+		expect(area.has('0,0')).toBe(false);
+		// one twin's tile: the other twin comes too
+		const twinArea = smudgeArea(list, new Int32Array([9, 4]), 1600, 800);
+		expect(strokesOnTiles(list, twinArea).map((s) => s.id)).toEqual(
+			expect.arrayContaining([a.id, b.id])
+		);
+		// nothing smudges: as it was
+		expect(smudgeArea([plain], one, 1600, 800)).toBe(one);
+		// a far reach is cut to the biggest canvas
+		expect(strokeTiles({ ...smudge, reach: 1000 }).length).toBeLessThan(140 * 140);
+	});
+
+	it('numbers the strokes made together, to replay them together', () => {
+		const [a, b] = linkedCopies(line(10, 10, 50, 10), 'vertical', 6, 100, 0);
+		const [c, d] = linkedCopies(line(10, 40, 50, 40), 'vertical', 6, 100, 0);
+		const p = line(0, 0, 9, 9);
+		expect(replayGroups([p, a, b, c, d, p])).toEqual([0, 1, 1, 2, 2, 0]);
+		expect(replayGroups([a, p, b])).toEqual([1, 0, 2]);
+	});
+
+	it('gives a snapped shape’s copies the shape, mirrored; reach and smudge are kept', () => {
+		const shape = {
+			kind: 'poly' as const,
+			pts: [
+				[10, 10],
+				[30, 40],
+				[50, 10]
+			] as [number, number][],
+			closed: false,
+			pressure: 0.5
+		};
+		const [a, b] = linkedCopies({ ...line(10, 10, 50, 10), shape }, 'vertical', 6, 100, 0);
+		expect(a.shape).toEqual(shape);
+		expect(b.shape?.kind === 'poly' && b.shape.pts).toEqual([
+			[190, 10],
+			[170, 40],
+			[150, 10]
+		]);
+		expect(decodeLines(encodeLines([{ ...a, reach: 4.5, smudge: true }]))[0]).toMatchObject({
+			reach: 4.5,
+			smudge: true
+		});
 	});
 });

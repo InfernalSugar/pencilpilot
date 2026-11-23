@@ -28,6 +28,9 @@ import {
 	handles,
 	hitTest,
 	inBox,
+	replayGroups,
+	smudgeArea,
+	strokeTiles,
 	mirrored,
 	mirroredDelta,
 	overLimit,
@@ -146,7 +149,9 @@ export class LineLayers {
 	#redraw(layer: number, list: readonly LineStroke[], boxes: Box[]): boolean {
 		const e = this.host.engine();
 		if (!e) return false;
-		let tiles = tilesOf(boxes, this.host.width(), this.host.height());
+		const [w, h] = [this.host.width(), this.host.height()];
+		// (strokes that smudge read the paint around them: all of it is drawn again too)
+		let tiles = smudgeArea(list, tilesOf(boxes, w, h), w, h);
 		// (nothing on the canvas changes: one tile, so the step still exists)
 		if (!tiles.length) tiles = new Int32Array([0, 0]);
 		if (!e.linesBegin(layer, tiles)) return false;
@@ -156,13 +161,16 @@ export class LineLayers {
 		return true;
 	}
 
-	/** The strokes of `list` that reach `tiles`, replayed into the redraw begun. */
-	#replay(list: readonly LineStroke[], tiles: Int32Array) {
+	/** The strokes of `list` that reach `tiles` (all of them: none), replayed into the redraw begun. */
+	#replay(list: readonly LineStroke[], tiles?: Int32Array) {
 		const e = this.host.engine();
 		if (!e) return;
 		// (the dab style is set only when it changes; the current brush's comes back after)
 		let style: string | undefined;
-		for (const s of strokesOnTiles(list, tiles)) {
+		const on = tiles ? strokesOnTiles(list, tiles) : list;
+		// (strokes made together are replayed together, as symmetry painted them)
+		const groups = replayGroups(on);
+		for (const [i, s] of on.entries()) {
 			const b = this.host.brush(s.brush);
 			if (!b) continue;
 			b.setSizeScale(s.size);
@@ -175,7 +183,7 @@ export class LineLayers {
 				this.host.dabStyle(s.texture);
 				style = key;
 			}
-			e.linesStroke(b, s.seed, s.pts);
+			e.linesStroke(b, s.seed, s.pts, groups[i]);
 		}
 		if (style !== undefined) this.host.restoreDabStyle();
 	}
@@ -192,18 +200,115 @@ export class LineLayers {
 		layer: number,
 		d: number,
 		list: readonly LineStroke[],
-		start: number[]
+		start: number[],
+		tainted?: Set<string>
 	): readonly LineStroke[] | null {
+		return this.#bakePlan(layer, d, list, start, tainted)?.keep ?? null;
+	}
+
+	/** `#bake`, with what it did: the strokes kept and baked (null: none baked). */
+	#bakePlan(
+		layer: number,
+		d: number,
+		list: readonly LineStroke[],
+		start: number[],
+		tainted?: Set<string>
+	): { keep: LineStroke[]; baked: LineStroke[] } | null {
 		const e = this.host.engine();
 		if (!e || !start.length) return null;
-		const plan = bakePlan(list, start, (s) => !!this.host.brush(s.brush));
+		// (a stroke that smudged paint now gone can't be replayed as it was: the strokes
+		// over it become plain pixels too)
+		const plan = bakePlan(
+			list,
+			start,
+			(s) =>
+				!!this.host.brush(s.brush) &&
+				!(s.smudge && tainted && strokeTiles(s).some((t) => tainted.has(t)))
+		);
 		if (!plan.baked.length) return null;
-		if (plan.replay.length && e.baseBegin(d, layer, plan.replay)) {
-			this.#replay(plan.baked, plan.replay);
-			e.linesCommit();
+		if (plan.replay.length) {
+			// (drawn over the tiles about to go too: what smudges reads them)
+			const all = new Int32Array([...plan.replay, ...plan.drop]);
+			if (e.baseBegin(d, layer, all)) {
+				this.#replay(plan.baked, all);
+				e.linesCommit();
+			}
 		}
 		if (plan.drop.length) e.baseDrop(d, plan.drop);
-		return plan.keep;
+		return plan;
+	}
+
+	/** Draw `tiles` of `layer` again from `list`, into the last undo step. */
+	#redrawJoined(layer: number, list: readonly LineStroke[], tiles: Int32Array) {
+		const e = this.host.engine();
+		if (!e || !tiles.length || !e.linesBegin(layer, tiles)) return;
+		this.#replay(list, tiles);
+		e.linesCommit();
+		if (e.linesPush()) e.joinLastEdits();
+		this.host.schedule();
+	}
+
+	/**
+	 * A transform by `m` (affine) was just kept on `layer` (the engine kept what it did,
+	 * `xf*`): the strokes `follow` (ids: those it moved whole) move along and stay
+	 * editable, drawn again where they land over the pixels that were under them, moved
+	 * the same way; the others it changed become plain pixels (`runs`: the engine's
+	 * `takeTainted`). On a line layer every stroke follows. All in the transform's undo
+	 * step; what to undo and redo with it (null: nothing).
+	 */
+	followTransform(
+		layer: number,
+		m: Affine,
+		follow: Set<string>,
+		runs: Int32Array | number[]
+	): Effect | null {
+		const e = this.host.engine();
+		const d = this.drawingOf(layer);
+		if (!e || !d) return null;
+		const before = this.strokesOf(layer);
+		const [w, h] = [this.host.width(), this.host.height()];
+		let after: readonly LineStroke[];
+		if (this.host.isLineLayer(layer)) {
+			after = before.map((s) => (follow.has(s.id) ? transformStroke(s, m) : s));
+			const tiles = tilesOf([...before, ...after].map(bounds), w, h);
+			this.#redrawJoined(layer, after, smudgeArea(after, tiles, w, h));
+		} else {
+			const keys = new Set<string>();
+			for (let i = 0; i + 1 < runs.length;) {
+				const n = runs[i + 1];
+				if (runs[i] === d)
+					for (let k = 0; k < n; k++) keys.add(`${runs[i + 2 + k * 2]},${runs[i + 3 + k * 2]}`);
+				i += 2 + n * 2;
+			}
+			// strokes the transform changed but didn't move whole: plain pixels
+			const start = strokesOnKeys(before, keys).filter((i) => !follow.has(before[i].id));
+			const plan = this.#bakePlan(layer, d, before, start, keys) ?? {
+				keep: [...before],
+				baked: []
+			};
+			const moving = plan.keep.filter((s) => follow.has(s.id));
+			if (moving.length) {
+				// the layer as it was without its editable strokes (but those just baked)…
+				if (e.xfWithoutBegin()) {
+					this.#replay(plan.baked);
+					e.linesCommit();
+				}
+				// …moved as the transform moved it: under the strokes where they land
+				const moved = new Map(moving.map((s) => [s.id, transformStroke(s, m)]));
+				after = plan.keep.map((s) => moved.get(s.id) ?? s);
+				const tiles = smudgeArea(after, tilesOf([...moved.values()].map(bounds), w, h), w, h);
+				e.xfBase(tiles);
+				this.#redrawJoined(layer, after, tiles);
+			} else after = plan.keep;
+		}
+		e.xfForget();
+		if (after === before) return null;
+		this.store.set(d, after);
+		this.#keepSelection();
+		return {
+			undo: () => this.store.set(d, before),
+			redo: () => this.store.set(d, after)
+		};
 	}
 
 	/**
@@ -223,7 +328,7 @@ export class LineLayers {
 			const start = strokesOnKeys(before, keys);
 			if (!start.length) continue;
 			const layer = this.host.layerShowing(d) || (this.host.engine()?.activeLayer ?? 0);
-			const after = this.#bake(layer, d, before, start) ?? before;
+			const after = this.#bake(layer, d, before, start, keys) ?? before;
 			if (after === before) continue;
 			this.store.set(d, after);
 			effects.push({
@@ -378,6 +483,11 @@ export class LineLayers {
 		let after: readonly LineStroke[] = [...this.strokesOf(layer), ...strokes];
 		if (!this.host.isLineLayer(layer)) {
 			this.store.setPlain(d);
+			// what smudging strokes read without painting joins the base too
+			const e = this.host.engine();
+			const smudged = strokes.filter((s) => s.smudge).map(bounds);
+			if (e && smudged.length)
+				e.baseCover(d, tilesOf(smudged, this.host.width(), this.host.height()));
 			const over = overLimit(after, limit);
 			if (over.length) after = this.#bake(layer, d, after, over) ?? after;
 		}
@@ -724,6 +834,17 @@ export class LineLayers {
 				const r = radiusOf(next.brush, next.size);
 				if (r !== null) next.radius = r;
 			}
+			if (patch.brush !== undefined) {
+				// (another brush reaches as far as it does)
+				const b = this.host.brush(next.brush);
+				delete next.reach;
+				delete next.smudge;
+				if (b) {
+					const reach = Math.round(b.paintReach() * 100) / 100;
+					if (reach > 2.5) next.reach = reach;
+					if (b.smudgeReach() > 0) next.smudge = true;
+				}
+			}
 			const same =
 				next.color === x.color &&
 				next.size === x.size &&
@@ -746,13 +867,15 @@ export class LineLayers {
 			shape,
 			pts: pointsAlong(resample(shapePath(shape), 3), shape.pressure)
 		});
-		// its linked twins take the shape mirrored
+		// its linked twins take the shape mirrored: those picked with it, or (a shape just
+		// snapped, with symmetry on) all of them
 		const from = list.find((s) => s.id === id)?.link;
-		const sel = new Set(this.sel?.ids ?? []);
-		const linked = !!this.primary();
+		const picked = this.primary() ? new Set(this.sel?.ids ?? []) : null;
+		const linked = !!picked || this.host.symmetryOn();
 		const next = list.map((s) => {
 			if (s.id === id) return along(s, sh);
-			if (!linked || !from || !s.link || s.link.g !== from.g || !sel.has(s.id)) return s;
+			if (!linked || !from || !s.link || s.link.g !== from.g) return s;
+			if (picked && !picked.has(s.id)) return s;
 			return along(s, transformShape(sh, twinMap(from, s.link)));
 		});
 		if (live) this.#preview(layer, next);

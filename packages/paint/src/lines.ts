@@ -38,6 +38,13 @@ export interface LineStroke {
 	shape?: EditShape;
 	/** made with symmetry on: its mirrored / turned twins share `g` (see `Link`) */
 	link?: Link;
+	/**
+	 * how far from its path the brush can paint or read paint, as a multiple of `radius`
+	 * (the engine's `paint_reach`; none: 2.5, as for plain round brushes)
+	 */
+	reach?: number;
+	/** the brush smudges (reads the paint around it): redraws take in all it reaches */
+	smudge?: boolean;
 }
 
 /**
@@ -85,7 +92,7 @@ export const pointCount = (s: LineStroke) => Math.floor(s.pts.length / STRIDE);
 const boundsCache = new WeakMap<LineStroke, Box>();
 
 /** How far paint may reach past the path: brushes vary their dabs with pressure. */
-export const reach = (s: LineStroke) => s.radius * 2.5 + 3;
+export const reach = (s: LineStroke) => s.radius * Math.max(2.5, s.reach ?? 0) + 3;
 
 /** The area a stroke's paint can cover (canvas px). */
 export function bounds(s: LineStroke): Box {
@@ -629,7 +636,13 @@ export function linkedCopies(
 	const link = (k: number): Link => ({ g, k, mode, n, cx, cy });
 	return [
 		{ ...s, link: link(0) },
-		...symmetryStrokes(s, mode, n, cx, cy).map((c, i) => ({ ...c, link: link(i + 1) }))
+		...symmetryStrokes(s, mode, n, cx, cy).map((c, i) => {
+			const l = link(i + 1);
+			// (a snapped shape's copies are that shape, mirrored: edited along with it)
+			return s.shape
+				? { ...c, link: l, shape: transformShape(s.shape, linkMap(l)) }
+				: { ...c, link: l };
+		})
 	];
 }
 
@@ -718,6 +731,8 @@ interface Meta {
 	texture?: BrushTexture;
 	shape?: EditShape;
 	link?: Link;
+	reach?: number;
+	smudge?: boolean;
 }
 
 /** Strokes as bytes (a drawing in a project file, or an edit shared with others). */
@@ -733,7 +748,9 @@ export function encodeLines(strokes: readonly LineStroke[]): Uint8Array {
 		seed: s.seed,
 		...(s.texture ? { texture: s.texture } : {}),
 		...(s.shape ? { shape: s.shape } : {}),
-		...(s.link ? { link: s.link } : {})
+		...(s.link ? { link: s.link } : {}),
+		...(s.reach ? { reach: s.reach } : {}),
+		...(s.smudge ? { smudge: true } : {})
 	}));
 	const json = new TextEncoder().encode(JSON.stringify(meta));
 	const head = 8 + json.length;
@@ -861,7 +878,9 @@ export function decodeLines(bytes: Uint8Array): LineStroke[] {
 			seed: Math.floor(m.seed) >>> 0,
 			...(texture ? { texture } : {}),
 			...(shape ? { shape } : {}),
-			...(link ? { link } : {})
+			...(link ? { link } : {}),
+			...(num(m.reach, 0, 1000) ? { reach: m.reach } : {}),
+			...(m.smudge === true ? { smudge: true } : {})
 		});
 	}
 	return out;
@@ -925,11 +944,65 @@ function readLink(v: unknown): Link | undefined {
 export function strokeTiles(s: LineStroke, tile = 64): string[] {
 	const b = bounds(s);
 	if (!(b.x0 <= b.x1)) return [];
+	// (cut to the biggest canvas and the ring round it: a far reach is the whole canvas)
+	const most = Math.ceil(8192 / tile);
+	const at = (v: number) => Math.min(most, Math.max(-1, Math.floor(v / tile)));
 	const out: string[] = [];
-	for (let ty = Math.floor(b.y0 / tile); ty <= Math.floor(b.y1 / tile); ty++)
-		for (let tx = Math.floor(b.x0 / tile); tx <= Math.floor(b.x1 / tile); tx++)
-			out.push(`${tx},${ty}`);
+	for (let ty = at(b.y0); ty <= at(b.y1); ty++)
+		for (let tx = at(b.x0); tx <= at(b.x1); tx++) out.push(`${tx},${ty}`);
 	return out;
+}
+
+/**
+ * The tiles a redraw of `tiles` must take in for strokes that smudge to come out as
+ * they were painted: all that every smudging stroke there reaches (and its twins,
+ * replayed with it), again and again, as (tx, ty) pairs.
+ */
+export function smudgeArea(
+	strokes: readonly LineStroke[],
+	tiles: Int32Array,
+	w: number,
+	h: number,
+	tile = 64
+): Int32Array {
+	if (!strokes.some((s) => s.smudge)) return tiles;
+	let now = tiles;
+	for (;;) {
+		const on = strokesOnTiles(strokes, now, tile);
+		const groups = new Set(on.filter((s) => s.smudge && s.link).map((s) => s.link!.g));
+		const reached = [
+			...on.filter((s) => s.smudge),
+			...strokes.filter((s) => s.link && groups.has(s.link.g))
+		];
+		if (!reached.length) return now;
+		const keys = new Set<string>();
+		for (let i = 0; i + 1 < now.length; i += 2) keys.add(`${now[i]},${now[i + 1]}`);
+		const more = tilesOf(reached.map(bounds), w, h, tile);
+		let grew = false;
+		for (let i = 0; i + 1 < more.length; i += 2) {
+			const k = `${more[i]},${more[i + 1]}`;
+			if (!keys.has(k)) {
+				keys.add(k);
+				grew = true;
+			}
+		}
+		if (!grew) return now;
+		now = new Int32Array([...keys].flatMap((k) => k.split(',').map(Number)));
+	}
+}
+
+/**
+ * Group numbers for replaying (`linesStroke`): strokes made together (one link, one
+ * after the other in the list) share one, and are replayed point by point together as
+ * symmetry painted them; others get 0.
+ */
+export function replayGroups(strokes: readonly LineStroke[]): number[] {
+	let n = 0;
+	return strokes.map((s, i) => {
+		if (!s.link) return 0;
+		if (i > 0 && strokes[i - 1].link?.g === s.link.g) return n;
+		return ++n;
+	});
 }
 
 /**
