@@ -16,21 +16,22 @@ test('brush editor: adjust a brush, save it to My brushes, draw with it, keep it
 	await page.goto('/draw');
 	await expect(canvas(page)).toHaveAttribute('data-ready', 'true', { timeout: 15_000 });
 	await page.getByRole('tab', { name: /^Brushes/ }).click();
-	await page.getByRole('button', { name: /^Adjust .* and save as my brush/ }).click();
+	await page.getByRole('button', { name: /^Adjust .* and save as mine/ }).click();
 
-	const editor = page.getByRole('region', { name: 'Adjust brush' });
-	const sample = editor.locator('canvas');
+	const editor = page.getByRole('dialog', { name: /your own/ });
+	const sample = editor.getByRole('figure', { name: /Sample stroke/ }).locator('canvas');
 	await expect
 		.poll(() =>
 			sample.evaluate((c: HTMLCanvasElement) => {
 				const d = c.getContext('2d')!.getImageData(0, 0, c.width, c.height).data;
 				let n = 0;
-				for (let i = 3; i < d.length; i += 4) if (d[i] > 40) n++;
+				for (let i = 0; i < d.length; i += 4) if (d[i] < 200) n++;
 				return n;
 			})
 		)
 		.toBeGreaterThan(200);
 	await editor.getByRole('slider', { name: 'Edge' }).fill('1');
+	await editor.getByRole('tab', { name: 'Pressure and speed' }).click();
 	await editor.getByRole('slider', { name: 'Press harder → thicker' }).fill('0');
 	await editor.getByRole('textbox', { name: 'Brush name' }).fill('Crisp pencil');
 	await editor.getByRole('button', { name: 'Save to My brushes' }).click();
@@ -70,9 +71,10 @@ test('brush editor: adjust a brush, save it to My brushes, draw with it, keep it
 	);
 
 	// adjust again: the saved settings come back; then delete
-	await page.getByRole('button', { name: 'Adjust “Crisp pencil”' }).click();
-	await expect(editor.getByRole('slider', { name: 'Edge' })).toHaveValue('1');
-	await editor.getByRole('button', { name: 'Delete brush' }).click();
-	await editor.getByRole('button', { name: 'Delete', exact: true }).click();
+	await page.getByRole('button', { name: 'Edit “Crisp pencil”' }).click();
+	const edit = page.getByRole('dialog', { name: 'Edit “Crisp pencil”' });
+	await expect(edit.getByRole('slider', { name: 'Edge' })).toHaveValue('1');
+	await edit.getByRole('button', { name: 'Delete brush' }).click();
+	await edit.getByRole('button', { name: 'Delete', exact: true }).click();
 	await expect(page.getByRole('tab', { name: 'My brushes', exact: true })).toBeVisible();
 });
