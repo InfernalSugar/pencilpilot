@@ -156,7 +156,7 @@
 	import { recognise, resample } from './quickshape';
 	import type { PsdDoc, PsdGroup, PsdLayer } from './psd';
 	import { applyCurve } from './pressure';
-	import { renderText, textJson, type TextSpec } from './text';
+	import { parseText, renderText, textJson, type TextSpec } from './text';
 	import { customBrush, isCustom, onCustomBrushes } from './custom-brushes';
 	/** other players don't have "My brushes": they see the brush it's based on */
 	const sharedBrushId = (id: string) => (isCustom(id) ? (customBrush(id)?.base ?? id) : id);
@@ -2943,6 +2943,10 @@
 	 * hears the new size through `oncanvassize`. Every drawing changes with it (an
 	 * animation's other frames too, the ones the engine has), and every mask; text layers
 	 * get the descriptions in `texts` ([layer id, text JSON]: their boxes, moved).
+	 *
+	 * `swaps` ([drawing, other id] pairs): drawings already resized one at a time with
+	 * `resizeDrawingInto` (an animation in a frame store): the step swaps each with its
+	 * resized copy instead of keeping both in memory (the app swaps them in its store).
 	 */
 	export function resizeCanvas(
 		w: number,
@@ -2950,7 +2954,8 @@
 		dx: number,
 		dy: number,
 		scale: boolean,
-		texts: [number, string][] = []
+		texts: [number, string][] = [],
+		swaps: [number, number][] = []
 	) {
 		if (!paint) return false;
 		if (xf) transformCancel();
@@ -2962,22 +2967,51 @@
 			? [w / width, 0, 0, h / height, 0, 0]
 			: [1, 0, 0, 1, Math.round(dx), Math.round(dy)];
 		const drawings = lines.store.drawings();
+		const ids = new Uint32Array(texts.map(([id]) => id));
+		const specs = texts.map(([, t]) => t).join('\u0001');
+		const [rdx, rdy] = [Math.round(dx), Math.round(dy)];
+		const ok = swaps.length
+			? paint.resizeCanvasSwapping(w, h, rdx, rdy, scale, ids, specs, new Uint32Array(swaps.flat()))
+			: paint.resizeCanvas(w, h, rdx, rdy, scale, ids, specs);
 		return changed(
-			paint.resizeCanvas(
-				w,
-				h,
-				Math.round(dx),
-				Math.round(dy),
-				scale,
-				new Uint32Array(texts.map(([id]) => id)),
-				texts.map(([, t]) => t).join('\u0001')
-			),
+			ok,
 			() => {
 				log.layerChange();
 				if (drawings.length) log.attachLast(transformLinesStep(drawings, m));
+				// replays (films of the drawing) show the strokes where the drawing is now
+				log.attachLast(log.transformStep(m));
+				// scaled texts are drawn again at their new size (their pixels would only be
+				// stretched, and text can't stretch), in the same step
+				if (scale) for (const [id, json] of texts) redrawText(id, json, w, h);
 			},
 			'Canvas size'
 		);
+	}
+
+	/** Draw a text layer again from its description on a `w`×`h` canvas, joined to the last step. */
+	function redrawText(id: number, json: string, w: number, h: number) {
+		const spec = parseText(json);
+		if (!paint || !spec) return;
+		const r = renderText(spec, w, h);
+		if (!paint.textRedraw(id, r.x, r.y, r.w, r.h, r.rgba)) return;
+		log.layerChange();
+		if (paint.joinLastEdits()) log.joinLast();
+	}
+
+	/**
+	 * Kept drawing `to` becomes drawing `from` resized for a canvas size change (as
+	 * `resizeCanvas` would resize it): not an undo step, for sending to a frame store.
+	 */
+	export function resizeDrawingInto(
+		from: number,
+		to: number,
+		w: number,
+		h: number,
+		dx: number,
+		dy: number,
+		scale: boolean
+	): boolean {
+		return paint?.resizeDrawingInto(from, to, w, h, Math.round(dx), Math.round(dy), scale) ?? false;
 	}
 
 	/**
@@ -3001,6 +3035,11 @@
 	export const canvasStepDrawings = (redo = false): number[] => [
 		...(paint?.canvasStepDrawings(redo) ?? [])
 	];
+	/** The [drawing, other id] pairs the next undo (or redo) of a canvas size swaps. */
+	export function canvasStepSwaps(redo = false): [number, number][] {
+		const flat = [...(paint?.canvasStepSwaps(redo) ?? [])];
+		return flat.flatMap((v, i) => (i % 2 ? [] : [[v, flat[i + 1]] as [number, number]]));
+	}
 	/** Tiles (64×64) of paint the engine holds: layers, masks and kept drawings. */
 	export const tileCount = () => paint?.tileCount() ?? 0;
 
@@ -4156,6 +4195,8 @@
 	}
 	/** A new, empty drawing's id. */
 	export const newDrawing = () => paint?.newDrawing() ?? 0;
+	/** Drawings up to `id` are kept elsewhere (a frame store): new ones get ids past it. */
+	export const reserveDrawings = (id: number) => paint?.reserveDrawings(id);
 	/** A copy of a drawing (its line strokes too); returns the copy's id. */
 	export function copyDrawing(drawing: number) {
 		const id = paint?.copyDrawing(drawing) ?? 0;

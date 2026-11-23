@@ -188,6 +188,8 @@ export const ENGINE_MOST = 1536 * 2 ** 20;
 /**
  * About how much memory a canvas size change takes while it works and for its undo:
  * the paint as it is (`tiles` 64×64 tiles, kept for the undo) plus the paint resized.
+ * In the app, `tiles` is only what the engine holds: the frames in the frame store are
+ * resized a batch at a time and their undo waits in the store (see `FrameCache.resizeEach`).
  */
 export function resizeBytes(tiles: number, p: ResizePlan): number {
 	const [kx, ky] = stretch(p);

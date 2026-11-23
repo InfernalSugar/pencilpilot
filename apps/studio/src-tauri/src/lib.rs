@@ -253,6 +253,16 @@ fn frames_get(ids: Vec<u32>, store: State<'_, Frames>) -> Result<Response, Strin
     Ok(Response::new(anim::pack(&out)))
 }
 
+/// Drawings trade their tiles, pair by pair (`pairs` flattened: a, b, a, b, …): a canvas
+/// size change and its undo and redo.
+#[tauri::command]
+fn frames_swap(pairs: Vec<u32>, store: State<'_, Frames>) {
+    let mut s = frames(&store);
+    for p in pairs.as_chunks::<2>().0 {
+        s.swap(p[0], p[1]);
+    }
+}
+
 /// Forget every drawing not in `keep` (a new document starts with none).
 #[tauri::command]
 fn frames_retain(keep: Vec<u32>, store: State<'_, Frames>) {
@@ -662,6 +672,7 @@ pub fn run() {
             frames_put,
             frames_get,
             frames_retain,
+            frames_swap,
             frames_stats,
             share_host,
             share_join,

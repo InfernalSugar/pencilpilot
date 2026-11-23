@@ -32,6 +32,14 @@ async function stubTauri(page: Page, stub: Stub = {}) {
 			frameStore.set(id, r.request().postDataBuffer() ?? Buffer.alloc(0));
 			return r.fulfill({ body: 'ok' });
 		}
+		if (r.request().method() === 'DELETE') {
+			const keep = new URL(r.request().url()).searchParams.get('keep');
+			if (keep !== null) {
+				const ids = new Set(keep.split(',').filter(Boolean));
+				for (const k of [...frameStore.keys()]) if (!ids.has(k)) frameStore.delete(k);
+			} else frameStore.delete(id);
+			return r.fulfill({ body: 'ok' });
+		}
 		const b = frameStore.get(id);
 		return b ? r.fulfill({ body: b }) : r.fulfill({ status: 404 });
 	});
@@ -169,9 +177,32 @@ async function stubTauri(page: Page, stub: Stub = {}) {
 						}
 						return out.buffer;
 					}
+					case 'frames_swap': {
+						const ids = (args as { pairs: number[] }).pairs;
+						for (let i = 0; i + 1 < ids.length; i += 2) {
+							const [a, b] = [ids[i], ids[i + 1]];
+							const [x, y] = [frames.get(a), frames.get(b)];
+							for (const [id, v] of [
+								[a, y],
+								[b, x]
+							] as const) {
+								if (v) frames.set(id, v);
+								else frames.delete(id);
+								await fetch(
+									`/__frame/${id}`,
+									v ? { method: 'POST', body: v } : { method: 'DELETE' }
+								);
+							}
+						}
+						return null;
+					}
 					case 'frames_retain': {
 						const keep = (args as { keep: number[] }).keep;
 						for (const id of [...frames.keys()]) if (!keep.includes(id)) frames.delete(id);
+						// (opening a project: the copies kept for the next page go too. A new canvas
+						// keeps them: the app's store would read them from the file again on opening)
+						if (keep.length)
+							await fetch(`/__frame/retain?keep=${keep.join(',')}`, { method: 'DELETE' });
 						return null;
 					}
 					default:
@@ -2316,6 +2347,9 @@ test('canvas size: every frame moves with it, one undo step, kept in the file', 
 		await frame(n);
 		await lands(boxes[n - 1], 2880, 1, 480, 270);
 	}
+	// the frames were resized through the store, and the step swaps them there
+	const count = async (cmd: string) => (await calls(page)).filter((c) => c.cmd === cmd).length;
+	expect(await count('frames_swap')).toBe(1);
 	// one undo: every frame as it was
 	await page.keyboard.press('Control+z');
 	await lands(boxes[1], 1920);
@@ -2328,6 +2362,8 @@ test('canvas size: every frame moves with it, one undo step, kept in the file', 
 	await lands(boxes[2], 2880, 1, 480, 270);
 	await page.keyboard.press('Control+z');
 	await lands(boxes[2], 1920);
+	// undo and redo swap the frames in the store
+	expect(await count('frames_swap')).toBe(4);
 
 	// half the size, the drawing scaled with it
 	dlg = await openSize();
@@ -2349,6 +2385,167 @@ test('canvas size: every frame moves with it, one undo step, kept in the file', 
 	});
 	await frame(2);
 	await lands(boxes[1], 960, 0.5, 0, 0, 3);
+	// a new drawing after opening is new (not one of the drawings waiting in the store: it
+	// used to take frame 2's id)
+	await frame(1);
+	await lands(boxes[0], 960, 0.5, 0, 0, 3);
+	await tl.getByRole('button', { name: 'New drawing' }).click();
+	await expect(tl.getByRole('button', { name: /drawing 4, frame 4$/ })).toBeVisible();
+	await page.waitForTimeout(300);
+	expect(await inkBox(page)).toBeNull();
+});
+
+test('canvas size: a text stays where it is drawn, with its box, through undo and the file', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	await page.keyboard.press('t');
+	const b = (await canvas(page).boundingBox())!;
+	await page.mouse.click(b.x + b.width * 0.3, b.y + b.height * 0.4);
+	const typed = page.getByRole('textbox', { name: 'Text', exact: true });
+	await expect(typed).toBeFocused();
+	await page.keyboard.type('Hello there');
+	const done = page.getByRole('group', { name: 'Text' }).getByRole('button', { name: 'Done' });
+	/** the ink's box once it stops changing */
+	const settled = async () => {
+		let last = '';
+		await expect
+			.poll(async () => {
+				const before = last;
+				last = JSON.stringify(await inkBox(page));
+				return last === before && last !== 'null';
+			})
+			.toBe(true);
+		return JSON.parse(last) as Box;
+	};
+	/** the text box overlay's corners' box, in canvas px */
+	const frameBox = () =>
+		page.getByTestId('text-frame').evaluate((svg) => {
+			const pts = svg
+				.querySelector('polygon')!
+				.getAttribute('points')!
+				.split(' ')
+				.map((p) => p.split(',').map(Number));
+			const xs = pts.map((p) => p[0]);
+			const ys = pts.map((p) => p[1]);
+			const [vw, vh] = svg.getAttribute('viewBox')!.split(' ').slice(2).map(Number);
+			return {
+				x0: Math.min(...xs),
+				x1: Math.max(...xs),
+				y0: Math.min(...ys),
+				y1: Math.max(...ys),
+				vw,
+				vh
+			};
+		});
+	const typedBox = await settled();
+	const frame0 = await frameBox();
+	await done.click();
+	const kept = await settled();
+	expect(kept).toEqual(typedBox);
+	/** the text opened again: drawn from its description where its pixels were, its box around it */
+	const reopens = async (want: Box, slack: number) => {
+		const shown = await settled();
+		for (const k of ['x0', 'x1', 'y0', 'y1'] as const)
+			expect(Math.abs(shown[k] - want[k]), `${k} as kept`).toBeLessThanOrEqual(slack);
+		await page.getByRole('button', { name: /Change the text of/ }).click();
+		await expect(typed).toHaveValue('Hello there');
+		await expect(page.getByTestId('text-frame')).toBeVisible();
+		const again = await settled();
+		for (const k of ['x0', 'x1', 'y0', 'y1'] as const)
+			expect(Math.abs(again[k] - shown[k]), `${k} redrawn`).toBeLessThanOrEqual(slack);
+		const f = await frameBox();
+		expect([f.vw, f.vh]).toEqual([
+			again.w,
+			await canvas(page).evaluate((c: HTMLCanvasElement) => c.height)
+		]);
+		// the box is around the ink, as it was when typed
+		const pad = (k: 'x0' | 'x1' | 'y0' | 'y1', s: number) =>
+			expect(
+				Math.abs(f[k] - again[k] - s * (frame0[k] - typedBox[k])),
+				`box ${k}`
+			).toBeLessThanOrEqual(slack + 2);
+		return { again, pad };
+	};
+	const canvasW = () => canvas(page).evaluate((c: HTMLCanvasElement) => c.width);
+	const shift = (k: Box, dx: number, dy: number, s = 1): Box => ({
+		x0: k.x0 * s + dx,
+		x1: k.x1 * s + dx,
+		y0: k.y0 * s + dy,
+		y1: k.y1 * s + dy,
+		w: k.w
+	});
+	const openSize = async () => {
+		await page.getByRole('button', { name: 'File', exact: true }).click();
+		await page.getByRole('button', { name: /Canvas size…/ }).click();
+		return page.getByRole('dialog', { name: 'Canvas size' });
+	};
+	const check = async (want: Box, s: number, slack: number) => {
+		const { pad } = await reopens(want, slack);
+		for (const k of ['x0', 'x1', 'y0', 'y1'] as const) pad(k, s);
+		await typed.press('Escape');
+		await expect(page.getByTestId('text-frame')).toHaveCount(0);
+	};
+
+	// more room, in the middle: the text moves by (480, 270)
+	let dlg = await openSize();
+	await dlg.getByLabel('Width').fill('2880');
+	await dlg.getByLabel('Width').press('Tab');
+	await dlg.getByRole('button', { name: 'Resize canvas' }).click();
+	await expect.poll(canvasW).toBe(2880);
+	await check(shift(kept, 480, 270), 1, 1);
+	// undone, redone
+	await page.keyboard.press('Control+z');
+	await expect.poll(canvasW).toBe(1920);
+	await check(kept, 1, 1);
+	await page.keyboard.press('Control+Shift+z');
+	await expect.poll(canvasW).toBe(2880);
+	await check(shift(kept, 480, 270), 1, 1);
+	await page.keyboard.press('Control+z');
+	await expect.poll(canvasW).toBe(1920);
+
+	// half the size, scaled: the text is half the size where it was
+	dlg = await openSize();
+	await dlg.getByLabel('Resize the drawing too').check();
+	await dlg.getByLabel('Width').fill('960');
+	await dlg.getByLabel('Width').press('Tab');
+	await dlg.getByRole('button', { name: 'Resize canvas' }).click();
+	await expect.poll(canvasW).toBe(960);
+	await check(shift(kept, 0, 0, 0.5), 0.5, 3);
+	await page.keyboard.press('Control+z');
+	await expect.poll(canvasW).toBe(1920);
+	await check(kept, 1, 1);
+	await page.keyboard.press('Control+Shift+z');
+	await expect.poll(canvasW).toBe(960);
+	await check(shift(kept, 0, 0, 0.5), 0.5, 3);
+
+	// saved and opened again
+	await page.keyboard.press('Control+s');
+	await expect(page.getByTestId('project-name')).toHaveText('Walk cycle', { timeout: 20_000 });
+	await page.keyboard.press('Control+o');
+	await expect.poll(canvasW).toBe(960);
+	await page.keyboard.press('t');
+	await check(shift(kept, 0, 0, 0.5), 0.5, 3);
+
+	// twice as tall, scaled (the aspect ratio free): text can't stretch, so it's drawn
+	// again at its new size (twice the size), where its box is
+	dlg = await openSize();
+	await dlg.getByLabel('Resize the drawing too').check();
+	await dlg.getByRole('button', { name: 'Lock aspect ratio' }).click();
+	await dlg.getByLabel('Height').fill('1080');
+	await dlg.getByLabel('Height').press('Tab');
+	await expect(dlg.getByLabel('Width')).toHaveValue('960');
+	await dlg.getByRole('button', { name: 'Resize canvas' }).click();
+	await expect.poll(() => canvas(page).evaluate((c: HTMLCanvasElement) => c.height)).toBe(1080);
+	const tall = await settled();
+	// (the letters twice the size: about twice as wide as at 960 × 540)
+	const half = shift(kept, 0, 0, 0.5);
+	expect(tall.x1 - tall.x0).toBeGreaterThan((half.x1 - half.x0) * 1.8);
+	await check(tall, 1, 3);
+	await page.keyboard.press('Control+z');
+	await expect.poll(() => canvas(page).evaluate((c: HTMLCanvasElement) => c.height)).toBe(540);
+	await check(half, 0.5, 3);
 });
 
 test('a new canvas starts with its guides in the middle; Re-centre puts moved ones back', async ({

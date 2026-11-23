@@ -125,6 +125,19 @@ export class FrameCache {
 		for (const id of ids) if (id) this.#stored.add(id);
 	}
 
+	/**
+	 * A project was opened: the store has drawings `ids` (from its file), and of what it
+	 * had before only `keep` matters (the rest, an earlier project's or the other sizes an
+	 * old canvas size step kept for its undo, go).
+	 */
+	async opened(ids: number[], keep: number[]) {
+		this.#dirty.clear();
+		this.#used.clear();
+		this.#stored.clear();
+		this.stored(ids);
+		if (this.native) await this.#invoke('frames_retain', { keep: [...new Set([...ids, ...keep])] });
+	}
+
 	/** Whether showing these needs the store (so the frame change has to wait for it). */
 	needs(ids: number[]): boolean {
 		const c = this.canvas();
@@ -210,6 +223,115 @@ export class FrameCache {
 		} finally {
 			this.#pinned.clear();
 			this.trim();
+		}
+	}
+
+	/**
+	 * A canvas size change for drawings in the store, one batch at a time so the engine
+	 * never holds them all: each comes from the store if needed, `resize(from, to)` makes
+	 * its new size under a new id in the engine, and both go to the store. The engine then
+	 * keeps only the drawings `showing` and their new sizes (held, for the step to swap:
+	 * see `swapStep`). Returns the [drawing, new size] pairs (a drawing with no pixels
+	 * anywhere has none: there's nothing to resize).
+	 */
+	async resizeEach(
+		ids: number[],
+		showing: Set<number>,
+		resize: (from: number, to: number) => boolean,
+		newId: () => number,
+		onprogress?: (done: number, total: number) => void,
+		batch = 8
+	): Promise<[number, number][]> {
+		const c = this.canvas();
+		if (!this.native || !c) return [];
+		const all = [...new Set(ids.filter(Boolean))];
+		const pairs: [number, number][] = [];
+		for (let i = 0; i < all.length; i += batch) {
+			const part = all.slice(i, i + batch);
+			await this.ensure(part);
+			const made: [number, number][] = [];
+			for (const d of part) {
+				if (!c.hasDrawing(d)) continue;
+				const to = newId();
+				if (to && resize(d, to)) made.push([d, to]);
+			}
+			// the drawing as it is (unless the store has that already) and its new size
+			const send = made.flatMap(([d, to]) =>
+				this.#dirty.has(d) || !this.#stored.has(d) ? [d, to] : [to]
+			);
+			if (send.length) {
+				await this.#invoke(
+					'frames_put',
+					joinPacket(send.map((id) => ({ id, packed: c.drawingTilesPacked(id) })))
+				);
+				for (const id of send) {
+					this.#dirty.delete(id);
+					this.#stored.add(id);
+				}
+			}
+			for (const [d, to] of made) {
+				if (showing.has(d)) this.#pinned.add(to);
+				else {
+					c.forgetDrawing(d);
+					c.forgetDrawing(to);
+				}
+			}
+			pairs.push(...made);
+			onprogress?.(Math.min(all.length, i + batch), all.length);
+		}
+		return pairs;
+	}
+
+	/**
+	 * A canvas size step that swaps drawings with their other size (`pairs`), done, undone
+	 * or redone by `go` (true: the engine did it). The engine is made ready first (each
+	 * drawing in the store as it is; the ones not `showing` let go, since the store has
+	 * them; the other size of the ones showing brought here, for the engine to swap), the
+	 * store swaps them, then the engine does. False (the store swapped back) if `go`
+	 * didn't happen.
+	 */
+	async swapStep(pairs: [number, number][], showing: Set<number>, go: () => boolean) {
+		const c = this.canvas();
+		if (!this.native || !c) return go();
+		const ids = pairs.flat();
+		await this.push(ids);
+		const want: number[] = [];
+		for (const [a, b] of pairs) {
+			if (showing.has(a) || showing.has(b)) {
+				const other = showing.has(a) ? b : a;
+				this.#pinned.add(other);
+				want.push(other);
+			} else {
+				c.forgetDrawing(a);
+				c.forgetDrawing(b);
+			}
+		}
+		const swap = () => this.#invoke('frames_swap', { pairs: ids });
+		try {
+			await this.ensure(want);
+			if (want.some((id) => !c.hasDrawing(id))) throw new Error('a frame didn’t come back');
+			await swap();
+		} catch (e) {
+			for (const id of want) this.#pinned.delete(id);
+			throw e;
+		}
+		const ok = go();
+		// the other sizes stay in the store only
+		for (const id of ids) {
+			this.#pinned.delete(id);
+			if (!showing.has(id)) c.forgetDrawing(id);
+			this.#versions.set(id, (this.#versions.get(id) ?? 0) + 1);
+		}
+		if (!ok) await swap();
+		return ok;
+	}
+
+	/** Let go of drawings made for a step that didn't happen (they stay in the store, unused). */
+	drop(ids: number[]) {
+		const c = this.canvas();
+		for (const id of ids) {
+			this.#pinned.delete(id);
+			c?.forgetDrawing(id);
 		}
 	}
 

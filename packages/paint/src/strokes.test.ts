@@ -166,4 +166,46 @@ describe('StrokeLog batch', () => {
 		// a batch takes its first action's name; the step before it keeps its own
 		expect(log.history().undo).toEqual(['Brush stroke', 'Eraser', 'Gradient']);
 	});
+
+	it('moves and scales the logged strokes with a canvas size change, undoably', () => {
+		const log = new StrokeLog();
+		const a: Stroke = {
+			...s('a'),
+			size: 2,
+			points: [
+				{ x: 10, y: 20, pressure: 0.5, t: 0 },
+				{ x: 30, y: 40, pressure: 0.7, t: 5 }
+			]
+		};
+		const cloned: Stroke = { ...s('c'), clone: { dx: -8, dy: 4, heal: false, all: false } };
+		log.add(a);
+		log.add(cloned);
+		// canvas twice the size, the drawing scaled with it
+		log.layerChange();
+		log.attachLast(log.transformStep([2, 0, 0, 2, 0, 0]));
+		const now = log.strokes;
+		expect(now[0].points.map((p) => [p.x, p.y, p.pressure, p.t])).toEqual([
+			[20, 40, 0.5, 0],
+			[60, 80, 0.7, 5]
+		]);
+		expect(now[0].size).toBe(4);
+		expect(now[1].clone).toMatchObject({ dx: -16, dy: 8 });
+		// the strokes as they were are kept as they were (the undo step has them)
+		expect(a.points[0]).toEqual({ x: 10, y: 20, pressure: 0.5, t: 0 });
+		log.undo();
+		expect(log.strokes[0].points[0]).toMatchObject({ x: 10, y: 20 });
+		expect(log.strokes[0].size).toBe(2);
+		// undoing a stroke from before still finds it
+		log.undo();
+		expect(ids(log)).toEqual(['a']);
+		log.redo();
+		log.redo();
+		expect(log.strokes[0].points[1]).toMatchObject({ x: 60, y: 80 });
+		// more room (moved, not scaled): sizes stay
+		log.layerChange();
+		log.attachLast(log.transformStep([1, 0, 0, 1, 100, 50]));
+		expect(log.strokes[0].points[0]).toMatchObject({ x: 120, y: 90 });
+		expect(log.strokes[0].size).toBe(4);
+		expect(log.strokes[1].clone).toMatchObject({ dx: -16, dy: 8 });
+	});
 });

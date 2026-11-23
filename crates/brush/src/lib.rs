@@ -465,6 +465,10 @@ enum Edit {
         texts: Vec<(u32, String)>,
         /// editable strokes' bases (see [`lines`]), by drawing
         bases: Vec<(u32, lines::Base)>,
+        /// drawings kept as they were outside the engine (the app's frame store): each
+        /// drawing and the id its other size is kept under. Undo and redo swap the two
+        /// (the app swaps them in the store; here, the copies the engine holds).
+        swaps: Vec<(u32, u32)>,
     },
     /// Swap entries of a drawing's base (the pixels under its editable strokes; see
     /// [`lines`]): `None` = the entry wasn't there.
@@ -1328,8 +1332,12 @@ impl Painter {
                 masks,
                 texts,
                 bases,
+                swaps,
             } => {
                 self.stop_mask_editing();
+                for &(d, other) in &swaps {
+                    self.swap_kept(d, other);
+                }
                 let bases = bases
                     .into_iter()
                     .map(|(d, b)| {
@@ -1382,6 +1390,7 @@ impl Painter {
                     masks: old_masks,
                     texts: old_texts,
                     bases,
+                    swaps,
                 }
             }
             Edit::Base { drawing, snap } => Edit::Base {
@@ -2362,6 +2371,33 @@ impl Painter {
         scale: bool,
         texts: &[(u32, String)],
     ) -> bool {
+        self.resize_canvas_swapping(width, height, dx, dy, scale, texts, &[])
+    }
+
+    /// [`Painter::resize_canvas`] for an animation whose drawings live in the app's frame
+    /// store, so its undo step doesn't hold every frame: each pair in `swaps` is a
+    /// drawing and the id its resized copy was made under ([`Painter::resize_drawing_into`]).
+    /// The step swaps the two here (the copies the engine holds: for a drawing showing,
+    /// both must be here); the app swaps them in its store, so the drawing becomes the
+    /// resized one, and the old one waits under the other id for undo. Undo and redo
+    /// swap them back and forth: nothing is copied. Other drawings are resized here.
+    #[allow(clippy::too_many_arguments)]
+    pub fn resize_canvas_swapping(
+        &mut self,
+        width: u32,
+        height: u32,
+        dx: i32,
+        dy: i32,
+        scale: bool,
+        texts: &[(u32, String)],
+        swaps: &[(u32, u32)],
+    ) -> bool {
+        let swapped: HashSet<u32> = swaps.iter().flat_map(|&(a, b)| [a, b]).collect();
+        if swaps.iter().any(|&(a, b)| a == 0 || b == 0 || a == b)
+            || swapped.len() != swaps.len() * 2
+        {
+            return false;
+        }
         if !self.idle() || width == 0 || height == 0 || width > 8192 || height > 8192 {
             return false;
         }
@@ -2380,12 +2416,14 @@ impl Painter {
             }
         };
         // an animation's every drawing: the ones showing, and the other frames' kept here
+        // (but not the ones swapped: they were resized one by one)
         let drawings = self
             .layers
             .iter()
             .filter(|l| l.drawing != 0)
             .map(|l| (l.drawing, &l.surface.tiles))
             .chain(self.cels.iter().map(|(&d, t)| (d, t)))
+            .filter(|(d, _)| !swapped.contains(d))
             .map(|(d, t)| (d, redo(t)))
             .collect();
         let masks = self
@@ -2420,8 +2458,88 @@ impl Painter {
             masks,
             texts,
             bases,
+            swaps: swaps.to_vec(),
         });
         true
+    }
+
+    /// Make kept drawing `to` a copy of drawing `from` resized for a canvas size change
+    /// (as [`Painter::resize_canvas`] would resize it from the canvas size now). Not an
+    /// undo step: the app sends it to its frame store, then swaps the two with
+    /// [`Painter::resize_canvas_swapping`]. False if `from` isn't here (or `to` is
+    /// showing, or a bad id).
+    #[allow(clippy::too_many_arguments)]
+    pub fn resize_drawing_into(
+        &mut self,
+        from: u32,
+        to: u32,
+        width: u32,
+        height: u32,
+        dx: i32,
+        dy: i32,
+        scale: bool,
+    ) -> bool {
+        if to == 0 || to == from || width == 0 || height == 0 || width > 8192 || height > 8192 {
+            return false;
+        }
+        if self.layers.iter().any(|l| l.drawing == to) {
+            return false;
+        }
+        let Some(t) = self.drawing_tiles(from) else {
+            return false;
+        };
+        let out = if scale {
+            scale_tiles(t, self.width, self.height, width, height)
+        } else {
+            shift_tiles(t, dx, dy, width, height)
+        };
+        self.cels.insert(to, out);
+        self.next_drawing = self.next_drawing.max(to + 1);
+        true
+    }
+
+    /// The engine's copies of `a` and `b` trade places (a canvas size step swapping a
+    /// drawing with its other size). One without the other here is out of date once the
+    /// app swaps them in its store, so a kept one is let go (it comes back from there).
+    fn swap_kept(&mut self, a: u32, b: u32) {
+        let showing = |p: &Self, d: u32| p.layers.iter().any(|l| l.drawing == d);
+        let (ha, hb) = (self.has_drawing(a), self.has_drawing(b));
+        if ha && hb {
+            if showing(self, b) {
+                let ta = self.cels.remove(&a).unwrap_or_default();
+                let tb = self.swap_drawing(b, ta);
+                self.cels.insert(a, tb);
+            } else {
+                let tb = self.cels.remove(&b).unwrap_or_default();
+                let ta = self.swap_drawing(a, tb);
+                self.cels.insert(b, ta);
+            }
+        } else {
+            self.cels.remove(&a);
+            self.cels.remove(&b);
+        }
+    }
+
+    /// The (drawing, other size's id) pairs the next undo (or redo) of a canvas size
+    /// swaps (see [`Painter::resize_canvas_swapping`]); none for other steps.
+    pub fn canvas_step_swaps(&self, redo: bool) -> Vec<(u32, u32)> {
+        fn find(e: &Edit, out: &mut Vec<(u32, u32)>) {
+            match e {
+                Edit::Canvas { swaps, .. } => out.extend(swaps.iter().copied()),
+                Edit::Batch(list) => list.iter().for_each(|e| find(e, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        let step = if redo {
+            self.redo.last()
+        } else {
+            self.undo.last()
+        };
+        if let Some(e) = step {
+            find(e, &mut out);
+        }
+        out
     }
 
     /// Put `tiles` in place as a drawing's pixels, wherever it is (showing on a layer,
@@ -3653,6 +3771,12 @@ impl Painter {
         true
     }
 
+    /// Drawings up to `id` exist elsewhere (the app's frame store, a project opened into
+    /// it): new drawings get ids past it.
+    pub fn reserve_drawings(&mut self, id: u32) {
+        self.next_drawing = self.next_drawing.max(id.saturating_add(1));
+    }
+
     /// A new, empty drawing's id (it shows nowhere until `show_drawings`).
     pub fn new_drawing(&mut self) -> u32 {
         let id = self.next_drawing;
@@ -3836,7 +3960,12 @@ impl Painter {
                 Edit::Tiles { drawing, .. } => {
                     used.insert(*drawing);
                 }
-                Edit::Canvas { drawings, .. } => used.extend(drawings.iter().map(|(d, _)| *d)),
+                Edit::Canvas {
+                    drawings, swaps, ..
+                } => {
+                    used.extend(drawings.iter().map(|(d, _)| *d));
+                    used.extend(swaps.iter().flat_map(|&(a, b)| [a, b]));
+                }
                 Edit::Batch(list) => list.iter().for_each(|e| collect(e, used)),
                 _ => {}
             }
@@ -3987,7 +4116,12 @@ impl Painter {
                 Edit::Tiles { drawing, .. } if *drawing != 0 => {
                     used.insert(*drawing);
                 }
-                Edit::Canvas { drawings, .. } => used.extend(drawings.iter().map(|(d, _)| *d)),
+                Edit::Canvas {
+                    drawings, swaps, ..
+                } => {
+                    used.extend(drawings.iter().map(|(d, _)| *d));
+                    used.extend(swaps.iter().flat_map(|&(a, b)| [a, b]));
+                }
                 Edit::Batch(list) => list.iter().for_each(|e| collect(e, used)),
                 _ => {}
             }
@@ -4710,39 +4844,119 @@ fn shift_tiles(t: &TileMap, dx: i32, dy: i32, w: u32, h: u32) -> TileMap {
 
 /// `t` (on an `ow`×`oh` canvas) resized to fill `w`×`h`: each new pixel
 /// averages a few samples over its footprint (premultiplied, so edges stay clean).
+/// Each new tile reads the old pixels it needs into a flat window first (a canvas
+/// size change scales every frame of an animation: looking up tiles per sample was
+/// most of the time).
 fn scale_tiles(t: &TileMap, ow: u32, oh: u32, w: u32, h: u32) -> TileMap {
     let ts = TILE_SIZE as i64;
     let (sx, sy) = (ow as f32 / w as f32, oh as f32 / h as f32);
-    let get = |x: i64, y: i64| -> [f32; 4] {
-        if x < 0 || y < 0 || x >= ow as i64 || y >= oh as i64 {
-            return [0.0; 4];
-        }
-        t.get(&((x / ts) as i32, (y / ts) as i32))
-            .map_or([0.0; 4], |tile| {
-                tile[(y % ts) as usize][(x % ts) as usize].map(|v| v as f32)
-            })
-    };
-    // bilinear at a source point (pixel centres at .5)
-    let bil = |x: f32, y: f32| -> [f32; 4] {
-        let (fx, fy) = (x - 0.5, y - 0.5);
-        let (x0, y0) = (fx.floor(), fy.floor());
-        let (ax, ay) = (fx - x0, fy - y0);
-        let (x0, y0) = (x0 as i64, y0 as i64);
-        let (a, b, c, d) = (
-            get(x0, y0),
-            get(x0 + 1, y0),
-            get(x0, y0 + 1),
-            get(x0 + 1, y0 + 1),
-        );
-        [0, 1, 2, 3].map(|i| {
-            (a[i] * (1.0 - ax) + b[i] * ax) * (1.0 - ay) + (c[i] * (1.0 - ax) + d[i] * ax) * ay
-        })
-    };
     let (nx, ny) = (
         (sx.ceil() as usize).clamp(1, 4),
         (sy.ceil() as usize).clamp(1, 4),
     );
-    // the new tiles that can have paint: each old tile's area, scaled
+    let mut out = TileMap::new();
+    let mut win: Vec<[u16; 4]> = Vec::new();
+    for (kx, ky) in scaled_keys(t, sx, sy, w, h) {
+        // the old pixels this tile's samples read (a pixel of slack all round)
+        let (wx0, wy0) = (
+            ((kx as i64 * ts) as f32 * sx).floor() as i64 - 2,
+            ((ky as i64 * ts) as f32 * sy).floor() as i64 - 2,
+        );
+        let (wx1, wy1) = (
+            (((kx as i64 + 1) * ts) as f32 * sx).ceil() as i64 + 2,
+            (((ky as i64 + 1) * ts) as f32 * sy).ceil() as i64 + 2,
+        );
+        let (ww, wh) = ((wx1 - wx0) as usize, (wy1 - wy0) as usize);
+        win.clear();
+        win.resize(ww * wh, [0; 4]);
+        let mut any_src = false;
+        for ty in wy0.div_euclid(ts)..=(wy1 - 1).div_euclid(ts) {
+            for tx in wx0.div_euclid(ts)..=(wx1 - 1).div_euclid(ts) {
+                let Some(tile) = t.get(&(tx as i32, ty as i32)) else {
+                    continue;
+                };
+                any_src = true;
+                let (x0, y0) = (tx * ts, ty * ts);
+                for (py, row) in tile.iter().enumerate() {
+                    let y = y0 + py as i64;
+                    if y < wy0 || y >= wy1 || y >= oh as i64 {
+                        continue;
+                    }
+                    let base = (y - wy0) as usize * ww;
+                    for (px, v) in row.iter().enumerate() {
+                        let x = x0 + px as i64;
+                        if x >= wx0 && x < wx1 && x < ow as i64 {
+                            win[base + (x - wx0) as usize] = *v;
+                        }
+                    }
+                }
+            }
+        }
+        if !any_src {
+            continue;
+        }
+        // where each sample falls, per column and per row (the same for the whole tile):
+        // the window's pixel left of / above it, and how far towards the next
+        let taps = |k: i64, n: usize, scale: f32, w0: i64| -> Vec<(usize, f32)> {
+            (0..TILE_SIZE as i64)
+                .flat_map(|p| {
+                    (0..n).map(move |i| {
+                        let f = (((k * ts + p) as f32 + (i as f32 + 0.5) / n as f32) * scale) - 0.5;
+                        let f0 = f.floor();
+                        ((f0 as i64 - w0) as usize, f - f0)
+                    })
+                })
+                .collect()
+        };
+        let (cols, rows) = (taps(kx as i64, nx, sx, wx0), taps(ky as i64, ny, sy, wy0));
+        let px_at = |i: usize| -> [f32; 4] { win.get(i).map_or([0.0; 4], |v| v.map(|c| c as f32)) };
+        let mut tile = empty_tile();
+        let mut any = false;
+        let n = (nx * ny) as f32;
+        for (py, row) in tile.iter_mut().enumerate() {
+            if ky as i64 * ts + py as i64 >= h as i64 {
+                break;
+            }
+            for (px, p) in row.iter_mut().enumerate() {
+                if kx as i64 * ts + px as i64 >= w as i64 {
+                    break;
+                }
+                let mut acc = [0.0f32; 4];
+                for &(y0, ay) in &rows[py * ny..(py + 1) * ny] {
+                    for &(x0, ax) in &cols[px * nx..(px + 1) * nx] {
+                        // bilinear between the four pixels around the sample
+                        let i = y0 * ww + x0;
+                        let at = |i: usize| win.get(i).copied().unwrap_or_default();
+                        if at(i) == [0; 4]
+                            && at(i + 1) == [0; 4]
+                            && at(i + ww) == [0; 4]
+                            && at(i + ww + 1) == [0; 4]
+                        {
+                            continue;
+                        }
+                        let (a, b, c, d) =
+                            (px_at(i), px_at(i + 1), px_at(i + ww), px_at(i + ww + 1));
+                        for k in 0..4 {
+                            acc[k] += (a[k] * (1.0 - ax) + b[k] * ax) * (1.0 - ay)
+                                + (c[k] * (1.0 - ax) + d[k] * ax) * ay;
+                        }
+                    }
+                }
+                *p = acc.map(|v| (v / n).round().clamp(0.0, 32768.0) as u16);
+                any |= p[3] > 0;
+            }
+        }
+        if any {
+            out.insert((kx, ky), tile);
+        }
+    }
+    out
+}
+
+/// The new tiles that can have paint when `t` is scaled by 1/`sx`, 1/`sy` onto `w`×`h`:
+/// each old tile's area, scaled.
+fn scaled_keys(t: &TileMap, sx: f32, sy: f32, w: u32, h: u32) -> HashSet<TileKey> {
+    let ts = TILE_SIZE as i64;
     let mut keys = HashSet::new();
     for &(tx, ty) in t.keys() {
         let (x0, y0) = ((tx as i64 * ts) as f32 / sx, (ty as i64 * ts) as f32 / sy);
@@ -4764,38 +4978,7 @@ fn scale_tiles(t: &TileMap, ow: u32, oh: u32, w: u32, h: u32) -> TileMap {
             }
         }
     }
-    let mut out = TileMap::new();
-    for (kx, ky) in keys {
-        let mut tile = empty_tile();
-        let mut any = false;
-        for (py, row) in tile.iter_mut().enumerate() {
-            for (px, p) in row.iter_mut().enumerate() {
-                let (x, y) = (kx as i64 * ts + px as i64, ky as i64 * ts + py as i64);
-                if x >= w as i64 || y >= h as i64 {
-                    continue;
-                }
-                let mut acc = [0.0f32; 4];
-                for j in 0..ny {
-                    for i in 0..nx {
-                        let s = bil(
-                            (x as f32 + (i as f32 + 0.5) / nx as f32) * sx,
-                            (y as f32 + (j as f32 + 0.5) / ny as f32) * sy,
-                        );
-                        for c in 0..4 {
-                            acc[c] += s[c];
-                        }
-                    }
-                }
-                let n = (nx * ny) as f32;
-                *p = acc.map(|v| (v / n).round().clamp(0.0, 32768.0) as u16);
-                any |= p[3] > 0;
-            }
-        }
-        if any {
-            out.insert((kx, ky), tile);
-        }
-    }
-    out
+    keys
 }
 
 /// Pixels connected to (x, y) whose colour is within `tol` (per channel, 0–255)
@@ -5613,6 +5796,213 @@ mod tests {
         assert!(s0.abs_diff(b0.0 / 2) <= 2 && s1.abs_diff(b0.1 / 2) <= 2);
         p.undo();
         assert_eq!(ink_rows(&p, second), Some(b0));
+    }
+
+    /// (the old way, sample by sample through the tile map: the reference)
+    /// `t` (on an `ow`×`oh` canvas) resized to fill `w`×`h`: each new pixel
+    /// averages a few samples over its footprint (premultiplied, so edges stay clean).
+    fn scale_tiles_by_lookup(t: &TileMap, ow: u32, oh: u32, w: u32, h: u32) -> TileMap {
+        let ts = TILE_SIZE as i64;
+        let (sx, sy) = (ow as f32 / w as f32, oh as f32 / h as f32);
+        let get = |x: i64, y: i64| -> [f32; 4] {
+            if x < 0 || y < 0 || x >= ow as i64 || y >= oh as i64 {
+                return [0.0; 4];
+            }
+            t.get(&((x / ts) as i32, (y / ts) as i32))
+                .map_or([0.0; 4], |tile| {
+                    tile[(y % ts) as usize][(x % ts) as usize].map(|v| v as f32)
+                })
+        };
+        // bilinear at a source point (pixel centres at .5)
+        let bil = |x: f32, y: f32| -> [f32; 4] {
+            let (fx, fy) = (x - 0.5, y - 0.5);
+            let (x0, y0) = (fx.floor(), fy.floor());
+            let (ax, ay) = (fx - x0, fy - y0);
+            let (x0, y0) = (x0 as i64, y0 as i64);
+            let (a, b, c, d) = (
+                get(x0, y0),
+                get(x0 + 1, y0),
+                get(x0, y0 + 1),
+                get(x0 + 1, y0 + 1),
+            );
+            [0, 1, 2, 3].map(|i| {
+                (a[i] * (1.0 - ax) + b[i] * ax) * (1.0 - ay) + (c[i] * (1.0 - ax) + d[i] * ax) * ay
+            })
+        };
+        let (nx, ny) = (
+            (sx.ceil() as usize).clamp(1, 4),
+            (sy.ceil() as usize).clamp(1, 4),
+        );
+        // the new tiles that can have paint: each old tile's area, scaled
+        let mut keys = HashSet::new();
+        for &(tx, ty) in t.keys() {
+            let (x0, y0) = ((tx as i64 * ts) as f32 / sx, (ty as i64 * ts) as f32 / sy);
+            let (x1, y1) = (
+                ((tx as i64 + 1) * ts) as f32 / sx,
+                ((ty as i64 + 1) * ts) as f32 / sy,
+            );
+            let k0 = (
+                ((x0 - 2.0).max(0.0) as i64) / ts,
+                ((y0 - 2.0).max(0.0) as i64) / ts,
+            );
+            let k1 = (
+                ((x1 + 2.0).min(w as f32 - 1.0) as i64) / ts,
+                ((y1 + 2.0).min(h as f32 - 1.0) as i64) / ts,
+            );
+            for ky in k0.1..=k1.1 {
+                for kx in k0.0..=k1.0 {
+                    keys.insert((kx as i32, ky as i32));
+                }
+            }
+        }
+        let mut out = TileMap::new();
+        for (kx, ky) in keys {
+            let mut tile = empty_tile();
+            let mut any = false;
+            for (py, row) in tile.iter_mut().enumerate() {
+                for (px, p) in row.iter_mut().enumerate() {
+                    let (x, y) = (kx as i64 * ts + px as i64, ky as i64 * ts + py as i64);
+                    if x >= w as i64 || y >= h as i64 {
+                        continue;
+                    }
+                    let mut acc = [0.0f32; 4];
+                    for j in 0..ny {
+                        for i in 0..nx {
+                            let s = bil(
+                                (x as f32 + (i as f32 + 0.5) / nx as f32) * sx,
+                                (y as f32 + (j as f32 + 0.5) / ny as f32) * sy,
+                            );
+                            for c in 0..4 {
+                                acc[c] += s[c];
+                            }
+                        }
+                    }
+                    let n = (nx * ny) as f32;
+                    *p = acc.map(|v| (v / n).round().clamp(0.0, 32768.0) as u16);
+                    any |= p[3] > 0;
+                }
+            }
+            if any {
+                out.insert((kx, ky), tile);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn scaling_tiles_through_a_window_matches_sampling_each_pixel() {
+        // a few strokes across tile edges, on a canvas that isn't a whole number of tiles
+        let mut p = Painter::new(300, 170);
+        let b = pen();
+        for y in [20.0, 63.0, 130.0] {
+            line(&mut p, &b, y);
+        }
+        let d = p.layer_drawing(p.active_layer());
+        let t = p.drawing_tiles(d).unwrap().clone();
+        for (w, h) in [(150, 85), (450, 255), (97, 300), (300, 170), (611, 31)] {
+            let a = scale_tiles(&t, 300, 170, w, h);
+            let r = scale_tiles_by_lookup(&t, 300, 170, w, h);
+            assert_eq!(a.len(), r.len(), "{w}×{h}");
+            for (k, tile) in &r {
+                assert!(a.get(k) == Some(tile), "{w}×{h} tile {k:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn new_drawings_come_after_the_ones_kept_elsewhere() {
+        let mut p = Painter::new(64, 64);
+        let a = p.new_drawing();
+        p.reserve_drawings(40);
+        assert_eq!(p.new_drawing(), 41);
+        p.reserve_drawings(a);
+        assert_eq!(p.new_drawing(), 42);
+    }
+
+    #[test]
+    fn canvas_size_through_a_frame_store_swaps_instead_of_copying() {
+        // the app's frame store: drawing id → packed tiles
+        let mut store: HashMap<u32, Vec<u8>> = HashMap::new();
+        let mut p = Painter::new(256, 128);
+        let layer = p.active_layer();
+        let b = pen();
+        line(&mut p, &b, 30.0);
+        let first = p.layer_drawing(layer);
+        p.show_drawings(&[layer, 0]);
+        line(&mut p, &b, 100.0);
+        let second = p.layer_drawing(layer);
+        let (a0, b0) = (ink_rows(&p, first).unwrap(), ink_rows(&p, second).unwrap());
+        // frame 2 shows; frame 1 lives in the store only
+        for d in [first, second] {
+            store.insert(d, p.drawing_tiles_packed(d));
+        }
+        assert!(p.forget_drawing(first));
+        // each drawing resized one at a time into a new id, sent to the store
+        let mut pairs = Vec::new();
+        for d in [first, second] {
+            if !p.has_drawing(d) {
+                assert!(p.put_drawing_tiles(d, &store[&d]));
+            }
+            let other = p.new_drawing();
+            assert!(p.resize_drawing_into(d, other, 384, 256, 64, 64, false));
+            store.insert(other, p.drawing_tiles_packed(other));
+            if d != second {
+                // (not showing: neither stays here)
+                p.forget_drawing(d);
+                p.forget_drawing(other);
+            }
+            pairs.push((d, other));
+        }
+        assert_eq!(
+            p.kept_drawings().len(),
+            1,
+            "only the showing one's new size"
+        );
+        let swap = |store: &mut HashMap<u32, Vec<u8>>, pairs: &[(u32, u32)]| {
+            for &(a, b) in pairs {
+                let (x, y) = (store.remove(&a), store.remove(&b));
+                if let Some(y) = y {
+                    store.insert(a, y);
+                }
+                if let Some(x) = x {
+                    store.insert(b, x);
+                }
+            }
+        };
+        assert!(p.resize_canvas_swapping(384, 256, 64, 64, false, &[], &pairs));
+        swap(&mut store, &pairs);
+        // the step holds no frames: only which ids to swap
+        assert!(p.canvas_step_drawings(false).is_empty());
+        assert_eq!(p.canvas_step_swaps(false), pairs);
+        assert!(p.history_drawings().contains(&pairs[0].1));
+        assert_eq!((p.width(), p.height()), (384, 256));
+        assert_eq!(ink_rows(&p, second), Some((b0.0 + 64, b0.1 + 64)));
+        // the old size waits in the store; the engine lets it go
+        p.forget_drawing(pairs[1].1);
+        assert!(p.put_drawing_tiles(first, &store[&first]));
+        assert_eq!(ink_rows(&p, first), Some((a0.0 + 64, a0.1 + 64)));
+        p.forget_drawing(first);
+        // undo: the showing drawing's other size comes back first, then the swap
+        assert_eq!(p.canvas_step_swaps(false), pairs);
+        assert!(p.put_drawing_tiles(pairs[1].1, &store[&pairs[1].1]));
+        p.undo();
+        swap(&mut store, &pairs);
+        assert_eq!((p.width(), p.height()), (256, 128));
+        assert_eq!(ink_rows(&p, second), Some(b0));
+        assert!(p.put_drawing_tiles(first, &store[&first]));
+        assert_eq!(ink_rows(&p, first), Some(a0));
+        // redo (frame 1 is here this time, its other size isn't: it's let go, and comes
+        // back from the store)
+        assert_eq!(p.canvas_step_swaps(true), pairs);
+        assert!(p.put_drawing_tiles(pairs[1].1, &store[&pairs[1].1]));
+        p.redo();
+        swap(&mut store, &pairs);
+        assert!(!p.has_drawing(first));
+        assert_eq!(ink_rows(&p, second), Some((b0.0 + 64, b0.1 + 64)));
+        assert!(p.put_drawing_tiles(first, &store[&first]));
+        assert_eq!(ink_rows(&p, first), Some((a0.0 + 64, a0.1 + 64)));
+        // a bad pairing is refused
+        assert!(!p.resize_canvas_swapping(500, 300, 0, 0, false, &[], &[(first, first)]));
     }
 
     #[test]

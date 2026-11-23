@@ -1524,9 +1524,11 @@
 	 */
 	async function sizeStep(redoing: boolean, go: () => void) {
 		const ids = canvas?.canvasStepDrawings(redoing) ?? [];
-		if (!ids.length) return go();
+		const swaps = canvas?.canvasStepSwaps(redoing) ?? [];
+		if (!ids.length && !swaps.length) return go();
 		// (the others' canvases would stay the size they are)
 		if (sharing) return note('Canvas size can’t change while drawing together.', 3500);
+		if (swaps.length) return swapSizeStep(redoing, swaps, go);
 		switching = true;
 		try {
 			await cache.hold(ids);
@@ -1542,6 +1544,38 @@
 		await cache.release(ids).catch((e) => note(`Couldn’t keep the frames: ${e}`, 4000));
 	}
 
+	/** the drawings the layers show now */
+	const showingNow = () => new Set((status?.layers ?? []).map((l) => l.drawing).filter(Boolean));
+
+	/**
+	 * Undo / redo of a canvas size whose frames wait in the frame store: each drawing
+	 * trades places there with its other size (nothing is copied); only the drawings
+	 * showing come into the engine for it.
+	 */
+	async function swapSizeStep(redoing: boolean, pairs: [number, number][], go: () => void) {
+		const c = canvas;
+		if (!c) return;
+		const key = (p: [number, number][]) => JSON.stringify(p);
+		switching = true;
+		try {
+			const ok = await cache.swapStep(pairs, showingNow(), () => {
+				go();
+				// (it happened: the step moved to the other side of the history)
+				return key(c.canvasStepSwaps(!redoing)) === key(pairs);
+			});
+			if (!ok)
+				note(
+					`Couldn’t ${redoing ? 'redo' : 'undo'} the canvas size: finish what you’re doing first.`,
+					4000
+				);
+		} catch (e) {
+			note(`Couldn’t ${redoing ? 'redo' : 'undo'} the canvas size: ${e}`, 4000);
+		} finally {
+			switching = false;
+		}
+		cache.trim();
+	}
+
 	// ---- canvas size (Image → Canvas size…): every frame of every layer, one undo step ----
 	let canvasSizeOpen = $state(false);
 	/** about how much paint the project has, in 64×64 tiles (for the memory check) */
@@ -1551,14 +1585,9 @@
 		fileOpen = exportOpen = importOpen = false;
 		if (!canvas || !status || busy) return;
 		if (sharing) return note('Canvas size can’t change while drawing together.', 3500);
-		let stored = 0;
-		if (cache.native) {
-			const { invoke } = await import('@tauri-apps/api/core');
-			const st = await invoke<{ placed?: number } | null>('frames_stats').catch(() => null);
-			stored = st?.placed ?? 0;
-		}
-		// (the drawings in the window and the ones in the store: a bit over, never under)
-		projectTiles = canvas.tileCount() + stored;
+		// (what the engine holds: a bit over, never under. With the frame store, frames are
+		// resized one batch at a time and their undo waits in the store, so they don't count)
+		projectTiles = canvas.tileCount();
 		const png = await canvas.thumbnail(240).catch(() => null);
 		sizePicture = png
 			? URL.createObjectURL(new Blob([png as BlobPart], { type: 'image/png' }))
@@ -1574,9 +1603,12 @@
 	}
 
 	/**
-	 * Change the canvas size: every drawing of every layer and frame (brought from the
-	 * frame store first: the engine changes them all in one undo step), the masks, text
-	 * layers' boxes, the cuts' cameras and the guides. Nothing changes if any of it can't.
+	 * Change the canvas size: every drawing of every layer and frame, the masks, text
+	 * layers' boxes, the cuts' cameras and the guides, in one undo step. In the app the
+	 * frames are resized a batch at a time through the frame store, and the step swaps
+	 * each with its new size there (so a project of any size can change, with undo). In a
+	 * browser the engine has every drawing and changes them all at once. Nothing changes
+	 * if any of it can't.
 	 */
 	async function resizeAll(plan: ResizePlan) {
 		if (!canvas || !status || busy) return;
@@ -1584,6 +1616,8 @@
 		if (playing) stopPlay();
 		await showQueue;
 		if (toolOpts.adjustOpen) toolOpts.closeAdjust(false);
+		// (a text being typed is kept first: its box moves with the rest)
+		if (toolOpts.text.spec) toolOpts.text.done();
 		const c = canvas;
 		busy = 'resizing';
 		switching = true;
@@ -1592,17 +1626,46 @@
 			c.ensureDrawings();
 			// whatever the timeline has waiting becomes its own step first
 			recordTimeline();
-			const held = drawingsIn(timeline);
-			await cache.hold(held);
 			const texts = (status?.layers ?? []).flatMap((l) => {
 				const t = l.text ? moveText(l.text, plan) : null;
 				return t ? [[l.id, t] as [number, string]] : [];
 			});
 			const guides = moveGuides($state.snapshot(toolOpts.guides), plan);
-			if (!c.resizeCanvas(plan.to.width, plan.to.height, plan.dx, plan.dy, plan.scale, texts))
-				throw new Error('the canvas is busy (finish the transform or adjustment first)');
-			// what the engine changed: every drawing it had, the held ones among them
-			changed = [...new Set([...held, ...c.canvasStepDrawings(false)])];
+			const resize = (pairs: [number, number][] = []) =>
+				c.resizeCanvas(plan.to.width, plan.to.height, plan.dx, plan.dy, plan.scale, texts, pairs);
+			const busyCanvas = 'the canvas is busy (finish the transform or adjustment first)';
+			if (cache.native) {
+				// frame by frame through the store: each drawing's new size is made and sent
+				// there in turn; the step swaps them (its undo waits in the store, not in memory)
+				const showing = showingNow();
+				const ids = [...drawingsIn(timeline), ...showing];
+				// (the new sizes' ids: past every drawing there is)
+				c.reserveDrawings(Math.max(0, ...ids));
+				const { width, height } = plan.to;
+				const pairs = await cache.resizeEach(
+					ids,
+					showing,
+					(from, to) => c.resizeDrawingInto(from, to, width, height, plan.dx, plan.dy, plan.scale),
+					() => c.newDrawing(),
+					(done, total) => {
+						if (total > 8) fileNote = `Resizing frames: ${done} of ${total}`;
+					}
+				);
+				fileNote = '';
+				let ok = false;
+				try {
+					ok = await cache.swapStep(pairs, showing, () => resize(pairs));
+				} finally {
+					if (!ok) cache.drop(pairs.map(([, to]) => to));
+				}
+				if (!ok) throw new Error(busyCanvas);
+			} else {
+				const held = drawingsIn(timeline);
+				await cache.hold(held);
+				if (!resize()) throw new Error(busyCanvas);
+				// what the engine changed: every drawing it had, the held ones among them
+				changed = [...new Set([...held, ...c.canvasStepDrawings(false)])];
+			}
 			canvasSize = { ...plan.to };
 			// the guides stay on the drawing (kept for the new size, so they aren't rescaled)
 			keepLocal('pp.app.guides', { w: plan.to.width, h: plan.to.height, g: guides });
@@ -1619,6 +1682,7 @@
 		} finally {
 			switching = false;
 			busy = '';
+			fileNote = '';
 			await cache
 				.release(changed)
 				.catch((e) => note(`Couldn’t keep the frames in the store: ${e}`, 4000));
@@ -2945,7 +3009,16 @@
 				for (const d of doc.drawings ?? []) if (d.rgba) c.putDrawing(d.id, d.rgba);
 				// line layers' strokes, editable again
 				for (const d of doc.drawings ?? []) if (d.lines) c.putLineData(d.id, d.lines);
-				cache.stored((doc.drawings ?? []).filter((d) => !d.rgba).map((d) => d.id));
+				// the store has this project's drawings; others there (an earlier project's, a
+				// canvas size's other sizes for an undo that's gone) aren't needed any more
+				void cache
+					.opened(
+						(doc.drawings ?? []).filter((d) => !d.rgba).map((d) => d.id),
+						(doc.drawings ?? []).map((d) => d.id)
+					)
+					.catch(() => {});
+				// (new drawings mustn't take the ids of ones waiting in the store)
+				c.reserveDrawings(Math.max(0, ...(doc.drawings ?? []).map((d) => d.id)));
 				timeline = fromFile(doc.scenes!, ids, doc.statics, doc.mouths);
 				const kinds = kindsFromFile(doc.kinds);
 				if (Object.keys(kinds).length) timeline.kinds = kinds;

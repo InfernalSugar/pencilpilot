@@ -186,6 +186,38 @@ export class StrokeLog {
 			: effect;
 	}
 
+	/**
+	 * Every stroke kept moved (and scaled) by `m` ([a, b, c, d, e, f]: x' = a·x + c·y + e,
+	 * y' = b·x + d·y + f), as the canvas size moves the drawing: replays draw them where
+	 * the drawing is now. The strokes are replaced, not changed, so the steps before keep
+	 * theirs. Returns the undo / redo to attach to the step that moved the pixels.
+	 */
+	transformStep(m: [number, number, number, number, number, number]) {
+		const [a, b, c, d, e, f] = m;
+		const k = Math.sqrt(Math.abs(a * d - b * c)) || 1;
+		const was = this.#all;
+		const now = was.map((s): Stroke => ({
+			...s,
+			...(s.size !== undefined ? { size: s.size * k } : {}),
+			...(s.clone
+				? {
+						clone: {
+							...s.clone,
+							dx: a * s.clone.dx + c * s.clone.dy,
+							dy: b * s.clone.dx + d * s.clone.dy
+						}
+					}
+				: {}),
+			points: s.points.map((p) => ({ ...p, x: a * p.x + c * p.y + e, y: b * p.x + d * p.y + f }))
+		}));
+		const swap = (from: Stroke[], to: Stroke[]) => {
+			const map = new Map(from.map((s, i) => [s, to[i]]));
+			this.#all = this.#all.map((s) => map.get(s) ?? s);
+		};
+		this.#all = now;
+		return { undo: () => swap(now, was), redo: () => swap(was, now) };
+	}
+
 	/** Step names: `undo` oldest → newest (the last one is the current state), `redo` next → furthest. */
 	history(): { undo: string[]; redo: string[] } {
 		return {

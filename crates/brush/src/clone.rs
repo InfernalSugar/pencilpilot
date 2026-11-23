@@ -10,6 +10,9 @@
 //! destination (a ring just outside the dab), so the copied texture takes on
 //! the brightness and colour of where it lands. A light stand-in for Photoshop's
 //! Poisson blend: it matches the surroundings' mean, not their gradient.
+//!
+//! The brush's texture (grain, tip picture, dual brush: see [`crate::texture`]) thins
+//! the copy just as it thins paint, so a grainy pencil clones grainy.
 
 use std::sync::Arc;
 
@@ -131,6 +134,9 @@ pub(crate) fn clone_dab(s: &mut UndoSurface, dab: &Dab, src: &CloneSource) -> bo
         None
     };
     let lock_alpha = dab.lock_alpha > 0.5;
+    // the brush's grain / tip / dual brush thin the copy as they thin paint
+    let style = s.style.clone();
+    let stamps = style.as_ref().map(|st| st.stamps(dab)).unwrap_or_default();
     let ts = TILE_SIZE as i64;
     let mut changed = false;
     for (&(tx, ty), tile) in &cover.tiles {
@@ -150,7 +156,14 @@ pub(crate) fn clone_dab(s: &mut UndoSurface, dab: &Dab, src: &CloneSource) -> bo
                     let (col, a) = unpremul_srgb(c);
                     c = premul_fix15([col[0] + k[0], col[1] + k[1], col[2] + k[2]], a);
                 }
-                put.push((py, px, c, p[3] as f32 / 32768.0));
+                let mut a = p[3] as f32 / 32768.0;
+                if let Some(st) = &style {
+                    a *= st.factor(dab, &stamps, x as f32 + 0.5, y as f32 + 0.5);
+                    if a <= 0.0 {
+                        continue;
+                    }
+                }
+                put.push((py, px, c, a));
             }
         }
         if put.is_empty() {
@@ -321,6 +334,38 @@ mod tests {
         props.locked = true;
         p.set_layer_props(top, props, false);
         assert!(!p.begin_clone_stroke(-40.0, 0.0, true, false));
+    }
+
+    #[test]
+    fn a_grainy_brush_clones_grainy() {
+        // the dark dot, cloned with a brush whose grain is stripes: 2 px painted, 2 bare
+        let copied = |grain: bool| {
+            let mut p = halves([200, 200, 200, 255], [200, 200, 200, 255]);
+            let b = stamp();
+            if grain {
+                let tex: Vec<u8> = (0..16).map(|i| if i % 4 < 2 { 255 } else { 0 }).collect();
+                assert!(p.set_texture(7, 4, 4, tex));
+                p.set_dab_style(7, 1.0, 1.0, 0, 0, 0.0, 0.0, 1);
+            }
+            assert!(p.begin_clone_stroke(-40.0, 0.0, false, false));
+            dab_at(&mut p, &b, 60.0, 30.0);
+            // dark pixels in the copy, and the columns the grain leaves bare
+            let dark: Vec<(usize, usize)> = (26..35)
+                .flat_map(|y| (55..66).map(move |x| (x, y)))
+                .filter(|&(x, y)| at(&mut p, x, y)[0] < 100)
+                .collect();
+            dark
+        };
+        let (plain, grainy) = (copied(false), copied(true));
+        assert!(plain.len() >= 20, "the dot is copied: {}", plain.len());
+        assert!(
+            !grainy.is_empty() && grainy.len() * 10 < plain.len() * 7,
+            "the grain thins the copy: {} → {}",
+            plain.len(),
+            grainy.len()
+        );
+        // only the grain's painted columns get the copy
+        assert!(grainy.iter().all(|&(x, _)| x % 4 < 2), "{grainy:?}");
     }
 
     #[test]
