@@ -34,6 +34,8 @@
 		style: LayerStyle | null;
 		/** a text layer's text (JSON, see text.ts); null for other layers */
 		text?: string | null;
+		/** a line (vector) layer: its strokes stay editable (see lines.ts) */
+		lines?: boolean;
 	}
 	export type LayerSettings = Omit<
 		LayerInfo,
@@ -47,6 +49,7 @@
 		| 'drawing'
 		| 'assist'
 		| 'text'
+		| 'lines'
 	>;
 
 	/** What happened to a picture brought in with `importImage`. */
@@ -134,6 +137,20 @@
 	import { onMount, untrack } from 'svelte';
 	import { loadBrush, loadEngine, PaintCanvas, type PaintBrush } from './brushes';
 	import { StrokeLog, type Stroke } from './strokes';
+	import { LineLayers, type LineEraser } from './line-layers.svelte';
+	import {
+		STRIDE,
+		boilStrokes,
+		decodeLines,
+		encodeLines,
+		newId,
+		newSeed,
+		symmetryStrokes,
+		transformStroke,
+		type Affine,
+		type LineStroke,
+		type SymmetryMode
+	} from './lines';
 	import { recognise, resample } from './quickshape';
 	import type { PsdDoc, PsdGroup, PsdLayer } from './psd';
 	import { applyCurve } from './pressure';
@@ -266,7 +283,9 @@
 		textFrame = null,
 		onrasterize,
 		view,
-		undoLimit = 60
+		undoLimit = 60,
+		lineEraser = 'normal',
+		onlines
 	}: {
 		width?: number;
 		height?: number;
@@ -308,7 +327,8 @@
 			| 'smudge'
 			| 'pen'
 			| 'clone'
-			| 'text';
+			| 'text'
+			| 'lines';
 		/** pictures can be dropped onto the canvas (as a new layer) */
 		allowImport?: boolean;
 		/** a dropped picture was imported (or why not) */
@@ -434,6 +454,10 @@
 		view?: Partial<ViewPrefs>;
 		/** undo steps kept (10–500) */
 		undoLimit?: number;
+		/** the eraser on a line layer: removes whole strokes, or cuts them where it passes */
+		lineEraser?: LineEraser;
+		/** a drawing's line-layer strokes changed (drawing together shares them) */
+		onlines?: (drawing: number) => void;
 	} = $props();
 
 	const prefs = $derived<ViewPrefs>({ ...VIEW_DEFAULTS, ...view });
@@ -459,6 +483,113 @@
 		}
 	};
 	const t0 = performance.now();
+
+	// ---- line layers (see line-layers.svelte.ts): strokes that stay editable ----
+
+	/** brushes for redrawing line strokes, by id (loaded as needed) */
+	// eslint-disable-next-line svelte/prefer-svelte-reactivity -- engine bookkeeping, never rendered
+	const lineBrushes = new Map<string, PaintBrush>();
+	const lines = new LineLayers({
+		engine: () => paint,
+		width: () => width,
+		height: () => height,
+		isLineLayer: (id) => isLineLayer(id),
+		brush: (id) => lineBrushes.get(id) ?? null,
+		loadBrushes: async (ids) => {
+			await Promise.all(
+				ids.map(async (id) => {
+					if (!lineBrushes.has(id)) lineBrushes.set(id, await remoteBrush(id));
+				})
+			);
+		},
+		dabStyle: (t) => setDabStyle(t ?? null),
+		restoreDabStyle: () => setDabStyle(brushTexture),
+		step: (label, undo, redo) => {
+			log.layerChange();
+			log.labelLast(label);
+			log.attachLast({ undo, redo });
+		},
+		schedule: () => schedule(),
+		notify: () => notify()
+	});
+	lines.onlines = (d) => onlines?.(d);
+
+	/** a stroke's path for the selection overlay (SVG points) */
+	function linePoints(s: LineStroke) {
+		let out = '';
+		for (let i = 0; i + 1 < s.pts.length; i += STRIDE) out += `${s.pts[i]},${s.pts[i + 1]} `;
+		return out;
+	}
+
+	/** whether layer `id` is a line layer */
+	function isLineLayer(id: number) {
+		return !!layerList().find((l) => l.id === id)?.lines;
+	}
+
+	/** the live stroke on a line layer: its points as painted (`STRIDE` each) and its seed */
+	let linePts: number[] | null = null;
+	let lineSeed = 0;
+	/** the QuickShape being edited is this line stroke (else: the last raster stroke) */
+	let shapeOf: { layer: number; id: string } | null = null;
+	/** a press of the Select line tool or the line eraser */
+	let linePointer: number | null = null;
+	/** where the Select line tool's drag is, waiting for the next frame */
+	let lineMove: { layer: number; x: number; y: number; shift: boolean } | null = null;
+	let lineMoveRaf = 0;
+	function lineMoveNow() {
+		cancelAnimationFrame(lineMoveRaf);
+		lineMoveRaf = 0;
+		const m = lineMove;
+		lineMove = null;
+		if (m) lines.move(m.layer, m.x, m.y, m.shift);
+	}
+
+	/** one point of a stroke into the engine (and, on a line layer, into its points) */
+	function strokeTo(x: number, y: number, p: number, tx: number, ty: number, dt: number) {
+		if (linePts) {
+			// exactly as the engine gets them (f32), so redrawing paints the same pixels
+			[x, y, p, tx, ty, dt] = [x, y, p, tx, ty, dt].map(Math.fround);
+			linePts.push(x, y, p, tx, ty, dt);
+		}
+		paint!.strokeTo(brush!, x, y, p, tx, ty, dt);
+	}
+
+	/** start the stroke again (a QuickShape snapped): a line stroke keeps its seed */
+	function restartStroke(): boolean {
+		if (!paint) return false;
+		if (linePts) {
+			linePts = [];
+			return paint.beginLineStroke(lineSeed);
+		}
+		return paint.beginStroke();
+	}
+
+	/** A line stroke ending: it and its symmetry copies, to join the drawing (`lines.added`). */
+	function finishLineStroke(shape: EditShape | null) {
+		const pts = linePts;
+		linePts = null;
+		if (!pts?.length || !brush) return null;
+		const stroke: LineStroke = {
+			id: newId(),
+			pts: new Float32Array(pts),
+			brush: brushId,
+			color,
+			size,
+			opacity,
+			radius: brush.radius(),
+			seed: lineSeed,
+			...(brushTexture ? { texture: $state.snapshot(brushTexture) as typeof brushTexture } : {}),
+			...(shape ? { shape } : {})
+		};
+		const sym = guides?.symmetry;
+		const copies =
+			sym && sym.mode !== 'off'
+				? symmetryStrokes(stroke, sym.mode as SymmetryMode, sym.n ?? 6, sym.c[0], sym.c[1])
+				: [];
+		if (!lineBrushes.has(brushId)) void lines.ready([stroke]);
+		return { strokes: [stroke, ...copies] };
+	}
+
 	let current: Stroke | null = null;
 	/** the pointer drawing `current` */
 	let strokePointer = -1;
@@ -571,6 +702,8 @@
 	/** Redraw the editable shape in its new form: one step, replacing the last. */
 	function redrawShape(sh: EditShape) {
 		if (!paint || !brush) return;
+		// a line stroke's shape: the stroke is drawn along it (live while a handle drags)
+		if (shapeOf) return lines.reshape(shapeOf.layer, shapeOf.id, sh, !!shapeDrag);
 		if (paint.undo()) log.undo();
 		if (!paint.beginStroke()) return;
 		const stroke: Stroke = {
@@ -953,22 +1086,25 @@
 		texIds.set(id, n);
 		return n;
 	}
+	/** how the engine's next strokes are textured (null: plain) */
+	function setDabStyle(t: BrushTexture | null) {
+		if (!paint) return;
+		if (!t) return paint.setDabStyle(0, 1, 0, 0, 0, 0, 0, 1);
+		paint.setDabStyle(
+			engineTexture(t.grain),
+			t.grainScale,
+			t.grainStrength,
+			engineTexture(t.tip),
+			engineTexture(t.dual),
+			t.dualSize,
+			t.dualScatter,
+			t.dualCount
+		);
+	}
 	$effect(() => {
 		const t = brushTexture;
 		if (!ready || !paint) return;
-		untrack(() => {
-			if (!t) return paint!.setDabStyle(0, 1, 0, 0, 0, 0, 0, 1);
-			paint!.setDabStyle(
-				engineTexture(t.grain),
-				t.grainScale,
-				t.grainStrength,
-				engineTexture(t.tip),
-				engineTexture(t.dual),
-				t.dualSize,
-				t.dualScatter,
-				t.dualCount
-			);
-		});
+		untrack(() => setDabStyle(t));
 	});
 
 	// ---- view: zoom, pan, rotate, mirror (only how it's shown, never the drawing) ----
@@ -1200,6 +1336,8 @@
 		if (!paint) return false;
 		if (cx < 0 || cy < 0 || cx >= width || cy >= height) return false;
 		const l = shownLayers().find((x) => x.id === paint!.activeLayer);
+		// a line layer keeps only lines: the colour goes on the layer under it, inside its lines
+		if (l?.lines && !l.editingMask) return fillUnderLines(l, cx, cy, hex, tolerance);
 		if (l && (l.locked || !l.visible)) {
 			onblocked?.(l.visible ? 'locked' : 'hidden');
 			return false;
@@ -1219,6 +1357,68 @@
 			fillReference
 		);
 		return changed(done, undefined, 'Fill');
+	}
+
+	/**
+	 * Fill on a line layer (as Clip Studio fills with the lines as reference): the shape
+	 * is found on the line layer, the colour goes on the plain layer right under it (a
+	 * new "Colour" layer if there's none), and the line layer stays the one drawn on.
+	 * One undo step, the new layer included.
+	 */
+	function fillUnderLines(
+		line: LayerInfo,
+		cx: number,
+		cy: number,
+		hex: string,
+		tolerance: number
+	): boolean {
+		if (!paint) return false;
+		const all = shownLayers();
+		const i = all.findIndex((x) => x.id === line.id);
+		const below = all[i - 1];
+		const usable =
+			below &&
+			below.group === line.group &&
+			!below.lines &&
+			!below.text &&
+			!below.adjust &&
+			!below.locked &&
+			below.visible;
+		let target = usable ? below.id : 0;
+		let made = 0;
+		if (!target) {
+			made = paint.addLayer('Colour');
+			if (!made) return false;
+			log.layerChange();
+			// (made above the lines: moved under them)
+			if (paint.moveLayer(made, i)) {
+				log.layerChange();
+				if (paint.joinLastEdits()) log.joinLast();
+			}
+			target = made;
+		}
+		paint.setActiveLayer(target);
+		const n = parseInt(hex.slice(1), 16) || 0;
+		const done = paint.fill(
+			Math.floor(cx),
+			Math.floor(cy),
+			(n >> 16) & 255,
+			(n >> 8) & 255,
+			n & 255,
+			opacity,
+			tolerance,
+			false,
+			2,
+			3,
+			line.id
+		);
+		paint.setActiveLayer(line.id);
+		if (done) {
+			log.layerChange();
+			if (made && paint.joinLastEdits()) log.joinLast();
+			log.labelLast('Fill');
+		} else if (made && paint.undo()) log.undo();
+		return changed(done, () => {}, undefined);
 	}
 
 	/**
@@ -1377,11 +1577,11 @@
 				style: { brushId: sharedBrushId(brushId), color, size, opacity, eraser }
 			});
 		}
-		if (!paint.beginStroke()) return;
+		if (!restartStroke()) return;
 		const t = current.points.at(-1)?.t ?? 0;
 		current.points = [];
 		for (const [x, y] of path) {
-			paint.strokeTo(brush, x, y, pressure, 0, 0, 0.008);
+			strokeTo(x, y, pressure, 0, 0, 0.008);
 			current.points.push({ x: Math.round(x * 10) / 10, y: Math.round(y * 10) / 10, pressure, t });
 			if (sendLive())
 				livePts.push(
@@ -1415,11 +1615,11 @@
 				style: { brushId: sharedBrushId(brushId), color, size, opacity, eraser }
 			});
 		}
-		if (!paint.beginStroke()) return;
+		if (!restartStroke()) return;
 		const t = current.points.at(-1)?.t ?? 0;
 		current.points = [];
 		for (const [x, y] of resample(shapePath(sh), 3)) {
-			paint.strokeTo(brush, x, y, sh.pressure, 0, 0, 0.008);
+			strokeTo(x, y, sh.pressure, 0, 0, 0.008);
 			current.points.push({
 				x: Math.round(x * 10) / 10,
 				y: Math.round(y * 10) / 10,
@@ -2033,9 +2233,55 @@
 	}
 	// a new tool ends shape editing and the measuring line
 	$effect(() => {
-		if (tool !== 'brush') editShape = null;
+		if (tool !== 'brush' && tool !== 'lines') editShape = null;
 		if (tool !== 'measure') measureSeg = null;
+		if (tool !== 'lines') untrack(() => lines.deselect());
 	});
+	// Select line: a QuickShape selected on its own shows its Edit shape handles
+	$effect(() => {
+		if (tool !== 'lines') return;
+		const sh = lines.selectedShape();
+		const layer = lines.sel?.layer ?? 0;
+		untrack(() => {
+			if (shapeDrag) return;
+			editShape = sh?.shape ?? null;
+			shapeOf = sh ? { layer, id: sh.id } : null;
+		});
+	});
+	// Select line: the colour, size, opacity and brush chosen go to the selected strokes
+	let lineStyleWas = untrack(() => ({ color, chosenSize, opacity, brushId }));
+	let lineStyleAt = 0;
+	$effect(() => {
+		const now = { color, chosenSize, opacity, brushId };
+		untrack(() => {
+			const was = lineStyleWas;
+			lineStyleWas = now;
+			if (tool !== 'lines' || !lines.sel || lines.busy) return;
+			const patch: Partial<LineStroke> = {};
+			if (now.color !== was.color) patch.color = color;
+			if (now.chosenSize !== was.chosenSize) patch.size = size;
+			if (now.opacity !== was.opacity) patch.opacity = opacity;
+			if (now.brushId !== was.brushId) {
+				patch.brush = brushId;
+				patch.texture = brushTexture ? ($state.snapshot(brushTexture) as BrushTexture) : null;
+			}
+			if (!Object.keys(patch).length) return;
+			const joinable = performance.now() - lineStyleAt < 900;
+			void lines.restyle(patch, lineRadius).then((done) => {
+				if (!done) return;
+				// a slider dragged: one step
+				if (joinable && log.history().undo.at(-2) === 'Change lines') joinLastSteps();
+				lineStyleAt = performance.now();
+			});
+		});
+	});
+	/** a brush's radius (canvas px) at a size, for line strokes (null: not loaded) */
+	function lineRadius(id: string, s: number) {
+		const b = lineBrushes.get(id);
+		if (!b) return null;
+		b.setSizeScale(s);
+		return b.radius();
+	}
 
 	// ---- pen tool: Bézier paths, stroked with the brush or filled ----
 
@@ -2078,11 +2324,16 @@
 	/** Draw along the path with the current brush (one stroke, one undo step). */
 	export function penStroke(taper = true) {
 		if (!paint || !brush || penPath.anchors.length < 2) return false;
-		if (!paint.beginStroke()) {
+		// on a line layer the path becomes a line (editable, as any stroke there)
+		const layer = paint.activeLayer;
+		const asLine = !eraser && !paint.isEditingMask() && isLineLayer(layer);
+		if (asLine) lineSeed = newSeed();
+		if (!(asLine ? paint.beginLineStroke(lineSeed) : paint.beginStroke())) {
 			const l = shownLayers().find((x) => x.id === paint!.activeLayer);
 			onblocked?.(l && !l.visible ? 'hidden' : 'locked');
 			return false;
 		}
+		linePts = asLine ? [] : null;
 		const pts = samplePath(penPath, 2);
 		const stroke: Stroke = {
 			brushId,
@@ -2098,7 +2349,7 @@
 			// a light touch at the ends, like a hand-drawn line
 			const k = i / Math.max(1, pts.length - 1);
 			const pr = taper && !penPath.closed ? 0.25 + 0.6 * Math.sin(Math.PI * k) : 0.7;
-			paint!.strokeTo(brush!, x, y, pr, 0, 0, 0.008);
+			strokeTo(x, y, pr, 0, 0, 0.008);
 			stroke.points.push({
 				x: Math.round(x * 10) / 10,
 				y: Math.round(y * 10) / 10,
@@ -2106,8 +2357,17 @@
 				t
 			});
 		});
+		const line = asLine ? finishLineStroke(null) : null;
 		paint.endStroke(brush);
-		changed(true, () => log.add(stroke), 'Pen path');
+		const effect = line ? lines.added(layer, line.strokes) : undefined;
+		changed(
+			true,
+			() => {
+				log.add(stroke);
+				if (effect) log.attachLast(effect);
+			},
+			'Pen path'
+		);
 		return true;
 	}
 
@@ -2505,11 +2765,38 @@
 		if (!paint) return false;
 		if (xf) transformCancel();
 		penPath = EMPTY_PATH;
+		// line layers' strokes move (or scale) with their pixels
+		const m: Affine = scale
+			? [w / width, 0, 0, h / height, 0, 0]
+			: [1, 0, 0, 1, Math.round(dx), Math.round(dy)];
+		const drawings = layerList()
+			.filter((l) => l.lines && l.drawing)
+			.map((l) => l.drawing);
 		return changed(
 			paint.resizeCanvas(w, h, Math.round(dx), Math.round(dy), scale),
-			undefined,
+			() => {
+				log.layerChange();
+				if (drawings.length) log.attachLast(transformLinesStep(drawings, m));
+			},
 			'Canvas size'
 		);
+	}
+
+	/**
+	 * Every stroke of these drawings' line layers moved / scaled by `m` (no redraw: their
+	 * pixels were changed the same way). Returns the undo / redo to attach to the step that
+	 * changed the pixels. For changing the canvas size across frames: call it with every
+	 * line drawing and the same transform as the pixels get.
+	 */
+	export function transformLinesStep(drawings: number[], m: Affine) {
+		const was = drawings.map((d) => [d, lines.store.get(d)] as const);
+		const now = was.map(([d, list]) => [d, list.map((s) => transformStroke(s, m))] as const);
+		for (const [d, list] of now) lines.store.set(d, list);
+		lines.check();
+		return {
+			undo: () => was.forEach(([d, list]) => lines.store.set(d, list)),
+			redo: () => now.forEach(([d, list]) => lines.store.set(d, list))
+		};
 	}
 
 	/** keep the adjustment (one undo step) */
@@ -2534,7 +2821,7 @@
 	/** one point of the stroke: painted, sent to others drawing along and logged */
 	function paintAt(x: number, y: number, p: number, tx: number, ty: number, dt: number, t: number) {
 		if (!paint || !brush || !current) return;
-		paint.strokeTo(brush, x, y, p, tx, ty, dt);
+		strokeTo(x, y, p, tx, ty, dt);
 		if (sendLive())
 			livePts.push(
 				Math.round(x * 10) / 10,
@@ -2611,7 +2898,7 @@
 			const x = lastEnd.x + (bx - lastEnd.x) * f;
 			const y = lastEnd.y + (by - lastEnd.y) * f;
 			const p = lastEnd.p + (pb - lastEnd.p) * f;
-			paint.strokeTo(brush, x, y, p, 0, 0, 0.004);
+			strokeTo(x, y, p, 0, 0, 0.004);
 			if (sendLive())
 				livePts.push(
 					Math.round(x * 10) / 10,
@@ -2714,8 +3001,13 @@
 			tap.max = Math.max(tap.max, touches.size);
 			if (touches.size === 2) {
 				// a second finger: this is a pinch, not a stroke
+				if (linePointer !== null) {
+					lines.cancel();
+					linePointer = null;
+				}
 				if (current) {
 					paint.cancelStroke();
+					linePts = null;
 					current = null;
 					schedule();
 					if (sendLive()) {
@@ -2767,7 +3059,7 @@
 			return;
 		}
 		// editable shape: grab one of its points
-		if (tool === 'brush' && editShape && !locked) {
+		if ((tool === 'brush' || tool === 'lines') && editShape && !locked) {
 			const p = toCanvas(e.clientX, e.clientY);
 			const r = 14 / Math.max(0.01, fit * zoom);
 			const i = shapeHandles(editShape).findIndex((q) => Math.hypot(p[0] - q[0], p[1] - q[1]) <= r);
@@ -2807,6 +3099,22 @@
 		if (onrasterize && RASTERIZING.has(tool) && !paint.isEditingMask()) {
 			const l = layerList().find((x) => x.id === paint!.activeLayer);
 			if (l?.text) return onrasterize(l.id);
+			// a line layer takes the brush (strokes), the eraser and fills; the rest paint pixels
+			if (l?.lines && tool !== 'brush' && tool !== 'fill') return onrasterize(l.id);
+		}
+		// line layers: Select line, and the eraser (whole strokes, or cut where it passes)
+		const onLines = !paint.isEditingMask() && isLineLayer(paint.activeLayer);
+		if (tool === 'lines' || (onLines && tool === 'brush' && eraser)) {
+			if (!onLines) return;
+			const l = shownLayers().find((x) => x.id === paint!.activeLayer);
+			if (l && (l.locked || !l.visible)) return onblocked?.(l.visible ? 'locked' : 'hidden');
+			if (lines.busy) return;
+			capture(e);
+			linePointer = e.pointerId;
+			const [x, y] = toCanvas(e.clientX, e.clientY);
+			if (tool === 'lines') lines.down(paint.activeLayer, x, y, e.shiftKey, fit * zoom);
+			else lines.eraseBegin(paint.activeLayer, x, y, brushR, lineEraser);
+			return;
 		}
 		if (tool === 'transform') {
 			if (!xf) return;
@@ -2895,9 +3203,15 @@
 				? cloneOffset(cloneFrom, toCanvas(e.clientX, e.clientY), cloneAligned, cloneKept)
 				: null;
 		if (tool === 'clone' && !off) return;
+		// on a line layer the stroke is kept as a line (seeded: redrawn, it paints the same)
+		const asLine = !off && onLines && tool === 'brush';
+		if (asLine) lineSeed = newSeed();
 		const began = off
 			? paint.beginCloneStroke(off[0], off[1], cloneAllLayers, cloneHeal)
-			: paint.beginStroke();
+			: asLine
+				? paint.beginLineStroke(lineSeed)
+				: paint.beginStroke();
+		linePts = asLine && began ? [] : null;
 		if (!began) {
 			const l = shownLayers().find((x) => x.id === paint!.activeLayer);
 			onblocked?.(l && !l.visible ? 'hidden' : 'locked');
@@ -2979,6 +3293,22 @@
 		if (shapeDrag && e.pointerId === shapeDrag.id && editShape) {
 			editShape = moveHandle(editShape, shapeDrag.index, toCanvas(e.clientX, e.clientY));
 			redrawShape(editShape);
+			return;
+		}
+		if (linePointer === e.pointerId && paint) {
+			if (lines.erasing) {
+				const events = e.getCoalescedEvents?.() ?? [];
+				for (const ev of events.length ? events : [e]) {
+					const [x, y] = toCanvas(ev.clientX, ev.clientY);
+					lines.eraseTo(x, y);
+				}
+				cursorAt = toCanvas(e.clientX, e.clientY);
+			} else {
+				// (redrawn once a frame, however fast the pointer reports)
+				const [x, y] = toCanvas(e.clientX, e.clientY);
+				lineMove = { layer: paint.activeLayer, x, y, shift: e.shiftKey };
+				if (!lineMoveRaf) lineMoveRaf = requestAnimationFrame(lineMoveNow);
+			}
 			return;
 		}
 		if (zoomDrag && e.pointerId === zoomDrag.id) {
@@ -3098,6 +3428,17 @@
 		}
 		if (shapeDrag && e.pointerId === shapeDrag.id) {
 			shapeDrag = null;
+			if (shapeOf) lines.reshaped();
+			notify();
+			return;
+		}
+		if (linePointer === e.pointerId) {
+			linePointer = null;
+			if (lines.erasing) lines.eraseEnd();
+			else if (paint) {
+				lineMoveNow();
+				lines.up(paint.activeLayer);
+			}
 			notify();
 			return;
 		}
@@ -3162,9 +3503,31 @@
 		if (!snapped) catchUp();
 		// a snapped shape stays editable (not on shared canvases: others already have it)
 		editShape = snapped && !onlive && !maskStroke ? snappedShape : null;
+		const lineLayer = current.layer ?? 0;
+		const line = linePts ? finishLineStroke(snapped ? snappedShape : null) : null;
+		paint.endStroke(brush);
+		if (line) {
+			// its drawing is known now (a first stroke gives an empty cel one)
+			const effect = lines.added(lineLayer, line.strokes);
+			shapeOf = editShape && effect ? { layer: lineLayer, id: line.strokes[0].id } : null;
+			if (effect) {
+				log.add(current);
+				log.labelLast(snapped ? 'Shape' : 'Line');
+				log.attachLast(effect);
+				current = null;
+			}
+		} else shapeOf = null;
 		snapped = false;
 		snappedShape = null;
-		paint.endStroke(brush);
+		if (!current) {
+			if (sendLive()) {
+				flushLive();
+				onlive?.({ type: 'end', k: liveK });
+			}
+			schedule();
+			notify();
+			return;
+		}
 		if (current.clone && !cloneAligned) cloneKept = null;
 		const end = current.points.at(-1);
 		if (end) lastEnd = { x: end.x, y: end.y, p: end.pressure };
@@ -3193,7 +3556,18 @@
 	// Time's up mid-stroke: keep what was drawn so far.
 	$effect(() => {
 		if (locked && current && paint && brush) {
+			const layer = current.layer ?? 0;
+			const line = linePts ? finishLineStroke(null) : null;
 			paint.endStroke(brush);
+			const effect = line ? lines.added(layer, line.strokes) : null;
+			if (effect) {
+				log.add(current);
+				log.attachLast(effect);
+				current = null;
+				schedule();
+				notify();
+				return;
+			}
 			if (maskStroke) log.layerChange();
 			else log.add(current);
 			current = null;
@@ -3252,6 +3626,7 @@
 	/** The history panel: go `steps` back (negative) or forward (positive) in one go. */
 	export function historyGo(steps: number) {
 		if (!paint) return;
+		lines.cancel();
 		editShape = null;
 		if (xf) transformCancel();
 		for (let i = 0; i < Math.abs(steps); i++) {
@@ -3260,6 +3635,7 @@
 			if (steps < 0) log.undo();
 			else log.redo();
 		}
+		lines.check();
 		schedule();
 		notify();
 	}
@@ -3267,13 +3643,17 @@
 	export function undo() {
 		editShape = null;
 		if (xf) return transformCancel();
+		lines.cancel();
 		if (paint?.undo()) log.undo();
+		lines.check();
 		schedule();
 		notify();
 	}
 
 	export function redo() {
+		lines.cancel();
 		if (paint?.redo()) log.redo();
+		lines.check();
 		schedule();
 		notify();
 	}
@@ -3327,9 +3707,69 @@
 	/** The text layer being typed on (0: none). */
 	export const textLayer = () => paint?.textLayer() ?? 0;
 
-	/** Turn a text layer into a plain one (one undo step). */
+	/** Turn a text or line layer into a plain one (one undo step). */
 	export function rasterizeLayer(id: number) {
-		if (paint) changed(paint.rasterizeText(id), undefined, 'Rasterize text');
+		if (!paint) return;
+		if (isLineLayer(id)) {
+			if (lines.sel?.layer === id) lines.deselect();
+			changed(paint.rasterizeLines(id), undefined, 'Convert to pixels');
+		} else changed(paint.rasterizeText(id), undefined, 'Rasterize text');
+	}
+
+	// ---- line layers (see lines.ts and line-layers.svelte.ts) ----
+
+	/** A new line layer above the current one (one undo step). */
+	export function addLineLayer(name = '') {
+		if (paint) changed(paint.addLineLayer(name) !== 0, undefined, 'New line layer');
+	}
+	/** whether a layer is a line layer */
+	export const isLines = (id: number) => isLineLayer(id);
+	/** The selected line strokes go (one undo step). */
+	export const deleteLines = () => lines.deleteSelected();
+	export const deselectLines = () => lines.deselect();
+	/** Move the selected line strokes (arrow keys). */
+	export const nudgeLines = (dx: number, dy: number) => lines.nudge(dx, dy);
+	/** how many line strokes are selected */
+	export const linesSelected = () => lines.sel?.ids.length ?? 0;
+	/** a drawing's line strokes */
+	export const lineStrokes = (drawing: number): readonly LineStroke[] => lines.store.get(drawing);
+	/** the drawings that have line strokes */
+	export const lineDrawings = () => lines.store.drawings();
+	/** a drawing's line strokes as bytes, for the project file (null: none) */
+	export function lineData(drawing: number): Uint8Array | null {
+		const list = lines.store.get(drawing);
+		return list.length ? encodeLines(list) : null;
+	}
+	/** Put a drawing's line strokes back from the project file (no undo step; the pixels
+	 * come with the drawing). False if the bytes aren't line data. */
+	export function putLineData(drawing: number, bytes: Uint8Array): boolean {
+		try {
+			const list = decodeLines(bytes);
+			lines.store.set(drawing, list);
+			void lines.ready(list);
+			return true;
+		} catch {
+			return false;
+		}
+	}
+	/**
+	 * Set a drawing's line strokes without an undo step (drawing together: someone else's
+	 * change, whose pixels arrive as tiles). `redraw`: draw its pixels from them too, when
+	 * it shows (they don't come with it).
+	 */
+	export function setLinesQuiet(drawing: number, list: readonly LineStroke[], redraw = false) {
+		lines.store.set(drawing, list);
+		void lines.ready(list);
+		lines.check();
+		if (redraw) {
+			lines.markStale(drawing);
+			const layer = layerList().find((l) => l.drawing === drawing && l.lines);
+			if (layer) void lines.showing([layer.id]);
+		}
+	}
+	/** Make a layer a line layer or a plain one without an undo step (drawing together). */
+	export function setLinesLayerQuiet(id: number, on: boolean) {
+		if (paint?.setLinesSilent(id, on)) notify();
 	}
 
 	// ---- drawings (animation cels) ----
@@ -3340,7 +3780,11 @@
 	export function showDrawings(pairs: [number, number][]): boolean {
 		if (!paint) return false;
 		editShape = null;
+		lines.cancel();
 		const ok = paint.showDrawings(new Uint32Array(pairs.flat()));
+		lines.check();
+		// drawings made as strokes (boiled) get their pixels as they first show
+		if (ok) void lines.showing(pairs.map(([l]) => l));
 		schedule();
 		notify();
 		return ok;
@@ -3354,11 +3798,26 @@
 	}
 	/** A new, empty drawing's id. */
 	export const newDrawing = () => paint?.newDrawing() ?? 0;
-	/** A copy of a drawing; returns the copy's id. */
-	export const copyDrawing = (drawing: number) => paint?.copyDrawing(drawing) ?? 0;
-	/** A boiled copy of a drawing: its lines nudged up to `amount` px, as if traced again. */
-	export const boilDrawing = (drawing: number, amount: number, seed: number) =>
-		paint?.boilDrawing(drawing, amount, seed) ?? 0;
+	/** A copy of a drawing (its line strokes too); returns the copy's id. */
+	export function copyDrawing(drawing: number) {
+		const id = paint?.copyDrawing(drawing) ?? 0;
+		if (id) lines.store.copy(drawing, id);
+		return id;
+	}
+	/**
+	 * A boiled copy of a drawing: its lines nudged up to `amount` px, as if traced again.
+	 * A line drawing's strokes wobble instead (they stay editable), drawn as it shows.
+	 */
+	export function boilDrawing(drawing: number, amount: number, seed: number) {
+		if (!paint) return 0;
+		const strokes = lines.store.get(drawing);
+		if (!strokes.length) return paint.boilDrawing(drawing, amount, seed);
+		const id = paint.copyDrawing(drawing);
+		if (!id) return 0;
+		lines.store.set(id, boilStrokes(strokes, amount, seed));
+		lines.markStale(id);
+		return id;
+	}
 	/** A drawing's pixels (straight-alpha RGBA, canvas size). */
 	export const drawingRgba = (drawing: number) =>
 		paint?.drawingRgba(drawing) ?? new Uint8Array(width * height * 4);
@@ -3443,6 +3902,12 @@
 		if (!paint) return;
 		const layer = paint.activeLayer;
 		const mask = paint.isEditingMask();
+		// a line layer stays one: its strokes go
+		if (!mask && isLineLayer(layer)) {
+			lines.deselect();
+			void lines.edit(layer, [], 'Clear layer');
+			return;
+		}
 		changed(paint.clear(), () => (mask ? log.layerChange() : log.clear(layer)));
 	}
 
@@ -3458,8 +3923,11 @@
 
 	export function duplicateLayer(id: number) {
 		if (!paint) return;
+		const from = paint.layerDrawing(id);
 		const copy = paint.duplicateLayer(id);
 		if (copy && assistLayers.has(id)) assistLayers.add(copy);
+		// a line layer's copy keeps its strokes (on its own drawing)
+		if (copy && from) lines.store.copy(from, paint.layerDrawing(copy));
 		changed(copy !== 0, undefined, 'Duplicate layer');
 	}
 
@@ -3885,6 +4353,8 @@
 		style?: LayerStyle | null;
 		/** a text layer's text (JSON, see text.ts) */
 		text?: string | null;
+		/** a line layer (its strokes are kept by drawing: `lineData`) */
+		lines?: boolean;
 	}
 
 	/** A small PNG of the drawing as it shows (at most `max` px on its long side). */
@@ -3933,7 +4403,8 @@
 				adjust: l.adjust,
 				...(assistLayers.has(l.id) ? { assist: true } : {}),
 				style: l.style,
-				...(l.text ? { text: l.text } : {})
+				...(l.text ? { text: l.text } : {}),
+				...(l.lines ? { lines: true } : {})
 			};
 		});
 		return { layers, groups: groupList(), strokes: structuredClone(log.strokes) as Stroke[] };
@@ -3983,6 +4454,7 @@
 			if (l.mask) paint.restoreMask(id, l.mask);
 			if (l.assist) assistLayers.add(id);
 			if (l.text) paint.setTextSilent(id, l.text);
+			if (l.lines) paint.setLinesSilent(id, true);
 		}
 		// groups: the first layer of each starts it, the rest join
 		// eslint-disable-next-line svelte/prefer-svelte-reactivity -- a local lookup, not state
@@ -4158,6 +4630,7 @@
 	class:transforming={tool === 'transform'}
 	class:liquifying={tool === 'liquify'}
 	class:texting={tool === 'text'}
+	class:line-select={tool === 'lines'}
 	class:editing-guides={tool === 'guides'}
 	bind:this={vp}
 	style={fill ? 'height: 100%' : `aspect-ratio: ${width} / ${height}; max-height: ${maxHeight}`}
@@ -4262,7 +4735,55 @@
 				<circle class="grad" cx={grad.to[0]} cy={grad.to[1]} r={hr} />
 			</svg>
 		{/if}
-		{#if editShape && tool === 'brush'}
+		{#if tool === 'lines' && (lines.sel || lines.marquee)}
+			{@const k = Math.max(0.01, fit * zoom)}
+			{@const hr = 5 / k}
+			{@const th = lines.transformHandles(k)}
+			{@const ph = editShape ? null : lines.pointHandles()}
+			<svg
+				class="xf line-sel"
+				viewBox="0 0 {width} {height}"
+				preserveAspectRatio="none"
+				aria-hidden="true"
+				data-testid="line-selection"
+				data-count={lines.sel?.ids.length ?? 0}
+			>
+				{#each lines.selected() as s (s.id)}
+					<polyline class="line-path-under" points={linePoints(s)} />
+					<polyline class="line-path" points={linePoints(s)} />
+				{/each}
+				{#if th.length === 5}
+					<rect
+						class="line-box"
+						x={th[0][0]}
+						y={th[0][1]}
+						width={th[2][0] - th[0][0]}
+						height={th[2][1] - th[0][1]}
+					/>
+					<line class="line-box" x1={th[4][0]} y1={th[0][1]} x2={th[4][0]} y2={th[4][1]} />
+					{#each th.slice(0, 4) as [x, y], i (i)}
+						<rect class="line-h" x={x - hr} y={y - hr} width={hr * 2} height={hr * 2} />
+					{/each}
+					<circle class="line-h line-turn" cx={th[4][0]} cy={th[4][1]} r={hr * 1.1} />
+				{/if}
+				{#if ph}
+					{#each ph.pts as [x, y], i (i)}
+						<circle class="line-pt" cx={x} cy={y} r={hr * 0.85} data-testid="line-point" />
+					{/each}
+				{/if}
+				{#if lines.marquee}
+					{@const [a, b] = lines.marquee}
+					<rect
+						class="line-marquee"
+						x={Math.min(a[0], b[0])}
+						y={Math.min(a[1], b[1])}
+						width={Math.abs(b[0] - a[0])}
+						height={Math.abs(b[1] - a[1])}
+					/>
+				{/if}
+			</svg>
+		{/if}
+		{#if editShape && (tool === 'brush' || tool === 'lines')}
 			{@const hr = 6 / Math.max(0.01, fit * zoom)}
 			<svg
 				class="xf"
@@ -4661,7 +5182,7 @@
 				: 'Alt+click (⌥+click) where to copy from, then paint'}
 		</div>
 	{/if}
-	{#if editShape && tool === 'brush' && ready}
+	{#if editShape && (tool === 'brush' || tool === 'lines') && ready}
 		{@const name = shapeName(editShape)}
 		{@const pair = (
 			{
@@ -5029,6 +5550,50 @@
 		stroke: #3d6bff;
 		stroke-width: 2;
 		vector-effect: non-scaling-stroke;
+	}
+	.xf .line-path,
+	.xf .line-path-under {
+		fill: none;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+		vector-effect: non-scaling-stroke;
+	}
+	.xf .line-path-under {
+		stroke: rgba(255, 255, 255, 0.85);
+		stroke-width: 3.5;
+	}
+	.xf .line-path {
+		stroke: #3d6bff;
+		stroke-width: 1.5;
+	}
+	.xf .line-box {
+		fill: none;
+		stroke: #3d6bff;
+		stroke-width: 1;
+		stroke-dasharray: 5 4;
+		vector-effect: non-scaling-stroke;
+	}
+	.xf .line-h {
+		fill: #fff;
+		stroke: #3d6bff;
+		stroke-width: 1.5;
+		vector-effect: non-scaling-stroke;
+	}
+	.xf .line-pt {
+		fill: #3d6bff;
+		stroke: #fff;
+		stroke-width: 1.5;
+		vector-effect: non-scaling-stroke;
+	}
+	.xf .line-marquee {
+		fill: rgba(61, 107, 255, 0.08);
+		stroke: #3d6bff;
+		stroke-width: 1;
+		stroke-dasharray: 4 3;
+		vector-effect: non-scaling-stroke;
+	}
+	.viewport.line-select {
+		cursor: default;
 	}
 	.xf .warp-line {
 		fill: none;

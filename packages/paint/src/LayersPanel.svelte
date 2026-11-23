@@ -32,8 +32,10 @@
 		setLayerAssist?(id: number, on: boolean): void;
 		/** select what's on a layer; `op` 0 replace, 1 add, 2 subtract, 3 intersect */
 		selectLayerContents?(id: number, op?: number): void;
-		/** turn a text layer into a plain one */
+		/** turn a text or line layer into a plain one */
 		rasterizeLayer?(id: number): void;
+		/** a new line (vector) layer above the current one */
+		addLineLayer?(name?: string): void;
 	}
 </script>
 
@@ -46,7 +48,8 @@
 		controls,
 		aspect = 4 / 3,
 		onadjustment,
-		ontext
+		ontext,
+		lineLayers = false
 	}: {
 		status: CanvasStatus;
 		controls: LayerControls | undefined;
@@ -55,6 +58,8 @@
 		onadjustment?: (id: number) => void;
 		/** change a text layer's text (the text tool on it) */
 		ontext?: (id: number) => void;
+		/** offer line (vector) layers (the screen has the Select line tool) */
+		lineLayers?: boolean;
 	} = $props();
 
 	const BLENDS: { id: BlendMode; label: string }[] = [
@@ -220,6 +225,23 @@
 		>
 			<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
 		</button>
+		{#if lineLayers && controls?.addLineLayer}
+			<button
+				type="button"
+				aria-label="New line layer"
+				title="New line layer: every line stays editable (select, move, reshape, recolour, erase whole lines), as Clip Studio’s vector layers"
+				disabled={status.layers.length >= MAX_LAYERS}
+				onclick={() => controls?.addLineLayer?.()}
+			>
+				<svg viewBox="0 0 24 24" aria-hidden="true">
+					<path d="M4 17c3-7 7-10 13-10" /><circle cx="4" cy="17" r="1.6" /><circle
+						cx="17"
+						cy="7"
+						r="1.6"
+					/><path d="M18 14v6M15 17h6" />
+				</svg>
+			</button>
+		{/if}
 		<button
 			type="button"
 			aria-label="Duplicate layer"
@@ -462,6 +484,16 @@
 						}}
 					>
 						New group
+					</button>
+				{/if}
+				{#if active.lines && controls?.rasterizeLayer}
+					<button
+						type="button"
+						class="chip"
+						title="Make this line layer a plain layer of pixels (its lines can’t be selected and changed after that; a plain layer can’t become a line layer)"
+						onclick={() => controls?.rasterizeLayer?.(active.id)}
+					>
+						Convert to pixels
 					</button>
 				{/if}
 				{#if active.text && controls?.rasterizeLayer}
@@ -909,6 +941,17 @@
 								{#if l.assist}Assisted{/if}
 							</span>
 						</button>
+					{/if}
+					{#if l.lines}
+						<span class="badge line-badge" title="Line layer: its lines stay editable">
+							<svg viewBox="0 0 24 24" aria-label="Line layer" role="img">
+								<path d="M4 18c3-8 8-12 16-12" /><circle cx="4" cy="18" r="1.8" /><circle
+									cx="20"
+									cy="6"
+									r="1.8"
+								/>
+							</svg>
+						</span>
 					{/if}
 					{#if l.text}
 						<button

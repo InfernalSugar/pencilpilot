@@ -1599,6 +1599,10 @@
 			newDrawing: () => c.newDrawing(),
 			layerOfDrawing: (d) =>
 				status?.layers.find((l) => l.drawing === d)?.id ?? layerOfDrawing(timeline, d),
+			isLineLayer: (id) => c.isLines(id),
+			setLineLayer: (id, on) => c.setLinesLayerQuiet(id, on),
+			lineStrokes: (d) => c.lineStrokes(d),
+			setLineStrokes: (d, list) => c.setLinesQuiet(d, list),
 			drawingsOfLayer: (id) =>
 				timeline.scenes.flatMap((sc) =>
 					sc.cuts.flatMap((cut) => (cut.tracks[id] ?? []).map((e) => e.drawing).filter((d) => d))
@@ -1821,6 +1825,7 @@
 		return new Proxy(c, {
 			get(target, prop, recv) {
 				if (prop === 'addLayer') return (name?: string) => t.addOwnLayer(name);
+				if (prop === 'addLineLayer') return (name?: string) => t.addOwnLayer(name, true);
 				const own = (id: number) => {
 					const lid = t.lidOf(id);
 					if (lid && t.shared.layers.get(lid)?.owner === t.me) return lid;
@@ -2029,10 +2034,13 @@
 		const drawings = drawingsIn(timeline).flatMap((id) => {
 			const layer = layerOfDrawing(timeline, id);
 			if (layer === null || !layerIds.includes(layer)) return [];
-			if (cache.native) return [{ id, layer }];
+			// a line layer's drawing keeps its strokes
+			const lines = c.isLines(layer) ? c.lineData(id) : null;
+			const withLines = lines ? { lines } : {};
+			if (cache.native) return [{ id, layer, ...withLines }];
 			// (no store: the pixels go in the packet; an empty drawing as no bytes)
 			const rgba = c.drawingEmpty(id) ? new Uint8Array(0) : c.drawingRgba(id);
-			return [{ id, layer, rgba }];
+			return [{ id, layer, rgba, ...withLines }];
 		});
 		// an animation's layer pixels are its drawings: not needed twice
 		if (cache.native) for (const l of snap.layers) if (!l.adjust) l.rgba = new Uint8Array(0);
@@ -2798,6 +2806,8 @@
 			if (anim) {
 				// (drawings in the frame store come when their frames show)
 				for (const d of doc.drawings ?? []) if (d.rgba) c.putDrawing(d.id, d.rgba);
+				// line layers' strokes, editable again
+				for (const d of doc.drawings ?? []) if (d.lines) c.putLineData(d.id, d.lines);
 				cache.stored((doc.drawings ?? []).filter((d) => !d.rgba).map((d) => d.id));
 				timeline = fromFile(doc.scenes!, ids, doc.statics, doc.mouths);
 				const kinds = kindsFromFile(doc.kinds);
@@ -3034,7 +3044,8 @@
 		'select-lasso': 'select-lasso',
 		'select-wand': 'select-wand',
 		gradient: 'gradient',
-		text: 'text'
+		text: 'text',
+		lines: 'lines'
 	};
 
 	function onkey(e: KeyboardEvent) {
@@ -3050,6 +3061,25 @@
 		}
 		if (tool === 'pen' && e.key === 'Escape') return canvas?.penClear();
 		if (tool === 'text' && e.key === 'Escape') return toolOpts.text.cancel();
+		if (tool === 'lines' && canvas?.linesSelected()) {
+			const k = e.key;
+			if (k === 'Delete' || k === 'Backspace') {
+				e.preventDefault();
+				return canvas.deleteLines();
+			}
+			if (k === 'Escape') return canvas.deselectLines();
+			const step = e.shiftKey ? 10 : 1;
+			const arrows: Record<string, [number, number]> = {
+				ArrowLeft: [-step, 0],
+				ArrowRight: [step, 0],
+				ArrowUp: [0, -step],
+				ArrowDown: [0, step]
+			};
+			if (arrows[k] && !e.ctrlKey && !e.metaKey && !e.altKey) {
+				e.preventDefault();
+				return canvas.nudgeLines(...arrows[k]);
+			}
+		}
 		if (tool === 'pen' && e.key === 'Backspace') {
 			e.preventDefault();
 			return canvas?.penBack();
@@ -3382,7 +3412,7 @@
 		{/snippet}
 		{#snippet rail()}
 			<ToolRail
-				tools={[...ALL_TOOLS, 'text']}
+				tools={[...ALL_TOOLS, 'text', 'lines']}
 				bind:tool
 				bind:eraser
 				bind:size
@@ -3455,7 +3485,7 @@
 		{/snippet}
 		{#snippet context()}
 			{#if status}
-				<ToolOptionsBar opts={toolOpts} bind:tool {status} {canvas} />
+				<ToolOptionsBar opts={toolOpts} bind:tool {status} {canvas} {eraser} />
 			{/if}
 		{/snippet}
 		{#snippet stage()}
@@ -3529,6 +3559,7 @@
 					ontext={toolOpts.text.ontext}
 					textFrame={toolOpts.text.frame}
 					onrasterize={toolOpts.text.onrasterize}
+					lineEraser={toolOpts.lineEraser}
 					onquickmenu={(x, y) => (quickMenu = { x, y })}
 					onchange={canvasChanged}
 					locked={switching}
@@ -3596,6 +3627,7 @@
 				<LayersPanel
 					{status}
 					controls={layerControls}
+					lineLayers
 					aspect={canvasSize.width / canvasSize.height}
 					onadjustment={(id) => toolOpts.adjustmentLayer(id)}
 					ontext={(id) => {

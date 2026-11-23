@@ -10,6 +10,7 @@
 //! | `thumbnail.png` | a small picture for the project browser (optional) |
 //! | `audio/<hash>.<ext>` | a sound file a scene plays (as imported: WAV, MP3, OGG…) |
 //! | `fonts/<hash>.<ext>` | a font file text layers use (as imported: TTF, OTF, WOFF2) |
+//! | `lines/<drawing>` | a line layer drawing's strokes (the app's own data, kept as given) |
 //! | `timelapse/<n>.jpg` | the timelapse: a small picture after each change (optional) |
 //!
 //! Pixels are cut into 64×64 tiles. Empty tiles (fully transparent, or a mask that
@@ -120,6 +121,10 @@ pub struct Layer {
     /// a text layer's text (the app's JSON: words, font, size…); none for other layers
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// a line (vector) layer: the app keeps its strokes (`lines/<drawing>`) and draws
+    /// its pixels from them; its drawings hold those pixels too
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lines: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -388,10 +393,22 @@ pub struct Project {
     pub timelapse: Vec<Vec<u8>>,
     /// font files: name (`<hash>.<ext>`) → bytes
     pub fonts: HashMap<String, Vec<u8>>,
+    /// line layers' strokes: drawing name (`D<n>`, a key of `manifest.drawings`) → the
+    /// app's data for it (its own versioned binary, kept as given)
+    pub lines: HashMap<String, Vec<u8>>,
 }
 
 /// Font files may be this big (each).
 pub const FONT_MAX: usize = 64 << 20;
+
+/// A drawing's line data may be this big.
+pub const LINES_MAX: usize = 256 << 20;
+
+/// A drawing name line data may be kept under: `D<digits>`, no folders.
+fn lines_name_ok(name: &str) -> bool {
+    name.strip_prefix('D')
+        .is_some_and(|n| (1..=10).contains(&n.len()) && n.chars().all(|c| c.is_ascii_digit()))
+}
 
 /// Sound files may be this big (each).
 pub const AUDIO_MAX: usize = 512 << 20;
@@ -444,6 +461,7 @@ impl Project {
             audio: HashMap::new(),
             timelapse: Vec::new(),
             fonts: HashMap::new(),
+            lines: HashMap::new(),
         }
     }
 
@@ -645,6 +663,11 @@ impl Project {
                 return Err(Error::Invalid(format!("font {}", f.file)));
             }
         }
+        for (name, data) in &self.lines {
+            if !lines_name_ok(name) || !m.drawings.contains_key(name) || data.len() > LINES_MAX {
+                return Err(Error::Invalid(format!("line data {name}")));
+            }
+        }
         if m.timelapse.len() != self.timelapse.len()
             || self.timelapse.len() > TIMELAPSE_MAX
             || self.timelapse.iter().any(|j| j.len() > TIMELAPSE_FRAME_MAX)
@@ -793,6 +816,17 @@ impl Project {
             z.start_file(format!("fonts/{name}"), stored)?;
             z.write_all(bytes)?;
         }
+        // line layers' strokes, for the drawings that are there
+        let mut lines: Vec<(&String, &Vec<u8>)> = self
+            .lines
+            .iter()
+            .filter(|(name, _)| lines_name_ok(name) && self.manifest.drawings.contains_key(*name))
+            .collect();
+        lines.sort();
+        for (name, data) in lines {
+            z.start_file(format!("lines/{name}"), deflate)?;
+            z.write_all(data)?;
+        }
         // the timelapse (JPEG: stored)
         for (i, jpeg) in self.timelapse.iter().enumerate() {
             z.start_file(format!("timelapse/{i:06}.jpg"), stored)?;
@@ -830,6 +864,7 @@ impl Project {
         let mut tiles = HashMap::new();
         let mut audio = HashMap::new();
         let mut fonts = HashMap::new();
+        let mut lines = HashMap::new();
         let mut timelapse: BTreeMap<usize, Vec<u8>> = BTreeMap::new();
         for i in 0..z.len() {
             let mut f = z.by_index(i)?;
@@ -866,6 +901,15 @@ impl Project {
                 fonts.insert(name, v);
                 continue;
             }
+            if let Some(name) = f.name()?.strip_prefix("lines/").map(str::to_owned) {
+                let mut v = Vec::new();
+                (&mut f).take(LINES_MAX as u64 + 1).read_to_end(&mut v)?;
+                if v.len() > LINES_MAX || !lines_name_ok(&name) {
+                    return Err(Error::Invalid(format!("line data {name}")));
+                }
+                lines.insert(name, v);
+                continue;
+            }
             let Some(h) = f.name()?.strip_prefix("tiles/").map(str::to_owned) else {
                 continue;
             };
@@ -899,6 +943,7 @@ impl Project {
             audio,
             timelapse: pictures,
             fonts,
+            lines,
         };
         p.validate()?;
         Ok(p)
@@ -971,6 +1016,7 @@ mod tests {
             adjust: None,
             style: None,
             text: None,
+            lines: false,
         }
     }
 
@@ -1058,6 +1104,38 @@ mod tests {
             Project::read(Cursor::new(buf.into_inner())),
             Err(Error::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn line_layers_and_their_data_round_trip() {
+        let (mut p, rgba) = sample();
+        p.manifest.layers[0].lines = true;
+        p.manifest.drawings = BTreeMap::new();
+        p.put_drawing("D3", &rgba, None).unwrap();
+        p.manifest.timeline.frames[0].cels.insert(1, "D3".into());
+        let data = b"PPL1\x00\x01\x02 strokes".to_vec();
+        p.lines.insert("D3".into(), data.clone());
+        // data for a drawing that isn't there isn't written
+        p.lines.insert("D9".into(), vec![1, 2, 3]);
+        let mut buf = Cursor::new(Vec::new());
+        p.write(&mut buf).unwrap();
+        let back = Project::read(Cursor::new(buf.into_inner())).unwrap();
+        assert_eq!(back.manifest.layers, p.manifest.layers);
+        assert!(back.manifest.layers[0].lines);
+        assert_eq!(back.lines.len(), 1);
+        assert_eq!(back.lines["D3"], data);
+        assert_eq!(back.drawing("D3").unwrap().0, rgba);
+        // plain layers don't say so; older files have no line data
+        let json = serde_json::to_string(&layer(2)).unwrap();
+        assert!(!json.contains("lines"));
+        let old: Layer = serde_json::from_str(&json).unwrap();
+        assert!(!old.lines);
+        // data for a missing drawing, or under a name that isn't a drawing's, is damage
+        for name in ["D9", "../D3", "x"] {
+            let mut q = back.clone();
+            q.lines.insert(name.into(), vec![0]);
+            assert!(q.validate().is_err(), "{name}");
+        }
     }
 
     #[test]

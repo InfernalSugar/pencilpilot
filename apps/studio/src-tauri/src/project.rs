@@ -41,6 +41,10 @@ pub struct PacketDrawing {
     /// store (the app's [`FrameStore`])
     #[serde(default)]
     pub rgba: Option<[usize; 2]>,
+    /// [offset, length] of its line layer strokes in the blobs (the app's own data,
+    /// `lines/D<id>` in the file); always in the packet, frame store or not
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines: Option<[usize; 2]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -175,6 +179,9 @@ pub fn to_project(
                 .find(|l| l.layer.id == d.layer)
                 .ok_or_else(|| format!("drawing {} names layer {}", d.id, d.layer))?;
             let name = format!("D{}", d.id);
+            if let Some(at) = d.lines {
+                p.lines.insert(name.clone(), slice(blobs, at)?.to_vec());
+            }
             let Some(at) = d.rgba else {
                 // in the frame store: its tiles go straight in
                 let store = frames
@@ -336,7 +343,13 @@ pub fn from_project(p: &Project, mut frames: Option<&mut FrameStore>) -> Result<
             }
             None => Some(put(&p.drawing(name).map_err(|e| e.to_string())?.0)),
         };
-        drawings.push(PacketDrawing { id, layer, rgba });
+        let lines = p.lines.get(name).map(|data| put(data));
+        drawings.push(PacketDrawing {
+            id,
+            layer,
+            rgba,
+            lines,
+        });
     }
     let thumbnail = p.thumbnail.as_deref().map(&mut put);
     let timelapse = p
@@ -483,6 +496,7 @@ mod tests {
             adjust: None,
             style: None,
             text: None,
+            lines: false,
         }
     }
 
@@ -537,6 +551,11 @@ mod tests {
         second[..4].copy_from_slice(&[255, 0, 0, 255]);
         let at = blobs.len();
         blobs.extend_from_slice(&second);
+        // drawing 9's line layer strokes (the app's own bytes)
+        let strokes = b"PPL1 two strokes".to_vec();
+        let at_lines = blobs.len();
+        blobs.extend_from_slice(&strokes);
+        h.layers[0].layer.lines = true;
         let ex = |d: u32, length| Exposure {
             drawing: Some(format!("D{d}")),
             length,
@@ -546,11 +565,13 @@ mod tests {
                 id: 7,
                 layer: 3,
                 rgba: Some(h.layers[0].rgba),
+                lines: None,
             },
             PacketDrawing {
                 id: 9,
                 layer: 3,
                 rgba: Some([at, second.len()]),
+                lines: Some([at_lines, strokes.len()]),
             },
         ];
         h.scenes = vec![Scene {
@@ -573,6 +594,9 @@ mod tests {
         let p = to_project(&pk, "test", "2026-11-21T00:00:00Z", None).unwrap();
         assert_eq!(p.manifest.timeline.frames.len(), 2);
         assert_eq!(p.manifest.timeline.frames[1].hold, 3);
+        assert_eq!(p.lines.len(), 1);
+        assert_eq!(p.lines["D9"], strokes);
+        assert!(p.manifest.layers[0].lines);
         let back = from_project(&p, None).unwrap();
         let (h2, b2) = decode(&back).unwrap();
         assert_eq!(h2.scenes, h.scenes);
@@ -581,6 +605,16 @@ mod tests {
         let d9 = h2.drawings.iter().find(|d| d.id == 9).unwrap();
         assert_eq!(d9.layer, 3);
         assert_eq!(slice(b2, d9.rgba.unwrap()).unwrap(), &second[..]);
+        assert_eq!(slice(b2, d9.lines.unwrap()).unwrap(), &strokes[..]);
+        assert!(
+            h2.drawings
+                .iter()
+                .find(|d| d.id == 7)
+                .unwrap()
+                .lines
+                .is_none()
+        );
+        assert!(h2.layers[0].layer.lines);
         // the layer shows the first frame's drawing
         assert_eq!(slice(b2, h2.layers[0].rgba).unwrap(), &rgba[..]);
 
@@ -645,6 +679,7 @@ mod tests {
             id: 11,
             layer: 3,
             rgba: Some([at, rgba.len()]),
+            lines: None,
         });
         hm.mouth_charts = vec![MouthChart {
             layer: 3,
@@ -693,6 +728,9 @@ mod tests {
         let back = from_project(&p, Some(&mut store)).unwrap();
         let (h3, b3) = decode(&back).unwrap();
         assert!(h3.drawings.iter().all(|d| d.rgba.is_none()));
+        // (line data always comes in the packet)
+        let d9 = h3.drawings.iter().find(|d| d.id == 9).unwrap();
+        assert_eq!(slice(b3, d9.lines.unwrap()).unwrap(), &strokes[..]);
         assert!(h3.layers[0].rgba[1] == 0, "the layer comes empty");
         assert_eq!(
             slice(b3, h3.layers[0].mask.unwrap()).unwrap().len(),
@@ -705,6 +743,7 @@ mod tests {
         let pk4 = encode(&h4, b3).unwrap();
         let p4 = to_project(&pk4, "test", "now", Some(&mut store)).unwrap();
         assert_eq!(p4.drawing("D9").unwrap().0, second);
+        assert_eq!(p4.lines["D9"], strokes);
         assert_eq!(p4.drawing("D7").unwrap().0, rgba);
         assert!(p4.manifest.drawings["D9"].mask.is_some());
         // without a store, a packet naming stored drawings is refused

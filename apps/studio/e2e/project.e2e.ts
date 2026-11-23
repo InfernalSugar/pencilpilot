@@ -2286,3 +2286,169 @@ test('a new canvas starts with its guides in the middle; Re-centre puts moved on
 	await page.getByRole('button', { name: 'Re-centre' }).click();
 	await expect.poll(axisAt).toBeCloseTo(0.5, 2);
 });
+
+test('line layers: strokes stay editable (select, move, recolour, erase, reshape, save, convert)', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	const layersTab = page.getByRole('tab', { name: /Layers/ });
+	await layersTab.click();
+	await page.getByRole('button', { name: 'New line layer' }).click();
+	await expect(layersTab).toContainText('2 layers');
+	await expect(page.getByRole('img', { name: 'Line layer' })).toBeVisible();
+	for (let i = 0; i < 4; i++) await page.keyboard.press(']');
+	// (the tool options row changes with the tool: the canvas moves, so it's looked up again)
+	let b = (await canvas(page).boundingBox())!;
+	const fresh = async () => {
+		await page.waitForTimeout(100);
+		b = (await canvas(page).boundingBox())!;
+	};
+	const at = (x: number, y: number) => [b.x + b.width * x, b.y + b.height * y] as const;
+	/** a straight stroke across, at height y */
+	const line = async (y: number) => {
+		await page.mouse.move(...at(0.2, y));
+		await page.mouse.down();
+		await page.mouse.move(...at(0.8, y), { steps: 20 });
+		await page.mouse.up();
+	};
+	await line(0.3);
+	await line(0.6);
+	await expect.poll(() => ink(page, 0.25, 0.35)).toBeGreaterThan(200);
+	// (both drawn to the end: the canvas shows changes on the next frame)
+	await page.waitForTimeout(300);
+	const lower = await ink(page, 0.55, 0.65);
+	expect(lower).toBeGreaterThan(200);
+	const upper = await ink(page, 0.25, 0.35);
+
+	// Select line: a tap picks the upper stroke, a drag moves it down; the other stays
+	await page.keyboard.press('Shift+V');
+	await fresh();
+	const sel = page.getByTestId('line-selection');
+	await page.mouse.click(...at(0.5, 0.3));
+	await expect(sel).toHaveAttribute('data-count', '1');
+	await expect(page.getByTestId('lines-picked')).toContainText('1 line selected');
+	await page.mouse.move(...at(0.5, 0.3));
+	await page.mouse.down();
+	await page.mouse.move(...at(0.5, 0.45), { steps: 8 });
+	await page.mouse.up();
+	await expect.poll(() => ink(page, 0.25, 0.35)).toBe(0);
+	await expect.poll(() => ink(page, 0.4, 0.5)).toBeGreaterThan(upper * 0.9);
+	expect(await ink(page, 0.55, 0.65)).toBe(lower);
+	// one undo step: back, and forward again
+	await page.keyboard.press('Control+z');
+	await expect.poll(() => ink(page, 0.25, 0.35)).toBe(upper);
+	await page.keyboard.press('Control+Shift+z');
+	await expect.poll(() => ink(page, 0.25, 0.35)).toBe(0);
+
+	// recolour the selected stroke: only it turns red
+	const red = (y0: number, y1: number) =>
+		canvas(page).evaluate(
+			(el: HTMLCanvasElement, [y0, y1]) => {
+				const top = Math.round(el.height * y0);
+				const h = Math.round(el.height * (y1 - y0));
+				const d = el.getContext('2d')!.getImageData(0, top, el.width, h).data;
+				let n = 0;
+				for (let i = 0; i < d.length; i += 4) if (d[i] - d[i + 1] > 20) n++;
+				return n;
+			},
+			[y0, y1]
+		);
+	const moved = await ink(page, 0.4, 0.5);
+	await page.getByRole('radio', { name: 'Colour #e8492f' }).click();
+	// (all of it: no dark pencil left there)
+	await expect.poll(() => red(0.4, 0.5)).toBeGreaterThan(moved * 0.3);
+	expect(await ink(page, 0.4, 0.5)).toBeLessThan(moved * 0.05);
+	expect(await red(0.55, 0.65)).toBe(0);
+
+	// the eraser, whole lines: one touch takes the lower stroke away
+	await page.keyboard.press('Escape');
+	await page.keyboard.press('e');
+	await fresh();
+	await page.getByRole('radio', { name: 'Whole lines' }).click();
+	await fresh();
+	await page.mouse.move(...at(0.5, 0.58));
+	await page.mouse.down();
+	await page.mouse.move(...at(0.5, 0.62), { steps: 3 });
+	await page.mouse.up();
+	await expect.poll(() => ink(page, 0.55, 0.65)).toBe(0);
+	expect(await red(0.4, 0.5)).toBeGreaterThan(moved * 0.3);
+
+	// a QuickShape circle, opened again later and made a perfect circle
+	await page.keyboard.press('b');
+	await fresh();
+	const [cx, cy] = at(0.5, 0.75);
+	const r = b.height * 0.08;
+	// a rough oval, held at the end
+	await page.mouse.move(cx + r * 1.4, cy);
+	await page.mouse.down();
+	for (let i = 1; i <= 48; i++) {
+		const t = (i / 46) * Math.PI * 2;
+		await page.mouse.move(cx + r * 1.4 * Math.cos(t) * (1 + (i % 3) * 0.015), cy + r * Math.sin(t));
+	}
+	await page.waitForTimeout(800);
+	await expect(page.getByRole('status').filter({ hasText: 'Snapped to an ellipse' })).toBeVisible();
+	await page.mouse.up();
+	await expect(page.getByRole('toolbar', { name: 'Edit shape' })).toBeVisible();
+	await page.keyboard.press('Shift+V');
+	await fresh();
+	await expect(page.getByRole('toolbar', { name: 'Edit shape' })).toHaveCount(0);
+	await page.mouse.click(cx + r * 1.4, cy);
+	const bar = page.getByRole('toolbar', { name: 'Edit shape' });
+	await expect(bar).toBeVisible();
+	await expect(bar.getByRole('button', { name: 'Ellipse' })).toHaveAttribute(
+		'aria-pressed',
+		'true'
+	);
+	const wide = await red(0.6, 0.9);
+	await bar.getByRole('button', { name: 'Circle' }).click();
+	await expect(bar.getByRole('button', { name: 'Circle' })).toHaveAttribute('aria-pressed', 'true');
+	// (a circle, as big on average, reaches further up and down than the flat ellipse)
+	await expect.poll(() => red(0.6, 0.9)).not.toBe(wide);
+	const circle = await red(0.6, 0.9);
+	await page.keyboard.press('Control+z');
+	await expect.poll(() => red(0.6, 0.9)).toBe(wide);
+	await page.keyboard.press('Control+Shift+z');
+	await expect.poll(() => red(0.6, 0.9)).toBe(circle);
+
+	// fill on a line layer: inside its lines, on the plain layer under it (one step);
+	// the line layer stays a line layer and stays the one drawn on
+	await page.keyboard.press('g');
+	await fresh();
+	await expect(page.getByRole('note')).toContainText('fills go on the layer under it');
+	const inside = await red(0.72, 0.78);
+	await page.mouse.click(...at(0.5, 0.75));
+	await expect.poll(() => red(0.72, 0.78)).toBeGreaterThan(inside + 2000);
+	await expect(layersTab).toContainText('Lines 2 · 2 layers');
+	await expect(page.getByRole('img', { name: 'Line layer' })).toBeVisible();
+	await page.keyboard.press('Control+z');
+	await expect.poll(() => red(0.72, 0.78)).toBe(inside);
+
+	// saved and opened again: the strokes are still lines to select
+	await page.keyboard.press('Control+s');
+	await expect(page.getByTestId('project-name')).toHaveText('Walk cycle', { timeout: 20_000 });
+	const saved = await red(0, 1);
+	expect(saved).toBeGreaterThan(400);
+	// (a change since, so opening asks; no: the file as saved comes back)
+	await page.keyboard.press('Control+o');
+	await expect.poll(() => red(0, 1)).toBe(saved);
+	await expect(page.getByRole('img', { name: 'Line layer' })).toBeVisible();
+	const selectLine = page.getByRole('button', { name: /Select line/ });
+	if ((await selectLine.getAttribute('aria-pressed')) !== 'true') await selectLine.click();
+	await fresh();
+	await page.mouse.click(...at(0.5, 0.45));
+	await expect(page.getByTestId('line-selection')).toHaveAttribute('data-count', '1');
+	await page.keyboard.press('Delete');
+	await expect.poll(() => red(0.4, 0.5)).toBe(0);
+
+	// convert to pixels: a plain layer (Select line has nothing to pick then); undo: lines again
+	await layersTab.click();
+	await page.getByRole('button', { name: 'Convert to pixels' }).click();
+	await fresh();
+	await expect(page.getByRole('img', { name: 'Line layer' })).toHaveCount(0);
+	await expect(page.getByRole('group', { name: 'Select line' })).toContainText(
+		'works on line layers'
+	);
+	await page.keyboard.press('Control+z');
+	await expect(page.getByRole('img', { name: 'Line layer' })).toBeVisible();
+});

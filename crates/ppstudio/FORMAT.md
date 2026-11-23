@@ -11,6 +11,7 @@ This crate (`pencilpilot-ppstudio`) reads and writes it.
 | `tiles/<hash>` | deflate | one tile of pixels (below) |
 | `audio/<hash>.<ext>` | stored | a sound file a scene plays, as imported (below) |
 | `fonts/<hash>.<ext>` | stored | a font file text layers use, as imported (below) |
+| `lines/<drawing>` | deflate | optional; a line layer drawing's strokes, the app's own data (below) |
 | `timelapse/<n>.jpg` | stored | optional; the timelapse, a JPEG after each change (`000000.jpg` first) |
 
 ## manifest.json
@@ -35,7 +36,8 @@ This crate (`pencilpilot-ppstudio`) reads and writes it.
         "stroke": { "on": true, "size": 4, "colour": "#000000", "position": "outside", "opacity": 1 },
         "shadow": { "on": false, "colour": "#000000", "opacity": 0.5, "angle": 120, "distance": 10, "blur": 8 },
         "glow": { "on": false, "colour": "#ffed87", "size": 12, "opacity": 0.75 } },
-      "text": null               // optional: a text layer's text (the app's JSON string)
+      "text": null,              // optional: a text layer's text (the app's JSON string)
+      "lines": true              // optional (false when left out): a line (vector) layer
     }
   ],
   "groups": [ { "id": 1, "name": "Character", "visible": true, "opacity": 1.0 } ],
@@ -142,6 +144,18 @@ This crate (`pencilpilot-ppstudio`) reads and writes it.
 - `fonts` are the font files the user imported for text layers: `fonts/<file>` (named
   by the BLAKE3 hash of its bytes and its extension), known to `text` by `family`. Only
   fonts the user imported are kept, never the system's.
+
+## Line layers
+
+- A layer with `"lines": true` is a **line (vector) layer**: the app keeps every stroke
+  drawn on it, so lines can be moved, changed or deleted later. Its drawings hold the
+  strokes' pixels as usual, so a reader that doesn't know line layers (or ignores
+  `lines/`) shows it as a plain layer.
+- `lines/<drawing>` holds a drawing's strokes (`<drawing>` is its name in `drawings`,
+  `D<number>`): the app's own versioned binary, kept as given. A drawing of a line layer
+  without an entry has no strokes kept. Each entry is at most 256 MiB; an entry for a
+  drawing that isn't in `drawings` is damage.
+- Added within version 1: older apps open these files and see plain layers.
 
 ## Rules for readers
 - Check `format` and `version` first. A newer version means "update the app".

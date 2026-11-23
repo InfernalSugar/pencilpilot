@@ -74,7 +74,18 @@
 	];
 </script>
 
-{#if text.rasterizeAsk}
+{#if text.rasterizeAsk && text.askingLines}
+	<div class="fill-opts" role="alertdialog" aria-label="Convert the line layer to pixels?">
+		<span class="msg">
+			This is a line layer: it takes the brush, the eraser and fills. Convert it to pixels to use
+			this tool on it? (Its lines can’t be selected and changed after that.)
+		</span>
+		<button type="button" class="tool done" onclick={() => text.rasterize(true)}>
+			Convert to pixels
+		</button>
+		<button type="button" class="tool" onclick={() => text.rasterize(false)}>Cancel</button>
+	</div>
+{:else if text.rasterizeAsk}
 	<div class="fill-opts" role="alertdialog" aria-label="Rasterize the text?">
 		<span class="msg">
 			This is a text layer. Rasterize it to paint on it? (Its text can’t be changed after that.)
