@@ -3947,6 +3947,7 @@
 						warp={toolOpts.warp}
 						quickShape={toolOpts.quickShape}
 						closeFill={toolOpts.closeFill}
+						inkSnap={toolOpts.inkSnap}
 						selectMode={toolOpts.selectMode}
 						selectFill={toolOpts.selectFill}
 						selectShape={toolOpts.selectShape}

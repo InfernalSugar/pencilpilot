@@ -3898,3 +3898,260 @@ test('reference pictures: your own, in the corner, at the side or popped out, ke
 		page.getByTestId('reference-corner').getByRole('img', { name: 'Reference: red.png' })
 	).toBeVisible({ timeout: 20_000 });
 });
+
+// ---- Shift: constraints while dragging ----
+
+/** the box the selection's marching ants go round (canvas px) */
+const antsBox = (page: Page) =>
+	page.locator('canvas.ants').evaluate((c: HTMLCanvasElement) => {
+		const d = c.getContext('2d')!.getImageData(0, 0, c.width, c.height).data;
+		let [x0, y0, x1, y1] = [c.width, c.height, -1, -1];
+		for (let i = 3; i < d.length; i += 4)
+			if (d[i]) {
+				const [x, y] = [((i - 3) / 4) % c.width, Math.floor((i - 3) / 4 / c.width)];
+				[x0, y0, x1, y1] = [Math.min(x0, x), Math.min(y0, y), Math.max(x1, x), Math.max(y1, y)];
+			}
+		return { w: x1 - x0, h: y1 - y0 };
+	});
+
+test('Shift: a move goes straight across, pressed or let go in the middle of the drag', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	for (let i = 0; i < 4; i++) await page.keyboard.press(']');
+	const k = await strokeKit(page);
+	// a short line across at y 0.3
+	await k.line(0.2, 0.3, 0.3, 0.3);
+	await expect.poll(() => inkIn(page, 0.15, 0.27, 0.35, 0.33)).toBeGreaterThan(50);
+	const drawn = await inkIn(page, 0, 0, 1, 1);
+
+	// Move, dragged from off the stroke (the layer moves): right and a little down
+	await page.keyboard.press('v');
+	await k.fresh();
+	await page.mouse.move(...k.at(0.6, 0.6));
+	await page.mouse.down();
+	await page.mouse.move(...k.at(0.8, 0.66), { steps: 6 });
+	// Shift pressed with the pointer still: held across at once, with the hint showing
+	await page.keyboard.down('Shift');
+	await expect(page.getByTestId('snap-hint')).toBeVisible();
+	await page.mouse.move(...k.at(0.8, 0.65), { steps: 2 });
+	await page.mouse.up();
+	await page.keyboard.up('Shift');
+	await expect(page.getByTestId('snap-hint')).toHaveCount(0);
+	await page.keyboard.press('Enter');
+	// moved right (x 0.4–0.5), not down: still on y 0.3
+	await expect.poll(() => inkIn(page, 0.35, 0.27, 0.55, 0.33)).toBeGreaterThan(drawn * 0.8);
+	expect(await inkIn(page, 0.15, 0.27, 0.35, 0.33)).toBe(0);
+	expect(await inkIn(page, 0, 0.34, 1, 1)).toBe(0);
+
+	// let go of Shift mid-drag: free again (it goes down too)
+	await page.keyboard.press('v');
+	await k.fresh();
+	await page.mouse.move(...k.at(0.6, 0.6));
+	await page.mouse.down();
+	await page.keyboard.down('Shift');
+	await page.mouse.move(...k.at(0.6, 0.7), { steps: 6 });
+	await page.mouse.move(...k.at(0.61, 0.7), { steps: 2 });
+	await page.keyboard.up('Shift');
+	await page.mouse.up();
+	await page.keyboard.press('Enter');
+	await expect.poll(() => inkIn(page, 0.35, 0.37, 0.55, 0.43)).toBeGreaterThan(drawn * 0.8);
+});
+
+test('Shift: the rectangle and ellipse selections come out square and round', async ({ page }) => {
+	await stubTauri(page);
+	await ready(page);
+	const k = await strokeKit(page);
+	await page.keyboard.press('m');
+	await k.fresh();
+	// no Shift: as dragged (wider than tall)
+	await k.drag(0.2, 0.2, 0.5, 0.3);
+	await expect.poll(async () => (await antsBox(page)).w).toBeGreaterThan(0);
+	const free = await antsBox(page);
+	expect(free.w).toBeGreaterThan(free.h * 1.5);
+	await page.keyboard.press('Control+d');
+	await expect.poll(async () => (await antsBox(page)).w).toBeLessThan(0);
+
+	// Shift held from the start (nothing selected yet): a square
+	await page.keyboard.down('Shift');
+	await k.drag(0.2, 0.2, 0.5, 0.3);
+	await page.keyboard.up('Shift');
+	await expect.poll(async () => (await antsBox(page)).w).toBeGreaterThan(0);
+	const sq = await antsBox(page);
+	expect(Math.abs(sq.w - sq.h)).toBeLessThanOrEqual(2);
+	expect(sq.w).toBeGreaterThan(free.w * 0.9);
+	await page.keyboard.press('Control+d');
+
+	// an ellipse, Shift pressed in the middle of the drag: a circle
+	await page.getByRole('radio', { name: 'Ellipse' }).click();
+	await k.fresh();
+	await page.mouse.move(...k.at(0.2, 0.2));
+	await page.mouse.down();
+	await page.mouse.move(...k.at(0.5, 0.3), { steps: 6 });
+	await page.keyboard.down('Shift');
+	await page.mouse.up();
+	await page.keyboard.up('Shift');
+	await expect.poll(async () => (await antsBox(page)).w).toBeGreaterThan(0);
+	const round = await antsBox(page);
+	expect(Math.abs(round.w - round.h)).toBeLessThanOrEqual(2);
+});
+
+test('Shift: a line’s point dragged with the grid on lands on a grid crossing', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	const layersTab = page.getByRole('tab', { name: /Layers/ });
+	await layersTab.click();
+	await page.getByRole('button', { name: 'New line layer' }).click();
+	await expect(page.getByRole('img', { name: 'Line layer' })).toBeVisible();
+	for (let i = 0; i < 4; i++) await page.keyboard.press(']');
+	const k = await strokeKit(page);
+	await k.fresh();
+	// a hook: its end is inside the selection's box, away from the corner handles
+	await page.mouse.move(...k.at(0.23, 0.45));
+	await page.mouse.down();
+	await page.mouse.move(...k.at(0.23, 0.25), { steps: 10 });
+	await page.mouse.move(...k.at(0.71, 0.25), { steps: 20 });
+	await page.mouse.move(...k.at(0.71, 0.45), { steps: 10 });
+	await page.mouse.move(...k.at(0.47, 0.37), { steps: 10 });
+	await page.mouse.up();
+	await expect.poll(() => inkIn(page, 0.2, 0.2, 0.75, 0.5)).toBeGreaterThan(100);
+
+	// the square grid on
+	await page.getByRole('button', { name: 'Guides', exact: true }).click();
+	const g = page.getByRole('group', { name: 'Guides' });
+	await g.getByRole('radio', { name: 'Square' }).click();
+	const size = 100;
+	await g.getByLabel(/^Grid size/).fill(String(size));
+	await expect(g).toContainText(`Grid size ${size}`);
+	await page.getByRole('button', { name: 'Guides', exact: true }).click();
+
+	// Select line: pick the stroke, then drag its last point with Shift (pressed after the press)
+	await page.keyboard.press('Shift+V');
+	await k.fresh();
+	await page.mouse.click(...k.at(0.47, 0.25));
+	await expect(page.getByTestId('line-selection')).toHaveAttribute('data-count', '1');
+	const pt = page.getByTestId('line-point').last();
+	const pos = async () => [
+		Number(await pt.getAttribute('cx')),
+		Number(await pt.getAttribute('cy'))
+	];
+	const [x0, y0] = await pos();
+	const onGrid = (v: number) => Math.abs(v / size - Math.round(v / size)) < 1e-6;
+	expect(onGrid(x0) && onGrid(y0)).toBe(false);
+	const h = (await pt.boundingBox())!;
+	await page.mouse.move(h.x + h.width / 2, h.y + h.height / 2);
+	await page.mouse.down();
+	await page.mouse.move(h.x + h.width / 2 + 13, h.y + h.height / 2 + 57, { steps: 4 });
+	await page.keyboard.down('Shift');
+	await page.mouse.move(h.x + h.width / 2 + 17, h.y + h.height / 2 + 61, { steps: 2 });
+	await expect(page.getByTestId('snap-hint')).toBeVisible();
+	await page.mouse.up();
+	await page.keyboard.up('Shift');
+	await expect.poll(async () => (await pos()).every(onGrid)).toBe(true);
+	const [x1, y1] = await pos();
+	expect(Math.hypot(x1 - x0, y1 - y0)).toBeGreaterThan(size * 0.3);
+});
+
+test('snap to ink: a line’s start and end join lines close by (an end first), with a ring showing where', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	const k = await strokeKit(page);
+	const line = async (x0: number, y0: number, x1: number, y1: number) => {
+		await page.mouse.move(x0, y0);
+		await page.mouse.down();
+		await page.mouse.move(x1, y1, { steps: 20 });
+		await page.mouse.up();
+		await page.waitForTimeout(50);
+	};
+	/** a screen point in canvas px */
+	const toCanvas = async (x: number, y: number) => {
+		const b = (await canvas(page).boundingBox())!;
+		const w = await canvas(page).evaluate((c: HTMLCanvasElement) => c.width);
+		const s = w / b.width;
+		return [(x - b.x) * s, (y - b.y) * s] as const;
+	};
+	/** the ends of the stroke under (x, y), as Move picks it (canvas px); the brush comes back */
+	const endsOf = async (x: number, y: number) => {
+		// (Move's options row can move the canvas: the same canvas point, found again)
+		const [px, py] = await toCanvas(x, y);
+		await page.keyboard.press('v');
+		await page.waitForTimeout(100);
+		const box = (await canvas(page).boundingBox())!;
+		const w = await canvas(page).evaluate((c: HTMLCanvasElement) => c.width);
+		await page.mouse.click(box.x + (px * box.width) / w, box.y + (py * box.width) / w);
+		await expect(page.getByTestId('line-selection')).toHaveAttribute('data-count', '1');
+		const pts = page.getByTestId('line-point');
+		const at = async (i: number) => {
+			const p = pts.nth(i);
+			return [Number(await p.getAttribute('cx')), Number(await p.getAttribute('cy'))] as const;
+		};
+		const ends = [await at(0), await at((await pts.count()) - 1)];
+		await page.keyboard.press('Escape');
+		await page.keyboard.press('b');
+		await page.waitForTimeout(100);
+		return ends;
+	};
+	const near = (p: readonly [number, number], q: readonly [number, number], d = 1) =>
+		Math.hypot(p[0] - q[0], p[1] - q[1]) <= d;
+	const [bx, by] = k.at(0.3, 0.3);
+
+	// off: a line started 7 px from another's end starts where it was pressed
+	await line(bx - 200, by, bx, by);
+	await line(bx + 5, by + 5, bx + 5, by + 150);
+	const end = await toCanvas(bx, by);
+	expect(near((await endsOf(bx + 5, by + 100))[0], end, 3)).toBe(false);
+	await page.keyboard.press('Control+z');
+	await page.keyboard.press('Control+z');
+	await expect.poll(() => inkIn(page, 0, 0, 1, 1)).toBe(0);
+
+	// on (in Guides, next to the ruler)
+	await page.getByRole('button', { name: 'Guides', exact: true }).click();
+	const toggle = page.getByRole('group', { name: 'Guides' }).getByRole('button', {
+		name: 'Snap to ink'
+	});
+	await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+	await toggle.click();
+	await expect(toggle).toHaveAttribute('aria-pressed', 'true');
+	await page.getByRole('button', { name: 'Guides', exact: true }).click();
+	await k.fresh();
+	const [cx, cy] = k.at(0.3, 0.3);
+
+	// a corner: the second line starts exactly on the first one's end
+	await line(cx - 200, cy, cx, cy);
+	const first = await endsOf(cx - 100, cy);
+	// hovering near its end: the ring shows on it
+	await page.mouse.move(cx + 5, cy + 5);
+	const ring = page.getByTestId('ink-snap');
+	await expect(ring).toBeVisible();
+	expect(
+		near(
+			[Number(await ring.getAttribute('data-x')), Number(await ring.getAttribute('data-y'))],
+			first[1],
+			0.2
+		)
+	).toBe(true);
+	await line(cx + 5, cy + 5, cx + 5, cy + 150);
+	await expect(ring).toHaveCount(0);
+	const second = await endsOf(cx + 5, cy + 100);
+	expect(near(second[0], first[1], 0.2)).toBe(true);
+
+	// a T: a line down that stops 7 px short of a line across ends on it (not on its end)
+	await line(cx - 200, cy + 300, cx + 200, cy + 300);
+	const [, acrossY] = await toCanvas(cx, cy + 300);
+	const [, shortY] = await toCanvas(cx, cy + 293);
+	await line(cx + 100, cy + 200, cx + 100, cy + 293);
+	const t = await endsOf(cx + 100, cy + 230);
+	expect(t[1][1]).toBeGreaterThan(shortY + 2);
+	expect(t[1][1]).toBeLessThanOrEqual(acrossY + 0.5);
+	// and one that runs 6 px past it is cut back to it (its ink: the line is a pixel or two thick)
+	await line(cx + 150, cy + 200, cx + 150, cy + 306);
+	const over = await endsOf(cx + 150, cy + 230);
+	const [, pastY] = await toCanvas(cx, cy + 306);
+	expect(over[1][1]).toBeLessThanOrEqual(acrossY + 2.5);
+	expect(over[1][1]).toBeLessThan(pastY - 4);
+});

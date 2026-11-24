@@ -18,6 +18,8 @@ import type { PaintBrush, PaintCanvas as Engine } from './brushes';
 import type { BrushTexture } from './brush-textures';
 import { resample } from './quickshape';
 import { shapePath, type EditShape, type Pt } from './shape-edit';
+import { shiftOffset, shiftPoint, type GuideSettings } from './guides';
+import { nearestOnPaths, nearestPoint, strokeEnds, strokePath } from './ink-snap';
 import {
 	LineStore,
 	bakePlan,
@@ -111,6 +113,10 @@ export class LineLayers {
 	shown = $state.raw<readonly LineStroke[] | null>(null);
 	/** a box being dragged to select (canvas px) */
 	marquee = $state<[Pt, Pt] | null>(null);
+	/** a Shift-held move or point drag: from where it started to where it's held (canvas px) */
+	hint = $state<[Pt, Pt] | null>(null);
+	/** snap to ink: where a dragged point joins another line (canvas px) */
+	inkMark = $state<Pt | null>(null);
 	/** someone else hears about changes (drawing together) */
 	onlines: (drawing: number) => void = () => {};
 	/** drawings whose pixels must be drawn again from their strokes when they show */
@@ -464,6 +470,8 @@ export class LineLayers {
 		this.#drag = null;
 		this.#erase = null;
 		this.marquee = null;
+		this.hint = null;
+		this.inkMark = null;
 		if (!this.#live) return;
 		this.#live = null;
 		this.shown = null;
@@ -932,9 +940,22 @@ export class LineLayers {
 		];
 	}
 
-	/** The Select line tool's press moved to (x, y). Shift keeps scaling in proportion. */
-	move(layer: number, x: number, y: number, shift = false) {
+	/**
+	 * The Select line tool's press moved to (x, y). Shift keeps scaling in proportion, turns
+	 * in 15° steps, and moves (the strokes, or a point) across, down or at 45°; with the
+	 * grid `g` on, a move goes whole cells and a point to a grid crossing.
+	 */
+	move(
+		layer: number,
+		x: number,
+		y: number,
+		shift = false,
+		g: GuideSettings | null = null,
+		inkReach = 0
+	) {
 		const d = this.#drag;
+		this.hint = null;
+		this.inkMark = null;
 		if (!d) return;
 		if (d.kind === 'box') {
 			this.marquee = [d.start, [x, y]];
@@ -950,7 +971,11 @@ export class LineLayers {
 				return transformStroke(s, mirrored(m, p.link, s.link));
 			});
 		if (d.kind === 'move') {
-			const [dx, dy] = [x - d.start[0], y - d.start[1]];
+			let [dx, dy] = [x - d.start[0], y - d.start[1]];
+			if (shift) {
+				[dx, dy] = shiftOffset(g, [dx, dy]);
+				this.hint = [d.start, [d.start[0] + dx, d.start[1] + dy]];
+			}
 			this.#preview(layer, map([1, 0, 0, 1, dx, dy]));
 		} else if (d.kind === 'scale') {
 			const b = d.box;
@@ -975,7 +1000,30 @@ export class LineLayers {
 			if (shift) a = Math.round(a / (Math.PI / 12)) * (Math.PI / 12);
 			this.#preview(layer, map(rotateAbout(a, d.c[0], d.c[1])));
 		} else if (d.kind === 'point') {
-			const [dx, dy] = [x - d.start[0], y - d.start[1]];
+			let [dx, dy] = [x - d.start[0], y - d.start[1]];
+			const s0 = d.before.find((s) => s.id === d.id);
+			if (shift && s0) {
+				// the point itself (not the pointer) goes along the axis or onto the grid
+				const i = d.hs[d.h] * 6;
+				const at: Pt = [s0.pts[i], s0.pts[i + 1]];
+				const to = shiftPoint(g, at, [at[0] + dx, at[1] + dy]);
+				[dx, dy] = [to[0] - at[0], to[1] - at[1]];
+				this.hint = [at, to];
+			} else if (inkReach > 0 && s0) {
+				// snap to ink: onto another line close by (its end first), not one being dragged
+				const i = d.hs[d.h] * 6;
+				const to: Pt = [s0.pts[i] + dx, s0.pts[i + 1] + dy];
+				const others = d.before.filter(
+					(s) => s.id !== d.id && !this.sel?.ids.includes(s.id) && !s.erase
+				);
+				const t =
+					nearestPoint(others.flatMap(strokeEnds), to, inkReach) ??
+					nearestOnPaths(others.map(strokePath), to, inkReach);
+				if (t) {
+					[dx, dy] = [t[0] - s0.pts[i], t[1] - s0.pts[i + 1]];
+					this.inkMark = t;
+				}
+			}
 			const sel = new Set(this.sel?.ids ?? []);
 			const from = d.before.find((s) => s.id === d.id)?.link;
 			this.#preview(
@@ -994,6 +1042,8 @@ export class LineLayers {
 	up(layer: number) {
 		const d = this.#drag;
 		this.#drag = null;
+		this.hint = null;
+		this.inkMark = null;
 		if (!d) return;
 		if (d.kind === 'box') {
 			const m = this.marquee;

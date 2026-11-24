@@ -171,7 +171,13 @@
 		perspectiveRays,
 		project,
 		rulerLine,
+		shiftOffset,
+		shiftPoint,
+		snapAlong,
+		snapAngle,
 		snapDirections,
+		snapToGrid,
+		STRAIGHT_DIRS,
 		symmetryAxes,
 		SYMMETRY_MODES,
 		type GuideSettings,
@@ -191,6 +197,7 @@
 		type EditShape
 	} from './shape-edit';
 	import { smudgeSource } from './smudge';
+	import { INK_SNAP_PX, nearestInk, nearestPoint, strokeEnds } from './ink-snap';
 	import { Stabilizer, stringLength } from './stabilizer';
 	import { cloneBrushSource, cloneOffset } from './clone';
 	import { textureById, type BrushTexture } from './brush-textures';
@@ -255,6 +262,7 @@
 		angleGuide = null,
 		quickShape = true,
 		closeFill = false,
+		inkSnap = false,
 		onshape,
 		selectMode = 'replace',
 		selectFill = false,
@@ -398,6 +406,11 @@
 		 * (not on shared canvases yet: others only get the stroke)
 		 */
 		closeFill?: boolean;
+		/**
+		 * snap to ink: a brush stroke's start and end, a pen point and a dragged line point go
+		 * onto ink close by on the active layer (a stroke's end first, else the nearest inked pixel)
+		 */
+		inkSnap?: boolean;
 		/** a stroke snapped to a shape */
 		onshape?: (kind: string) => void;
 		/** 0–1: steadies strokes (a pulled string, like Procreate's StreamLine) */
@@ -625,7 +638,7 @@
 		lineMoveRaf = 0;
 		const m = lineMove;
 		lineMove = null;
-		if (m) lines.move(m.layer, m.x, m.y, m.shift);
+		if (m) lines.move(m.layer, m.x, m.y, m.shift, guides ?? null, inkSnap ? inkReach() : 0);
 	}
 
 	/** one point of a stroke into the engine (and, on a line layer, into its points) */
@@ -783,7 +796,7 @@
 	let sizeDrag: { id: number; x: number; size: number; at: [number, number] } | null = null;
 	/** the last QuickShape, still editable (its points can be dragged) */
 	let editShape = $state<EditShape | null>(null);
-	let shapeDrag: { id: number; index: number } | null = null;
+	let shapeDrag: { id: number; index: number; from: Pt } | null = null;
 	let hoverHandle = $state(false);
 	/** the measuring tool's line (canvas px) and whether it's being dragged */
 	let measureSeg = $state<[[number, number], [number, number]] | null>(null);
@@ -868,6 +881,8 @@
 
 	function notify() {
 		if (!paint) return;
+		// (snap to ink reads the layer again: it changed)
+		if (!current) inkCache = null;
 		if (!bakeQueued) {
 			bakeQueued = true;
 			queueMicrotask(bakeTainted);
@@ -1661,6 +1676,7 @@
 
 	function snapShape() {
 		if (!paint || !brush || !current || snapped) return;
+		snapHint = null;
 		// a held pen: a smoothed line catches up first, so the shape reaches the pen
 		catchUp();
 		const pts = current.points.map((p) => [p.x, p.y] as [number, number]);
@@ -1701,6 +1717,8 @@
 		snapped = true;
 		schedule();
 		onshape?.(shape.kind);
+		// Shift already down when it snaps: perfect straight away
+		if (shiftHeld) perfectSnapped();
 	}
 
 	/**
@@ -1852,6 +1870,10 @@
 		kind: 'rect' | 'ellipse' | 'lasso';
 		pts: [number, number][];
 		op: number;
+		/** where the press was (a box's first corner before Shift puts it on the grid) */
+		from: Pt;
+		/** Shift shapes the box (not while the Shift that began it, adding, is still down) */
+		shapes: boolean;
 	} | null>(null);
 	/** a lasso placed point by point (click, click…; click the first point or Enter to close) */
 	let poly = $state<{ pts: [number, number][]; op: number; at: [number, number] | null } | null>(
@@ -2024,6 +2046,23 @@
 		);
 	}
 
+	/** A box marquee dragged to `p`; with Shift a square (circle), its corners on the grid when it's on. */
+	function marqueeTo(p: Pt, shift: boolean) {
+		if (!marquee) return;
+		if (!shift) {
+			marquee = { ...marquee, pts: [marquee.from, p] };
+			return;
+		}
+		const a = snapToGrid(guides, marquee.from);
+		const b = snapToGrid(guides, p);
+		const [dx, dy] = [b[0] - a[0], b[1] - a[1]];
+		const m = Math.max(Math.abs(dx), Math.abs(dy));
+		marquee = {
+			...marquee,
+			pts: [a, [a[0] + (dx < 0 ? -m : m), a[1] + (dy < 0 ? -m : m)]]
+		};
+	}
+
 	function commitMarquee() {
 		if (!paint || !marquee) return;
 		const { kind, pts, op } = marquee;
@@ -2041,6 +2080,13 @@
 			return refreshAnts();
 		}
 		select(kind, pts, op);
+	}
+
+	/** where the next point of a lasso placed point by point goes (Shift: at 45° steps from the last) */
+	function polyAt(e: PointerEvent): Pt {
+		const p = toCanvas(e.clientX, e.clientY);
+		const last = poly?.pts.at(-1);
+		return e.shiftKey && last ? snapAngle(last, p, 45) : p;
 	}
 
 	/** A click while placing a lasso point by point: a point, or closing the shape. */
@@ -2614,37 +2660,70 @@
 	// ---- pen tool: Bézier paths, stroked with the brush or filled ----
 
 	let penPath = $state<PenPath>(EMPTY_PATH);
-	let penDrag: { id: number; index: number; part: 'p' | 'hin' | 'hout'; broken: boolean } | null =
-		null;
+	let penDrag: {
+		id: number;
+		index: number;
+		part: 'p' | 'hin' | 'hout';
+		broken: boolean;
+		/** where the anchor was when the drag began */
+		from: Pt;
+	} | null = null;
 	$effect(() => {
 		const p = penPath;
 		untrack(() => onpenpath?.({ points: p.anchors.length, closed: p.closed }));
 	});
 
 	function penDown(e: PointerEvent) {
-		const p = toCanvas(e.clientX, e.clientY);
+		let p = toCanvas(e.clientX, e.clientY);
 		const r = 10 / Math.max(0.01, fit * zoom);
 		const hit = hitPath(penPath, p, r);
 		capture(e);
+		const at = (i: number): Pt => penPath.anchors[i].p;
 		if (hit) {
 			// the first point again closes the path
 			if (hit.index === 0 && hit.part === 'p' && !penPath.closed && penPath.anchors.length > 2) {
 				penPath = { ...penPath, closed: true };
-				penDrag = { id: e.pointerId, index: 0, part: 'hout', broken: false };
+				penDrag = { id: e.pointerId, index: 0, part: 'hout', broken: false, from: at(0) };
 				return;
 			}
-			penDrag = { id: e.pointerId, ...hit, broken: e.altKey };
+			penDrag = { id: e.pointerId, ...hit, broken: e.altKey, from: at(hit.index) };
 			return;
 		}
 		if (penPath.closed) penPath = EMPTY_PATH;
+		// Shift: on the grid when it's on, else at 15° steps from the point before
+		const last = penPath.anchors.at(-1)?.p;
+		if (e.shiftKey && guides?.grid.on) p = snapToGrid(guides, p);
+		else if (e.shiftKey && last) p = snapAngle(last, p, 15);
+		else {
+			inkCache = null;
+			p = inkTarget(p) ?? p;
+		}
 		penPath = { ...penPath, anchors: [...penPath.anchors, corner(p)] };
 		// dragging out of a new point pulls its handles (a smooth point)
-		penDrag = { id: e.pointerId, index: penPath.anchors.length - 1, part: 'hout', broken: false };
+		penDrag = {
+			id: e.pointerId,
+			index: penPath.anchors.length - 1,
+			part: 'hout',
+			broken: false,
+			from: p
+		};
 	}
 
 	function penMove(e: PointerEvent) {
 		if (!penDrag || penDrag.id !== e.pointerId) return false;
-		const to = toCanvas(e.clientX, e.clientY);
+		let to = toCanvas(e.clientX, e.clientY);
+		// Shift: an anchor moves along an axis (or onto the grid), a handle turns in 15° steps
+		if (e.shiftKey) {
+			const a = penPath.anchors[penDrag.index]?.p ?? penDrag.from;
+			to = penDrag.part === 'p' ? shiftPoint(guides, penDrag.from, to) : snapAngle(a, to, 15);
+		} else if (penDrag.part === 'p' && inkSnap) {
+			// (not onto itself: the other points only)
+			const others = penPath.anchors.filter((_, i) => i !== penDrag!.index).map((a) => a.p);
+			const r = inkReach();
+			const t = nearestPoint(others, to, r) ?? nearestInk(inkPixels(), width, height, to, r);
+			inkMark = t;
+			if (t) to = t;
+		}
 		penPath = dragPart(penPath, penDrag.index, penDrag.part, to, penDrag.broken || e.altKey);
 		return true;
 	}
@@ -2794,8 +2873,17 @@
 	/** Distort: drag corners / edges freely; move and rotate the pinned quad. */
 	function quadMove(e: PointerEvent, p: Pt, f: Xf & { quad: Quad }) {
 		if (!xfDrag) return;
-		const [dx, dy] = [p[0] - xfDrag.start[0], p[1] - xfDrag.start[1]];
+		let [dx, dy] = [p[0] - xfDrag.start[0], p[1] - xfDrag.start[1]];
 		const q = f.quad;
+		if (e.shiftKey && xfDrag.mode !== 'rotate') {
+			// a corner goes along an axis (onto the grid when it's on); the rest moves by whole steps
+			if (xfDrag.mode === 'corner') {
+				const c = q[xfDrag.index];
+				const to = shiftPoint(guides, c, [c[0] + dx, c[1] + dy]);
+				[dx, dy] = [to[0] - c[0], to[1] - c[1]];
+			} else [dx, dy] = shiftOffset(guides, [dx, dy]);
+			xfHint(dx, dy);
+		}
 		let next: Quad;
 		if (xfDrag.mode === 'move') next = mapQuad(q, ([x, y]) => [x + dx, y + dy]);
 		else if (xfDrag.mode === 'rotate') {
@@ -2819,13 +2907,29 @@
 		if (usableQuad(next)) xf = { ...f, quad: next };
 	}
 
+	/** the hint for a Shift-held transform drag: from where it began, by (dx, dy) */
+	function xfHint(dx: number, dy: number) {
+		if (!xfDrag) return;
+		const a = xfDrag.start;
+		snapHint = [a, [a[0] + dx, a[1] + dy]];
+	}
+
 	function xfMove(e: PointerEvent) {
 		if (!xfDrag) return;
+		snapHint = null;
 		const p = toCanvas(e.clientX, e.clientY);
 		const f = xfDrag.from;
 		if (f.mesh) {
-			const [dx, dy] = [p[0] - xfDrag.start[0], p[1] - xfDrag.start[1]];
+			let [dx, dy] = [p[0] - xfDrag.start[0], p[1] - xfDrag.start[1]];
 			const m = f.mesh;
+			if (e.shiftKey && xfDrag.mode !== 'rotate') {
+				if (xfDrag.mode === 'node') {
+					const c = m[xfDrag.index];
+					const to = shiftPoint(guides, c, [c[0] + dx, c[1] + dy]);
+					[dx, dy] = [to[0] - c[0], to[1] - c[1]];
+				} else [dx, dy] = shiftOffset(guides, [dx, dy]);
+				xfHint(dx, dy);
+			}
 			let next: Pt[];
 			if (xfDrag.mode === 'node')
 				next = m.map((q, i) => (i === xfDrag!.index ? [q[0] + dx, q[1] + dy] : q));
@@ -2833,7 +2937,9 @@
 				const [cx, cy] = meshMid(m);
 				const a0 = Math.atan2(xfDrag.start[1] - cy, xfDrag.start[0] - cx);
 				const a1 = Math.atan2(p[1] - cy, p[0] - cx);
-				next = rotatePts(m, ((a1 - a0) * 180) / Math.PI);
+				let deg = ((a1 - a0) * 180) / Math.PI;
+				if (e.shiftKey) deg = Math.round(deg / 15) * 15;
+				next = rotatePts(m, deg);
 			} else next = m.map(([x, y]) => [x + dx, y + dy]);
 			xf = { ...f, mesh: next };
 			return xfShow();
@@ -2845,7 +2951,13 @@
 		const [cx, cy] = xfCenter(f);
 		const centre: [number, number] = [cx + f.tx, cy + f.ty];
 		if (xfDrag.mode === 'move') {
-			xf = { ...f, tx: f.tx + p[0] - xfDrag.start[0], ty: f.ty + p[1] - xfDrag.start[1] };
+			let [dx, dy] = [p[0] - xfDrag.start[0], p[1] - xfDrag.start[1]];
+			// Shift: across, down or at 45° from where the drag began (whole grid cells with the grid on)
+			if (e.shiftKey) {
+				[dx, dy] = shiftOffset(guides, [dx, dy]);
+				xfHint(dx, dy);
+			}
+			xf = { ...f, tx: f.tx + dx, ty: f.ty + dy };
 		} else if (xfDrag.mode === 'rotate') {
 			const a0 = Math.atan2(xfDrag.start[1] - centre[1], xfDrag.start[0] - centre[0]);
 			const a1 = Math.atan2(p[1] - centre[1], p[0] - centre[0]);
@@ -2862,7 +2974,10 @@
 			const [s0, s1] = [local(xfDrag.start), local(p)];
 			const k = (a: number, b: number) =>
 				Math.abs(a) < 1 ? 1 : Math.max(0.02, Math.abs(b) / Math.abs(a));
-			if (xfDrag.mode === 'corner') {
+			// a corner keeps the proportions; with Shift it scales each way on its own
+			if (xfDrag.mode === 'corner' && e.shiftKey)
+				xf = { ...f, sx: f.sx * k(s0[0], s1[0]), sy: f.sy * k(s0[1], s1[1]) };
+			else if (xfDrag.mode === 'corner') {
 				const g = k(Math.hypot(...s0), Math.hypot(...s1));
 				xf = { ...f, sx: f.sx * g, sy: f.sy * g };
 			} else if (xfDrag.mode === 'edge-x') xf = { ...f, sx: f.sx * k(s0[0], s1[0]) };
@@ -2910,6 +3025,13 @@
 				snapPending = null;
 			}
 		}
+		if (snapLine && shiftStroke) {
+			const q = gridStroke
+				? snapAlong(guides, snapLine.origin, snapLine.u, p)
+				: project(snapLine.origin, snapLine.u, p);
+			snapHint = [snapLine.origin, q];
+			return q;
+		}
 		return snapLine ? project(snapLine.origin, snapLine.u, p) : p;
 	}
 
@@ -2937,15 +3059,26 @@
 		return null;
 	}
 
-	function guideMove(p: Pt) {
+	/**
+	 * A guide's handle dragged to p. Shift: a ruler end turns the ruler in 15° steps about its
+	 * other end; a vanishing point or the mirror's centre moves along an axis (or onto the grid);
+	 * the whole ruler moves along an axis.
+	 */
+	function guideMove(p: Pt, shiftKey = false) {
 		if (!guideDrag) return;
 		const g = structuredClone(guideDrag.from);
-		const [dx, dy] = [p[0] - guideDrag.start[0], p[1] - guideDrag.start[1]];
-		const shift = (q: Pt): Pt => [q[0] + dx, q[1] + dy];
+		let [dx, dy] = [p[0] - guideDrag.start[0], p[1] - guideDrag.start[1]];
+		if (shiftKey && guideDrag.what === 'ruler') [dx, dy] = shiftOffset(guides, [dx, dy]);
+		const shift = (q: Pt): Pt => {
+			const to: Pt = [q[0] + dx, q[1] + dy];
+			return shiftKey && guideDrag?.what !== 'ruler' ? shiftPoint(guides, q, to) : to;
+		};
+		const turn = (q: Pt, about: Pt): Pt =>
+			shiftKey ? snapAngle(about, [q[0] + dx, q[1] + dy], 15) : [q[0] + dx, q[1] + dy];
 		if (guideDrag.what === 'vp')
 			g.perspective.vps[guideDrag.i] = shift(g.perspective.vps[guideDrag.i]);
-		else if (guideDrag.what === 'a') g.ruler.a = shift(g.ruler.a);
-		else if (guideDrag.what === 'b') g.ruler.b = shift(g.ruler.b);
+		else if (guideDrag.what === 'a') g.ruler.a = turn(g.ruler.a, g.ruler.b);
+		else if (guideDrag.what === 'b') g.ruler.b = turn(g.ruler.b, g.ruler.a);
 		else if (guideDrag.what === 'sym') g.symmetry.c = shift(g.symmetry.c);
 		else g.ruler = { ...g.ruler, a: shift(g.ruler.a), b: shift(g.ruler.b) };
 		onguides?.(g);
@@ -3266,14 +3399,6 @@
 
 	// ---- Shift+click: a straight line from where the last stroke ended (as in Photoshop) ----
 
-	const D = Math.SQRT1_2;
-	/** Shift + drag: horizontal, vertical and the two diagonals */
-	const STRAIGHT_DIRS: Pt[] = [
-		[1, 0],
-		[0, 1],
-		[D, D],
-		[D, -D]
-	];
 	/** the stroke in progress began with a Shift+click line */
 	let lineStroke = false;
 
@@ -3282,11 +3407,87 @@
 	let shiftHeld = $state(false);
 	/** where the pointer is (canvas px) while Shift is held, for the line preview */
 	let lineHover = $state<[number, number] | null>(null);
+	/** a Shift + drag stroke with the grid on: its points go from grid crossing to grid crossing */
+	let gridStroke = false;
+	/** the stroke in progress is a Shift + drag one (held straight) */
+	let shiftStroke = false;
+	/** a constraint at work (Shift): a light dashed line from where it holds to where it goes */
+	let snapHint = $state<[Pt, Pt] | null>(null);
+
+	// ---- snap to ink: strokes start and end on lines close by ----
+
+	/** where a stroke would join ink (a small ring shows there) */
+	let inkMark = $state<Pt | null>(null);
+	/** the active layer's pixels as they were before the stroke (read again at each press) */
+	let inkCache: { layer: number; rgba: Uint8Array } | null = null;
+	/** how near ink must be, in canvas px (the same on screen at any zoom) */
+	const inkReach = () => INK_SNAP_PX / Math.max(0.01, fit * zoom);
+	function inkPixels() {
+		if (!paint) return null;
+		const l = paint.activeLayer;
+		if (inkCache?.layer !== l) inkCache = { layer: l, rgba: paint.layerRgba(l) };
+		return inkCache.rgba;
+	}
+	/** the ink near p to join (a line's end first, else the nearest inked pixel), if on */
+	function inkTarget(p: Pt): Pt | null {
+		if (!inkSnap || !paint || paint.isEditingMask()) return null;
+		const r = inkReach();
+		const ends = [
+			...lines.strokesOf(paint.activeLayer).flatMap(strokeEnds),
+			...penPath.anchors.map((a) => a.p)
+		];
+		return nearestPoint(ends, p, r) ?? nearestInk(inkPixels(), width, height, p, r);
+	}
+	/** this stroke joins ink at its ends (a plain brush stroke, not held straight with Shift) */
+	const inkStroke = () =>
+		inkSnap && !!current && !current.eraser && !current.clone && !shiftStroke && !lineStroke;
+
+	/**
+	 * The stroke's end onto ink at `t`: the points that ran on inside the reach go (no
+	 * overshoot), and the line is drawn again ending exactly there (no gap).
+	 */
+	function endOnInk(t: Pt) {
+		if (!paint || !current || !current.points.length) return;
+		const r = inkReach();
+		const pts = current.points;
+		let n = pts.length;
+		while (n > 1 && Math.hypot(pts[n - 1].x - t[0], pts[n - 1].y - t[1]) <= r) n--;
+		const last = pts[n - 1];
+		const keep = pts.slice(0, n);
+		const len = Math.hypot(t[0] - last.x, t[1] - last.y);
+		const steps = Math.max(1, Math.ceil(len / 2));
+		for (let k = 1; k <= steps; k++)
+			keep.push({
+				x: Math.round((last.x + ((t[0] - last.x) * k) / steps) * 10) / 10,
+				y: Math.round((last.y + ((t[1] - last.y) * k) / steps) * 10) / 10,
+				pressure: last.pressure,
+				t: last.t
+			});
+		paint.cancelStroke();
+		if (sendLive()) {
+			flushLive();
+			onlive?.({ type: 'cancel', k: liveK });
+			liveK++;
+			onlive?.({
+				type: 'begin',
+				k: liveK,
+				style: { brushId: sharedBrushId(brushId), color, size, opacity, eraser }
+			});
+		}
+		if (!restartStroke()) return;
+		current.points = [];
+		for (const q of keep) {
+			strokeTo(q.x, q.y, q.pressure, 0, 0, 0.008);
+			current.points.push(q);
+			if (sendLive()) livePts.push(q.x, q.y, q.pressure, 8);
+		}
+	}
 
 	/** Draw the straight part of a Shift+click stroke: from the last stroke's end to `e`. */
 	function lineFromLast(e: PointerEvent) {
 		if (!paint || !brush || !current || !lastEnd) return;
-		const [bx, by] = toCanvas(e.clientX, e.clientY);
+		// (with the grid on, the line ends on a grid crossing)
+		const [bx, by] = snapToGrid(guides, toCanvas(e.clientX, e.clientY));
 		// a pen's first contact is often very light: keep the last stroke's pressure then
 		const raw = e.pointerType === 'mouse' || !penPressure ? 0.5 : applyCurve(e.pressure);
 		const pb = raw < 0.05 ? lastEnd.p : raw;
@@ -3319,9 +3520,9 @@
 		lastT = e.timeStamp;
 	}
 
-	function feed(e: PointerEvent) {
+	function feed(e: PointerEvent, at?: Pt | null) {
 		if (!paint || !brush || !current) return;
-		const [cx, cy] = toCanvas(e.clientX, e.clientY);
+		const [cx, cy] = at ?? toCanvas(e.clientX, e.clientY);
 		const raw: RawPoint = {
 			x: cx,
 			y: cy,
@@ -3377,6 +3578,7 @@
 
 	function down(e: PointerEvent) {
 		if (!paint || !brush) return;
+		lastPointer = e;
 		if ((e.target as HTMLElement).closest('.drop-tol, .canvas-note')) return;
 		dropFill = null;
 		// the view toolbar sits on top of the canvas area: its buttons aren't strokes
@@ -3469,7 +3671,7 @@
 			const i = shapeHandles(editShape).findIndex((q) => Math.hypot(p[0] - q[0], p[1] - q[1]) <= r);
 			if (i >= 0) {
 				capture(e);
-				shapeDrag = { id: e.pointerId, index: i };
+				shapeDrag = { id: e.pointerId, index: i, from: shapeHandles(editShape)[i] };
 				return;
 			}
 		}
@@ -3627,13 +3829,16 @@
 			lassoFill = [toCanvas(e.clientX, e.clientY)];
 			return;
 		}
-		if (tool === 'select-lasso' && poly) return polyClick(toCanvas(e.clientX, e.clientY));
+		if (tool === 'select-lasso' && poly) return polyClick(polyAt(e));
 		if (tool === 'select-rect' || tool === 'select-lasso') {
 			capture(e);
 			const p = toCanvas(e.clientX, e.clientY);
 			const kind =
 				tool === 'select-lasso' ? 'lasso' : selectShape === 'ellipse' ? 'ellipse' : 'rect';
-			marquee = { kind, pts: [p, p], op: opOf(e) };
+			// (Shift at the press adds to a selection; with none yet, it just shapes the box)
+			const shapes = !e.shiftKey || !paint.hasSelection();
+			marquee = { kind, pts: [p, p], op: opOf(e), from: p, shapes };
+			if (e.shiftKey && shapes) marqueeTo(p, true);
 			return;
 		}
 		if (adjustOverlay && overlaySrc) {
@@ -3649,6 +3854,12 @@
 				: null;
 		if (tool === 'clone' && !off) return;
 		// on a line layer the stroke is kept as a line (seeded: redrawn, it paints the same)
+		// snap to ink: where it starts (read before this stroke marks the layer)
+		inkCache = null;
+		const inkStart =
+			inkSnap && tool === 'brush' && !eraser && !off && !e.shiftKey
+				? inkTarget(toCanvas(e.clientX, e.clientY))
+				: null;
 		const asLine = !off && tool === 'brush' && keepsStroke();
 		if (asLine) lineSeed = newSeed();
 		// (the eraser's brush redraws its mark: loaded before the stroke ends)
@@ -3694,8 +3905,12 @@
 			});
 		}
 		lineStroke = false;
+		gridStroke = shiftStroke = false;
 		if (e.shiftKey) {
-			const p = toCanvas(e.clientX, e.clientY);
+			shiftStroke = true;
+			// with the grid on, the stroke starts (and ends) on a grid crossing
+			gridStroke = !!guides?.grid.on;
+			const p = snapToGrid(guides, toCanvas(e.clientX, e.clientY));
 			if (lastEnd) {
 				lineFromLast(e);
 				lineHover = null;
@@ -3706,7 +3921,7 @@
 			heldBack = [];
 			snapPending = { start: p, dirs: STRAIGHT_DIRS };
 		}
-		feed(e);
+		feed(e, inkStart);
 		schedule();
 	}
 
@@ -3786,7 +4001,42 @@
 		'clone'
 	]);
 
+	/** the last pointer event of a press (Shift pressed or let go replays it) */
+	let lastPointer: PointerEvent | null = null;
+
+	/** Shift went down or up mid-drag: drags it constrains follow at once, the pointer still. */
+	function shiftChanged(shiftKey: boolean) {
+		const e = lastPointer;
+		if (!e) return;
+		if (marquee && !shiftKey) marquee = { ...marquee, shapes: true };
+		const constrained =
+			xfDrag ||
+			(marquee && marquee.kind !== 'lasso') ||
+			shapeDrag ||
+			guideDrag ||
+			grad ||
+			penDrag ||
+			poly ||
+			measuring !== null ||
+			(linePointer !== null && !lines.erasing);
+		if (!constrained) return;
+		move(
+			new PointerEvent('pointermove', {
+				clientX: e.clientX,
+				clientY: e.clientY,
+				pointerId: e.pointerId,
+				pointerType: e.pointerType,
+				shiftKey,
+				altKey: e.altKey,
+				ctrlKey: e.ctrlKey,
+				metaKey: e.metaKey
+			})
+		);
+		if (linePointer !== null) lineMoveNow();
+	}
+
 	function move(e: PointerEvent) {
+		lastPointer = e;
 		if (oncursor) oncursor(toCanvas(e.clientX, e.clientY));
 		if (moveStrokes && !xf && paint && linePointer === null) {
 			const [x, y] = toCanvas(e.clientX, e.clientY);
@@ -3812,7 +4062,14 @@
 			return;
 		}
 		if (shapeDrag && e.pointerId === shapeDrag.id && editShape) {
-			editShape = moveHandle(editShape, shapeDrag.index, toCanvas(e.clientX, e.clientY));
+			editShape = moveHandle(
+				editShape,
+				shapeDrag.index,
+				toCanvas(e.clientX, e.clientY),
+				e.shiftKey,
+				guides ?? null,
+				shapeDrag.from
+			);
 			redrawShape(editShape);
 			return;
 		}
@@ -3837,11 +4094,11 @@
 			zoomAt(want / zoom, zoomDrag.cx, zoomDrag.cy);
 			return;
 		}
-		if (guideDrag) return guideMove(toCanvas(e.clientX, e.clientY));
+		if (guideDrag) return guideMove(toCanvas(e.clientX, e.clientY), e.shiftKey);
 		if (tool === 'liquify') hoverAt = toCanvas(e.clientX, e.clientY);
 		lineHover =
 			e.shiftKey && !current && lastEnd && tool === 'brush' && e.pointerType !== 'touch'
-				? toCanvas(e.clientX, e.clientY)
+				? snapToGrid(guides, toCanvas(e.clientX, e.clientY))
 				: null;
 		cursorAt =
 			(tool === 'brush' || tool === 'clone') && e.pointerType !== 'touch' && !adjustOverlay
@@ -3857,7 +4114,8 @@
 					)
 				: false;
 		if (grad && e.pointerId === grad.id) {
-			grad = { ...grad, to: toCanvas(e.clientX, e.clientY) };
+			const to = toCanvas(e.clientX, e.clientY);
+			grad = { ...grad, to: e.shiftKey ? snapAngle(grad.from, to, 45) : to };
 			gradientShow();
 			return;
 		}
@@ -3878,18 +4136,17 @@
 			return;
 		}
 		if (measuring === e.pointerId && measureSeg) {
-			measureSeg = [measureSeg[0], toCanvas(e.clientX, e.clientY)];
+			const to = toCanvas(e.clientX, e.clientY);
+			measureSeg = [measureSeg[0], e.shiftKey ? snapAngle(measureSeg[0], to, 15) : to];
 			return;
 		}
 		if (marquee) {
 			const p = toCanvas(e.clientX, e.clientY);
-			marquee =
-				marquee.kind === 'lasso'
-					? { ...marquee, pts: [...marquee.pts, p] }
-					: { ...marquee, pts: [marquee.pts[0], p] };
+			if (marquee.kind === 'lasso') marquee = { ...marquee, pts: [...marquee.pts, p] };
+			else marqueeTo(p, e.shiftKey && marquee.shapes);
 			return;
 		}
-		if (poly) poly = { ...poly, at: toCanvas(e.clientX, e.clientY) };
+		if (poly) poly = { ...poly, at: polyAt(e) };
 		if (e.pointerType === 'touch' && touches.has(e.pointerId)) {
 			touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
 			const st = tap?.starts.get(e.pointerId);
@@ -3924,6 +4181,10 @@
 			clampPan();
 			return;
 		}
+		inkMark =
+			inkSnap && tool === 'brush' && !eraser && (current ? inkStroke() : e.pointerType !== 'touch')
+				? inkTarget(toCanvas(e.clientX, e.clientY))
+				: null;
 		if (!current) return;
 		if (snapped) return; // the shape is set; lift the pen to finish
 		const events = e.getCoalescedEvents?.() ?? [];
@@ -3934,6 +4195,7 @@
 
 	function up(e: PointerEvent) {
 		strokeDown = false;
+		snapHint = null;
 		if (holdPick?.id === e.pointerId) endHoldPick();
 		if (textPointer === e.pointerId) {
 			textPointer = null;
@@ -4039,6 +4301,10 @@
 		if (!current || !paint || !brush) return;
 		if (heldBack.length) releaseHeld(); // a short stroke that never picked a direction
 		if (!snapped) catchUp();
+		const inkEnd = !snapped && inkStroke() ? inkTarget(toCanvas(e.clientX, e.clientY)) : null;
+		if (inkEnd) endOnInk(inkEnd);
+		inkMark = null;
+		inkCache = null;
 		// a snapped shape stays editable (not on shared canvases: others already have it)
 		editShape = snapped && !onlive && !maskStroke ? snappedShape : null;
 		const lineLayer = current.layer ?? 0;
@@ -4155,6 +4421,7 @@
 	function keydown(e: KeyboardEvent) {
 		if (e.key === 'Shift') shiftHeld = true;
 		if (e.key === 'Shift' && !e.repeat && current && snapped) perfectSnapped();
+		if (e.key === 'Shift' && !e.repeat) shiftChanged(true);
 		if (poly && !typing(e.target) && (e.key === 'Enter' || e.key === 'Escape')) {
 			if (e.key === 'Enter') closePoly();
 			else poly = null;
@@ -4170,6 +4437,7 @@
 		if (e.key === 'Shift') {
 			shiftHeld = false;
 			lineHover = null;
+			shiftChanged(false);
 		}
 		if (e.code === 'Space') spaceHeld = false;
 		if (e.key === 'Control' || e.key === 'Meta') ctrlHeld = false;
@@ -5622,6 +5890,32 @@
 				/>
 			</svg>
 		{/if}
+		{#if (inkMark || lines.inkMark) && inkSnap}
+			{@const [mx, my] = (inkMark ?? lines.inkMark)!}
+			<svg
+				class="xf"
+				viewBox="0 0 {width} {height}"
+				preserveAspectRatio="none"
+				aria-hidden="true"
+				data-testid="ink-snap"
+				data-x={mx.toFixed(1)}
+				data-y={my.toFixed(1)}
+			>
+				<circle class="ink-mark" cx={mx} cy={my} r={5 / Math.max(0.01, fit * zoom)} />
+			</svg>
+		{/if}
+		{#if snapHint || lines.hint}
+			{@const [[hx1, hy1], [hx2, hy2]] = (snapHint ?? lines.hint)!}
+			<svg
+				class="xf"
+				viewBox="0 0 {width} {height}"
+				preserveAspectRatio="none"
+				aria-hidden="true"
+				data-testid="snap-hint"
+			>
+				<line class="shift-line" x1={hx1} y1={hy1} x2={hx2} y2={hy2} />
+			</svg>
+		{/if}
 		{#if tool === 'liquify' && hoverAt}
 			<svg class="xf" viewBox="0 0 {width} {height}" preserveAspectRatio="none" aria-hidden="true">
 				<circle class="liq" cx={hoverAt[0]} cy={hoverAt[1]} r={liquifySize} />
@@ -6179,6 +6473,12 @@
 	}
 	.xf line.shift-line {
 		stroke-dasharray: 6 4;
+	}
+	.xf circle.ink-mark {
+		fill: none;
+		stroke: #3d6bff;
+		stroke-width: 1.5;
+		vector-effect: non-scaling-stroke;
 	}
 
 	.lasso-fill {

@@ -6,8 +6,10 @@ import {
 	moveHandle,
 	shapeHandles,
 	shapePath,
+	type EditShape,
 	type Pt
 } from './shape-edit';
+import { defaultGuides } from './guides';
 
 const ring = (cx: number, cy: number, a: number, b: number): Pt[] =>
 	Array.from({ length: 73 }, (_, i) => {
@@ -184,5 +186,80 @@ describe('curved shapes', () => {
 		expect(
 			shapePath({ kind: 'poly', pts: line, closed: false, pressure: 1, smooth: true })
 		).toEqual(line);
+	});
+});
+
+describe('Shift on a shape handle', () => {
+	const rect = (): EditShape => ({
+		kind: 'poly',
+		pts: [
+			[0, 0],
+			[100, 0],
+			[100, 50],
+			[0, 50]
+		],
+		closed: true,
+		pressure: 1
+	});
+	const grid = () => {
+		const g = defaultGuides(800, 600);
+		g.grid = { on: true, kind: 'square', size: 40 };
+		return g;
+	};
+
+	it('a rectangle keeps its proportions about the opposite corner', () => {
+		const s = moveHandle(rect(), 2, [210, 60], true);
+		if (s.kind !== 'poly') throw new Error('not a poly');
+		expect(s.pts[0]).toEqual([0, 0]);
+		expect(s.pts[2][0] / s.pts[2][1]).toBeCloseTo(2);
+		// without Shift the corner goes where it's dragged
+		const free = moveHandle(rect(), 2, [210, 60]);
+		if (free.kind !== 'poly') throw new Error('not a poly');
+		expect(free.pts[2]).toEqual([210, 60]);
+	});
+
+	it('with the grid on, the corner goes to a crossing and it stays a rectangle', () => {
+		const s = moveHandle(rect(), 2, [163, 77], true, grid());
+		if (s.kind !== 'poly') throw new Error('not a poly');
+		expect(s.pts).toEqual([
+			[0, 0],
+			[160, 0],
+			[160, 80],
+			[0, 80]
+		]);
+	});
+
+	it("a line's end turns in 15° steps", () => {
+		const line: EditShape = {
+			kind: 'poly',
+			pts: [
+				[0, 0],
+				[100, 0]
+			],
+			closed: false,
+			pressure: 1
+		};
+		const s = moveHandle(line, 1, [100, 22], true);
+		if (s.kind !== 'poly') throw new Error('not a poly');
+		expect((Math.atan2(s.pts[1][1], s.pts[1][0]) * 180) / Math.PI).toBeCloseTo(15);
+	});
+
+	it('an ellipse keeps its proportions; its centre moves along an axis', () => {
+		const e: EditShape = {
+			kind: 'ellipse',
+			c: [100, 100],
+			a: 60,
+			b: 30,
+			theta: 0,
+			circle: false,
+			pressure: 1
+		};
+		const s = moveHandle(e, 1, [220, 104], true);
+		if (s.kind !== 'ellipse') throw new Error('not an ellipse');
+		expect(s.theta).toBe(0);
+		expect(s.a / s.b).toBeCloseTo(2);
+		const m = moveHandle(e, 0, [150, 106], true, null, [100, 100]);
+		if (m.kind !== 'ellipse') throw new Error('not an ellipse');
+		expect(m.c).toEqual([150, 100]);
 	});
 });
