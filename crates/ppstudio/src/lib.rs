@@ -664,6 +664,12 @@ impl Project {
         let t = TILE as usize;
         let mut px = vec![fill; w * h * channels];
         for r in refs {
+            let (x0, y0) = (r.x as usize * t, r.y as usize * t);
+            // (paint spilled past the canvas edge, kept by older versions: not part of the
+            // picture, so left out rather than refusing the file)
+            if x0 >= w || y0 >= h {
+                continue;
+            }
             let tile = self
                 .tiles
                 .get(&r.hash)
@@ -673,10 +679,6 @@ impl Project {
                     "tile {} has the wrong size",
                     r.hash
                 )));
-            }
-            let (x0, y0) = (r.x as usize * t, r.y as usize * t);
-            if x0 >= w || y0 >= h {
-                return Err(Error::Invalid(format!("tile {} is off the canvas", r.hash)));
             }
             let n = t.min(w - x0);
             for row in 0..t.min(h - y0) {
@@ -1176,6 +1178,24 @@ mod tests {
         assert_eq!(back.manifest, p.manifest);
         assert_eq!(back.strokes, p.strokes);
         assert_eq!(back.thumbnail, p.thumbnail);
+        assert_eq!(back.drawing("d1").unwrap().0, rgba);
+    }
+
+    #[test]
+    fn tiles_past_the_canvas_edge_are_left_out_not_refused() {
+        // (older versions saved paint a line spilled past the right or bottom edge)
+        let (mut p, rgba) = sample();
+        let hash = p.manifest.drawings["d1"].tiles[0].hash.clone();
+        let tiles = &mut p.manifest.drawings.get_mut("d1").unwrap().tiles;
+        tiles.push(TileRef {
+            x: 3,
+            y: 0,
+            hash: hash.clone(),
+        });
+        tiles.push(TileRef { x: 0, y: 2, hash });
+        let mut buf = Cursor::new(Vec::new());
+        p.write(&mut buf).unwrap();
+        let back = Project::read(Cursor::new(buf.into_inner())).unwrap();
         assert_eq!(back.drawing("d1").unwrap().0, rgba);
     }
 
