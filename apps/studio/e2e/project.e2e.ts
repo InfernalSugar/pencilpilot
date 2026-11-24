@@ -3226,6 +3226,45 @@ test('composition creator: a guide of your own, previewed live, saved, placed on
 	await expect(overlay).toHaveCount(0);
 });
 
+test('the rail sliders: bars that fill with size and opacity, set by a press, a drag or the keys', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	const opacity = page.getByRole('slider', { name: 'Opacity', exact: true }).first();
+	const size = page.getByRole('slider', { name: 'Size', exact: true }).first();
+	await expect(opacity).toBeVisible();
+	// big enough to see and to grab
+	const ob = (await opacity.boundingBox())!;
+	expect(ob.height).toBeGreaterThan(100);
+	expect(ob.width).toBeGreaterThanOrEqual(24);
+	// a press at the top: all of it; near the bottom: little
+	await page.mouse.click(ob.x + ob.width / 2, ob.y + 2);
+	await expect(opacity).toHaveAttribute('aria-valuetext', '100%');
+	await page.mouse.click(ob.x + ob.width / 2, ob.y + ob.height - 2);
+	await expect(opacity).toHaveAttribute('aria-valuetext', '5%');
+	// a drag up from there follows the pointer
+	await page.mouse.move(ob.x + ob.width / 2, ob.y + ob.height - 2);
+	await page.mouse.down();
+	await page.mouse.move(ob.x + ob.width / 2, ob.y + ob.height / 2, { steps: 5 });
+	await page.mouse.up();
+	const half = parseInt((await opacity.getAttribute('aria-valuetext'))!);
+	expect(half).toBeGreaterThan(40);
+	expect(half).toBeLessThan(60);
+	// the keys step it
+	await opacity.focus();
+	await page.keyboard.press('ArrowUp');
+	await expect(opacity).toHaveAttribute('aria-valuetext', `${half + 5}%`);
+	await page.keyboard.press('Home');
+	await expect(opacity).toHaveAttribute('aria-valuetext', '5%');
+	// size: the top is the largest, and it shows
+	const sb = (await size.boundingBox())!;
+	await page.mouse.click(sb.x + sb.width / 2, sb.y + sb.height - 2);
+	const small = parseInt((await size.getAttribute('aria-valuetext'))!);
+	await page.mouse.click(sb.x + sb.width / 2, sb.y + 2);
+	expect(parseInt((await size.getAttribute('aria-valuetext'))!)).toBeGreaterThan(small * 4);
+});
+
 test('line layers: strokes stay editable (select, move, recolour, erase, reshape, save, convert)', async ({
 	page
 }) => {
