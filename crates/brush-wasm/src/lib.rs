@@ -1239,6 +1239,33 @@ impl PaintCanvas {
         self.inner.lines_cancel();
     }
 
+    /// Start lifting strokes (a drag of heavy strokes): `linesStroke`… then
+    /// `linesCommit` draw them onto nothing over `tiles`, kept to slide as pixels.
+    #[wasm_bindgen(js_name = linesLiftBegin)]
+    pub fn lines_lift_begin(&mut self, layer: u32, tiles: &[i32]) -> bool {
+        self.inner.lines_lift_begin(layer, tiles)
+    }
+
+    /// Show the lifted strokes moved by `m` = [a, b, c, d, e, f].
+    #[wasm_bindgen(js_name = linesLiftPreview)]
+    pub fn lines_lift_preview(&mut self, m: &[f32]) -> bool {
+        let Ok(m) = <[f32; 6]>::try_from(m) else {
+            return false;
+        };
+        self.inner.lines_lift_preview(m)
+    }
+
+    /// Drop the lifted strokes: the tiles they passed over go back as they were.
+    #[wasm_bindgen(js_name = linesLiftEnd)]
+    pub fn lines_lift_end(&mut self) {
+        self.inner.lines_lift_end();
+    }
+
+    #[wasm_bindgen(js_name = lifting)]
+    pub fn lifting(&self) -> bool {
+        self.inner.lifting()
+    }
+
     #[wasm_bindgen(js_name = linesPending)]
     pub fn lines_pending(&self) -> bool {
         self.inner.lines_pending()

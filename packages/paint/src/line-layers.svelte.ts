@@ -100,6 +100,15 @@ export type Effect = { undo(): void; redo(): void };
 /** Paint brushes reach this far past their radius, to keep tiles from cutting dabs. */
 const SEL_TOL = 6;
 
+/**
+ * A drag whose redraw takes longer than this (ms: about a frame) lifts the strokes it
+ * moves: they slide as pixels till let go, then are drawn exactly where they land.
+ */
+const LIFT_AFTER_MS = 12;
+
+/** Strokes moved, scaled or turned together by one matrix (a drag that may lift them). */
+type Lift = { ids: ReadonlySet<string>; m: Affine; from: readonly LineStroke[] };
+
 export class LineLayers {
 	store = new LineStore();
 	/** bumps when any drawing's strokes change (for the selection overlay) */
@@ -121,13 +130,28 @@ export class LineLayers {
 	onlines: (drawing: number) => void = () => {};
 	/** drawings whose pixels must be drawn again from their strokes when they show */
 	#stale = new Set<number>();
-	/** a drag or an erase showing live, not an undo step yet */
-	#live: { layer: number; before: readonly LineStroke[]; shown: readonly LineStroke[] } | null =
-		null;
+	/**
+	 * a drag or an erase showing live, not an undo step yet; `lifted`: the strokes it
+	 * moves slide as pixels in the engine (`#lift`), the rest of the layer without them
+	 */
+	#live: {
+		layer: number;
+		before: readonly LineStroke[];
+		shown: readonly LineStroke[];
+		lifted?: boolean;
+	} | null = null;
 	#drag: Drag | null = null;
+	/** ms a drag's redraw may take before it lifts (`LIFT_AFTER_MS`; `pp.liftAfterMs` sets it) */
+	#liftAfter = LIFT_AFTER_MS;
 	#erase: { layer: number; mode: LineEraser; r: number; at: Pt } | null = null;
 
 	constructor(private host: LineHost) {
+		try {
+			const v = parseFloat(localStorage.getItem('pp.liftAfterMs') ?? '');
+			if (Number.isFinite(v)) this.#liftAfter = v;
+		} catch {
+			// (no storage: the default)
+		}
 		this.store.onchange = (d) => {
 			this.version++;
 			this.onlines(d);
@@ -438,17 +462,67 @@ export class LineLayers {
 		return this.#record(layer, before, after, label);
 	}
 
-	/** Show `next` live (a drag), not yet an undo step. */
-	#preview(layer: number, next: readonly LineStroke[]) {
+	/**
+	 * Show `next` live (a drag), not yet an undo step. `lift`: `next` is `lift.from` with
+	 * the strokes `lift.ids` under one matrix; if drawing them is slow (heavy brushes: a
+	 * glow), they're lifted and slide as pixels from then on.
+	 */
+	#preview(layer: number, next: readonly LineStroke[], lift?: Lift) {
 		const live = (this.#live ??= {
 			layer,
 			before: this.strokesOf(layer),
 			shown: this.strokesOf(layer)
 		});
 		next = this.#settle(live.before, next);
+		if (live.lifted) {
+			if (lift && this.host.engine()?.linesLiftPreview(Float32Array.from(lift.m))) {
+				live.shown = this.shown = next;
+				this.host.schedule();
+			}
+			return;
+		}
 		const boxes = this.#changed(live.shown, next);
 		if (!boxes.length) return;
-		if (this.#redraw(layer, next, boxes)) live.shown = this.shown = next;
+		const t0 = performance.now();
+		if (!this.#redraw(layer, next, boxes)) return;
+		live.shown = this.shown = next;
+		if (lift && performance.now() - t0 > this.#liftAfter) this.#lift(layer, lift);
+	}
+
+	/**
+	 * Lift the strokes a slow drag moves: the layer is drawn again without them, and they
+	 * go to the engine as pixels (where they started) to slide under the drag's matrix.
+	 * Not for strokes that erase or smudge (they change the paint under them).
+	 */
+	#lift(layer: number, lift: Lift) {
+		const e = this.host.engine();
+		const live = this.#live;
+		if (!e || !live || live.layer !== layer) return;
+		const from = lift.from.filter((s) => lift.ids.has(s.id));
+		if (!from.length || from.some((s) => s.erase || s.smudge)) return;
+		const [w, h] = [this.host.width(), this.host.height()];
+		const tiles = tilesOf(from.map(bounds), w, h);
+		const now = live.shown.filter((s) => lift.ids.has(s.id)).map(bounds);
+		if (
+			!tiles.length ||
+			!this.#redraw(
+				layer,
+				live.shown.filter((s) => !lift.ids.has(s.id)),
+				now
+			)
+		)
+			return;
+		if (e.linesLiftBegin(layer, tiles)) {
+			this.#replay(from, tiles);
+			if (e.linesCommit() && e.linesLiftPreview(Float32Array.from(lift.m))) {
+				live.lifted = true;
+				this.host.schedule();
+				return;
+			}
+			e.linesLiftEnd();
+		}
+		// (couldn't: the strokes back where they're shown)
+		this.#redraw(layer, live.shown, now);
 	}
 
 	/** The live change becomes one undo step (none if nothing changed). */
@@ -461,6 +535,17 @@ export class LineLayers {
 		if (live.shown === live.before) {
 			e.linesCancel();
 			return;
+		}
+		if (live.lifted) {
+			// the lifted strokes, drawn exactly where they landed
+			e.linesLiftEnd();
+			const moved = new Set(live.before);
+			const boxes = live.shown.filter((s) => !moved.has(s)).map(bounds);
+			if (!this.#redraw(live.layer, live.shown, boxes)) {
+				e.linesCancel();
+				this.host.schedule();
+				return;
+			}
 		}
 		this.#record(live.layer, live.before, live.shown, label);
 	}
@@ -964,6 +1049,10 @@ export class LineLayers {
 		const ids = 'ids' in d ? d.ids : new Set<string>();
 		// linked twins (mirrored with the one picked) get each edit mirrored
 		const p = this.primary();
+		// (all under one matrix, unless twins are mirrored: then they can't be lifted)
+		const one = !p?.link || !d.before.some((s) => ids.has(s.id) && s.link && s.id !== p.id);
+		const lift = (m: Affine): Lift | undefined =>
+			one && 'before' in d ? { ids, m, from: d.before } : undefined;
 		const map = (m: Affine) =>
 			d.before.map((s) => {
 				if (!ids.has(s.id)) return s;
@@ -976,7 +1065,8 @@ export class LineLayers {
 				[dx, dy] = shiftOffset(g, [dx, dy]);
 				this.hint = [d.start, [d.start[0] + dx, d.start[1] + dy]];
 			}
-			this.#preview(layer, map([1, 0, 0, 1, dx, dy]));
+			const m: Affine = [1, 0, 0, 1, dx, dy];
+			this.#preview(layer, map(m), lift(m));
 		} else if (d.kind === 'scale') {
 			const b = d.box;
 			// the corner opposite stays put
@@ -993,12 +1083,14 @@ export class LineLayers {
 			}
 			const tiny = (v: number) => (Math.abs(v) < 0.02 ? Math.sign(v || 1) * 0.02 : v);
 			[sx, sy] = [tiny(sx), tiny(sy)];
-			this.#preview(layer, map([sx, 0, 0, sy, fx - fx * sx, fy - fy * sy]));
+			const m: Affine = [sx, 0, 0, sy, fx - fx * sx, fy - fy * sy];
+			this.#preview(layer, map(m), lift(m));
 		} else if (d.kind === 'rotate') {
 			const a0 = Math.atan2(d.start[1] - d.c[1], d.start[0] - d.c[0]);
 			let a = Math.atan2(y - d.c[1], x - d.c[0]) - a0;
 			if (shift) a = Math.round(a / (Math.PI / 12)) * (Math.PI / 12);
-			this.#preview(layer, map(rotateAbout(a, d.c[0], d.c[1])));
+			const m = rotateAbout(a, d.c[0], d.c[1]);
+			this.#preview(layer, map(m), lift(m));
 		} else if (d.kind === 'point') {
 			let [dx, dy] = [x - d.start[0], y - d.start[1]];
 			const s0 = d.before.find((s) => s.id === d.id);
