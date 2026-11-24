@@ -23,10 +23,14 @@ import {
 	setKey,
 	setLength,
 	setNote,
+	setStage,
 	setStatic,
 	setStaticDrawing,
 	setTiming,
 	showing,
+	stageOf,
+	stagesFromFile,
+	stagesToFile,
 	staticDrawing,
 	staticsToFile,
 	toFile,
@@ -279,5 +283,40 @@ describe('timeline', () => {
 		const back = fromFile(toFile(tl, [1]), new Map([[1, 1]]));
 		expect(back.scenes[0].cuts[0].dialogue).toEqual({ 4: 'lo' });
 		expect(back.scenes[0].cuts[0].action).toBeUndefined();
+	});
+});
+
+describe('layer stages', () => {
+	it('set, clear, and go away when none is left', () => {
+		const tl = newTimeline([]);
+		setStage(tl, 3, 'rough');
+		setStage(tl, 4, 'clean');
+		expect(stageOf(tl, 3)).toBe('rough');
+		expect(stageOf(tl, 5)).toBeNull();
+		setStage(tl, 3, 'tiedown');
+		expect(tl.stages).toEqual({ 3: 'tiedown', 4: 'clean' });
+		setStage(tl, 3, null);
+		setStage(tl, 4, null);
+		expect(tl.stages).toBeUndefined();
+		// (layer 0 is no layer)
+		setStage(tl, 0, 'rough');
+		expect(tl.stages).toBeUndefined();
+	});
+
+	it('round-trip through the file, for layers that exist (unknown stages left out)', () => {
+		const tl = newTimeline([]);
+		setStage(tl, 3, 'rough');
+		setStage(tl, 4, 'clean');
+		setStage(tl, 9, 'comp');
+		const file = stagesToFile(tl, [3, 4]);
+		expect(file).toEqual({ 3: 'rough', 4: 'clean' });
+		// opened, the canvas gives the layers new ids
+		const ids = new Map([
+			[3, 30],
+			[4, 40]
+		]);
+		expect(stagesFromFile(file, ids)).toEqual({ 30: 'rough', 40: 'clean' });
+		expect(stagesFromFile({ 3: 'wobbly', 4: 'flats', 7: 'rough' }, ids)).toEqual({ 40: 'flats' });
+		expect(stagesFromFile(undefined, ids)).toEqual({});
 	});
 });

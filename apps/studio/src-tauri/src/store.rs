@@ -490,6 +490,7 @@ mod tests {
             audio: vec![],
             mouth_charts: vec![],
             drawing_kinds: Default::default(),
+            layer_stages: Default::default(),
             timelapse: vec![],
             fonts: vec![],
             references: vec![],

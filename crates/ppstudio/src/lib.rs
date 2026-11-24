@@ -177,10 +177,23 @@ pub struct Timeline {
         skip_serializing_if = "BTreeMap::is_empty"
     )]
     pub drawing_kinds: BTreeMap<String, String>,
+    /// each layer's production stage: layer id → one of [`STAGES`] (layers with none
+    /// belong to every stage)
+    #[serde(
+        default,
+        rename = "layerStages",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub layer_stages: BTreeMap<String, String>,
 }
 
 /// What a drawing can be marked as.
 pub const DRAWING_KINDS: [&str; 3] = ["key", "breakdown", "inbetween"];
+
+/// The production stages a layer can be in, in the order the work goes.
+pub const STAGES: [&str; 7] = [
+    "board", "rough", "tiedown", "clean", "flats", "shade", "comp",
+];
 
 /// The mouth shapes lip-sync uses (Rhubarb's: A–F, and the extended G, H and X).
 pub const MOUTH_SHAPES: &str = "ABCDEFGHX";
@@ -468,6 +481,7 @@ impl Project {
                     static_layers: Vec::new(),
                     mouth_charts: Vec::new(),
                     drawing_kinds: BTreeMap::new(),
+                    layer_stages: BTreeMap::new(),
                 },
                 drawings: BTreeMap::new(),
                 extra: serde_json::Value::Null,
@@ -751,6 +765,15 @@ impl Project {
                 return Err(Error::Invalid(format!("static layer {layer} isn't there")));
             }
         }
+        for (layer, stage) in &m.timeline.layer_stages {
+            if !layer
+                .parse::<u32>()
+                .is_ok_and(|id| m.layers.iter().any(|l| l.id == id))
+                || !STAGES.contains(&stage.as_str())
+            {
+                return Err(Error::Invalid(format!("layer stage {layer}: {stage}")));
+            }
+        }
         for (d, kind) in &m.timeline.drawing_kinds {
             if !m.drawings.contains_key(d) || !DRAWING_KINDS.contains(&kind.as_str()) {
                 return Err(Error::Invalid(format!("drawing mark {d}: {kind}")));
@@ -1031,6 +1054,13 @@ impl Project {
             }
         }
         manifest.timelapse = times;
+        // (stages are a nicety too: ones for layers that aren't there, or that a newer
+        // app knows and this one doesn't, are dropped)
+        let layer_ids: Vec<u32> = manifest.layers.iter().map(|l| l.id).collect();
+        manifest.timeline.layer_stages.retain(|layer, stage| {
+            layer.parse::<u32>().is_ok_and(|id| layer_ids.contains(&id))
+                && STAGES.contains(&stage.as_str())
+        });
         let p = Project {
             manifest,
             tiles,
@@ -1407,6 +1437,10 @@ mod tests {
         ]
         .into_iter()
         .collect();
+        // layer 1 is clean-up
+        p.manifest.timeline.layer_stages = [("1".to_string(), "clean".to_string())]
+            .into_iter()
+            .collect();
         // a timelapse of two pictures
         p.timelapse = vec![b"\xff\xd8one".to_vec(), b"\xff\xd8two".to_vec()];
         p.manifest.timelapse = vec![1_700_000_000_000, 1_700_000_005_000];
@@ -1465,6 +1499,19 @@ mod tests {
         q.write(&mut buf).unwrap();
         let back = Project::read(std::io::Cursor::new(buf.into_inner())).unwrap();
         assert_eq!(back.manifest.timelapse.len(), 2);
+
+        // stages for a layer that isn't there or that this app doesn't know: dropped, the
+        // project still opens (but a writer mustn't write them)
+        let mut q = p.clone();
+        let stages = &mut q.manifest.timeline.layer_stages;
+        stages.insert("9".into(), "rough".into());
+        stages.insert("x".into(), "rough".into());
+        stages.insert("1".into(), "wobbly".into());
+        assert!(q.validate().is_err());
+        let mut buf = std::io::Cursor::new(Vec::new());
+        q.write(&mut buf).unwrap();
+        let back = Project::read(std::io::Cursor::new(buf.into_inner())).unwrap();
+        assert!(back.manifest.timeline.layer_stages.is_empty());
 
         // a static layer that isn't there, a camera with no size, a sound file that isn't
         // in the archive, or a mouth chart naming an unknown shape, layer or drawing is

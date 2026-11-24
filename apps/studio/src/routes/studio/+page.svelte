@@ -200,11 +200,19 @@
 		kindsFromFile,
 		nextKind,
 		setKind,
+		setStage,
+		STAGES,
+		STAGE_LABELS,
+		stagesFromFile,
+		stagesToFile,
+		isStage,
+		type Stage,
 		type Camera,
 		type MouthChart,
 		type MouthShape,
 		type Timeline
 	} from '#lib/timeline.js';
+	import { guessStage } from '#lib/stages.js';
 
 	let canvas = $state<PaintCanvas>();
 	let status = $state<CanvasStatus | null>(null);
@@ -724,6 +732,13 @@
 		await tick();
 		const shadow = await newLayer(`Shadow (${lineLayer.name})`);
 		if (shadow) c.setLayer(shadow, { clip: true, blend: 'multiply' });
+		// in their stages (the lines in clean-up, unless they're in one already)
+		setStage(timeline, colour, 'flats');
+		if (shadow) setStage(timeline, shadow, 'shade');
+		if (!timeline.stages?.[lineLayer.id]) setStage(timeline, lineLayer.id, 'clean');
+		tlJoin = true;
+		tlLabel = 'Set up colour layers';
+		docVersion++;
 		c.selectLayer(colour);
 		toolOpts.fillRefLayer = lineLayer.id;
 		tool = 'fill';
@@ -1199,6 +1214,47 @@
 		tlLabel = k ? `Mark ${k === 'inbetween' ? 'in-between' : k}` : 'Unmark drawing';
 		docVersion++;
 		note(k ? `Marked as ${k === 'inbetween' ? 'an in-between' : `a ${k}`}.` : 'Unmarked.', 1500);
+	}
+
+	// ---- production stages: each layer's (Timeline.stages) ----
+	const STAGE_SHORT: Record<Stage, string> = {
+		board: 'Board',
+		rough: 'Rough',
+		tiedown: 'Tie-down',
+		clean: 'Clean',
+		flats: 'Colour',
+		shade: 'Shade',
+		comp: 'Comp'
+	};
+	const STAGE_CHOICES = STAGES.map((id) => ({
+		id,
+		label: STAGE_LABELS[id],
+		short: STAGE_SHORT[id]
+	}));
+
+	/** Put a layer in a stage (null: in none), one undo step. */
+	function putStage(layer: number, stage: string | null) {
+		const st = isStage(stage) ? stage : null;
+		if ((timeline.stages?.[layer] ?? null) === st) return;
+		setStage(timeline, layer, st);
+		tlLabel = 'Set stage';
+		docVersion++;
+	}
+
+	/** Put each layer with no stage in the one its name suggests, one undo step. */
+	function sortStages() {
+		let n = 0;
+		for (const l of status?.layers ?? []) {
+			if (timeline.stages?.[l.id]) continue;
+			const st = guessStage(l, timeline.statics.includes(l.id));
+			if (!st) continue;
+			setStage(timeline, l.id, st);
+			n++;
+		}
+		if (!n) return note('No layer’s name suggests a stage: pick each one’s stage instead.', 3000);
+		tlLabel = 'Sort layers into stages';
+		docVersion++;
+		note(`Put ${n} layer${n > 1 ? 's' : ''} in stages.`, 2000);
 	}
 
 	/** Let go: back to the frame flipping started on. */
@@ -2377,6 +2433,10 @@
 				timeline,
 				drawings.map((d) => d.id)
 			),
+			stages: stagesToFile(
+				timeline,
+				snap.layers.map((l) => l.id)
+			),
 			audio: [
 				...new Set(timeline.scenes.flatMap((s) => (s.audio ?? []).map((a) => a.file)))
 			].flatMap((file) => {
@@ -3163,6 +3223,8 @@
 				);
 				[scene, cutIndex, frame] = [0, 0, 0];
 			}
+			const stages = stagesFromFile(doc.stages, ids);
+			if (Object.keys(stages).length) timeline.stages = stages;
 			timelineFor = canvasKey;
 			onCanvas = { scene, cut: cutIndex, frame };
 			if (anim) {
@@ -3949,6 +4011,13 @@
 						oncursor={onCursor}
 						onlive={sharing ? onLive : undefined}
 						onfill={(f) => void carryFill(f)}
+						oncolourlayer={(id) => {
+							// (with the fill: one undo step)
+							setStage(timeline, id, 'flats');
+							tlJoin = true;
+							tlLabel = 'Fill';
+							docVersion++;
+						}}
 						fill
 						width={canvasSize.width}
 						height={canvasSize.height}
@@ -4092,6 +4161,10 @@
 					{status}
 					controls={layerControls}
 					lineLayers
+					stages={STAGE_CHOICES}
+					stageOf={(id) => timeline.stages?.[id] ?? null}
+					onstage={(id, st) => putStage(id, st)}
+					onsortstages={sortStages}
 					aspect={canvasSize.width / canvasSize.height}
 					onadjustment={(id) => toolOpts.adjustmentLayer(id)}
 					ontext={(id) => {

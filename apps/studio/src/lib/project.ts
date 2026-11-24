@@ -37,6 +37,8 @@ export interface ProjectDoc {
 	mouths?: FileMouthChart[];
 	/** drawing marks: "D<id>" → key / breakdown / inbetween */
 	kinds?: Record<string, string>;
+	/** layer stages: layer id → board / rough / tiedown / clean / flats / shade / comp */
+	stages?: Record<string, string>;
 	/** the sound files the scenes play (the key they use, the file as imported) */
 	audio?: { file: string; bytes: Uint8Array }[];
 	/** the timelapse: JPEG pictures and when each was taken (ms since 1970) */
@@ -97,6 +99,7 @@ interface Header {
 	staticLayers?: number[];
 	mouthCharts?: FileMouthChart[];
 	drawingKinds?: Record<string, string>;
+	layerStages?: Record<string, string>;
 	audio?: { file: string; bytes: [number, number] }[];
 	drawings?: {
 		id: number;
@@ -165,6 +168,7 @@ export function pack(doc: ProjectDoc): Uint8Array {
 					}))
 				}
 			: {}),
+		...(doc.stages && Object.keys(doc.stages).length ? { layerStages: doc.stages } : {}),
 		...(doc.scenes?.length
 			? {
 					scenes: doc.scenes,
@@ -242,6 +246,7 @@ export function unpack(packet: ArrayBuffer | Uint8Array): ProjectDoc {
 		...(h.staticLayers?.length ? { statics: h.staticLayers } : {}),
 		...(h.mouthCharts?.length ? { mouths: h.mouthCharts } : {}),
 		...(h.drawingKinds ? { kinds: h.drawingKinds } : {}),
+		...(h.layerStages ? { stages: h.layerStages } : {}),
 		...(h.audio?.length
 			? { audio: h.audio.map((a) => ({ file: a.file, bytes: get(a.bytes) })) }
 			: {}),

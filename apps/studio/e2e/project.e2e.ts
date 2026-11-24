@@ -2071,6 +2071,83 @@ test('colour: colour layers under the lines, a fill carried through the frames',
 	await expect.poll(() => dark(0.32, 0.45)).toBe(false);
 });
 
+/** rename the active layer */
+async function renameLayer(page: Page, from: string, to: string) {
+	await page.getByRole('button', { name: `Rename ${from}` }).click();
+	await page.getByLabel('Layer name').fill(to);
+	await page.getByLabel('Layer name').press('Enter');
+	await expect(page.getByRole('button', { name: `Rename ${to}` })).toBeVisible();
+}
+
+/** a layer's row in the Layers panel */
+const layerRow = (page: Page, name: string) =>
+	page
+		.getByRole('list', { name: 'Layers, top to bottom' })
+		.getByRole('listitem')
+		.filter({ has: page.getByText(name, { exact: true }) });
+
+test('stages: layers put in stages, sorted by their names, undone, saved and opened', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	await scribble(page, 0.3);
+	await renameLayer(page, 'Layer 1', 'Rough');
+	await page.getByRole('button', { name: 'New layer' }).click();
+	await scribble(page, 0.6);
+	await renameLayer(page, 'Layer 2', 'Inks');
+	await page.getByRole('button', { name: 'New layer' }).click();
+	await renameLayer(page, 'Layer 3', 'Hat');
+
+	// the hat in shading, picked in the layer's settings
+	const stage = page.getByRole('combobox', { name: 'Stage' });
+	await expect(stage).toHaveValue('');
+	await stage.selectOption({ label: 'Shading' });
+	await expect(layerRow(page, 'Hat').getByTitle('Stage: Shading')).toHaveText('Shade');
+	// one undo step
+	await page.keyboard.press('Control+z');
+	await expect(layerRow(page, 'Hat').getByTitle(/^Stage:/)).toHaveCount(0);
+	await expect(stage).toHaveValue('');
+	await page.keyboard.press('Control+Shift+z');
+	await expect(layerRow(page, 'Hat').getByTitle('Stage: Shading')).toBeVisible();
+
+	// the others sorted by their names (the hat keeps its own)
+	await page.getByRole('button', { name: 'Sort layers into stages' }).click();
+	await expect(layerRow(page, 'Rough').getByTitle('Stage: Rough')).toBeVisible();
+	await expect(layerRow(page, 'Inks').getByTitle('Stage: Clean-up')).toHaveText('Clean');
+	await expect(layerRow(page, 'Hat').getByTitle('Stage: Shading')).toBeVisible();
+	await page.keyboard.press('Control+z');
+	await expect(layerRow(page, 'Rough').getByTitle(/^Stage:/)).toHaveCount(0);
+	await expect(layerRow(page, 'Hat').getByTitle('Stage: Shading')).toBeVisible();
+	await page.keyboard.press('Control+Shift+z');
+	await expect(layerRow(page, 'Rough').getByTitle('Stage: Rough')).toBeVisible();
+	// none: back in no stage
+	await stage.selectOption({ label: 'None' });
+	await expect(layerRow(page, 'Hat').getByTitle(/^Stage:/)).toHaveCount(0);
+
+	// saved and opened again: the stages are kept
+	await page.keyboard.press('Control+s');
+	await expect(page.getByTestId('project-name')).toHaveText('Walk cycle', { timeout: 20_000 });
+	await page.keyboard.press('Control+o');
+	await expect(layerRow(page, 'Rough').getByTitle('Stage: Rough')).toBeVisible({
+		timeout: 20_000
+	});
+	await expect(layerRow(page, 'Inks').getByTitle('Stage: Clean-up')).toBeVisible();
+	await expect(layerRow(page, 'Hat').getByTitle(/^Stage:/)).toHaveCount(0);
+});
+
+test('stages: colour layers set up for the lines go in their stages', async ({ page }) => {
+	await stubTauri(page);
+	await ready(page);
+	await scribble(page, 0.4);
+	await page.getByRole('button', { name: 'Fill (G)' }).click();
+	await page.getByRole('button', { name: 'Set up colour layers' }).click();
+	await expect(page.getByText('Fill on the Colour layer')).toBeVisible();
+	await expect(layerRow(page, 'Colour (Layer 1)').getByTitle('Stage: Colour')).toBeVisible();
+	await expect(layerRow(page, 'Shadow (Layer 1)').getByTitle('Stage: Shading')).toBeVisible();
+	await expect(layerRow(page, 'Layer 1').getByTitle('Stage: Clean-up')).toBeVisible();
+});
+
 test('transitions: a white flash and a dissolve between cuts, in the export', async ({ page }) => {
 	await stubTauri(page);
 	await ready(page);

@@ -85,6 +85,9 @@ pub struct Header {
     /// drawing marks: drawing name → "key", "breakdown" or "inbetween"
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub drawing_kinds: std::collections::BTreeMap<String, String>,
+    /// layer stages: layer id → "board", "rough", "tiedown", "clean", "flats", "shade" or "comp"
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub layer_stages: std::collections::BTreeMap<String, String>,
     /// the timelapse: JPEG pictures and when each was taken (ms since 1970)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub timelapse: Vec<PacketTimelapse>,
@@ -274,6 +277,16 @@ pub fn to_project(
             .map_err(|e| e.to_string())?;
     }
     p.manifest.layers = h.layers.iter().map(|l| l.layer.clone()).collect();
+    // (only for layers there are, and stages the format knows)
+    p.manifest.timeline.layer_stages = h
+        .layer_stages
+        .into_iter()
+        .filter(|(l, st)| {
+            l.parse::<u32>()
+                .is_ok_and(|id| p.manifest.layers.iter().any(|x| x.id == id))
+                && ppstudio::STAGES.contains(&st.as_str())
+        })
+        .collect();
     p.manifest.groups = h.groups;
     p.manifest.active_layer = h.active_layer;
     p.manifest.extra = h.extra;
@@ -430,6 +443,7 @@ pub fn from_project(p: &Project, mut frames: Option<&mut FrameStore>) -> Result<
         audio,
         mouth_charts: m.timeline.mouth_charts.clone(),
         drawing_kinds: m.timeline.drawing_kinds.clone(),
+        layer_stages: m.timeline.layer_stages.clone(),
         timelapse,
         fonts,
         references,
@@ -564,6 +578,7 @@ mod tests {
             audio: vec![],
             mouth_charts: vec![],
             drawing_kinds: Default::default(),
+            layer_stages: Default::default(),
             timelapse: vec![],
             fonts: vec![],
             references: vec![],
@@ -759,6 +774,14 @@ mod tests {
         let pk = to_project(&encode(&hk, &blobs).unwrap(), "test", "now", None).unwrap();
         let (hk2, _) = decode(&from_project(&pk, None).unwrap()).unwrap();
         assert_eq!(hk2.drawing_kinds, hk.drawing_kinds);
+        // and layer stages
+        let mut hst = h.clone();
+        hst.layer_stages = [("3".to_string(), "clean".to_string())]
+            .into_iter()
+            .collect();
+        let pst = to_project(&encode(&hst, &blobs).unwrap(), "test", "now", None).unwrap();
+        let (hst2, _) = decode(&from_project(&pst, None).unwrap()).unwrap();
+        assert_eq!(hst2.layer_stages, hst.layer_stages);
         let d11 = hm2.drawings.iter().find(|d| d.id == 11).unwrap();
 
         // a timelapse: its pictures and times through the file and back
