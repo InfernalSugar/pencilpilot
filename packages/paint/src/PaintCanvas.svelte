@@ -150,6 +150,7 @@
 		linkedCopies,
 		pickable,
 		shownOf,
+		symmetryCopies,
 		transformStroke,
 		type Affine,
 		type LineStroke,
@@ -203,6 +204,7 @@
 	import { INK_SNAP_PX, nearestInk, nearestPoint, strokeEnds } from './ink-snap';
 	import { Stabilizer, stringLength } from './stabilizer';
 	import { cloneBrushSource, cloneOffset } from './clone';
+	import { hardEdges, lassoBack, lassoOutline, type LassoPoint } from './lasso-path';
 	import { textureById, type BrushTexture } from './brush-textures';
 	import { Timelapse } from './timelapse';
 	import Rulers from './Rulers.svelte';
@@ -290,6 +292,9 @@
 		brushTexture = null,
 		wandContiguous = true,
 		wandAllLayers = true,
+		lassoErase = false,
+		lassoSmoothing = 0,
+		lassoHard = false,
 		cloneAligned = true,
 		cloneAllLayers = false,
 		cloneHeal = false,
@@ -388,6 +393,12 @@
 		selectShape?: 'rect' | 'ellipse';
 		/** magic wand: colour tolerance (0–1) */
 		wandTolerance?: number;
+		/** lasso fill: cut the shape out instead of filling it (Alt flips it) */
+		lassoErase?: boolean;
+		/** lasso fill: how much the freehand parts are smoothed (0–1, 0 = off) */
+		lassoSmoothing?: number;
+		/** lasso fill: hard edges (no anti-aliasing) */
+		lassoHard?: boolean;
 		/** fill: how different a colour may be and still be filled (0–1) */
 		fillTolerance?: number;
 		/** fill: sample what you see (true) or the current layer only */
@@ -2017,14 +2028,152 @@
 	/** rasterise a rectangle / lasso to a canvas-sized mask and combine it */
 	// ---- lasso fill: draw a shape, it fills solid with the brush colour ----
 
-	let lassoFill = $state<[number, number][] | null>(null);
+	/**
+	 * The lasso fill's shape while it's drawn. A drag draws freehand; a click (a press let
+	 * go without dragging) puts down a corner, and the edge to the next point is straight.
+	 * One freehand drag fills as you let go; a shape begun with a click stays open until
+	 * it's closed (click the first point, double-click or Enter; Esc drops it).
+	 */
+	let lassoFill = $state<{
+		pts: LassoPoint[];
+		/** begun with a click: placed point by point, open until closed */
+		open: boolean;
+		/** the press, while it lasts (screen px, to tell a click from a drag) */
+		down: { id: number; x: number; y: number; moved: boolean } | null;
+		/** where the next straight edge would go (the pointer, between presses) */
+		at: Pt | null;
+		/** Alt was down at the press */
+		alt: boolean;
+	} | null>(null);
+	/** Alt is held (the lasso fill cuts instead of filling while it is) */
+	let altHeld = $state(false);
+	/** the last click of a shape placed point by point (a second one soon after closes it) */
+	let lassoLastClick = { t: 0, x: 0, y: 0 };
 
-	function commitLassoFill() {
-		if (!paint || !lassoFill) return;
-		const pts = lassoFill;
-		lassoFill = null;
-		fillPolygon(pts, 'Lasso fill');
+	/** the lasso fill cuts (its option, or Alt held, flips it) */
+	const lassoCuts = $derived(lassoErase !== (altHeld || !!lassoFill?.alt));
+	/** the smoothing, in canvas px (it follows the view, as the hand does) */
+	const lassoRadius = $derived((lassoSmoothing * 40) / Math.max(0.01, fit * zoom));
+	/** the outline as it will fill (smoothed), with the edge to the pointer while it's open */
+	const lassoShown = $derived.by(() => {
+		if (!lassoFill) return [];
+		const pts = [...lassoFill.pts];
+		if (lassoFill.open && !lassoFill.down && lassoFill.at)
+			pts.push({ p: lassoFill.at, corner: true });
+		return lassoOutline(pts, lassoRadius);
+	});
+
+	/** where a lasso fill point goes (Shift: at 45° steps from the last corner) */
+	function lassoAt(e: PointerEvent): Pt {
+		const p = toCanvas(e.clientX, e.clientY);
+		const last = lassoFill?.pts.at(-1)?.p;
+		return e.shiftKey && last && lassoFill?.open ? snapAngle(last, p, 45) : p;
 	}
+
+	/**
+	 * Close the lasso fill's shape and fill it (or cut it out), with its symmetry copies:
+	 * one undo step.
+	 */
+	function commitLassoFill(alt = false) {
+		if (!paint || !lassoFill) return;
+		const l = lassoFill;
+		lassoFill = null;
+		const outline = lassoOutline(l.pts, lassoRadius);
+		if (lassoErase !== (alt || l.alt)) erasePolygon(outline);
+		else fillPolygon(outline, 'Lasso fill', lassoHard, true);
+	}
+
+	/** A press of the lasso fill: a new shape, or the next point of one being placed. */
+	function lassoDown(e: PointerEvent) {
+		const p = lassoAt(e);
+		const down = { id: e.pointerId, x: e.clientX, y: e.clientY, moved: false };
+		if (lassoFill?.open) {
+			const { pts } = lassoFill;
+			const now = performance.now();
+			const last = lassoLastClick;
+			lassoLastClick = { t: now, x: e.clientX, y: e.clientY };
+			// a double-click, or a click on the first point, closes it
+			if (now - last.t < 400 && Math.hypot(e.clientX - last.x, e.clientY - last.y) < 8)
+				return commitLassoFill(e.altKey);
+			const near = 12 / Math.max(0.01, fit * zoom);
+			const [fx, fy] = pts[0].p;
+			if (pts.length >= 3 && Math.hypot(p[0] - fx, p[1] - fy) <= near)
+				return commitLassoFill(e.altKey);
+			capture(e);
+			lassoFill = { ...lassoFill, pts: [...pts, { p, corner: true }], down, at: null };
+			return;
+		}
+		const l = shownLayers().find((x) => x.id === paint!.activeLayer);
+		if (l && (l.locked || !l.visible)) return onblocked?.(l.visible ? 'locked' : 'hidden');
+		capture(e);
+		lassoLastClick = { t: performance.now(), x: e.clientX, y: e.clientY };
+		lassoFill = { pts: [{ p, corner: false }], open: false, down, at: null, alt: e.altKey };
+	}
+
+	function lassoMove(e: PointerEvent) {
+		if (!lassoFill) return;
+		altHeld = e.altKey;
+		const { down } = lassoFill;
+		if (!down) {
+			lassoFill = { ...lassoFill, at: lassoAt(e) };
+			return;
+		}
+		if (e.pointerId !== down.id) return;
+		const moved = down.moved || Math.hypot(e.clientX - down.x, e.clientY - down.y) > 4;
+		if (!moved) return;
+		const p = toCanvas(e.clientX, e.clientY);
+		lassoFill = {
+			...lassoFill,
+			pts: [...lassoFill.pts, { p, corner: false }],
+			down: { ...down, moved: true }
+		};
+	}
+
+	function lassoUp(e: PointerEvent) {
+		const l = lassoFill;
+		if (!l?.down || e.pointerId !== l.down.id) return;
+		if (e.type === 'pointercancel' && !l.open) {
+			lassoFill = null;
+			return;
+		}
+		// one freehand drag: it fills as you let go
+		if (!l.open && l.down.moved) return commitLassoFill(e.altKey);
+		// a click to begin: the shape is placed point by point from here
+		if (!l.open) {
+			lassoFill = { ...l, pts: [{ ...l.pts[0], corner: true }], open: true, down: null };
+			return;
+		}
+		// a drag in a shape being placed: its end is a corner (a straight edge goes on from it)
+		const pts = l.pts.slice();
+		if (l.down.moved) {
+			pts[pts.length - 1] = { ...pts[pts.length - 1], corner: true };
+			lassoLastClick = { t: 0, x: 0, y: 0 };
+		}
+		lassoFill = { ...l, pts, down: null, at: toCanvas(e.clientX, e.clientY) };
+	}
+
+	/** Enter closes the shape being placed, Esc drops it, Backspace takes the last point back. */
+	$effect(() => {
+		if (!lassoFill?.open) return;
+		const onKey = (e: KeyboardEvent) => {
+			if (typing(e.target) || !['Enter', 'Escape', 'Backspace'].includes(e.key)) return;
+			// (before the screen's own keys: Esc would drop the selection, Backspace clear)
+			e.preventDefault();
+			e.stopImmediatePropagation();
+			if (e.key === 'Enter') return commitLassoFill(e.altKey);
+			if (e.key === 'Escape' || !lassoFill) return void (lassoFill = null);
+			// (a click straight after isn't the second half of a double-click)
+			lassoLastClick = { t: 0, x: 0, y: 0 };
+			const pts = lassoBack(lassoFill.pts);
+			lassoFill = pts.length ? { ...lassoFill, pts } : null;
+		};
+		window.addEventListener('keydown', onKey, true);
+		return () => window.removeEventListener('keydown', onKey, true);
+	});
+	// another tool: the half-drawn shape goes
+	$effect(() => {
+		if (tool !== 'lasso-fill') untrack(() => (lassoFill = null));
+	});
 
 	/**
 	 * Close and fill: a stroke that ends near where it began (within ~24 screen pixels,
@@ -2057,26 +2206,52 @@
 		return true;
 	}
 
-	/** Fill a closed shape with the brush colour (one undo step). */
-	function fillPolygon(pts: [number, number][], label: string) {
-		if (!paint || pts.length < 3) return false;
+	/** A shape and, with symmetry on, its mirrored / turned copies. */
+	function withSymmetry(pts: Pt[]): Pt[][] {
+		const sym = guides?.symmetry;
+		const mode = sym?.mode;
+		if (!sym || !mode || mode === 'off' || !pts.length) return [pts];
+		const at = pts.map((p) => symmetryCopies(mode, sym.n, sym.c[0], sym.c[1], p[0], p[1]));
+		return [pts, ...at[0].map((_, k) => at.map((copies) => copies[k]))];
+	}
+
+	/**
+	 * A closed shape's coverage of the canvas (0–255 a pixel; anti-aliased unless `hard`).
+	 * `mirror`: its symmetry copies too.
+	 */
+	function coverageOf(pts: [number, number][], hard = false, mirror = false) {
 		const off = new OffscreenCanvas(width, height);
 		const c = off.getContext('2d')!;
 		c.fillStyle = '#fff';
-		c.beginPath();
-		c.moveTo(...pts[0]);
-		for (const p of pts.slice(1)) c.lineTo(...p);
-		c.closePath();
-		c.fill();
+		for (const shape of mirror ? withSymmetry(pts) : [pts]) {
+			c.beginPath();
+			c.moveTo(...shape[0]);
+			for (const p of shape.slice(1)) c.lineTo(...p);
+			c.closePath();
+			c.fill();
+		}
 		const rgba = c.getImageData(0, 0, width, height).data;
 		const coverage = new Uint8Array(width * height);
 		for (let i = 0; i < coverage.length; i++) coverage[i] = rgba[i * 4 + 3];
+		return hard ? hardEdges(coverage) : coverage;
+	}
+
+	/** Fill a closed shape with the brush colour (one undo step). */
+	function fillPolygon(pts: [number, number][], label: string, hard = false, mirror = false) {
+		if (!paint || pts.length < 3) return false;
+		const coverage = coverageOf(pts, hard, mirror);
 		const n = parseInt(color.slice(1), 16) || 0;
 		return changed(
 			paint.fillMask(coverage, (n >> 16) & 255, (n >> 8) & 255, n & 255, opacity),
 			undefined,
 			label
 		);
+	}
+
+	/** Cut a closed shape (and its symmetry copies) out of the active layer: one undo step. */
+	function erasePolygon(pts: [number, number][]) {
+		if (!paint || pts.length < 3) return false;
+		return changed(paint.eraseMask(coverageOf(pts, lassoHard, true)), undefined, 'Lasso erase');
 	}
 
 	/** A box marquee dragged to `p`; with Shift a square (circle), its corners on the grid when it's on. */
@@ -3751,7 +3926,8 @@
 			return;
 		}
 		// eyedropper: the tool, or Alt+click with the brush
-		if (tool === 'picker' || (e.altKey && e.pointerType !== 'touch')) {
+		// (not the lasso fill: there Alt cuts)
+		if (tool === 'picker' || (e.altKey && e.pointerType !== 'touch' && tool !== 'lasso-fill')) {
 			capture(e);
 			picking = e.pointerId;
 			pick(e);
@@ -3885,13 +4061,7 @@
 			measuring = e.pointerId;
 			return;
 		}
-		if (tool === 'lasso-fill') {
-			const l = shownLayers().find((x) => x.id === paint!.activeLayer);
-			if (l && (l.locked || !l.visible)) return onblocked?.(l.visible ? 'locked' : 'hidden');
-			capture(e);
-			lassoFill = [toCanvas(e.clientX, e.clientY)];
-			return;
-		}
+		if (tool === 'lasso-fill') return lassoDown(e);
 		if (tool === 'select-lasso' && poly) return polyClick(polyAt(e));
 		if (tool === 'select-rect' || tool === 'select-lasso') {
 			capture(e);
@@ -4080,6 +4250,7 @@
 			grad ||
 			penDrag ||
 			poly ||
+			lassoFill?.open ||
 			measuring !== null ||
 			(linePointer !== null && !lines.erasing);
 		if (!constrained) return;
@@ -4194,10 +4365,7 @@
 		}
 		if (picking === e.pointerId) return pick(e);
 		if (xfDrag) return xfMove(e);
-		if (lassoFill) {
-			lassoFill = [...lassoFill, toCanvas(e.clientX, e.clientY)];
-			return;
-		}
+		if (lassoFill) return lassoMove(e);
 		if (measuring === e.pointerId && measureSeg) {
 			const to = toCanvas(e.clientX, e.clientY);
 			measureSeg = [measureSeg[0], e.shiftKey ? snapAngle(measureSeg[0], to, 15) : to];
@@ -4331,7 +4499,7 @@
 			}
 			return;
 		}
-		if (lassoFill) return commitLassoFill();
+		if (lassoFill?.down) return lassoUp(e);
 		if (measuring === e.pointerId) {
 			measuring = null;
 			return;
@@ -4494,7 +4662,12 @@
 			spaceHeld = true;
 		}
 		if (e.key === 'Control' || e.key === 'Meta') ctrlHeld = hovering && !e.altKey;
-		if (e.key === 'Alt') ctrlHeld = false;
+		if (e.key === 'Alt') {
+			ctrlHeld = false;
+			altHeld = true;
+			// (Alt alone would open the menu bar in some browsers: not while it cuts)
+			if (tool === 'lasso-fill' && lassoFill) e.preventDefault();
+		}
 	}
 	function keyup(e: KeyboardEvent) {
 		if (e.key === 'Shift') {
@@ -4503,6 +4676,7 @@
 			shiftChanged(false);
 		}
 		if (e.code === 'Space') spaceHeld = false;
+		if (e.key === 'Alt') altHeld = false;
 		if (e.key === 'Control' || e.key === 'Meta') ctrlHeld = false;
 	}
 
@@ -5545,6 +5719,7 @@
 		spaceHeld = false;
 		ctrlHeld = false;
 		shiftHeld = false;
+		altHeld = false;
 		lineHover = null;
 	}}
 />
@@ -5911,19 +6086,56 @@
 					: showLength(len, prefs.units, prefs.ppi)} · {Math.round(deg)}°
 			</span>
 		{/if}
-		{#if lassoFill && lassoFill.length > 1}
+		{#if lassoFill && (lassoShown.length > 1 || lassoFill.open)}
+			{@const px = 1 / Math.max(0.01, fit * zoom)}
 			<svg
 				class="xf"
 				viewBox="0 0 {width} {height}"
 				preserveAspectRatio="none"
 				aria-hidden="true"
 				data-testid="lasso-fill-preview"
+				data-mode={lassoCuts ? 'erase' : 'fill'}
+				data-points={lassoShown.length}
+				data-copies={withSymmetry(lassoShown).length}
 			>
-				<polygon
-					class="lasso-fill"
-					points={lassoFill.map((p) => p.join(',')).join(' ')}
-					style="fill: {color}"
-				/>
+				{#if lassoCuts}
+					<!-- a cut: hatched, with a dashed edge -->
+					<defs>
+						<pattern
+							id="lasso-cut-hatch"
+							patternUnits="userSpaceOnUse"
+							width={8 * px}
+							height={8 * px}
+							patternTransform="rotate(45)"
+						>
+							<rect width={8 * px} height={8 * px} fill="rgba(255, 255, 255, 0.35)" />
+							<rect width={4 * px} height={8 * px} fill="rgba(22, 22, 26, 0.35)" />
+						</pattern>
+					</defs>
+					{#each withSymmetry(lassoShown) as shape, i (i)}
+						<polygon
+							class="lasso-fill cut"
+							points={shape.map((p) => p.join(',')).join(' ')}
+							style="fill: url(#lasso-cut-hatch)"
+						/>
+					{/each}
+				{:else}
+					{#each withSymmetry(lassoShown) as shape, i (i)}
+						<polygon
+							class="lasso-fill"
+							points={shape.map((p) => p.join(',')).join(' ')}
+							style="fill: {color}"
+						/>
+					{/each}
+				{/if}
+				{#if lassoFill.open}
+					<circle
+						class="lasso-first"
+						cx={lassoFill.pts[0].p[0]}
+						cy={lassoFill.pts[0].p[1]}
+						r={5 * px}
+					/>
+				{/if}
 			</svg>
 		{/if}
 		{#if showOutline && cursorAt && (prefs.cursorWhilePainting || !strokeDown)}
@@ -6587,11 +6799,22 @@
 		vector-effect: non-scaling-stroke;
 	}
 
-	.lasso-fill {
+	.xf polygon.lasso-fill {
 		opacity: 0.45;
 		stroke: #16161a;
 		stroke-width: 1.5;
 		stroke-dasharray: 6 4;
+		vector-effect: non-scaling-stroke;
+	}
+	.xf polygon.lasso-fill.cut {
+		opacity: 1;
+		stroke: #e5484d;
+		stroke-dasharray: 4 3;
+	}
+	.xf .lasso-first {
+		fill: #fff;
+		stroke: #16161a;
+		stroke-width: 1.5;
 		vector-effect: non-scaling-stroke;
 	}
 	.xf .cur-out,

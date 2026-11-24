@@ -65,6 +65,12 @@ export class ToolOptions {
 	wandTolerance = $state(0.15);
 	/** magic wand and Select colour: what you see, or only the current layer */
 	wandAllLayers = $state(true);
+	/** lasso fill: fill the shape, or cut it out of the layer (Alt flips it) */
+	lassoMode = $state<'fill' | 'erase'>('fill');
+	/** lasso fill: smoothing for the freehand parts (0–1, 0 = off) */
+	lassoSmoothing = $state(0);
+	/** lasso fill: hard edges (no anti-aliasing) */
+	lassoHard = $state(false);
 	/** grow / shrink the selection by this much (canvas px) */
 	growPx = $state(4);
 	/** the Clone tool: later strokes keep the first one's offset (Photoshop's Aligned) */

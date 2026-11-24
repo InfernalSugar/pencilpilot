@@ -4358,6 +4358,9 @@
 						wandTolerance={toolOpts.wandTolerance}
 						wandContiguous={toolOpts.wandContiguous}
 						wandAllLayers={toolOpts.wandAllLayers}
+						lassoErase={toolOpts.lassoMode === 'erase'}
+						lassoSmoothing={toolOpts.lassoSmoothing}
+						lassoHard={toolOpts.lassoHard}
 						cloneAligned={toolOpts.cloneAligned}
 						cloneAllLayers={toolOpts.cloneAllLayers}
 						cloneHeal={toolOpts.cloneHeal}
