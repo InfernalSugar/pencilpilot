@@ -2901,6 +2901,8 @@ test('composition creator: a guide of your own, previewed live, saved, placed on
 	await expect.poll(async () => Number(await circle.getAttribute('cx'))).toBeGreaterThan(cx0 + 40);
 	await drag('composition-size', 150, 100);
 	await expect.poll(async () => Number(await circle.getAttribute('rx'))).toBeLessThan(rx0 * 0.9);
+	// the row wraps: every button in it is on screen, none cut off at the edge
+	for (const b of await row.locator('button').all()) await expect(b).toBeInViewport({ ratio: 1 });
 	await row.getByRole('button', { name: 'Re-centre' }).click();
 	await expect.poll(async () => Number(await circle.getAttribute('cx'))).toBeCloseTo(cx0, 1);
 	await expect.poll(async () => Number(await circle.getAttribute('rx'))).toBeCloseTo(rx0, 1);

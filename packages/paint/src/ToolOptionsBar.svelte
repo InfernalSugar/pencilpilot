@@ -340,7 +340,7 @@
 	</div>
 {/if}
 {#if opts.compositionOpen}
-	<div class="fill-opts guides-opts" role="group" aria-label="Composition guides">
+	<div class="fill-opts guides-opts comp-opts" role="group" aria-label="Composition guides">
 		<div class="seg" role="radiogroup" aria-label="Composition">
 			{#each COMPOSITIONS as p (p)}
 				{@const shapes = compositionShapes({ preset: p, flipX: false, flipY: false }, 24, 16)}
@@ -1196,6 +1196,15 @@
 	}
 	.fill-opts > * {
 		flex: none;
+	}
+	/* the Composition row grows with your own guides: it wraps, nothing goes off the edge */
+	.fill-opts.comp-opts {
+		flex-wrap: wrap;
+		overflow-x: visible;
+	}
+	.fill-opts.comp-opts > .seg {
+		flex: 0 1 auto;
+		flex-wrap: wrap;
 	}
 	/* (as tall as a row of buttons: the canvas stays put when Move's box comes) */
 	.move-hint {
