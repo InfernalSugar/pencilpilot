@@ -871,6 +871,37 @@ test('guides: grid, ruler and perspective assist straighten strokes; vanishing p
 		.not.toBe(before);
 });
 
+test('composition guides of your own: made, exported as a download, imported back', async ({
+	page
+}) => {
+	await ready(page);
+	await page.getByRole('button', { name: 'Composition', exact: true }).click();
+	const row = page.getByRole('group', { name: 'Composition guides' });
+	await row.getByRole('button', { name: 'New composition…' }).click();
+	const win = page.getByRole('dialog', { name: 'New composition' });
+	await win.getByRole('tab', { name: 'Start from' }).click();
+	await win.getByRole('button', { name: 'Golden spiral' }).click();
+	await expect(win.getByTestId('composition-preview').locator('path.spiral')).toHaveCount(1);
+	await win.getByLabel('Composition name').fill('Shell');
+	const download = page.waitForEvent('download');
+	await win.getByRole('button', { name: 'Export…' }).click();
+	const file = await download;
+	expect(file.suggestedFilename()).toBe('Shell.ppcomp.json');
+	const text = await (await file.createReadStream()).toArray();
+	await win.getByRole('button', { name: 'Save to My compositions' }).click();
+	const overlay = page.getByTestId('composition-guide');
+	await expect(overlay).toHaveAttribute('data-name', 'Shell');
+	await expect(overlay.locator('path')).toHaveCount(1);
+	// the file brings it back as another one
+	await row.getByLabel('Composition files to import').setInputFiles({
+		name: 'Shell.ppcomp.json',
+		mimeType: 'application/json',
+		buffer: Buffer.concat(text)
+	});
+	await expect(row.getByRole('status')).toHaveText('1 composition added to My compositions.');
+	await expect(row.getByRole('radio', { name: 'Shell' })).toHaveCount(2);
+});
+
 test('symmetry: strokes are mirrored live, one undo removes all copies, the centre moves', async ({
 	page
 }) => {

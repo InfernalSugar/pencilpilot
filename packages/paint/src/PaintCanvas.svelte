@@ -163,10 +163,13 @@
 	/** other players don't have "My brushes": they see the brush it's based on */
 	const sharedBrushId = (id: string) => (isCustom(id) ? (customBrush(id)?.base ?? id) : id);
 	import {
-		arcsPath,
 		closestDirection,
-		compositionShapes,
+		compositionFrame,
+		compositionOn,
+		compositionParts,
 		edgePin,
+		MAX_SCALE,
+		MIN_SCALE,
 		gridLines,
 		perspectiveRays,
 		project,
@@ -203,6 +206,7 @@
 	import { textureById, type BrushTexture } from './brush-textures';
 	import { Timelapse } from './timelapse';
 	import Rulers from './Rulers.svelte';
+	import CompositionShapes from './CompositionShapes.svelte';
 	import {
 		panAfterZoom,
 		paintSize,
@@ -2993,7 +2997,8 @@
 	/** perspective: directions on offer until the stroke has shown which way it goes */
 	let snapPending: { start: Pt; dirs: Pt[] } | null = null;
 	let guideDrag: {
-		what: 'vp' | 'a' | 'b' | 'ruler' | 'sym';
+		/** comp: the composition guide moved; compScale: a corner, sizing it about its middle */
+		what: 'vp' | 'a' | 'b' | 'ruler' | 'sym' | 'comp' | 'compScale';
 		i: number;
 		start: Pt;
 		from: GuideSettings;
@@ -3048,6 +3053,24 @@
 			if (near(guides.perspective.vps[i]) || (pin && near(pin.at)))
 				return { what: 'vp', i, start: p, from: $state.snapshot(guides) as GuideSettings };
 		}
+		if (compositionOn(guides)) {
+			const [x, y, fw, fh] = compositionFrame(guides.composition, width, height);
+			const corners: Pt[] = [
+				[x, y],
+				[x + fw, y],
+				[x + fw, y + fh],
+				[x, y + fh]
+			];
+			if (corners.some(near))
+				return {
+					what: 'compScale',
+					i: 0,
+					start: p,
+					from: $state.snapshot(guides) as GuideSettings
+				};
+			if (near([x + fw / 2, y + fh / 2]))
+				return { what: 'comp', i: 0, start: p, from: $state.snapshot(guides) as GuideSettings };
+		}
 		if (guides.ruler.on) {
 			if (near(guides.ruler.a))
 				return { what: 'a', i: 0, start: p, from: $state.snapshot(guides) as GuideSettings };
@@ -3080,7 +3103,20 @@
 		else if (guideDrag.what === 'a') g.ruler.a = turn(g.ruler.a, g.ruler.b);
 		else if (guideDrag.what === 'b') g.ruler.b = turn(g.ruler.b, g.ruler.a);
 		else if (guideDrag.what === 'sym') g.symmetry.c = shift(g.symmetry.c);
-		else g.ruler = { ...g.ruler, a: shift(g.ruler.a), b: shift(g.ruler.b) };
+		else if (guideDrag.what === 'comp') {
+			const [ox, oy] = g.composition.offset ?? [0, 0];
+			if (shiftKey) [dx, dy] = shiftOffset(null, [dx, dy]);
+			const k = (v: number) => Math.max(-1, Math.min(1, v));
+			g.composition.offset = [k(ox + dx / width), k(oy + dy / height)];
+		} else if (guideDrag.what === 'compScale') {
+			// sized about its middle, as far out as the corner is dragged
+			const [x, y, fw, fh] = compositionFrame(g.composition, width, height);
+			const [cx, cy] = [x + fw / 2, y + fh / 2];
+			const was = Math.hypot(guideDrag.start[0] - cx, guideDrag.start[1] - cy);
+			const now = Math.hypot(p[0] - cx, p[1] - cy);
+			const s = (g.composition.scale ?? 1) * (was > 0 ? now / was : 1);
+			g.composition.scale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, s));
+		} else g.ruler = { ...g.ruler, a: shift(g.ruler.a), b: shift(g.ruler.b) };
 		onguides?.(g);
 	}
 
@@ -3097,9 +3133,7 @@
 	const guideGrid = $derived(guides?.grid.on ? gridLines(guides, width, height) : []);
 	/** the composition overlay (thirds, the golden spiral…): only shown, never in the picture */
 	const guideComp = $derived(
-		guides?.composition && guides.composition.preset !== 'off'
-			? compositionShapes(guides.composition, width, height)
-			: null
+		compositionOn(guides) ? compositionParts(guides!.composition, width, height) : null
 	);
 	const guideRays = $derived(
 		guides && guides.perspective.points
@@ -5543,17 +5577,18 @@
 					<line class="ray" {x1} {y1} {x2} {y2} />
 				{/each}
 				{#if guideComp}
+					{@const own = guides.composition.custom}
 					<g
 						class="composition"
 						data-testid="composition-guide"
 						data-preset={guides.composition.preset}
+						data-name={own?.name}
 					>
-						{#each guideComp.lines as [x1, y1, x2, y2], i (i)}
-							<line {x1} {y1} {x2} {y2} />
-						{/each}
-						{#if guideComp.arcs.length}
-							<path class="spiral" d={arcsPath(guideComp.arcs)} />
-						{/if}
+						<CompositionShapes
+							parts={guideComp}
+							color={own?.color ?? 'var(--guide, #e8492f)'}
+							opacity={own?.opacity ?? 0.6}
+						/>
 					</g>
 				{/if}
 				{#if guides.perspective.points >= 1 && guides.perspective.points <= 2}
@@ -5604,6 +5639,29 @@
 							<circle class="handle" data-testid="vp-handle" cx={x} cy={y} r={hr} />
 						{/if}
 					{/each}
+					{#if guideComp}
+						<!-- the composition guide: its frame, a handle in the middle to move it and
+							one on each corner to size it -->
+						{@const [x, y, fw, fh] = compositionFrame(guides.composition, width, height)}
+						<rect class="comp-frame" {x} {y} width={fw} height={fh} />
+						<circle
+							class="handle"
+							data-testid="composition-move"
+							cx={x + fw / 2}
+							cy={y + fh / 2}
+							r={hr}
+						/>
+						{#each [[x, y], [x + fw, y], [x + fw, y + fh], [x, y + fh]] as [cx, cy], k (k)}
+							<rect
+								class="handle"
+								data-testid="composition-size"
+								x={cx - hr}
+								y={cy - hr}
+								width={2 * hr}
+								height={2 * hr}
+							/>
+						{/each}
+					{/if}
 					{#if guides.ruler.on}
 						<circle class="handle" cx={guides.ruler.a[0]} cy={guides.ruler.a[1]} r={hr} />
 						<circle class="handle" cx={guides.ruler.b[0]} cy={guides.ruler.b[1]} r={hr} />
@@ -6666,16 +6724,13 @@
 		stroke-opacity: 0.6;
 		stroke-width: 1.5;
 	}
-	.guides .composition line,
-	.guides .composition path {
+	.guides .comp-frame {
 		fill: none;
 		stroke: var(--guide, #e8492f);
-		stroke-opacity: 0.6;
-		stroke-width: 1.5;
+		stroke-opacity: 0.5;
+		stroke-width: 1;
+		stroke-dasharray: 4 4;
 		vector-effect: non-scaling-stroke;
-	}
-	.guides .composition .spiral {
-		stroke-width: 2;
 	}
 	.guides .vp-pin .arrow {
 		fill: var(--guide, #e8492f);

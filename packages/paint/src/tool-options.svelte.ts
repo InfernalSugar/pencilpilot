@@ -9,6 +9,7 @@ import type { CanvasStatus, ImportResult } from './PaintCanvas.svelte';
 import {
 	centredGuides,
 	defaultGuides,
+	NO_COMPOSITION,
 	withPerspective,
 	type Composition,
 	type GuideSettings
@@ -31,6 +32,11 @@ export interface ToolHost {
 	onguides?(g: GuideSettings): void;
 	/** the canvas size (for putting guides back in the middle) */
 	size?(): { width: number; height: number };
+	/**
+	 * Save a small text file (a composition guide), asking where: the path, or null if
+	 * cancelled. Without it, the browser downloads the file.
+	 */
+	saveFile?(name: string, text: string): Promise<string | null>;
 }
 
 export const NO_ADJUST = { hue: 0, saturation: 0, brightness: 0, contrast: 0, blur: 0 };
@@ -158,6 +164,10 @@ export class ToolOptions {
 		this.host.onguides?.(g);
 	}
 
+	/** the canvas's size (800 × 600 when the screen doesn't say) */
+	get canvasSize() {
+		return this.host.size?.() ?? { width: 800, height: 600 };
+	}
 	/** whether the guides can be put back in the middle */
 	get canCentre() {
 		return !!this.host.size;
@@ -169,12 +179,23 @@ export class ToolOptions {
 	}
 	/** a composition overlay (or off), or which way round it goes */
 	setComposition(c: Partial<Composition>) {
-		const was: Composition = this.guides.composition ?? {
-			preset: 'off',
-			flipX: false,
-			flipY: false
-		};
+		const was: Composition = this.guides.composition ?? NO_COMPOSITION;
 		this.setGuides({ ...this.guides, composition: { ...was, ...c } });
+	}
+	/** the composition guide back to filling the canvas */
+	recentreComposition() {
+		this.setComposition({ offset: [0, 0], scale: 1 });
+	}
+	/** Save a text file (asking where, in the app; a download on the website): where it went. */
+	async saveFile(name: string, text: string): Promise<string | null> {
+		if (this.host.saveFile) return this.host.saveFile(name, text);
+		const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+		const a = document.createElement('a');
+		a.href = url;
+		a.download = name;
+		a.click();
+		setTimeout(() => URL.revokeObjectURL(url), 1000);
+		return name;
 	}
 	/** 1-, 2- or 3-point perspective (or off), the points laid out for it unless moved */
 	setPerspective(points: 0 | 1 | 2 | 3) {
