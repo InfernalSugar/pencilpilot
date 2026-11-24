@@ -1053,9 +1053,36 @@
 <TextOptions text={opts.text} {tool} {status} />
 {#if tool === 'lasso-fill'}
 	<div class="fill-opts" role="group" aria-label="Lasso fill">
+		<div class="seg" role="radiogroup" aria-label="Lasso fill mode">
+			{#each [['fill', 'Fill', 'Fill the shape with the colour'], ['erase', 'Erase', 'Cut the shape out of the layer (or hold Alt as you finish)']] as const as [id, label, title] (id)}
+				<button
+					type="button"
+					class="tool"
+					role="radio"
+					{title}
+					aria-checked={opts.lassoMode === id}
+					onclick={() => (opts.lassoMode = id)}
+				>
+					{label}
+				</button>
+			{/each}
+		</div>
+		<label class="slider" title="Smooths the freehand parts of the shape; corners stay sharp">
+			<span>Smoothing <b>{Math.round(opts.lassoSmoothing * 100)}%</b></span>
+			<input type="range" min="0" max="1" step="0.05" bind:value={opts.lassoSmoothing} />
+		</label>
+		<button
+			type="button"
+			class="tool"
+			aria-pressed={opts.lassoHard}
+			title="Hard edges: no soft (anti-aliased) pixels along the edge"
+			onclick={() => (opts.lassoHard = !opts.lassoHard)}
+		>
+			Hard edges
+		</button>
 		<span class="adjust-msg plain">
-			Draw a shape: it fills with the colour when you let go. Great for blocking in big shapes and
-			shadows.
+			Drag to draw, click for straight edges (click the first point, double-click or press Enter to
+			close). Hold Alt to cut instead.
 		</span>
 	</div>
 {/if}

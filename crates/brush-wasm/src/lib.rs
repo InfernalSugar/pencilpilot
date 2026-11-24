@@ -682,6 +682,12 @@ impl PaintCanvas {
         self.inner.fill_mask(coverage, [r, g, b], opacity)
     }
 
+    /// Cut the shape `coverage` out of the active layer (one undo step).
+    #[wasm_bindgen(js_name = eraseMask)]
+    pub fn erase_mask(&mut self, coverage: &[u8]) -> bool {
+        self.inner.erase_mask(coverage)
+    }
+
     // ---- symmetry ----
 
     /// `mode`: 0 off, 1 vertical, 2 horizontal, 3 quadrant, 4 radial (`n` copies); centre (cx, cy).

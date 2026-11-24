@@ -4619,3 +4619,151 @@ test('snap to ink: a line’s start and end join lines close by (an end first), 
 	expect(over[1][1]).toBeLessThanOrEqual(acrossY + 2.5);
 	expect(over[1][1]).toBeLessThan(pastY - 4);
 });
+
+// ---- the lasso fill: straight edges, freehand, erase ----
+
+test('lasso fill: clicked corners make straight edges, Enter fills them, one undo step', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	await page.getByRole('button', { name: /^Lasso fill/ }).click();
+	const k = await strokeKit(page);
+	await k.fresh();
+	// a click begins a shape placed point by point: nothing fills yet
+	await page.mouse.click(...k.at(0.2, 0.2));
+	await page.mouse.click(...k.at(0.7, 0.2));
+	await page.mouse.click(...k.at(0.7, 0.8));
+	await page.mouse.move(...k.at(0.5, 0.9));
+	const preview = page.getByTestId('lasso-fill-preview');
+	await expect(preview).toHaveAttribute('data-mode', 'fill');
+	expect(await ink(page)).toBe(0);
+	// Backspace takes the last corner back; it goes down again
+	await page.keyboard.press('Backspace');
+	await page.mouse.move(...k.at(0.5, 0.9));
+	await expect(preview).toHaveAttribute('data-points', '3');
+	await page.mouse.click(...k.at(0.7, 0.8));
+	await page.keyboard.press('Enter');
+	await expect(preview).toHaveCount(0);
+	// a triangle: filled above the diagonal, empty below it, the edge straight all along
+	await expect.poll(() => inkIn(page, 0.55, 0.25, 0.65, 0.35)).toBeGreaterThan(50);
+	for (const t of [0.3, 0.45, 0.6]) {
+		const [x, y] = [0.2 + 0.5 * t, 0.2 + 0.6 * t];
+		expect(await inkIn(page, x + 0.02, y - 0.04, x + 0.03, y - 0.03)).toBeGreaterThan(0);
+		expect(await inkIn(page, x - 0.03, y + 0.03, x - 0.02, y + 0.04)).toBe(0);
+	}
+	expect(await inkIn(page, 0.75, 0.2, 0.9, 0.9)).toBe(0);
+	// Esc drops a half-placed shape
+	await page.mouse.click(...k.at(0.8, 0.85));
+	await page.mouse.click(...k.at(0.9, 0.85));
+	await expect(preview).toBeVisible();
+	await page.keyboard.press('Escape');
+	await expect(preview).toHaveCount(0);
+	// one undo step takes the whole fill away
+	await page.keyboard.press('Control+z');
+	await expect.poll(() => ink(page)).toBe(0);
+});
+
+test('lasso fill: Alt or Erase cuts the shape out of the layer, one undo step each', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	await page.getByRole('button', { name: /^Lasso fill/ }).click();
+	const k = await strokeKit(page);
+	await k.fresh();
+	// one freehand drag fills as it's let go
+	await page.mouse.move(...k.at(0.1, 0.1));
+	await page.mouse.down();
+	for (const [x, y] of [
+		[0.9, 0.1],
+		[0.9, 0.9],
+		[0.1, 0.9]
+	])
+		await page.mouse.move(...k.at(x, y), { steps: 10 });
+	await page.mouse.up();
+	await expect.poll(() => inkIn(page, 0.4, 0.4, 0.6, 0.6)).toBeGreaterThan(100);
+	const full = await ink(page);
+
+	// Alt held: the shape shows as a cut, and closing it (a click on its first point) cuts a hole
+	await page.keyboard.down('Alt');
+	for (const [x, y] of [
+		[0.3, 0.3],
+		[0.7, 0.3],
+		[0.7, 0.7],
+		[0.3, 0.7]
+	])
+		await page.mouse.click(...k.at(x, y));
+	await expect(page.getByTestId('lasso-fill-preview')).toHaveAttribute('data-mode', 'erase');
+	await page.mouse.click(...k.at(0.3, 0.3));
+	await page.keyboard.up('Alt');
+	await expect.poll(() => inkIn(page, 0.35, 0.35, 0.65, 0.65)).toBe(0);
+	expect(await inkIn(page, 0.15, 0.15, 0.25, 0.85)).toBeGreaterThan(100);
+	// one undo step fills the hole again
+	await page.keyboard.press('Control+z');
+	await expect.poll(() => ink(page)).toBe(full);
+
+	// the Erase option: a plain drag cuts
+	await page.getByRole('radio', { name: 'Erase' }).click();
+	await k.fresh();
+	await page.mouse.move(...k.at(0.4, 0.4));
+	await page.mouse.down();
+	for (const [x, y] of [
+		[0.6, 0.4],
+		[0.6, 0.6],
+		[0.4, 0.6]
+	])
+		await page.mouse.move(...k.at(x, y), { steps: 10 });
+	await expect(page.getByTestId('lasso-fill-preview')).toHaveAttribute('data-mode', 'erase');
+	await page.mouse.up();
+	await expect.poll(() => inkIn(page, 0.45, 0.45, 0.55, 0.55)).toBe(0);
+	await page.keyboard.press('Control+z');
+	await expect.poll(() => ink(page)).toBe(full);
+});
+
+test('lasso fill with Vertical symmetry: the fill and the cut both mirror, one undo step each', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	await page.getByRole('button', { name: 'Guides', exact: true }).click();
+	await page
+		.getByRole('radiogroup', { name: 'Symmetry' })
+		.getByRole('radio', { name: 'Vertical' })
+		.click();
+	await page.getByRole('button', { name: 'Guides', exact: true }).click();
+	await page.getByRole('button', { name: /^Lasso fill/ }).click();
+	const k = await strokeKit(page);
+	await k.fresh();
+	// a box on the left, placed corner by corner: its mirror shows and fills on the right
+	for (const [x, y] of [
+		[0.1, 0.2],
+		[0.4, 0.2],
+		[0.4, 0.8]
+	])
+		await page.mouse.click(...k.at(x, y));
+	await page.mouse.click(...k.at(0.1, 0.8));
+	await expect(page.getByTestId('lasso-fill-preview')).toHaveAttribute('data-copies', '2');
+	await page.keyboard.press('Enter');
+	await expect.poll(() => inkIn(page, 0.15, 0.3, 0.35, 0.7)).toBeGreaterThan(100);
+	await expect.poll(() => inkIn(page, 0.65, 0.3, 0.85, 0.7)).toBeGreaterThan(100);
+	expect(await inkIn(page, 0.45, 0.3, 0.55, 0.7)).toBe(0);
+	const full = await ink(page);
+
+	// Alt: a cut on the left cuts the mirrored place on the right too
+	await page.keyboard.down('Alt');
+	await page.mouse.click(...k.at(0.2, 0.4));
+	await page.mouse.click(...k.at(0.3, 0.4));
+	await page.mouse.click(...k.at(0.3, 0.6));
+	await page.mouse.dblclick(...k.at(0.2, 0.6));
+	await page.keyboard.up('Alt');
+	await expect.poll(() => inkIn(page, 0.22, 0.42, 0.28, 0.58)).toBe(0);
+	await expect.poll(() => inkIn(page, 0.72, 0.42, 0.78, 0.58)).toBe(0);
+	expect(await inkIn(page, 0.12, 0.25, 0.18, 0.75)).toBeGreaterThan(50);
+	// one undo step brings both back
+	await page.keyboard.press('Control+z');
+	await expect.poll(() => ink(page)).toBe(full);
+	// and one more takes both fills away
+	await page.keyboard.press('Control+z');
+	await expect.poll(() => ink(page)).toBe(0);
+});

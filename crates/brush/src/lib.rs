@@ -2232,6 +2232,68 @@ impl Painter {
         true
     }
 
+    /// Cut the shape `coverage` (one byte per canvas pixel, 0–255, anti-aliased
+    /// edges allowed) out of the active layer: the lasso fill's erase mode. Partly
+    /// covered pixels lose part of their paint; respects the selection. Nothing on
+    /// an alpha-locked layer (its transparency can't change). One undo step; false
+    /// if nothing changed.
+    pub fn erase_mask(&mut self, coverage: &[u8]) -> bool {
+        let (w, h) = (self.width as usize, self.height as usize);
+        if self.stroking.is_some() || coverage.len() != w * h || !self.idle() {
+            return false;
+        }
+        let active = self.active;
+        let Some(li) = self.index_of(active) else {
+            return false;
+        };
+        let props = &self.layers[li].props;
+        if props.locked || props.alpha_lock || !self.shown(li) {
+            return false;
+        }
+        let sel = self.selection.clone();
+        let ts = TILE_SIZE;
+        let mut snap = Snapshot::new();
+        for (&key, tile) in &self.layers[li].surface.tiles {
+            let mut t = tile.clone();
+            let mut changed = false;
+            for (py, row) in t.iter_mut().enumerate() {
+                for (px, p) in row.iter_mut().enumerate() {
+                    let (cx, cy) = (
+                        key.0 as i64 * ts as i64 + px as i64,
+                        key.1 as i64 * ts as i64 + py as i64,
+                    );
+                    if p[3] == 0 || cx < 0 || cy < 0 || cx as usize >= w || cy as usize >= h {
+                        continue;
+                    }
+                    let i = cy as usize * w + cx as usize;
+                    let k = coverage[i] as f32 / 255.0
+                        * sel.as_ref().map_or(1.0, |s| s[i] as f32 / 255.0);
+                    if k <= 0.0 {
+                        continue;
+                    }
+                    let out = lerp_px(*p, [0; 4], k);
+                    if out != *p {
+                        *p = out;
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
+                snap.insert(key, Some(t));
+            }
+        }
+        if snap.is_empty() {
+            return false;
+        }
+        self.perform(Edit::Tiles {
+            drawing: 0,
+            layer: active,
+            mask: self.editing_mask(active),
+            snap,
+        });
+        true
+    }
+
     /// Fill the selection with `rgb` at `opacity` on the active layer (soft edges
     /// partly): one undo step. False if there's no selection or nothing changed.
     pub fn fill_selection(&mut self, rgb: [u8; 3], opacity: f32) -> bool {
@@ -6830,6 +6892,37 @@ mod tests {
         assert!(px(&p, 60, 60)[0] < 40 && px(&p, 100, 60)[0] > 240);
         // nothing to paint: no undo step
         assert!(!p.fill_mask(&vec![0; 256 * 128], [0, 0, 220], 1.0));
+    }
+
+    #[test]
+    fn erase_mask_cuts_the_lasso_shape_out() {
+        let mut p = Painter::new(256, 128);
+        assert!(p.fill_mask(&vec![255; 256 * 128], [0, 0, 220], 1.0));
+        let mut cov = rect_mask(&p, 40, 30, 120, 90);
+        cov[(60 * 256 + 120) as usize] = 128; // a half-covered edge pixel
+        assert!(p.erase_mask(&cov));
+        p.flush();
+        assert!(
+            px(&p, 80, 60)[0] > 240,
+            "the inside is cut out (white paper)"
+        );
+        assert!(
+            px(&p, 200, 60)[2] > 200 && px(&p, 200, 60)[0] < 40,
+            "outside stays"
+        );
+        let edge = px(&p, 120, 60);
+        assert!(edge[0] > 60 && edge[0] < 200, "edge is half way: {edge:?}");
+        // one undo step brings it back
+        assert!(p.undo());
+        p.flush();
+        assert!(px(&p, 80, 60)[0] < 40);
+        // the selection limits it
+        p.set_selection(&rect_mask(&p, 0, 0, 80, 128), 0);
+        assert!(p.erase_mask(&rect_mask(&p, 40, 30, 120, 90)));
+        p.flush();
+        assert!(px(&p, 60, 60)[0] > 240 && px(&p, 100, 60)[0] < 40);
+        // nothing to cut: no undo step
+        assert!(!p.erase_mask(&vec![0; 256 * 128]));
     }
 
     #[test]
