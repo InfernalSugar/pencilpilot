@@ -62,8 +62,17 @@ async function stubTauri(page: Page, stub: Stub = {}) {
 		const frames = new Map<number, Uint8Array>();
 		w.__frames = frames;
 		const TILE = 64 * 64 * 4;
+		// events the window listens to (plugin:event|listen): tests send them with __emit
+		const handlers: ((e: unknown) => void)[] = [];
+		const listening: { event: string; id: number }[] = [];
+		w.__emit = (event: string, payload: unknown) => {
+			for (const l of listening) if (l.event === event) handlers[l.id]?.({ event, payload });
+		};
 		w.__TAURI_INTERNALS__ = {
-			transformCallback: () => 0,
+			transformCallback: (f: (e: unknown) => void) => {
+				handlers.push(f);
+				return handlers.length - 1;
+			},
 			unregisterCallback: () => {},
 			metadata: { currentWindow: { label: 'main' }, currentWebview: { label: 'main' } },
 			invoke: async (
@@ -177,6 +186,21 @@ async function stubTauri(page: Page, stub: Stub = {}) {
 						}
 						return out.buffer;
 					}
+					case 'plugin:event|listen': {
+						const a = args as { event: string; handler: number };
+						listening.push({ event: a.event, id: a.handler });
+						return listening.length;
+					}
+					case 'share_host':
+						return {
+							invite: 'pp1-abc',
+							me: { id: 'me1', name: 'Me' },
+							members: [
+								{ id: 'me1', name: 'Me' },
+								{ id: 'sam1', name: 'Sam' }
+							],
+							host: true
+						};
 					case 'frames_swap': {
 						const ids = (args as { pairs: number[] }).pairs;
 						for (let i = 0; i + 1 < ids.length; i += 2) {
@@ -766,6 +790,58 @@ test('home: draw together has its own row, to host, join, or go back to a shared
 		.poll(async () => (await calls(page)).find((c) => c.cmd === 'share_join')?.json)
 		.toContain('"code":"pp1-abcDEF_123"');
 	expect(page.url()).not.toContain('pp1-');
+});
+
+test('draw together: the chat shows only in a session, sends, receives and counts unread', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	await expect(page.getByRole('region', { name: 'Chat' })).toHaveCount(0);
+	// host a session
+	await page.getByRole('button', { name: 'Draw together' }).click();
+	const dialog = page.getByRole('dialog', { name: 'Draw together' });
+	await dialog.getByRole('textbox', { name: /name/i }).fill('Me');
+	await dialog.getByRole('button', { name: 'Host', exact: true }).click();
+	await dialog.getByRole('button', { name: 'Back to drawing' }).click();
+	const chat = page.getByRole('region', { name: 'Chat' });
+	await expect(chat).toBeVisible();
+	const emit = (event: string, payload: unknown) =>
+		page.evaluate(
+			([e, p]) =>
+				(window as unknown as { __emit: (a: string, b: unknown) => void }).__emit(e as string, p),
+			[event, payload]
+		);
+
+	// collapsed: a message from Sam counts as unread
+	await emit('share-event', {
+		kind: 'direct',
+		from: 'sam1',
+		body: { k: 'chat', text: '<b>hi</b>' }
+	});
+	await expect(chat.getByLabel('1 unread')).toBeVisible();
+	await chat.getByRole('button', { name: /^Chat/ }).click();
+	await expect(chat.getByLabel(/unread/)).toHaveCount(0);
+	// shown as text, never as HTML
+	await expect(chat).toContainText('<b>hi</b>');
+	await expect(chat.locator('b', { hasText: 'hi' })).toHaveCount(0);
+	await expect(chat.getByText('Sam', { exact: true })).toBeVisible();
+
+	// typing goes to the chat, not to the canvas keys; Enter sends to Sam
+	const box = chat.getByLabel('Message');
+	await box.fill('b hello');
+	await box.press('Enter');
+	await expect(box).toHaveValue('');
+	await expect(chat.getByText('You', { exact: true })).toBeVisible();
+	await expect(chat).toContainText('b hello');
+	await expect
+		.poll(async () => (await calls(page)).find((c) => c.cmd === 'share_direct')?.json)
+		.toContain('"text":"b hello"');
+	await expect(page.getByRole('button', { name: 'Brush (B)' })).toBeVisible();
+
+	// someone leaves
+	await emit('share-event', { kind: 'left', id: 'sam1' });
+	await expect(chat).toContainText('Sam left');
 });
 
 test('studio layout: each tool shows its options, as on the website', async ({ page }) => {
