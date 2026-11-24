@@ -606,13 +606,10 @@ async fn share_leave(state: State<'_, share::Sharing>) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // an AppImage starts in its own read-only mount: work from home instead, so nothing
-    // relative is ever written in there
-    if let (Some(dir), Some(home)) = (std::env::var_os("APPDIR"), std::env::var_os("HOME"))
-        && std::env::current_dir().is_ok_and(|c| c.starts_with(&dir))
-    {
-        let _ = std::env::set_current_dir(home);
-    }
+    // An AppImage starts in its own read-only mount. Stay there: its WebKit finds its
+    // helpers (WebKitNetworkProcess, …) by paths relative to that folder, so leaving it
+    // stops the window from opening. Nothing is written relative to it: file dialogs
+    // start in Documents (`startFolder` in project.ts).
     tauri::Builder::default()
         .manage(Exporting::default())
         .manage(LipSync::default())
