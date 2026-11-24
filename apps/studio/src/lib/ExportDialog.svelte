@@ -18,6 +18,10 @@
 		camera,
 		/** frames rendered so far, while exporting */
 		progress,
+		/** the project's layers are in stages (offer to export by stage) */
+		staged = false,
+		/** the canvas's view by stage ("All", "Rough"…) */
+		viewName = 'All',
 		onstart,
 		oncancel,
 		onclose
@@ -29,6 +33,8 @@
 		hasLoop: boolean;
 		camera: { width: number; height: number };
 		progress: { done: number; total: number } | null;
+		staged?: boolean;
+		viewName?: string;
 		onstart: () => void;
 		oncancel: () => void;
 		onclose: () => void;
@@ -97,6 +103,17 @@
 				<option value="all">Everything</option>
 			</select>
 		</label>
+		{#if staged}
+			<label>
+				<span>Show</span>
+				<select bind:value={settings.show} disabled={!!progress} aria-label="Show">
+					<option value="final">Final (no storyboard, rough or tie-down)</option>
+					<option value="view">What the canvas shows ({viewName})</option>
+					<option value="all">Every layer</option>
+					<option value="each">Each stage, a file of its own</option>
+				</select>
+			</label>
+		{/if}
 		<label>
 			<span>Size</span>
 			<select bind:value={settings.scale} disabled={!!progress} aria-label="Size">

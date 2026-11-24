@@ -5411,6 +5411,8 @@
 	export function exportLayered(frame?: {
 		pairs: [number, number][];
 		transparent?: boolean;
+		/** layers left out of the file and its flat picture */
+		hidden?: number[];
 	}): PsdDoc | null {
 		if (!paint || !ctx) return null;
 		render();
@@ -5463,7 +5465,9 @@
 		// a group's layers sit next to each other, so consecutive layers of one group form a folder
 		const items: PsdDoc['items'] = [];
 		let open = null as { id: number; folder: PsdGroup } | null;
+		const left = new Set(frame?.hidden ?? []);
 		for (const l of layerList()) {
+			if (left.has(l.id)) continue;
 			const g = l.group ? groups.get(l.group) : undefined;
 			if (!g) {
 				open = null;
@@ -5483,7 +5487,7 @@
 		}
 		// (the file's flat picture is the document's, not a view's: the canvas shows the view)
 		const flat = frame
-			? renderFrame(frame.pairs, 1, frame.transparent)?.rgba
+			? renderFrame(frame.pairs, 1, frame.transparent, frame.hidden)?.rgba
 			: viewHidden.size
 				? renderFrame([], 1)?.rgba
 				: null;
