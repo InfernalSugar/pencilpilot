@@ -3,7 +3,8 @@
  * colour, shading, compositing). The timeline keeps them (`Timeline.stages`); layers
  * with none belong to every stage.
  */
-import { STAGES, isStage, type Stage } from './timeline';
+import { STAGES, STAGE_LABELS, isStage, type Stage } from './timeline';
+import type { ExportShow } from './exporting';
 
 /** A layer as far as guessing its stage goes. */
 export interface StageGuessLayer {
@@ -119,4 +120,28 @@ export function layersInView(
 export function singleStage(view: StageView): Stage | null {
 	const st = viewStages(view);
 	return st?.length === 1 ? st[0] : null;
+}
+
+// ---- exporting by stage ----
+
+/**
+ * The passes an export makes: one (the final film, the view, or every layer), or one per
+ * stage that has layers ("each", labelled with the stage's name for its file).
+ */
+export function exportPasses(
+	show: ExportShow,
+	stages: Record<number, Stage> | undefined,
+	view: StageView
+): { label: string | null; view: StageView }[] {
+	if (show === 'final') return [{ label: null, view: { id: 'final' } }];
+	if (show === 'view') return [{ label: null, view }];
+	if (show === 'each') {
+		const used = new Set(Object.values(stages ?? {}));
+		const each = STAGES.filter((s) => used.has(s)).map((s) => ({
+			label: STAGE_LABELS[s],
+			view: { id: 'custom', stages: [s] } as StageView
+		}));
+		if (each.length) return each;
+	}
+	return [{ label: null, view: VIEW_ALL }];
 }

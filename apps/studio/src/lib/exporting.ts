@@ -99,6 +99,19 @@ export function frameFile(stem: string, n: number, total: number, ext: string, p
 
 export type ExportRange = 'cut' | 'loop' | 'scene' | 'all';
 
+/**
+ * Which layers go out, by stage: the finished film (clean-up, colour, shading and
+ * compositing), what the canvas's view shows, every layer, or each stage on its own.
+ */
+export type ExportShow = 'final' | 'view' | 'all' | 'each';
+
+/** A stage's pass, as a file of its own: `Walk cycle.mp4` → `Walk cycle_Rough.mp4`. */
+export function stageFile(path: string, label: string) {
+	const safe = label.replace(/[\\/:*?"<>|]+/g, '-').trim();
+	const m = /^(.*?)(\.[^./\\]+)?$/.exec(path)!;
+	return `${m[1]}_${safe}${m[2] ?? ''}`;
+}
+
 export interface ExportSettings {
 	format: ExportFormat;
 	range: ExportRange;
@@ -109,6 +122,8 @@ export interface ExportSettings {
 	transparent: boolean;
 	/** GIF / APNG: play once instead of looping */
 	once: boolean;
+	/** which layers, by stage (a project with no stages: every layer) */
+	show: ExportShow;
 }
 
 export const EXPORT_DEFAULTS: ExportSettings = {
@@ -117,7 +132,8 @@ export const EXPORT_DEFAULTS: ExportSettings = {
 	scale: 1,
 	fps: 0,
 	transparent: false,
-	once: false
+	once: false,
+	show: 'all'
 };
 
 /** One frame of a cut to render. */
