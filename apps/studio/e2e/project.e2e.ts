@@ -2510,15 +2510,21 @@ test('canvas size: a text stays where it is drawn, with its box, through undo an
 	await expect(typed).toBeFocused();
 	await page.keyboard.type('Hello there');
 	const done = page.getByRole('group', { name: 'Text' }).getByRole('button', { name: 'Done' });
-	/** the ink's box once it stops changing */
+	/** the ink's box once it stops changing (fonts loaded, the same three reads running) */
 	const settled = async () => {
+		await page.evaluate(() => document.fonts.ready.then(() => undefined));
 		let last = '';
+		let same = 0;
 		await expect
-			.poll(async () => {
-				const before = last;
-				last = JSON.stringify(await inkBox(page));
-				return last === before && last !== 'null';
-			})
+			.poll(
+				async () => {
+					const now = JSON.stringify(await inkBox(page));
+					same = now === last && now !== 'null' ? same + 1 : 0;
+					last = now;
+					return same >= 2;
+				},
+				{ intervals: [100, 150, 200, 250] }
+			)
 			.toBe(true);
 		return JSON.parse(last) as Box;
 	};
