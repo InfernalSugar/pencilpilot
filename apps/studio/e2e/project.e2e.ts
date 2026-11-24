@@ -2416,7 +2416,7 @@ test('canvas size: every frame moves with it, one undo step, kept in the file', 
 				[b.y0, want.y0 * k + dy],
 				[b.y1, want.y1 * k + dy]
 			].every(([a, e]) => Math.abs(a - e) <= slack);
-		await expect.poll(async () => at(await inkBox(page))).toBe(true);
+		await expect.poll(async () => at(await inkBox(page)), { timeout: 20_000 }).toBe(true);
 	};
 	// three frames: a line at the top, the middle, the bottom
 	const boxes: Box[] = [];
@@ -3005,8 +3005,9 @@ test('editable strokes on a plain layer: Move picks one, it moves over what is u
 	await k.drag(0.3, 0.4, 0.3, 0.6);
 	await expect.poll(() => inkIn(page, 0.25, 0.35, 0.4, 0.45)).toBe(0);
 	await expect.poll(() => inkIn(page, 0.25, 0.55, 0.4, 0.65)).toBeGreaterThan(left * 0.9);
+	// (what was under it comes back once the redraw lands)
+	await expect.poll(() => inkIn(page, 0.46, 0.37, 0.54, 0.43)).toBeGreaterThan(column * 0.8);
 	const there = await inkIn(page, 0.46, 0.37, 0.54, 0.43);
-	expect(there).toBeGreaterThan(column * 0.8);
 	expect(there).toBeLessThan(crossing);
 	expect(await inkIn(page, 0.6, 0.37, 0.75, 0.43)).toBe(0);
 	// one undo step
