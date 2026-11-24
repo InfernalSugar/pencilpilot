@@ -212,7 +212,14 @@
 		type MouthShape,
 		type Timeline
 	} from '#lib/timeline.js';
-	import { guessStage } from '#lib/stages.js';
+	import {
+		guessStage,
+		layersInView,
+		readView,
+		singleStage,
+		VIEW_ALL,
+		type StageView
+	} from '#lib/stages.js';
 
 	let canvas = $state<PaintCanvas>();
 	let status = $state<CanvasStatus | null>(null);
@@ -935,9 +942,7 @@
 		const cut = timeline.scenes[onCanvas.scene]?.cuts[onCanvas.cut];
 		if (!cut) return;
 		// (static layers show the same drawing on every frame: nothing to onion)
-		const layers = status.layers
-			.filter((l) => !l.adjust && !timeline.statics.includes(l.id))
-			.map((l) => l.id);
+		const layers = viewLayerIds().filter((id) => !timeline.statics.includes(id));
 		const entries = onionEntries(
 			cut,
 			layers,
@@ -1013,6 +1018,7 @@
 		void $state.snapshot(onion);
 		void [...pinned];
 		void status?.active;
+		void viewKey;
 		untrack(() => void updateOnion());
 	});
 	// another cut: its own pins
@@ -1068,10 +1074,12 @@
 	// eslint-disable-next-line svelte/prefer-svelte-reactivity -- a cache, not state
 	let rendered = new Map<string, ImageBitmap>();
 	let renderedFor = -1;
+	/** how much the rendered frames may take (RGBA): views multiply them */
+	const RENDERED_BYTES = 384 * 1024 * 1024;
 	let playTimer = 0;
 
 	/** What a frame looks like depends on: its drawings (and their changes), the layers. */
-	function frameKey(pairs: [number, number][], shrink: number) {
+	function frameKey(pairs: [number, number][], shrink: number, hidden: number[] = []) {
 		const layers = (status?.layers ?? []).map((l) => [
 			l.id,
 			l.visible,
@@ -1088,7 +1096,8 @@
 			pairs.map(([l, d]) => [l, d, cache.version(d)]),
 			layers,
 			status?.groups ?? [],
-			shrink
+			shrink,
+			hidden
 		]);
 	}
 
@@ -1125,7 +1134,11 @@
 		if (!canvas || !status) return null;
 		const cut = theCut();
 		const shrink = previewShrink(canvasSize.width);
-		const layerIds = status.layers.filter((l) => !l.adjust).map((l) => l.id);
+		// only the view's layers (the others' drawings aren't needed)
+		const layerIds = viewLayerIds();
+		const hidden = inView.hidden;
+		const t0 = performance.now();
+		let made = 0;
 		if (renderedFor !== canvasKey) {
 			for (const b of rendered.values()) b.close();
 			rendered = new Map();
@@ -1138,16 +1151,17 @@
 			for (const f of todo) {
 				if (!playing || !canvas) return null;
 				const pairs = showing(cut, layerIds, f, timeline.statics);
-				const key = frameKey(pairs, shrink);
+				const key = frameKey(pairs, shrink, hidden);
 				keys.set(f, key);
 				if (!rendered.has(key)) {
 					await cache.ensure(pairs.map(([, d]) => d));
-					const r = canvas?.renderFrame(pairs, shrink);
+					const r = canvas?.renderFrame(pairs, shrink, false, hidden);
 					if (!r) {
 						stopPlay();
 						return null;
 					}
 					rendered.set(key, await createImageBitmap(new ImageData(r.rgba, r.width, r.height)));
+					made++;
 					cache.trim();
 				}
 				preparing = { done: preparing!.done + 1, total: todo.length };
@@ -1159,9 +1173,18 @@
 		} finally {
 			preparing = null;
 		}
-		// a few hundred frames at most stay rendered
-		while (rendered.size > 400) {
+		// (how long a frame takes, for the performance budget: see the console)
+		if (made)
+			console.debug(
+				`renderFrames: ${made} distinct frames in ${(performance.now() - t0).toFixed(0)} ms ` +
+					`(${((performance.now() - t0) / made).toFixed(1)} ms a frame; view hides ${hidden.length} layers)`
+			);
+		// at most RENDERED_BYTES of frames stay rendered (each view has its own)
+		let bytes = 0;
+		for (const b of rendered.values()) bytes += b.width * b.height * 4;
+		while (bytes > RENDERED_BYTES && rendered.size) {
 			const [k, b] = rendered.entries().next().value!;
+			bytes -= b.width * b.height * 4;
 			b.close();
 			rendered.delete(k);
 		}
@@ -1176,7 +1199,7 @@
 		if (flipping || playing || !status) return;
 		await showQueue;
 		const cut = theCut();
-		const layers = status.layers.filter((l) => !l.adjust).map((l) => l.id);
+		const layers = viewLayerIds();
 		const list =
 			kind === 'roll'
 				? rollFrames(drawingStarts(cut, [status.active], timeline.statics), frame)
@@ -1232,6 +1255,78 @@
 		short: STAGE_SHORT[id]
 	}));
 
+	// ---- viewing by stage: a view of the canvas (never the document, never an undo step) ----
+	let stageView = $state<StageView>(VIEW_ALL);
+	/** the layers the view shows and leaves out */
+	const inView = $derived(layersInView(status?.layers ?? [], timeline.stages, stageView));
+	/** what the view leaves out, as a key (frames rendered for one view aren't another's) */
+	const viewKey = $derived(inView.hidden.join(','));
+	/** the paint layers the view shows (adjustment layers have no drawings) */
+	function viewLayerIds(): number[] {
+		const out = new Set(inView.hidden);
+		return (status?.layers ?? []).filter((l) => !l.adjust && !out.has(l.id)).map((l) => l.id);
+	}
+	// the canvas shows what the view does
+	$effect(() => {
+		const hidden = viewKey ? viewKey.split(',').map(Number) : [];
+		if (status) canvas?.setViewHidden(hidden);
+	});
+	// a new canvas or project: every layer (an opened project then shows its own view)
+	$effect(() => {
+		void canvasKey;
+		untrack(() => (stageView = VIEW_ALL));
+	});
+
+	/** Show a view; drawing on a layer it leaves out moves to the top one it shows. */
+	function setView(v: StageView) {
+		stageView = v;
+		if (playing) stopPlay();
+		const now = layersInView(status?.layers ?? [], timeline.stages, v);
+		if (!status || !now.hidden.includes(status.active)) return;
+		const paint = new Set(status.layers.filter((l) => !l.adjust).map((l) => l.id));
+		const top = now.shown.filter((id) => paint.has(id)).at(-1);
+		if (top) canvas?.selectLayer(top);
+	}
+
+	/**
+	 * Make a layer (`make`), then put the new layer(s) in `stage`: a single stage's view's,
+	 * or a duplicated layer's own. With the new layer: one undo step.
+	 */
+	function inStage<T>(make: () => T, stage: Stage | null): T {
+		const before = new Set((status?.layers ?? []).map((l) => l.id));
+		const out = make();
+		if (stage)
+			void Promise.resolve(out)
+				.then(() => tick())
+				.then(() => {
+					const fresh = (status?.layers ?? []).filter(
+						(l) => !before.has(l.id) && !timeline.stages?.[l.id]
+					);
+					if (!fresh.length) return;
+					for (const l of fresh) setStage(timeline, l.id, stage);
+					tlJoin = true;
+					tlLabel = 'Set stage';
+					docVersion++;
+				});
+		return out;
+	}
+	/** the Layers panel's controls: new layers go in the view's stage, copies in their own */
+	const panelControls = $derived.by(() => {
+		const c = layerControls;
+		if (!c) return c;
+		return new Proxy(c, {
+			get(target, prop, recv) {
+				const f = Reflect.get(target, prop, recv);
+				if (typeof f !== 'function') return f;
+				if (prop === 'addLayer' || prop === 'addLineLayer' || prop === 'importImage')
+					return (...a: unknown[]) => inStage(() => f.apply(target, a), singleStage(stageView));
+				if (prop === 'duplicateLayer')
+					return (id: number) => inStage(() => f.call(target, id), timeline.stages?.[id] ?? null);
+				return f;
+			}
+		});
+	});
+
 	/** Put a layer in a stage (null: in none), one undo step. */
 	function putStage(layer: number, stage: string | null) {
 		const st = isStage(stage) ? stage : null;
@@ -1271,7 +1366,8 @@
 		const si = scene;
 		const sc = theScene();
 		const cuts = cutsIn(timeline, 'scene', { scene: si, cut: cutIndex }, null);
-		const layerIds = status.layers.filter((l) => !l.adjust).map((l) => l.id);
+		const layerIds = viewLayerIds();
+		const hidden = inView.hidden;
 		const runs = plan(timeline, cuts, layerIds, fps, fps);
 		const frames = outputFrames(
 			runs,
@@ -1302,7 +1398,7 @@
 					const at = placeCamera(cam, out);
 					const k = Math.max(1, Math.floor(1 / at.k));
 					await cache.ensure(run.pairs.map(([, d]) => d));
-					const r = canvas.renderFrame(run.pairs, k);
+					const r = canvas.renderFrame(run.pairs, k, false, hidden);
 					if (!r) return stopPlay();
 					const src = await createImageBitmap(new ImageData(r.rgba, r.width, r.height));
 					const c = new OffscreenCanvas(out.width, out.height);
@@ -2417,6 +2513,8 @@
 				frame,
 				// this project's guides, where they were moved to
 				guides: $state.snapshot(toolOpts.guides),
+				// what it showed (a view by stage)
+				...(stageView.id !== 'all' ? { view: $state.snapshot(stageView) } : {}),
 				// a shared project keeps its session, to rejoin later
 				...(together && sharing
 					? { share: together.save(sharing.invite, everyone(sharing.members)) }
@@ -3225,6 +3323,7 @@
 			}
 			const stages = stagesFromFile(doc.stages, ids);
 			if (Object.keys(stages).length) timeline.stages = stages;
+			stageView = readView(doc.extra.view);
 			timelineFor = canvasKey;
 			onCanvas = { scene, cut: cutIndex, frame };
 			if (anim) {
@@ -4138,6 +4237,9 @@
 					onmark={markKind}
 					onplay={togglePlay}
 					onrange={setRange}
+					{stageView}
+					onview={setView}
+					viewHidden={inView.hidden}
 					layers={status.layers}
 					active={status.active}
 					newDrawing={() => canvas?.newDrawing() ?? 0}
@@ -4159,7 +4261,7 @@
 			{#if t === 'layers' && status}
 				<LayersPanel
 					{status}
-					controls={layerControls}
+					controls={panelControls}
 					lineLayers
 					stages={STAGE_CHOICES}
 					stageOf={(id) => timeline.stages?.[id] ?? null}
