@@ -150,7 +150,9 @@
 		frameFile,
 		joinFrames,
 		outputFrames,
+		stageFile,
 		type ExportFormat,
+		type ExportShow,
 		type Run,
 		type ExportSettings
 	} from '#lib/exporting.js';
@@ -213,11 +215,13 @@
 		type Timeline
 	} from '#lib/timeline.js';
 	import {
+		exportPasses,
 		guessStage,
 		layersInView,
 		readView,
 		singleStage,
 		VIEW_ALL,
+		viewLabel,
 		type StageView
 	} from '#lib/stages.js';
 
@@ -2981,6 +2985,12 @@
 		if (playing) stopPlay();
 		// it starts on the format Settings names
 		exportSettings.format = settings.exportFormat;
+		// a project with stages: the finished film (or what this project last used)
+		exportSettings.show = !timeline.stages
+			? 'all'
+			: exportShow.key === canvasKey
+				? exportShow.show
+				: 'final';
 		const { invoke } = await import('@tauri-apps/api/core');
 		const tools = await invoke<{ ffmpeg: string | null; video: string[] }>('export_tools').catch(
 			() => ({ ffmpeg: null, video: [] })
@@ -2988,18 +2998,48 @@
 		animExport = { ...tools, progress: null };
 	}
 
-	/** Render the frames and send them to be written; returns where the file went. */
+	/** the export's Show this project last used (a project with stages starts on Final) */
+	let exportShow = { key: -1, show: 'final' as ExportShow };
+
+	/** Render the frames and send them to be written: once, or once a stage. */
 	async function runAnimExport() {
 		if (!canvas || !status || !animExport || busy) return;
 		const s = $state.snapshot(exportSettings) as ExportSettings;
-		const f = FORMATS.find((x) => x.id === s.format)!;
 		const kind = s.format === 'png' ? 'png-seq' : s.format === 'psd' ? 'psd-seq' : s.format;
 		const target = await askExportPath(docName, kind, settings.projectFolder);
 		if (!target) return;
 		await showQueue;
+		if (timeline.stages) exportShow = { key: canvasKey, show: s.show };
+		// which layers, by stage: one pass, or one per stage (a file each, named after it)
+		const passes = exportPasses(timeline.stages ? s.show : 'all', timeline.stages, stageView);
+		let last = '';
+		for (const pass of passes) {
+			const hidden = layersInView(status?.layers ?? [], timeline.stages, pass.view).hidden;
+			const where = await exportPass(
+				s,
+				pass.label ? stageFile(target, pass.label) : target,
+				hidden
+			);
+			// (cancelled or failed: the note says so)
+			if (!where) return;
+			last = where;
+		}
+		if (passes.length > 1) fileNote = `Exported ${passes.length} stages (the last: ${last})`;
+		animExport = null;
+	}
+
+	/** One export: the layers the view `hidden` leaves out aren't in it. Where it went, or null. */
+	async function exportPass(
+		s: ExportSettings,
+		target: string,
+		hidden: number[]
+	): Promise<string | null> {
+		if (!canvas || !status || !animExport) return null;
+		const f = FORMATS.find((x) => x.id === s.format)!;
 		const outFps = s.fps || fps;
 		const cuts = cutsIn(timeline, s.range, { scene, cut: cutIndex }, playRange);
-		const layerIds = status.layers.filter((l) => !l.adjust).map((l) => l.id);
+		const left = new Set(hidden);
+		const layerIds = status.layers.filter((l) => !l.adjust && !left.has(l.id)).map((l) => l.id);
 		const runs = plan(timeline, cuts, layerIds, fps, outFps);
 		const first = timeline.scenes[cuts[0].scene].cuts[cuts[0].cut];
 		const out = outputSize(cameraOf(first, canvasSize), s.scale, f.video);
@@ -3009,10 +3049,7 @@
 		fileNote = '';
 		exportStop = false;
 		animExport.progress = { done: 0, total: runs.length };
-		if (f.files) {
-			await writeFrameFiles(s.format, target, runs, out, transparent);
-			return;
-		}
+		if (f.files) return writeFrameFiles(s.format, target, runs, out, transparent, hidden);
 		try {
 			// a video gets the sound of the same frames
 			if (f.video) {
@@ -3066,7 +3103,7 @@
 				// (render smaller first when the output is much smaller: faster, and smoother)
 				const k = Math.max(1, Math.floor(1 / at.k));
 				await cache.ensure(run.pairs.map(([, d]) => d));
-				const r = canvas!.renderFrame(run.pairs, k, transparent);
+				const r = canvas!.renderFrame(run.pairs, k, transparent, hidden);
 				if (!r) throw new Error('the canvas went away');
 				const src = await createImageBitmap(new ImageData(r.rgba, r.width, r.height));
 				const pic = new OffscreenCanvas(out.width, out.height);
@@ -3133,11 +3170,12 @@
 			for (const b of pictures.values()) b.close();
 			const where = await invoke<string>('export_end');
 			fileNote = `Exported to ${where}`;
-			animExport = null;
+			return where;
 		} catch (e) {
 			await invoke('export_cancel').catch(() => {});
 			fileNote = String(e).includes('cancelled') ? 'Export cancelled.' : `Couldn’t export: ${e}`;
 			if (animExport) animExport.progress = null;
+			return null;
 		} finally {
 			busy = '';
 		}
@@ -3152,16 +3190,18 @@
 		target: string,
 		runs: Run[],
 		out: { width: number; height: number },
-		transparent: boolean
-	) {
+		transparent: boolean,
+		/** layers left out (a stage's pass) */
+		hidden: number[] = []
+	): Promise<string | null> {
 		const c = canvas;
 		if (!c || !status) {
 			busy = '';
-			return;
+			return null;
 		}
 		const stem = target.replace(/\.(psd|png)$/i, '');
 		const total = runs.reduce((n, r) => n + r.repeat, 0);
-		const paintLayers = status.layers.filter((l) => !l.adjust);
+		const paintLayers = status.layers.filter((l) => !l.adjust && !hidden.includes(l.id));
 		// (layers with nothing on any exported frame are left out of the per-layer files)
 		const used = new Set(runs.flatMap((r) => r.pairs.filter(([, d]) => d).map(([l]) => l)));
 		const off = new OffscreenCanvas(out.width, out.height);
@@ -3194,7 +3234,7 @@
 				await cache.ensure(run.pairs.map(([, d]) => d));
 				const files: { part: string; ext: string; bytes: Uint8Array }[] = [];
 				if (format === 'psd') {
-					const doc = c.exportLayered({ pairs: run.pairs, transparent });
+					const doc = c.exportLayered({ pairs: run.pairs, transparent, hidden });
 					if (!doc) throw new Error('the canvas went away');
 					const items = [];
 					for (const it of doc.items) {
@@ -3239,12 +3279,13 @@
 				if (animExport) animExport.progress = { done: i + 1, total: runs.length };
 			}
 			fileNote = `Exported ${n} frame${n === 1 ? '' : 's'} (the last: ${last})`;
-			animExport = null;
+			return last;
 		} catch (e) {
 			fileNote = String(e).includes('cancelled')
 				? `Export cancelled after ${n} frame${n === 1 ? '' : 's'}.`
 				: `Couldn’t export: ${e}`;
 			if (animExport) animExport.progress = null;
+			return null;
 		} finally {
 			busy = '';
 		}
@@ -4324,6 +4365,8 @@
 					hasLoop={!!playRange}
 					camera={cameraOf(theCut(), canvasSize)}
 					progress={animExport.progress}
+					staged={!!timeline.stages}
+					viewName={viewLabel(stageView)}
 					onstart={() => void runAnimExport()}
 					oncancel={() => (exportStop = true)}
 					onclose={() => (animExport = null)}

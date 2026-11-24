@@ -2258,6 +2258,57 @@ test('stages: Show one stage on the canvas, in playback and the onion skin; kept
 	await expect.poll(top).toBe(0);
 });
 
+test('stages: the export leaves the rough out of the final film, or makes a file a stage', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	await scribble(page, 0.25);
+	await renameLayer(page, 'Layer 1', 'Rough');
+	await page.getByRole('button', { name: 'New layer' }).click();
+	await scribble(page, 0.75);
+	await renameLayer(page, 'Layer 2', 'Lines');
+	await page.getByRole('button', { name: 'Sort layers into stages' }).click();
+	await expect(layerRow(page, 'Rough').getByTitle('Stage: Rough')).toBeVisible();
+
+	const dlg = page.getByRole('dialog', { name: 'Export the animation' });
+	/** export a GIF of what `show` picks; the frames and files it sent */
+	const exportGif = async (show: string | null, expectShow?: string) => {
+		const before = (await calls(page)).length;
+		await page.getByRole('button', { name: 'Export', exact: true }).click();
+		await page.getByRole('button', { name: /^Animation…/ }).click();
+		await expect(dlg).toBeVisible();
+		await dlg.getByRole('radio', { name: /^GIF/ }).click();
+		if (expectShow) await expect(dlg.getByLabel('Show')).toHaveValue(expectShow);
+		if (show) await dlg.getByLabel('Show').selectOption(show);
+		await dlg.getByRole('button', { name: 'Export…' }).click();
+		await expect(dlg).toHaveCount(0, { timeout: 15_000 });
+		const sent = (await calls(page)).slice(before);
+		return {
+			files: sent
+				.filter((c) => c.cmd === 'export_begin')
+				.map((c) => JSON.parse(c.json!).spec.path as string),
+			ink: sent.filter((c) => c.cmd === 'export_frame').map((c) => c.ink!)
+		};
+	};
+	// a project with stages starts on the final film: no rough
+	const final = await exportGif(null, 'final');
+	await expect(page.getByText(/Exported to/)).toBeVisible();
+	expect(final.files).toEqual(['/home/me/Walk cycle.gif']);
+	expect(final.ink).toHaveLength(1);
+	expect(final.ink[0]).toBeGreaterThan(20);
+	// every layer: the rough too (and it remembers what was picked)
+	const all = await exportGif('all', 'final');
+	expect(all.ink[0]).toBeGreaterThan(final.ink[0] + 20);
+	// a file for each stage, named after it
+	const each = await exportGif('each', 'all');
+	await expect(page.getByText(/Exported 2 stages/)).toBeVisible();
+	expect(each.files).toEqual(['/home/me/Walk cycle_Rough.gif', '/home/me/Walk cycle_Clean-up.gif']);
+	expect(each.ink[0]).toBeGreaterThan(20);
+	expect(each.ink[1]).toBe(final.ink[0]);
+	expect(each.ink[0] + each.ink[1]).toBeGreaterThanOrEqual(all.ink[0]);
+});
+
 test('transitions: a white flash and a dissolve between cuts, in the export', async ({ page }) => {
 	await stubTauri(page);
 	await ready(page);

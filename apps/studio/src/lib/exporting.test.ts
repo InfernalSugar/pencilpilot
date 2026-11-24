@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { cutsIn, outputSize, placeCamera, plan } from './exporting';
-import { addCut, newTimeline, setStatic, type Timeline } from './timeline';
+import { cutsIn, outputSize, placeCamera, plan, stageFile } from './exporting';
+import { exportPasses, layersInView } from './stages';
+import { addCut, newTimeline, setStage, setStatic, type Timeline } from './timeline';
 
 /** layer 1: A B on twos, C held 3; layer 2: a static background */
 function tl(): Timeline {
@@ -142,5 +143,78 @@ describe('transitions between cuts', () => {
 		const j = joinFrames(out);
 		expect(j.reduce((n, [, r]) => n + r, 0)).toBe(44);
 		expect(j.at(-1)).toEqual([{ run: 3 }, 18]);
+	});
+});
+
+describe('exporting by stage', () => {
+	/** layer 1: a rough on twos; layer 2: its clean-up on ones; layer 3: untagged notes */
+	function staged(): Timeline {
+		const t = newTimeline([]);
+		const cut = t.scenes[0].cuts[0];
+		cut.tracks[1] = [
+			{ drawing: 11, length: 2 },
+			{ drawing: 12, length: 2 }
+		];
+		cut.tracks[2] = [
+			{ drawing: 21, length: 1 },
+			{ drawing: 22, length: 1 },
+			{ drawing: 23, length: 1 },
+			{ drawing: 24, length: 1 }
+		];
+		cut.tracks[3] = [{ drawing: 31, length: 4 }];
+		setStage(t, 1, 'rough');
+		setStage(t, 2, 'clean');
+		return t;
+	}
+	const layers = [1, 2, 3].map((id) => ({ id, clip: false }));
+	/** what each pass sends: its file label, and each run's pairs and how long it's held */
+	const send = (t: Timeline, show: 'final' | 'view' | 'all' | 'each') =>
+		exportPasses(show, t.stages, { id: 'rough' }).map((pass) => {
+			const { shown } = layersInView(layers, t.stages, pass.view);
+			const runs = plan(t, cutsIn(t, 'cut', { scene: 0, cut: 0 }, null), shown, 24, 24);
+			return { label: pass.label, runs: runs.map((r) => [r.pairs.map(([, d]) => d), r.repeat]) };
+		});
+
+	it('leave the rough out of the final film, and send its frames on twos alone', () => {
+		const t = staged();
+		expect(send(t, 'final')).toEqual([
+			{
+				label: null,
+				runs: [
+					[[21, 31], 1],
+					[[22, 31], 1],
+					[[23, 31], 1],
+					[[24, 31], 1]
+				]
+			}
+		]);
+		// the view (rough): its drawings held two frames each, sent once
+		expect(send(t, 'view')).toEqual([
+			{
+				label: null,
+				runs: [
+					[[11, 31], 2],
+					[[12, 31], 2]
+				]
+			}
+		]);
+		expect(send(t, 'all')[0].runs).toHaveLength(4);
+	});
+
+	it('make a pass per stage that has layers, each named after it', () => {
+		const t = staged();
+		expect(send(t, 'each').map((p) => [p.label, p.runs.length])).toEqual([
+			['Rough', 2],
+			['Clean-up', 4]
+		]);
+		// no stages: one pass of every layer
+		expect(exportPasses('each', undefined, { id: 'all' })).toEqual([
+			{ label: null, view: { id: 'all' } }
+		]);
+		expect(stageFile('/home/me/Walk cycle.mp4', 'Rough')).toBe('/home/me/Walk cycle_Rough.mp4');
+		expect(stageFile('/home/me/Walk cycle.png', 'Tie-down')).toBe(
+			'/home/me/Walk cycle_Tie-down.png'
+		);
+		expect(stageFile('/home/me/v1.2/film', 'Clean-up')).toBe('/home/me/v1.2/film_Clean-up');
 	});
 });
