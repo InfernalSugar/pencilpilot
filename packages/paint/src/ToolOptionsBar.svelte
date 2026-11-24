@@ -10,7 +10,7 @@
 	import type PaintCanvas from './PaintCanvas.svelte';
 	import type { CanvasStatus } from './PaintCanvas.svelte';
 	import {
-		anyGuide,
+		drawingGuide,
 		arcsPath,
 		COMPOSITIONS,
 		compositionFlips,
@@ -268,7 +268,31 @@
 				/>
 			</label>
 		{/if}
-		<span class="opt-label">Composition</span>
+		{#if opts.guides.perspective.points || opts.guides.ruler.on || symmetryOn(opts.guides)}
+			<button
+				type="button"
+				class="tool"
+				aria-pressed={tool === 'guides'}
+				title="Drag vanishing points and the ruler"
+				onclick={() => (tool = tool === 'guides' ? 'brush' : 'guides')}
+			>
+				Move guides
+			</button>
+		{/if}
+		{#if opts.canCentre && drawingGuide(opts.guides)}
+			<button
+				type="button"
+				class="tool"
+				title="Put the mirror line, vanishing points and ruler back in the middle of the canvas"
+				onclick={() => opts.centreGuides()}
+			>
+				Re-centre
+			</button>
+		{/if}
+	</div>
+{/if}
+{#if opts.compositionOpen}
+	<div class="fill-opts guides-opts" role="group" aria-label="Composition guides">
 		<div class="seg" role="radiogroup" aria-label="Composition">
 			{#each COMPOSITIONS as p (p)}
 				{@const shapes = compositionShapes({ preset: p, flipX: false, flipY: false }, 24, 16)}
@@ -332,25 +356,14 @@
 				Flip ↕
 			</button>
 		{/if}
-		{#if opts.guides.perspective.points || opts.guides.ruler.on || symmetryOn(opts.guides)}
+		{#if composition.flipX || composition.flipY}
 			<button
 				type="button"
 				class="tool"
-				aria-pressed={tool === 'guides'}
-				title="Drag vanishing points and the ruler"
-				onclick={() => (tool = tool === 'guides' ? 'brush' : 'guides')}
+				title="Put the guide back the way it started"
+				onclick={() => opts.setComposition({ flipX: false, flipY: false })}
 			>
-				Move guides
-			</button>
-		{/if}
-		{#if opts.canCentre && anyGuide(opts.guides)}
-			<button
-				type="button"
-				class="tool"
-				title="Put the mirror line, vanishing points and ruler back in the middle of the canvas"
-				onclick={() => opts.centreGuides()}
-			>
-				Re-centre
+				Reset
 			</button>
 		{/if}
 	</div>

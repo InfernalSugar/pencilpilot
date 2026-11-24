@@ -12,7 +12,8 @@
 	import TimelapsePlayer from '@pencilpilot/paint/TimelapsePlayer.svelte';
 	import { ToolOptions } from '@pencilpilot/paint/tool-options.svelte.js';
 	import {
-		anyGuide,
+		compositionOn,
+		drawingGuide,
 		centredGuides,
 		defaultGuides,
 		gridLines,
@@ -3859,12 +3860,28 @@
 			<button
 				type="button"
 				class="opt"
-				aria-pressed={anyGuide(toolOpts.guides)}
+				aria-pressed={drawingGuide(toolOpts.guides)}
 				aria-expanded={toolOpts.guidesOpen}
 				title="Guides: grid, perspective, ruler and symmetry"
-				onclick={() => (toolOpts.guidesOpen = !toolOpts.guidesOpen)}
+				onclick={() => {
+					toolOpts.guidesOpen = !toolOpts.guidesOpen;
+					if (toolOpts.guidesOpen) toolOpts.compositionOpen = false;
+				}}
 			>
 				Guides
+			</button>
+			<button
+				type="button"
+				class="opt"
+				aria-pressed={compositionOn(toolOpts.guides)}
+				aria-expanded={toolOpts.compositionOpen}
+				title="Composition: thirds, golden ratio, spiral and more"
+				onclick={() => {
+					toolOpts.compositionOpen = !toolOpts.compositionOpen;
+					if (toolOpts.compositionOpen) toolOpts.guidesOpen = false;
+				}}
+			>
+				Composition
 			</button>
 			<button
 				type="button"
