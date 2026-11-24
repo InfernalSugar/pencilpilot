@@ -492,6 +492,15 @@ test('close and fill: a stroke that ends where it began fills inside, in one und
 	// an open stroke doesn't fill
 	await zigzag(page, 0.8);
 	expect(await inside(0.5, 0.65)).toBe(false);
+	// with symmetry: the mirrored copy fills too
+	await page.getByRole('button', { name: 'Guides' }).click();
+	await page
+		.getByRole('group', { name: 'Guides' })
+		.getByRole('radio', { name: 'Vertical' })
+		.click();
+	await loop(0.2, 0.25);
+	await expect.poll(() => inside(0.2, 0.25)).toBe(true);
+	await expect.poll(() => inside(0.8, 0.25)).toBe(true);
 });
 
 test('QuickShape: a second finger (or Shift, or Edit shape) makes a perfect circle', async ({
