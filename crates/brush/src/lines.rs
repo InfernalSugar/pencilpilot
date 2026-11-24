@@ -29,6 +29,7 @@ use std::collections::{HashMap, HashSet};
 use hokusai::tile::empty_tile;
 use hokusai::{Brush, BrushState, TILE_SIZE, TilePixels};
 
+use crate::strands::{Pen, Strands};
 use crate::{Edit, H_IDENTITY, Painter, Snapshot, TileKey, TileMap, TransformSession, UndoSurface};
 
 /// One tile of a base, kept small: most are under line art, so equal pixels in a row
@@ -328,6 +329,7 @@ struct Queued {
     seed: u32,
     pts: Vec<f32>,
     style: Option<std::sync::Arc<crate::texture::DabStyle>>,
+    strands: Option<Strands>,
     span: Option<(u32, u32)>,
     clips: Vec<Clip>,
 }
@@ -338,11 +340,7 @@ struct Clip {
     seed: u32,
     pts: Vec<f32>,
     style: Option<std::sync::Arc<crate::texture::DabStyle>>,
-}
-
-/// Point `i` of `pts` (6 numbers a point) into `brush` on `s`.
-fn point_to(brush: &Brush, st: &mut BrushState, s: &mut UndoSurface, p: &[f32]) {
-    brush.stroke_to(st, s, p[0], p[1], p[2], p[3], p[4], p[5] as f64);
+    strands: Option<Strands>,
 }
 
 impl Redraw {
@@ -374,7 +372,7 @@ impl Redraw {
             }
             return;
         }
-        let mut states: Vec<BrushState> = queue.iter().map(|q| BrushState::new(q.seed)).collect();
+        let mut states: Vec<Pen> = queue.iter().map(|q| Pen::new(q.seed, q.strands)).collect();
         let mut counts = vec![0u32; queue.len()];
         let most = queue.iter().map(|q| q.pts.len() / 6).max().unwrap_or(0);
         let s = &mut self.scratch;
@@ -385,14 +383,14 @@ impl Redraw {
                 };
                 s.style = q.style.clone();
                 (s.span, s.dab_no) = (q.span, counts[k]);
-                point_to(&q.brush, st, s, p);
+                st.stroke_to(&q.brush, s, p);
                 counts[k] = s.dab_no;
             }
         }
         for (k, (q, st)) in queue.iter().zip(states.iter_mut()).enumerate() {
             s.style = q.style.clone();
             (s.span, s.dab_no) = (q.span, counts[k]);
-            q.brush.finish_stroke(st, s);
+            st.finish(&q.brush, s);
         }
         s.span = None;
     }
@@ -406,20 +404,20 @@ impl Redraw {
             fixed_sampling: true,
             ..Default::default()
         };
-        let mut st = BrushState::new(q.seed);
+        let mut st = Pen::new(q.seed, q.strands);
         own.span = q.span;
         for p in q.pts.as_chunks::<6>().0 {
-            point_to(&q.brush, &mut st, &mut own, p);
+            st.stroke_to(&q.brush, &mut own, p);
         }
-        q.brush.finish_stroke(&mut st, &mut own);
+        st.finish(&q.brush, &mut own);
         own.span = None;
         for c in &q.clips {
             own.style = c.style.clone();
-            let mut st = BrushState::new(c.seed);
+            let mut st = Pen::new(c.seed, c.strands);
             for p in c.pts.as_chunks::<6>().0 {
-                point_to(&c.brush, &mut st, &mut own, p);
+                st.stroke_to(&c.brush, &mut own, p);
             }
-            c.brush.finish_stroke(&mut st, &mut own);
+            st.finish(&c.brush, &mut own);
         }
         for (k, t) in own.tiles {
             if self
@@ -522,6 +520,7 @@ impl Painter {
         for (k, st) in self.sym_states.iter_mut().enumerate() {
             *st = BrushState::new(seed.wrapping_add(k as u32 + 1));
         }
+        self.begin_strands(seed);
         // (smudge sampling as a replay will do it)
         let active = self.active;
         if let Some(l) = self.layer_mut(active) {
@@ -948,7 +947,7 @@ impl Painter {
     /// together, as they were painted, when the group ends. (It matters for brushes
     /// that smudge: each copy picks up the paint the others just put down.)
     pub fn lines_stroke(&mut self, brush: &Brush, seed: u32, pts: &[f32], group: u32) {
-        let style = self.style.clone();
+        let (style, strands) = (self.style.clone(), self.strands);
         let Some(r) = self.line_redraw.as_mut() else {
             return;
         };
@@ -962,6 +961,7 @@ impl Painter {
             seed,
             pts,
             style,
+            strands,
             span: None,
             clips: Vec::new(),
         });
@@ -983,13 +983,14 @@ impl Painter {
     /// only it: it's painted on its own, erased, then laid over the rest (a line cut
     /// by the eraser and moved away keeps its cut ends).
     pub fn lines_clip(&mut self, brush: &Brush, seed: u32, pts: &[f32]) {
-        let style = self.style.clone();
+        let (style, strands) = (self.style.clone(), self.strands);
         if let Some(q) = self.line_redraw.as_mut().and_then(|r| r.queue.last_mut()) {
             q.clips.push(Clip {
                 brush: brush.clone(),
                 seed,
                 pts: pts[..pts.len() / 6 * 6].to_vec(),
                 style,
+                strands,
             });
         }
     }
@@ -1005,7 +1006,7 @@ impl Painter {
             fixed_sampling: true,
             ..Default::default()
         };
-        let mut st = BrushState::new(seed);
+        let mut st = Pen::new(seed, self.strands);
         let mut out = Vec::new();
         let flush = |s: &mut UndoSurface, i: usize, out: &mut Vec<f32>| {
             for d in s
@@ -1020,10 +1021,10 @@ impl Painter {
         };
         let points = pts.as_chunks::<6>().0;
         for (i, p) in points.iter().enumerate() {
-            point_to(brush, &mut st, &mut s, p);
+            st.stroke_to(brush, &mut s, p);
             flush(&mut s, i, &mut out);
         }
-        brush.finish_stroke(&mut st, &mut s);
+        st.finish(brush, &mut s);
         flush(&mut s, points.len().saturating_sub(1), &mut out);
         out
     }
@@ -1880,6 +1881,72 @@ mod tests {
             .collect();
         let c = p.add_line_layer("");
         redraw(&mut p, c, &all(), &b, &[(40, &pts), (41, &mirrored)]);
+        assert_eq!(painted(&p, c), painted(&p, a));
+    }
+
+    #[test]
+    fn a_stroke_in_strands_replays_pixel_for_pixel() {
+        let b = pen();
+        let mut p = Painter::new(300, 200);
+        p.set_strands(7, 14.0, 0.8, 0.9);
+        let a = p.add_line_layer("");
+        let pts = wave(20.0, 280.0, 100.0);
+        live(&mut p, &b, 11, &pts);
+        let drawn = painted(&p, a);
+        assert!(drawn.len() > 3);
+        // the whole stroke again
+        let c = p.add_line_layer("");
+        redraw(&mut p, c, &keys(&drawn), &b, &[(11, &pts)]);
+        assert!(p.lines_push());
+        assert_eq!(painted(&p, c), drawn);
+        // a few of its tiles only
+        let some: Vec<i32> = keys(&drawn).into_iter().take(4).collect();
+        assert!(p.lines_begin(a, &some));
+        p.lines_stroke(&b, 11, &pts, 0);
+        assert_eq!(p.lines_diff(), 0);
+        // the dabs it lists are the dabs it draws: a piece of all of them is the same
+        let n = (p.lines_dabs(&b, 11, &pts).len() / 4) as u32;
+        assert!(n > 100);
+        assert!(p.lines_begin(a, &keys(&drawn)));
+        p.lines_stroke(&b, 11, &pts, 0);
+        p.lines_span(0, n);
+        assert_eq!(p.lines_diff(), 0);
+        // other settings (or none) paint something else
+        p.set_strands(0, 0.0, 0.0, 0.0);
+        assert!(p.lines_begin(a, &keys(&drawn)));
+        p.lines_stroke(&b, 11, &pts, 0);
+        assert!(p.lines_diff() > 0);
+        p.set_strands(7, 14.0, 0.8, 0.5);
+        assert!(p.lines_begin(a, &keys(&drawn)));
+        p.lines_stroke(&b, 11, &pts, 0);
+        assert!(p.lines_diff() > 0);
+    }
+
+    #[test]
+    fn strands_with_symmetry_replay_copy_by_copy() {
+        let b = pen();
+        let mut p = Painter::new(300, 200);
+        p.set_strands(5, 10.0, 0.6, 0.7);
+        p.set_symmetry(Some(Symmetry {
+            mode: SymmetryMode::Vertical,
+            cx: 150.0,
+            cy: 100.0,
+        }));
+        let a = p.add_line_layer("");
+        let pts = wave(20.0, 110.0, 100.0);
+        live(&mut p, &b, 40, &pts);
+        p.set_symmetry(None);
+        let mirrored: Vec<f32> = pts
+            .as_chunks::<6>()
+            .0
+            .iter()
+            .flat_map(|q| [300.0 - q[0], q[1], q[2], 0.0, 0.0, q[5]])
+            .collect();
+        let c = p.add_line_layer("");
+        assert!(p.lines_begin(c, &all()));
+        p.lines_stroke(&b, 40, &pts, 3);
+        p.lines_stroke(&b, 41, &mirrored, 3);
+        assert!(p.lines_commit());
         assert_eq!(painted(&p, c), painted(&p, a));
     }
 

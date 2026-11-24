@@ -26,6 +26,7 @@ pub mod filters;
 pub mod layers;
 mod lines;
 mod select;
+pub mod strands;
 pub mod style;
 mod text;
 pub mod texture;
@@ -70,6 +71,8 @@ pub struct UndoSurface {
     dab_no: u32,
     /// where a stroke's dabs fall, not drawn (see `lines_dabs`): x, y, radius each
     probe: Option<Vec<f32>>,
+    /// a strand tapering (see [`strands`]): its dabs drawn smaller and lighter
+    taper: Option<strands::Taper>,
 }
 
 impl UndoSurface {
@@ -135,6 +138,23 @@ impl TiledSurface for UndoSurface {
     /// libmypaint's dab, then (with a texture) each pixel's change scaled by
     /// how much the grain / tip / dual brush lets through there.
     fn draw_dab(&mut self, dab: &hokusai::Dab) -> bool {
+        let tapered;
+        let dab = match self.taper {
+            Some(t) => {
+                let k = t.at(dab.x, dab.y);
+                // (the very tips: nothing, and not counted as a dab)
+                if k < 0.03 {
+                    return false;
+                }
+                tapered = hokusai::Dab {
+                    radius: dab.radius * k,
+                    opaque: dab.opaque * (0.4 + 0.6 * k),
+                    ..*dab
+                };
+                &tapered
+            }
+            None => dab,
+        };
         if let Some(p) = self.probe.as_mut() {
             p.extend([dab.x, dab.y, dab.radius]);
             return false;
@@ -350,6 +370,7 @@ impl Clone for UndoSurface {
             span: None,
             dab_no: 0,
             probe: None,
+            taper: None,
         }
     }
 }
@@ -554,6 +575,10 @@ pub struct Painter {
     symmetry: Option<Symmetry>,
     /// brush states for the mirrored copies of the current stroke
     sym_states: Vec<BrushState>,
+    /// how the next strokes are split into strands (see `set_strands`; None: they aren't)
+    strands: Option<strands::Strands>,
+    /// the current stroke in strands: the stroke, then its symmetry copies (empty: plain)
+    strand_pens: Vec<strands::StrandPen>,
     /// grain / tip pictures by id (see `set_texture`)
     textures: HashMap<u32, std::sync::Arc<texture::Gray>>,
     /// how the next strokes are textured (see `set_dab_style`)
@@ -612,6 +637,8 @@ impl Painter {
             liquify: None,
             symmetry: None,
             sym_states: Vec::new(),
+            strands: None,
+            strand_pens: Vec::new(),
             textures: HashMap::new(),
             style: None,
             adjust_layer_before: None,
@@ -677,6 +704,33 @@ impl Painter {
             }),
         };
         self.style = (!style.is_plain()).then(|| std::sync::Arc::new(style));
+    }
+
+    /// Paint the next strokes as `count` strands (fewer than 2: plain strokes): see
+    /// [`strands`]. `spread` is the bundle's width as a multiple of the brush's radius,
+    /// `wobble` and `taper` 0–1.
+    pub fn set_strands(&mut self, count: u32, spread: f32, wobble: f32, taper: f32) {
+        self.strands = strands::Strands::new(count, spread, wobble, taper);
+    }
+
+    /// The strands the next strokes are painted in (None: plain strokes).
+    pub fn strands(&self) -> Option<strands::Strands> {
+        self.strands
+    }
+
+    /// Start the current stroke's strand pens (none without strands): the stroke's
+    /// seeded `seed`, symmetry copy k `seed + k + 1`, as their brush states are.
+    fn begin_strands(&mut self, seed: u32) {
+        let copies = self.sym_states.len() as u32;
+        self.strand_pens = match self.strands {
+            Some(cfg) => (0..=copies)
+                .map(|k| {
+                    let s = if k == 0 { seed } else { seed.wrapping_add(k) };
+                    strands::StrandPen::new(cfg, s)
+                })
+                .collect(),
+            None => Vec::new(),
+        };
     }
 
     pub fn width(&self) -> u32 {
@@ -1745,6 +1799,7 @@ impl Painter {
         self.state.reset();
         let copies = self.symmetry.map_or(0, |sym| sym.copies(0.0, 0.0).len());
         self.sym_states = (0..copies).map(|_| BrushState::default()).collect();
+        self.begin_strands(0);
         self.stroking = Some(id);
         self.stroke_brush = None;
         self.alpha_lock_stroke = alpha_lock;
@@ -1780,17 +1835,30 @@ impl Painter {
         let b = self.stroke_brush.as_ref().unwrap_or(brush);
         if let Some(l) = self.layers.iter_mut().find(|l| l.id == id) {
             l.surface.touched.clear();
-            b.stroke_to(
-                &mut self.state,
-                &mut l.surface,
-                x,
-                y,
-                pressure,
-                xtilt,
-                ytilt,
-                dtime,
-            );
-            if let Some(sym) = self.symmetry {
+            if !self.strand_pens.is_empty() {
+                let copies = self.symmetry.map(|s| s.copies(x, y)).unwrap_or_default();
+                let mut pens = self.strand_pens.iter_mut();
+                if let Some(pen) = pens.next() {
+                    let p = [x, y, pressure, xtilt, ytilt, dtime as f32];
+                    pen.stroke_to(b, &mut l.surface, &p);
+                }
+                for (pen, (mx, my)) in pens.zip(copies) {
+                    let p = [mx, my, pressure, 0.0, 0.0, dtime as f32];
+                    pen.stroke_to(b, &mut l.surface, &p);
+                }
+            } else {
+                b.stroke_to(
+                    &mut self.state,
+                    &mut l.surface,
+                    x,
+                    y,
+                    pressure,
+                    xtilt,
+                    ytilt,
+                    dtime,
+                );
+            }
+            if let Some(sym) = self.symmetry.filter(|_| self.strand_pens.is_empty()) {
                 for (st, (mx, my)) in self.sym_states.iter_mut().zip(sym.copies(x, y)) {
                     b.stroke_to(st, &mut l.surface, mx, my, pressure, 0.0, 0.0, dtime);
                 }
@@ -1858,12 +1926,18 @@ impl Painter {
         let b = b.as_ref().unwrap_or(brush);
         if let Some(l) = self.layers.iter_mut().find(|l| l.id == id) {
             l.surface.touched.clear();
-            b.finish_stroke(&mut self.state, &mut l.surface);
-            for st in self.sym_states.iter_mut() {
-                b.finish_stroke(st, &mut l.surface);
+            if self.strand_pens.is_empty() {
+                b.finish_stroke(&mut self.state, &mut l.surface);
+                for st in self.sym_states.iter_mut() {
+                    b.finish_stroke(st, &mut l.surface);
+                }
+            }
+            for pen in self.strand_pens.iter_mut() {
+                pen.finish(b, &mut l.surface);
             }
         }
         self.sym_states.clear();
+        self.strand_pens.clear();
         let line = std::mem::take(&mut self.line_stroke);
         if let Some(l) = self.layers.iter_mut().find(|l| l.id == id) {
             l.surface.fixed_sampling = false;
@@ -1918,6 +1992,7 @@ impl Painter {
             }
         }
         self.state.reset();
+        self.strand_pens.clear();
         self.stroke_brush = None;
         self.alpha_lock_stroke = false;
         self.line_stroke = false;

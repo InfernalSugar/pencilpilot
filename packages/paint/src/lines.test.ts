@@ -271,6 +271,29 @@ describe('saving and sharing', () => {
 		expect(back[1].seed).toBe(4294967295);
 		expect(decodeLines(encodeLines([]))).toEqual([]);
 	});
+	it('keeps a stroke’s strands, checked', () => {
+		const texture = {
+			grain: null,
+			grainScale: 1,
+			grainStrength: 0.7,
+			tip: null,
+			dual: null,
+			dualSize: 0.35,
+			dualScatter: 0.8,
+			dualCount: 3,
+			strands: { count: 9, spread: 9, wobble: 0.35, taper: 0.7 }
+		};
+		const a = line(1, 2, 50, 3, { id: 'hair', texture });
+		const b = line(1, 2, 50, 3, {
+			id: 'odd',
+			texture: { ...texture, strands: { count: 500, spread: -4, wobble: 9, taper: 0.5 } }
+		});
+		const c = line(1, 2, 50, 3, { id: 'one', texture: { ...texture, strands: null } });
+		const [ra, rb, rc] = decodeLines(encodeLines([a, b, c]));
+		expect(ra.texture).toEqual(texture);
+		expect(rb.texture?.strands).toEqual({ count: 24, spread: 1, wobble: 1, taper: 0.5 });
+		expect(rc.texture?.strands).toBeUndefined();
+	});
 	it('refuses what isn’t line data', () => {
 		expect(() => decodeLines(new Uint8Array([1, 2, 3]))).toThrow();
 		const bytes = encodeLines([line(0, 0, 10, 0)]);

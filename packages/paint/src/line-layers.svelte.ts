@@ -638,7 +638,11 @@ export class LineLayers {
 		b.setSizeScale(s.size);
 		b.setOpacity(s.opacity);
 		b.setEraser(!!s.erase);
-		return e.linesDabs(b, s.seed, s.pts);
+		// (in strands, its dabs fall across the bundle)
+		this.host.dabStyle(s.texture);
+		const dabs = e.linesDabs(b, s.seed, s.pts);
+		this.host.restoreDabStyle();
+		return dabs;
 	}
 
 	/** Whether redrawing `tiles` of `layer` from `list` gives exactly the pixels there now. */

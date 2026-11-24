@@ -28,7 +28,56 @@ export interface BrushTexture {
 	dualSize: number;
 	dualScatter: number;
 	dualCount: number;
+	/** one stroke paints a bundle of thin strands (none: one line) */
+	strands?: BrushStrands | null;
 }
+
+/**
+ * Strands (see the engine's `strands` module): one stroke paints `count` thin,
+ * tapered, roughly parallel lines that follow it, as for hair or fur.
+ */
+export interface BrushStrands {
+	/** strands per stroke, 2–24 */
+	count: number;
+	/** the bundle's width at full pressure, as a multiple of the brush's size (radius) */
+	spread: number;
+	/** how much each strand bends and strays, 0–1 */
+	wobble: number;
+	/** how long the thin ends are, 0–1 */
+	taper: number;
+}
+
+export const STRANDS_MAX = 24;
+export const STRANDS_SPREAD: [number, number] = [1, 30];
+
+export const DEFAULT_STRANDS: BrushStrands = { count: 8, spread: 10, wobble: 0.35, taper: 0.6 };
+
+const clampTo = (v: unknown, lo: number, hi: number, d: number) =>
+	typeof v === 'number' && Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : d;
+
+/** Strand settings checked and clamped (from a file or storage); none when they aren't any. */
+export function readStrands(v: unknown): BrushStrands | undefined {
+	const s = v as BrushStrands;
+	if (!s || typeof s !== 'object') return undefined;
+	const count = Math.round(clampTo(s.count, 0, STRANDS_MAX, 0));
+	if (count < 2) return undefined;
+	return {
+		count,
+		spread: clampTo(s.spread, STRANDS_SPREAD[0], STRANDS_SPREAD[1], DEFAULT_STRANDS.spread),
+		wobble: clampTo(s.wobble, 0, 1, DEFAULT_STRANDS.wobble),
+		taper: clampTo(s.taper, 0, 1, DEFAULT_STRANDS.taper)
+	};
+}
+
+export const strandsOn = (t: BrushTexture | null | undefined) =>
+	!!t?.strands && t.strands.count >= 2;
+
+/**
+ * How far from its path a stroke in strands paints, as a multiple of the brush's radius,
+ * given how far its brush paints (`paintReach`): the engine's `Strands::reach` plus that.
+ */
+export const strandsReach = (s: BrushStrands, paintReach: number) =>
+	s.spread * (0.5 + 0.6 * s.wobble) + paintReach;
 
 export const NO_TEXTURE: BrushTexture = {
 	grain: null,
@@ -41,8 +90,16 @@ export const NO_TEXTURE: BrushTexture = {
 	dualCount: 3
 };
 
+/** whether `t` changes how strokes look at all (grain, a tip, a dual brush or strands) */
 export const textureOn = (t: BrushTexture | null | undefined) =>
-	!!t && (!!(t.grain && t.grainStrength > 0) || !!t.tip || !!t.dual);
+	!!t && (!!(t.grain && t.grainStrength > 0) || !!t.tip || !!t.dual || strandsOn(t));
+
+/** Built-in brushes that come with settings of these kinds (until changed on this device). */
+export const BRUSH_DEFAULTS: Record<string, Partial<BrushTexture>> = {
+	'pencilpilot-hair-strands': {
+		strands: { count: 6, spread: 24, wobble: 0.3, taper: 0.7 }
+	}
+};
 
 // ---- built-in grains and tips, drawn from a seeded noise ----
 
@@ -272,12 +329,19 @@ function allSettings(): Record<string, BrushTexture> {
 }
 
 export function brushTexture(brushId: string): BrushTexture {
-	return { ...NO_TEXTURE, ...allSettings()[brushId] };
+	const t = { ...NO_TEXTURE, ...BRUSH_DEFAULTS[brushId], ...allSettings()[brushId] };
+	const strands = readStrands(t.strands);
+	if (strands) t.strands = strands;
+	else delete t.strands;
+	return t;
 }
 
+/** Keep `t` as `brushId`'s settings (null: back to its own). */
 export function setBrushTexture(brushId: string, t: BrushTexture | null) {
 	const all = { ...allSettings() };
-	if (t && textureOn(t)) all[brushId] = t;
+	// (a built-in brush's own settings switched off are kept as off)
+	if (t && (textureOn(t) || BRUSH_DEFAULTS[brushId]))
+		all[brushId] = { ...t, strands: strandsOn(t) ? t.strands : null };
 	else delete all[brushId];
 	settings = all;
 	try {
@@ -347,6 +411,14 @@ interface TexturedCanvas {
 		dualScatter: number,
 		dualCount: number
 	): void;
+	setStrands(count: number, spread: number, wobble: number, taper: number): void;
+}
+
+/** Strand the engine canvas's next strokes as `t` says (none: one line a stroke). */
+export function strandStrokes(paint: Pick<TexturedCanvas, 'setStrands'>, t?: BrushTexture | null) {
+	const s = strandsOn(t) ? t!.strands! : null;
+	if (!s) return paint.setStrands(0, 0, 0, 0);
+	paint.setStrands(s.count, s.spread, s.wobble, s.taper);
 }
 
 /**
@@ -369,6 +441,7 @@ export function styleStrokes(
 		ids.set(id, n);
 		return n;
 	};
+	strandStrokes(paint, t);
 	if (!t || !textureOn(t)) return paint.setDabStyle(0, 1, 0, 0, 0, 0, 0, 1);
 	paint.setDabStyle(
 		engineId(t.grain),

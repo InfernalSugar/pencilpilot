@@ -9,7 +9,16 @@
 	import BrushTestPad from './BrushTestPad.svelte';
 	import TexturePicker from './TexturePicker.svelte';
 	import { brushSource, type BrushManifest } from './brushes';
-	import { brushTexture, NO_TEXTURE, setBrushTexture, type BrushTexture } from './brush-textures';
+	import {
+		brushTexture,
+		DEFAULT_STRANDS,
+		NO_TEXTURE,
+		setBrushTexture,
+		STRANDS_MAX,
+		STRANDS_SPREAD,
+		type BrushStrands,
+		type BrushTexture
+	} from './brush-textures';
 	import {
 		applyTweaks,
 		changedTweaks,
@@ -138,7 +147,11 @@
 		hint?: string;
 	}
 	const pct = (v: number) => `${Math.round(v * 100)}%`;
-	const GROUPS: { id: string; label: string; rows: (Slider | 'follow' | 'textures')[] }[] = [
+	const GROUPS: {
+		id: string;
+		label: string;
+		rows: (Slider | 'follow' | 'textures' | 'strands')[];
+	}[] = [
 		{
 			id: 'shape',
 			label: 'Shape',
@@ -351,8 +364,77 @@
 				}
 			]
 		},
-		{ id: 'grain', label: 'Grain and tip picture', rows: ['textures'] }
+		{ id: 'grain', label: 'Grain and tip picture', rows: ['textures'] },
+		{ id: 'strands', label: 'Strands', rows: ['strands'] }
 	];
+
+	// ---- strands: one stroke, a bundle of thin lines ----
+
+	interface StrandSlider {
+		key: keyof BrushStrands;
+		label: string;
+		left: string;
+		right: string;
+		min: number;
+		max: number;
+		step: number;
+		show: (v: number) => string;
+		hint?: string;
+	}
+	const STRAND_SLIDERS: StrandSlider[] = [
+		{
+			key: 'count',
+			label: 'Strands',
+			left: 'Few',
+			right: 'Many',
+			min: 2,
+			max: STRANDS_MAX,
+			step: 1,
+			show: (v) => `${Math.round(v)}`,
+			hint: 'More strands take longer to draw.'
+		},
+		{
+			key: 'spread',
+			label: 'Spread',
+			left: 'Narrow',
+			right: 'Wide',
+			min: STRANDS_SPREAD[0],
+			max: STRANDS_SPREAD[1],
+			step: 0.5,
+			show: (v) => `${v.toFixed(1)}× the size`,
+			hint: 'How wide the bundle is. Pressing harder spreads it more.'
+		},
+		{
+			key: 'wobble',
+			label: 'Wobble',
+			left: 'Neat',
+			right: 'Loose',
+			min: 0,
+			max: 1,
+			step: 0.01,
+			show: pct
+		},
+		{
+			key: 'taper',
+			label: 'Taper',
+			left: 'Blunt',
+			right: 'Pointed',
+			min: 0,
+			max: 1,
+			step: 0.01,
+			show: pct,
+			hint: 'Each strand starts and ends thinner, at its own place.'
+		}
+	];
+	/** the strand settings shown (the last ones used while they're off) */
+	let strandsShown = $state<BrushStrands>(
+		untrack(() => (tex.strands ? { ...tex.strands } : { ...DEFAULT_STRANDS }))
+	);
+	const strandsOnNow = $derived(!!tex.strands);
+	function setStrands(on: boolean, patch: Partial<BrushStrands> = {}) {
+		strandsShown = { ...strandsShown, ...patch };
+		tex = { ...tex, strands: on ? { ...strandsShown } : null };
+	}
 	let group = $state('shape');
 	const shown = $derived(GROUPS.find((g) => g.id === group)!);
 
@@ -457,6 +539,41 @@
 								</label>
 							{:else if row === 'textures'}
 								<TexturePicker value={tex} onchange={(v) => (tex = v)} />
+							{:else if row === 'strands'}
+								<p class="hint intro">
+									One stroke draws a bundle of thin lines that follow it: quick hair, fur and grass.
+								</p>
+								<label class="check">
+									<input
+										type="checkbox"
+										checked={strandsOnNow}
+										onchange={(e) => setStrands(e.currentTarget.checked)}
+									/>
+									<span>Draw in strands</span>
+								</label>
+								{#each STRAND_SLIDERS as s (s.key)}
+									<label class="row" class:off={!strandsOnNow}>
+										<span class="lbl">
+											{s.label}
+											<b>{s.show(strandsShown[s.key])}</b>
+										</span>
+										<span class="ends">
+											<span>{s.left}</span>
+											<input
+												type="range"
+												min={s.min}
+												max={s.max}
+												step={s.step}
+												value={strandsShown[s.key]}
+												disabled={!strandsOnNow}
+												aria-label="Strand {s.label.toLowerCase()}"
+												oninput={(e) => setStrands(true, { [s.key]: +e.currentTarget.value })}
+											/>
+											<span>{s.right}</span>
+										</span>
+										{#if s.hint}<small>{s.hint}</small>{/if}
+									</label>
+								{/each}
 							{:else}
 								{@const s = row}
 								<label class="row">
@@ -728,6 +845,12 @@
 	}
 	.check input {
 		accent-color: var(--pp-accent-strong);
+	}
+	.row.off {
+		opacity: 0.5;
+	}
+	.intro {
+		margin: 0 0 10px;
 	}
 	small,
 	.hint {
