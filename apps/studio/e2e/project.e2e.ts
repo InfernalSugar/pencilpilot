@@ -2148,6 +2148,116 @@ test('stages: colour layers set up for the lines go in their stages', async ({ p
 	await expect(layerRow(page, 'Layer 1').getByTitle('Stage: Clean-up')).toBeVisible();
 });
 
+test('stages: Show one stage on the canvas, in playback and the onion skin; kept with the project', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	const tl = page.getByRole('region', { name: 'Timeline' });
+	const top = () => ink(page, 0, 0.45);
+	const bottom = () => ink(page, 0.55, 1);
+	// a rough at the top, clean lines at the bottom, two drawings each
+	await scribble(page, 0.25);
+	await renameLayer(page, 'Layer 1', 'Rough');
+	await page.getByRole('button', { name: 'New layer' }).click();
+	await scribble(page, 0.75);
+	await renameLayer(page, 'Layer 2', 'Lines');
+	await page.getByRole('button', { name: 'Sort layers into stages' }).click();
+	await expect(layerRow(page, 'Lines').getByTitle('Stage: Clean-up')).toBeVisible();
+	await tl.getByRole('button', { name: 'New drawing' }).click();
+	await scribble(page, 0.8);
+	await tl.getByRole('button', { name: 'Frame 1', exact: true }).click();
+	await expect.poll(top).toBeGreaterThan(50);
+	await expect.poll(bottom).toBeGreaterThan(50);
+
+	// show the rough only: the lines go from the canvas (not hidden: their eye stays open)
+	await tl.getByRole('button', { name: 'Show: All' }).click();
+	await tl
+		.getByRole('group', { name: 'Show stages' })
+		.getByRole('radio', { name: 'Rough' })
+		.click();
+	await expect(tl.getByRole('button', { name: 'Show: Rough' })).toBeVisible();
+	await expect.poll(bottom).toBe(0);
+	expect(await top()).toBeGreaterThan(50);
+	await expect(page.getByRole('button', { name: 'Hide Lines' })).toBeVisible();
+	// drawing moved to the layer the view shows
+	await expect(page.getByRole('button', { name: 'Rename Rough' })).toBeVisible();
+
+	// playback plays the view
+	await tl.getByRole('radio', { name: 'Loop' }).click();
+	await tl.getByRole('button', { name: 'Play' }).click();
+	const player = page.getByTestId('player');
+	await expect(player).toBeVisible();
+	const playerInk = (half: 'top' | 'bottom') =>
+		player.evaluate((el: HTMLCanvasElement, half) => {
+			if (!el.width || !el.height) return -1;
+			const h = Math.floor(el.height / 2);
+			const d = el.getContext('2d')!.getImageData(0, half === 'top' ? 0 : h, el.width, h).data;
+			let n = 0;
+			for (let i = 0; i < d.length; i += 4) if (d[i] < 200) n++;
+			return n;
+		}, half);
+	await expect.poll(() => playerInk('top')).toBeGreaterThan(20);
+	expect(await playerInk('bottom')).toBe(0);
+	await tl.getByRole('button', { name: 'Stop' }).click();
+	await expect(player).toHaveCount(0);
+
+	// only the clean-up: the rough goes (and playback renders this view's frames, not the
+	// rough view's it kept)
+	await tl.getByRole('button', { name: 'Show: Rough' }).click();
+	await tl
+		.getByRole('group', { name: 'Show stages' })
+		.getByRole('button', { name: 'Only Clean-up' })
+		.click();
+	await expect(tl.getByRole('button', { name: 'Show: Custom' })).toBeVisible();
+	await expect.poll(top).toBe(0);
+	expect(await bottom()).toBeGreaterThan(50);
+	await tl.getByRole('button', { name: 'Play' }).click();
+	await expect(player).toBeVisible();
+	await expect.poll(() => playerInk('bottom')).toBeGreaterThan(20);
+	expect(await playerInk('top')).toBe(0);
+	await tl.getByRole('button', { name: 'Stop' }).click();
+	await expect(player).toHaveCount(0);
+
+	// onion skin: only the view's layers (the clean-up's drawing 2, after frame 1)
+	await tl.getByRole('button', { name: 'Onion', exact: true }).click();
+	const onionInk = (y0: number, y1: number) =>
+		page.getByTestId('onion').evaluate(
+			(el: HTMLCanvasElement, [y0, y1]) => {
+				const t = Math.round(el.height * y0);
+				const d = el
+					.getContext('2d')!
+					.getImageData(0, t, el.width, Math.max(1, Math.round(el.height * (y1 - y0)))).data;
+				let n = 0;
+				for (let i = 3; i < d.length; i += 4) if (d[i] > 20) n++;
+				return n;
+			},
+			[y0, y1]
+		);
+	await expect.poll(() => onionInk(0.55, 1)).toBeGreaterThan(20);
+	expect(await onionInk(0, 0.45)).toBe(0);
+	await tl.getByRole('button', { name: 'Onion', exact: true }).click();
+
+	// a new layer made while one stage shows goes in it
+	await page.getByRole('button', { name: 'New layer' }).click();
+	await expect(layerRow(page, 'Layer 3').getByTitle('Stage: Clean-up')).toBeVisible();
+	// (and undoing it takes the stage too)
+	await page.keyboard.press('Control+z');
+	await expect(layerRow(page, 'Layer 3')).toHaveCount(0);
+
+	// saved and opened again: the view comes back with the project
+	await page.keyboard.press('Control+s');
+	await expect(page.getByTestId('project-name')).toHaveText('Walk cycle', { timeout: 20_000 });
+	await tl.getByRole('button', { name: 'Show: Custom' }).click();
+	await tl.getByRole('group', { name: 'Show stages' }).getByRole('radio', { name: 'All' }).click();
+	await tl.getByRole('button', { name: 'Frame 1', exact: true }).click();
+	await expect.poll(top).toBeGreaterThan(50);
+	await page.keyboard.press('Control+o');
+	await expect(tl.getByRole('button', { name: 'Show: Custom' })).toBeVisible({ timeout: 20_000 });
+	await expect.poll(bottom).toBeGreaterThan(50);
+	await expect.poll(top).toBe(0);
+});
+
 test('transitions: a white flash and a dissolve between cuts, in the export', async ({ page }) => {
 	await stubTauri(page);
 	await ready(page);

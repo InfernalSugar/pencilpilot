@@ -31,7 +31,10 @@
 		startOf,
 		staticDrawing,
 		trackIn,
+		STAGES,
+		STAGE_LABELS,
 		type Camera,
+		type Stage,
 		type Timeline,
 		type Track,
 		type DrawingKind
@@ -54,6 +57,7 @@
 	import type { AudioBank } from './audio';
 	import { AUDIO_TYPES } from './audio';
 	import { TRANSITIONS } from './exporting';
+	import { VIEW_ALL, VIEW_PRESETS, viewLabel, viewStages, type StageView } from './stages';
 
 	let {
 		timeline,
@@ -68,6 +72,9 @@
 		playRange = $bindable<PlayRange | null>(null),
 		onplay,
 		onrange,
+		stageView = VIEW_ALL,
+		onview,
+		viewHidden = [],
 		onion,
 		pinned = $bindable<number[]>([]),
 		onpin,
@@ -104,6 +111,12 @@
 		/** the frames played (none: the whole cut) */
 		playRange?: PlayRange | null;
 		onplay: () => void;
+		/** what the canvas, playback and the onion skin show: every layer, or some stages' */
+		stageView?: StageView;
+		/** show another view */
+		onview?: (v: StageView) => void;
+		/** the layers the view leaves out (their rows are dimmed) */
+		viewHidden?: number[];
 		/** onion skin settings (changed in place) */
 		onion: OnionSettings;
 		/** frames on the light table */
@@ -533,6 +546,14 @@
 	}
 	const inRange = (f: number) => !!playRange && f >= playRange.from && f <= playRange.to;
 	let onionOpen = $state(false);
+	let showOpen = $state(false);
+	/** the stages the view shows (all of them for All) */
+	const viewing = $derived(viewStages(stageView) ?? STAGES);
+	/** a custom view: the stages shown, with one more or one fewer */
+	function toggleStage(st: Stage) {
+		const now = viewing.includes(st) ? viewing.filter((x) => x !== st) : [...viewing, st];
+		onview?.({ id: 'custom', stages: STAGES.filter((x) => now.includes(x)) });
+	}
 	/** shift & trace: which side the controls move */
 	let shiftSide = $state<'before' | 'after'>('before');
 	function nudge(dx: number, dy: number, dr: number, big: boolean) {
@@ -659,6 +680,66 @@
 			<button type="button" class="b" title="Play the whole cut" onclick={() => (playRange = null)}>
 				Frames {playRange.from + 1}–{playRange.to + 1} ×
 			</button>
+		{/if}
+		{#if onview}
+			<div class="onion">
+				<button
+					type="button"
+					class="b"
+					aria-label="Show: {viewLabel(stageView)}"
+					aria-expanded={showOpen}
+					aria-pressed={stageView.id !== 'all'}
+					title="Show the layers of some stages only (on the canvas, in playback and in the onion skin)"
+					onclick={() => (showOpen = !showOpen)}
+				>
+					Show: {viewLabel(stageView)} ▾
+				</button>
+				{#if showOpen}
+					<div class="pop" role="group" aria-label="Show stages">
+						<div class="views" role="radiogroup" aria-label="View">
+							{#each VIEW_PRESETS as p (p.id)}
+								<button
+									type="button"
+									class="b"
+									role="radio"
+									aria-checked={stageView.id === p.id}
+									onclick={() => {
+										onview({ id: p.id });
+										showOpen = false;
+									}}
+								>
+									{p.label}
+								</button>
+							{/each}
+						</div>
+						<p class="hint">Or pick the stages (layers with no stage always show):</p>
+						{#each STAGES as st (st)}
+							<div class="line">
+								<label class="check grow">
+									<input
+										type="checkbox"
+										checked={viewing.includes(st)}
+										onchange={() => toggleStage(st)}
+									/>
+									{STAGE_LABELS[st]}
+								</label>
+								<button
+									type="button"
+									class="b"
+									aria-label="Only {STAGE_LABELS[st]}"
+									title="Show only this stage"
+									onclick={() => {
+										onview({ id: 'custom', stages: [st] });
+										showOpen = false;
+									}}
+								>
+									Only
+								</button>
+							</div>
+						{/each}
+					</div>
+				{/if}
+			</div>
 		{/if}
 		<span class="sep"></span>
 		<div class="onion">
@@ -1267,7 +1348,7 @@
 			{@const t = theCut.tracks[l.id] ?? []}
 			{@const nums = numbers(t)}
 			{@const still = statics.includes(l.id)}
-			<div class="name" class:on={l.id === active}>
+			<div class="name" class:on={l.id === active} class:out={viewHidden.includes(l.id)}>
 				<button type="button" class="label" onclick={() => onlayer(l.id)} title={l.name}>
 					{l.name}
 				</button>
@@ -1287,6 +1368,7 @@
 			<div
 				class="row"
 				class:on={l.id === active}
+				class:out={viewHidden.includes(l.id)}
 				class:still
 				role="presentation"
 				data-layer={l.id}
@@ -1698,6 +1780,22 @@
 	}
 	.pop.wide {
 		width: 300px;
+	}
+	.views {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 4px;
+	}
+	.pop .hint {
+		font-size: 12px;
+		color: var(--pp-on-ink-muted);
+	}
+	.pop .grow {
+		flex: 1;
+	}
+	.name.out,
+	.row.out {
+		opacity: 0.4;
 	}
 	.pop.right {
 		left: auto;
