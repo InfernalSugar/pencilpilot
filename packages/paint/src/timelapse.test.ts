@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { filmFps, filmPlan, thin, thinIndices } from './timelapse';
+import { filmFps, filmPlan, fitRect, thin, thinIndices } from './timelapse';
 
 const frame = (n: number) => ({
 	n,
@@ -34,5 +34,13 @@ describe('timelapse', () => {
 		// 10 frames in 0.5 s at 8 fps: some are skipped, the order is kept
 		expect(filmPlan(10, 8, 0.5, 0)).toEqual([0, 2, 5, 7]);
 		expect(filmPlan(0, 8, 1)).toEqual([]);
+	});
+
+	it('fits frames from before a canvas size change into the film, keeping their shape', () => {
+		// the film is 1600 × 900; an older frame was square
+		expect(fitRect(800, 800, 1600, 900)).toEqual({ x: 350, y: 0, width: 900, height: 900 });
+		expect(fitRect(1600, 900, 1600, 900)).toEqual({ x: 0, y: 0, width: 1600, height: 900 });
+		// a wider one: paper above and below
+		expect(fitRect(2000, 500, 1000, 1000)).toEqual({ x: 0, y: 375, width: 1000, height: 250 });
 	});
 });

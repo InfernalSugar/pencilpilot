@@ -861,6 +861,80 @@ impl PaintCanvas {
             .resize_canvas(width, height, dx, dy, scale, &specs)
     }
 
+    /// Draw text layer `id` again from `rgba` (`w`×`h` at `x`, `y`): one undo step.
+    #[wasm_bindgen(js_name = textRedraw)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn text_redraw(&mut self, id: u32, x: i32, y: i32, w: u32, h: u32, rgba: &[u8]) -> bool {
+        self.inner.text_redraw(id, x, y, w, h, rgba)
+    }
+
+    /// `resizeCanvas` for drawings kept in the app's frame store: `swaps` (flattened
+    /// pairs: a drawing, the id its resized copy was made under with `resizeDrawingInto`)
+    /// trade places instead of being copied into the undo step.
+    #[wasm_bindgen(js_name = resizeCanvasSwapping)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn resize_canvas_swapping(
+        &mut self,
+        width: u32,
+        height: u32,
+        dx: i32,
+        dy: i32,
+        scale: bool,
+        text_ids: &[u32],
+        texts: &str,
+        swaps: &[u32],
+    ) -> bool {
+        let specs: Vec<(u32, String)> = if text_ids.is_empty() {
+            Vec::new()
+        } else {
+            text_ids
+                .iter()
+                .copied()
+                .zip(texts.split('\u{1}').map(str::to_string))
+                .collect()
+        };
+        if !swaps.len().is_multiple_of(2) {
+            return false;
+        }
+        let pairs: Vec<(u32, u32)> = swaps
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| (c[0], c[1]))
+            .collect();
+        self.inner
+            .resize_canvas_swapping(width, height, dx, dy, scale, &specs, &pairs)
+    }
+
+    /// Kept drawing `to` becomes drawing `from` resized for a canvas size change (not an
+    /// undo step). False if `from` isn't here.
+    #[wasm_bindgen(js_name = resizeDrawingInto)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn resize_drawing_into(
+        &mut self,
+        from: u32,
+        to: u32,
+        width: u32,
+        height: u32,
+        dx: i32,
+        dy: i32,
+        scale: bool,
+    ) -> bool {
+        self.inner
+            .resize_drawing_into(from, to, width, height, dx, dy, scale)
+    }
+
+    /// The pairs (flattened) the next undo (`redo` false) or redo of a canvas size swaps
+    /// (none: it isn't one, or it keeps its drawings in the engine).
+    #[wasm_bindgen(js_name = canvasStepSwaps)]
+    pub fn canvas_step_swaps(&self, redo: bool) -> Vec<u32> {
+        self.inner
+            .canvas_step_swaps(redo)
+            .into_iter()
+            .flat_map(|(a, b)| [a, b])
+            .collect()
+    }
+
     /// The drawings the next undo (`redo` false) or redo of a canvas size changes (none:
     /// the next step isn't one). They must all be here first.
     #[wasm_bindgen(js_name = canvasStepDrawings)]
@@ -954,6 +1028,12 @@ impl PaintCanvas {
     #[wasm_bindgen(js_name = showDrawings)]
     pub fn show_drawings(&mut self, pairs: &[u32]) -> bool {
         self.inner.show_drawings(pairs)
+    }
+
+    /// Drawings up to `id` are kept elsewhere (the app's frame store): new ones come after.
+    #[wasm_bindgen(js_name = reserveDrawings)]
+    pub fn reserve_drawings(&mut self, id: u32) {
+        self.inner.reserve_drawings(id);
     }
 
     #[wasm_bindgen(js_name = newDrawing)]

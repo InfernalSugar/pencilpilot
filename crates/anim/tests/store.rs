@@ -86,6 +86,26 @@ fn a_1080p_cut_keeps_each_tile_once() {
 }
 
 #[test]
+fn swapping_two_drawings_trades_their_tiles() {
+    let mut s = FrameStore::new(usize::MAX, None).unwrap();
+    put(&mut s, 1, &drawing(640, 360, 0));
+    put(&mut s, 2, &drawing(640, 360, 5));
+    let tiles = s.stats().tiles;
+    s.swap(1, 2);
+    assert_eq!(got(&mut s, 1), sorted(drawing(640, 360, 5)));
+    assert_eq!(got(&mut s, 2), sorted(drawing(640, 360, 0)));
+    assert_eq!(s.stats().tiles, tiles, "nothing copied");
+    // with a drawing that isn't there, the other moves
+    s.swap(2, 9);
+    assert!(!s.contains(2));
+    assert_eq!(got(&mut s, 9), sorted(drawing(640, 360, 0)));
+    s.swap(3, 4);
+    assert!(!s.contains(3) && !s.contains(4));
+    s.swap(1, 1);
+    assert_eq!(got(&mut s, 1), sorted(drawing(640, 360, 5)));
+}
+
+#[test]
 fn a_4k_cut_past_the_memory_budget_goes_to_disk_and_comes_back() {
     let dir = temp_dir("4k");
     // 4 MB in memory: 256 tiles

@@ -228,6 +228,16 @@ vi.mock('@tauri-apps/api/core', () => ({
 				at += 8;
 			}
 		}
+		if (cmd === 'frames_swap') {
+			const ids = (args as { pairs: number[] }).pairs;
+			for (let i = 0; i + 1 < ids.length; i += 2) {
+				const [a, b] = [store.get(ids[i]), store.get(ids[i + 1])];
+				store.delete(ids[i]);
+				store.delete(ids[i + 1]);
+				if (b) store.set(ids[i], b);
+				if (a) store.set(ids[i + 1], a);
+			}
+		}
 		return null;
 	}
 }));
@@ -247,6 +257,67 @@ function fakeEngine(showing: number[]) {
 		}
 	};
 }
+
+describe('a canvas size frame by frame through the store', () => {
+	it('resizes a batch at a time, keeping only what shows; the step swaps in the store', async () => {
+		store.clear();
+		calls.length = 0;
+		for (let id = 1; id <= 20; id++) store.set(id, new Uint8Array(4));
+		const e = fakeEngine([1]);
+		const cache = new FrameCache(() => e.canvas as never, true);
+		cache.stored([...store.keys()]);
+		cache.keep = 2;
+		let next = 100;
+		let most = 0;
+		const progress: number[] = [];
+		const pairs = await cache.resizeEach(
+			[...store.keys(), 1, 0],
+			new Set([1]),
+			(from, to) => {
+				e.kept.add(to);
+				most = Math.max(most, e.kept.size);
+				return e.canvas.hasDrawing(from);
+			},
+			() => ++next,
+			(done) => progress.push(done),
+			5
+		);
+		expect(pairs).toHaveLength(20);
+		expect(progress).toEqual([5, 10, 15, 20]);
+		// never more than a batch and its new sizes in the engine at once (and what shows)
+		expect(most).toBeLessThanOrEqual(11);
+		// each batch sent once: the new sizes (the drawings were in the store already)
+		expect(calls.filter((c) => c === 'frames_put')).toHaveLength(4);
+		expect(store.size).toBe(40);
+		// the engine keeps the drawing showing and its new size (held through a trim)
+		const other = pairs.find(([d]) => d === 1)![1];
+		cache.trim();
+		expect([...e.kept]).toEqual([other]);
+		// the step: the store swaps every pair, the engine (here, `go`) does too
+		const was = new Map(store);
+		let went = 0;
+		expect(await cache.swapStep(pairs, new Set([1]), () => ++went > 0)).toBe(true);
+		expect(went).toBe(1);
+		for (const [d, to] of pairs) {
+			expect(store.get(d)).toBe(was.get(to));
+			expect(store.get(to)).toBe(was.get(d));
+		}
+		// the other size is let go: it waits in the store for undo
+		expect(e.kept.size).toBe(0);
+		expect(cache.version(5)).toBe(1);
+
+		// undo: the showing drawing's other size comes from the store first
+		let had = false;
+		expect(
+			await cache.swapStep(pairs, new Set([1]), () => (had = e.canvas.hasDrawing(other)))
+		).toBe(true);
+		expect(had).toBe(true);
+		for (const [d] of pairs) expect(store.get(d)).toBe(was.get(d));
+		// one that doesn't happen swaps the store back
+		expect(await cache.swapStep(pairs, new Set([1]), () => false)).toBe(false);
+		for (const [d] of pairs) expect(store.get(d)).toBe(was.get(d));
+	});
+});
 
 describe('a canvas size across the frame store', () => {
 	it('holds every drawing in the engine while it changes, then sends them all back', async () => {
