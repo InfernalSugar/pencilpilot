@@ -77,6 +77,8 @@
 	import LipSyncDialog from '#lib/LipSyncDialog.svelte';
 	import FilmDialog from '#lib/FilmDialog.svelte';
 	import ShareDialog from '#lib/ShareDialog.svelte';
+	import TogetherChat from '#lib/TogetherChat.svelte';
+	import { capLines, chatBody, chatText, type ChatLine } from '#lib/chat.js';
 	import SaveChangesDialog from '#lib/SaveChangesDialog.svelte';
 	import SettingsPanel from '#lib/SettingsPanel.svelte';
 	import CanvasSizeDialog from '#lib/CanvasSizeDialog.svelte';
@@ -1819,6 +1821,33 @@
 		shareOpen = true;
 	});
 	let shareBusy = $state(false);
+	// chat while drawing together: only while a session is on, never saved
+	let chatLines = $state<ChatLine[]>([]);
+	let chatOpen = $state(false);
+	let chatUnread = $state(0);
+	let chatId = 0;
+	function chatAdd(line: Omit<ChatLine, 'id'>) {
+		chatLines = capLines([...chatLines, { ...line, id: ++chatId }]);
+		if (!chatOpen && line.kind === 'message' && !line.mine) chatUnread++;
+	}
+	function chatSend(typed: string) {
+		const body = chatBody(typed);
+		const me = sharing?.me;
+		if (!body || !me || !sharing) return;
+		for (const m of sharing.members)
+			if (m.id !== me.id) void sendDirect(m.id, body).catch(() => {});
+		chatAdd({ kind: 'message', from: me.id, name: me.name, mine: true, text: body.text });
+	}
+	$effect(() => {
+		if (!sharing) {
+			chatLines = [];
+			chatUnread = 0;
+			chatOpen = false;
+		}
+	});
+	$effect(() => {
+		if (chatOpen) chatUnread = 0;
+	});
 	let shareError = $state('');
 	const cursorsOf = new Cursors();
 	let cursorTick = $state(0);
@@ -2237,8 +2266,12 @@
 				else if (isCursor(e.body) && cursorsOf.set(e.from, e.body.x, e.body.y, performance.now()))
 					cursorTick++;
 			} else if (e.kind === 'joined') {
+				if (!sharing.members.some((m) => m.id === e.member.id))
+					chatAdd({ kind: 'system', text: `${e.member.name || 'Someone'} joined` });
 				sharing.members = [...sharing.members.filter((m) => m.id !== e.member.id), e.member];
 			} else if (e.kind === 'left') {
+				const who = sharing.members.find((m) => m.id === e.id);
+				if (who) chatAdd({ kind: 'system', text: `${who.name || 'Someone'} left` });
 				sharing.members = sharing.members.filter((m) => m.id !== e.id);
 				if (cursorsOf.remove(e.id)) cursorTick++;
 			} else if (e.kind === 'host_changed') {
@@ -2249,7 +2282,11 @@
 			} else if (e.kind === 'edit') {
 				void together?.onEdit(e.seq, e.from, e.body);
 			} else if (e.kind === 'direct') {
-				void together?.onDirect(e.from, e.body);
+				const said = chatText(e.body);
+				if (said !== null) {
+					const name = sharing.members.find((m) => m.id === e.from)?.name || 'Someone';
+					chatAdd({ kind: 'message', from: e.from, name, text: said });
+				} else void together?.onDirect(e.from, e.body);
 			} else if (e.kind === 'closed') {
 				const was = sharing;
 				sharing = null;
@@ -4129,6 +4166,14 @@
 						shareOpen = false;
 						shareError = '';
 					}}
+				/>
+			{/if}
+			{#if sharing}
+				<TogetherChat
+					lines={chatLines}
+					unread={chatUnread}
+					bind:open={chatOpen}
+					onsend={chatSend}
 				/>
 			{/if}
 			{#if film}
