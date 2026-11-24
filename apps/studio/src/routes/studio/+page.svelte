@@ -4242,7 +4242,21 @@
 				/>
 			{/if}
 			{#if timelapseOpen && canvas}
-				<TimelapsePlayer film={canvas.timelapse()} onclose={() => (timelapseOpen = false)} />
+				<TimelapsePlayer
+					film={canvas.timelapse()}
+					onclose={() => (timelapseOpen = false)}
+					onsave={(fps, frames) => {
+						// saved through the film export (the app's own encoder: the window's
+						// web view can't record video), as long as the speed chosen here
+						const want = frames / fps;
+						filmSettings.kind = 'timelapse';
+						filmSettings.seconds = [10, 15, 30, 60].reduce((a, b) =>
+							Math.abs(b - want) < Math.abs(a - want) ? b : a
+						);
+						timelapseOpen = false;
+						void openFilm();
+					}}
+				/>
 			{/if}
 		{/snippet}
 	</Studio>
