@@ -2812,6 +2812,27 @@ test('line layers: strokes stay editable (select, move, recolour, erase, reshape
 	await page.mouse.click(cx + r * 1.4, cy);
 	const bar = page.getByRole('toolbar', { name: 'Edit shape' });
 	await expect(bar).toBeVisible();
+	// the bar moves out of the way by its grip (no line drawn), stays put, and goes back
+	const home = (await bar.boundingBox())!;
+	const grip = bar.getByRole('button', { name: 'Move this bar' });
+	const g = (await grip.boundingBox())!;
+	const inked = await ink(page);
+	await page.mouse.move(g.x + g.width / 2, g.y + g.height / 2);
+	await page.mouse.down();
+	await page.mouse.move(g.x + g.width / 2 - 150, g.y + g.height / 2 + 200, { steps: 6 });
+	await page.mouse.up();
+	await expect.poll(async () => (await bar.boundingBox())!.y).toBeGreaterThan(home.y + 150);
+	expect((await bar.boundingBox())!.x).toBeLessThan(home.x - 100);
+	expect(await ink(page)).toBe(inked);
+	// dragged far off: it stays inside the canvas
+	const g2 = (await grip.boundingBox())!;
+	await page.mouse.move(g2.x + 5, g2.y + 5);
+	await page.mouse.down();
+	await page.mouse.move(g2.x + 5, g2.y + 5000, { steps: 4 });
+	await page.mouse.up();
+	await expect(bar).toBeInViewport();
+	await grip.dblclick();
+	await expect.poll(async () => Math.round((await bar.boundingBox())!.y)).toBe(Math.round(home.y));
 	await expect(bar.getByRole('button', { name: 'Ellipse' })).toHaveAttribute(
 		'aria-pressed',
 		'true'

@@ -1742,6 +1742,72 @@
 		onshape?.(shapeName(sh));
 	}
 
+	/** The Edit shape bar, moved out of the way by its grip (kept); 0, 0: top centre. */
+	let shapeBarOff = $state(readBarOff());
+	let shapeBarEl: HTMLDivElement | undefined = $state();
+	function readBarOff(): { dx: number; dy: number } {
+		try {
+			const v = JSON.parse(localStorage.getItem('pp.shapeBarAt') ?? 'null');
+			if (v && Number.isFinite(v.dx) && Number.isFinite(v.dy)) return { dx: v.dx, dy: v.dy };
+		} catch {
+			/* none kept */
+		}
+		return { dx: 0, dy: 0 };
+	}
+	/** Move the bar by an offset from its home, kept inside the canvas area. */
+	function placeShapeBar(dx: number, dy: number, keep = true) {
+		const el = shapeBarEl;
+		const box = el?.offsetParent as HTMLElement | null | undefined;
+		if (el && box) {
+			const b = box.getBoundingClientRect();
+			const r = el.getBoundingClientRect();
+			// where it would be at home (no offset)
+			const left = r.left - shapeBarOff.dx;
+			const top = r.top - shapeBarOff.dy;
+			dx = Math.min(Math.max(dx, b.left + 4 - left), b.right - 4 - (left + r.width));
+			dy = Math.min(Math.max(dy, b.top + 4 - top), b.bottom - 4 - (top + r.height));
+		}
+		shapeBarOff = { dx: Math.round(dx), dy: Math.round(dy) };
+		if (keep)
+			try {
+				localStorage.setItem('pp.shapeBarAt', JSON.stringify(shapeBarOff));
+			} catch {
+				/* storage blocked: kept for this visit */
+			}
+	}
+	function dragShapeBar(e: PointerEvent) {
+		if (e.button !== 0) return;
+		e.preventDefault();
+		e.stopPropagation();
+		const grip = e.currentTarget as HTMLElement;
+		grip.setPointerCapture(e.pointerId);
+		const from = { x: e.clientX, y: e.clientY, ...shapeBarOff };
+		const move = (m: PointerEvent) =>
+			placeShapeBar(from.dx + m.clientX - from.x, from.dy + m.clientY - from.y, false);
+		const up = () => {
+			grip.removeEventListener('pointermove', move);
+			grip.removeEventListener('pointerup', up);
+			grip.removeEventListener('pointercancel', up);
+			placeShapeBar(shapeBarOff.dx, shapeBarOff.dy);
+		};
+		grip.addEventListener('pointermove', move);
+		grip.addEventListener('pointerup', up);
+		grip.addEventListener('pointercancel', up);
+	}
+	function keyShapeBar(e: KeyboardEvent) {
+		const step = e.shiftKey ? 48 : 12;
+		const d = {
+			ArrowLeft: [-step, 0],
+			ArrowRight: [step, 0],
+			ArrowUp: [0, -step],
+			ArrowDown: [0, step]
+		}[e.key];
+		if (!d) return;
+		e.preventDefault();
+		e.stopPropagation();
+		placeShapeBar(shapeBarOff.dx + d[0], shapeBarOff.dy + d[1]);
+	}
+
 	/** Snapped shapes with corners: straight lines between them, or a smooth curve (kept). */
 	let curveShapes = $state(readCurve());
 	function readCurve() {
@@ -5726,7 +5792,28 @@
 		)[name]}
 		{@const bends = curvable(editShape) && editShape.kind === 'poly'}
 		{#if pair || bends}
-			<div class="shape-bar" role="toolbar" aria-label="Edit shape">
+			<div
+				class="shape-bar"
+				role="toolbar"
+				aria-label="Edit shape"
+				bind:this={shapeBarEl}
+				style:translate="{shapeBarOff.dx}px {shapeBarOff.dy}px"
+			>
+				<button
+					type="button"
+					class="grip"
+					aria-label="Move this bar"
+					title="Drag to move it out of the way (double-click: back to the top)"
+					onpointerdown={dragShapeBar}
+					onkeydown={keyShapeBar}
+					ondblclick={() => placeShapeBar(0, 0)}
+				>
+					<svg viewBox="0 0 10 16" width="10" height="16" aria-hidden="true">
+						{#each [3, 8, 13] as y (y)}
+							<circle cx="2.5" cy={y} r="1.4" /><circle cx="7.5" cy={y} r="1.4" />
+						{/each}
+					</svg>
+				</button>
 				<span>Edit shape</span>
 				{#if bends && editShape.kind === 'poly'}
 					<button
@@ -5958,7 +6045,7 @@
 		display: flex;
 		align-items: center;
 		gap: 4px;
-		padding: 4px 4px 4px 12px;
+		padding: 4px 4px 4px 4px;
 		border-radius: 14px;
 		background: var(--pp-ink, #16161a);
 		color: var(--pp-on-ink, #fff);
@@ -5989,6 +6076,22 @@
 	.shape-bar button[aria-pressed='true'] {
 		background: var(--pp-accent-strong, #e8492f);
 		color: #fff;
+	}
+	.shape-bar .grip {
+		width: 22px;
+		padding: 0;
+		display: grid;
+		place-items: center;
+		background: transparent;
+		color: var(--pp-on-ink-muted, #b9b9c2);
+		cursor: grab;
+		touch-action: none;
+	}
+	.shape-bar .grip:active {
+		cursor: grabbing;
+	}
+	.shape-bar .grip svg {
+		fill: currentColor;
 	}
 	.shape-bar button:disabled {
 		opacity: 0.45;
