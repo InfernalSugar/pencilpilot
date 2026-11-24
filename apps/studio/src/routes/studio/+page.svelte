@@ -203,6 +203,7 @@
 		nextKind,
 		setKind,
 		setStage,
+		followTiming,
 		STAGES,
 		STAGE_LABELS,
 		stagesFromFile,
@@ -224,6 +225,9 @@
 		type LightTable,
 		readView,
 		singleStage,
+		oneStageView,
+		traceName,
+		traceStages,
 		VIEW_ALL,
 		viewLabel,
 		type StageView
@@ -1505,6 +1509,59 @@
 		tlLabel = 'Sort layers into stages';
 		docVersion++;
 		note(`Put ${n} layer${n > 1 ? 's' : ''} in stages.`, 2000);
+	}
+
+	/** The stages a layer traced over layer `id` can go in (after its stage, or its name's). */
+	function traceStagesOf(id: number): Stage[] {
+		const l = status?.layers.find((x) => x.id === id);
+		if (!l || l.adjust) return [];
+		return traceStages(timeline.stages?.[id] ?? guessStage(l, timeline.statics.includes(id)));
+	}
+
+	/**
+	 * New layer from this: a layer in `stage` just above layer `id`, named after it, with an
+	 * empty drawing wherever `id` has a drawing, held as long, in every cut (static if it
+	 * is): trace each in turn and the timing matches. One undo step; a view that would
+	 * leave the new layer out switches to its stage.
+	 */
+	async function traceLayer(id: number, stage: string) {
+		const c = canvas;
+		const src = status?.layers.find((l) => l.id === id);
+		if (!c || !src || src.adjust || !isStage(stage) || timelineFor !== canvasKey) return;
+		await showQueue;
+		const layers = () => status?.layers ?? [];
+		const before = new Set(layers().map((l) => l.id));
+		// (made on the canvas itself: drawing together, it's shared just below)
+		c.selectLayer(id);
+		c.addLayer(traceName(src.name, stage));
+		await tick();
+		const fresh = layers().find((l) => !before.has(l.id));
+		if (!fresh) return note('No room for another layer.', 2500);
+		const t = sharing ? together : null;
+		if (t) await t.shareAbove(fresh.id, id);
+		else {
+			// just above it (in one step with the new layer)
+			const i = layers().findIndex((l) => l.id === id);
+			const k = layers().findIndex((l) => l.id === fresh.id);
+			if (i >= 0 && k !== i + 1) {
+				c.moveLayer(fresh.id, k < i ? i : i + 1);
+				c.joinLastSteps();
+			}
+		}
+		const made = followTiming(timeline, id, fresh.id, () => c.newDrawing());
+		cache.touch(made);
+		setStage(timeline, fresh.id, stage);
+		tlJoin = true;
+		tlLabel = `New ${STAGE_LABELS[stage]} layer`;
+		docVersion++;
+		c.selectLayer(fresh.id);
+		if (layersInView(layers(), timeline.stages, stageView).hidden.includes(fresh.id))
+			setView(oneStageView(stage));
+		await showFrame();
+		note(
+			`${fresh.name}: ${made.length} empty drawing${made.length === 1 ? '' : 's'} timed as ${src.name}, to trace.`,
+			3000
+		);
 	}
 
 	/** Let go: back to the frame flipping started on. */
@@ -4476,6 +4533,8 @@
 					stageOf={(id) => timeline.stages?.[id] ?? null}
 					onstage={(id, st) => putStage(id, st)}
 					onsortstages={sortStages}
+					{traceStagesOf}
+					ontrace={(id, st) => void traceLayer(id, st)}
 					aspect={canvasSize.width / canvasSize.height}
 					onadjustment={(id) => toolOpts.adjustmentLayer(id)}
 					ontext={(id) => {

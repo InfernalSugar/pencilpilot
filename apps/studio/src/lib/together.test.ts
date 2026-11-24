@@ -14,7 +14,7 @@ import {
 	type CanvasPort,
 	type TileMap
 } from './together';
-import { newTimeline, setStage, type Timeline } from './timeline';
+import { followTiming, newTimeline, setStage, type Timeline } from './timeline';
 import { STRIDE, transformStroke, type LineStroke } from '@pencilpilot/paint/lines';
 import {
 	applyLineEdit,
@@ -806,6 +806,48 @@ describe('drawing together: apps', () => {
 		await session.settle();
 		expect(bc.drawings.get(track[1].drawing)!.get('2,2')?.[0]).toBe(33);
 		expect(bc.drawings.get(track[0].drawing)!.has('2,2')).toBe(false);
+	});
+
+	it('shares a layer made from another: above it, timed as it, in its stage', async () => {
+		const session = new FakeSession();
+		const hc = new FakeCanvas(['Rough', 'Sky']);
+		const rough = hc.byName('Rough').id;
+		const [d1, d2] = [hc.newDrawing(), hc.newDrawing()];
+		hc.drawings.get(d1)!.set('0,0', tile(11));
+		hc.tl = newTimeline([{ id: rough, drawing: d1 }]);
+		hc.tl.scenes[0].cuts[0].tracks[rough] = [
+			{ drawing: d1, length: 2 },
+			{ drawing: 0, length: 1 },
+			{ drawing: d2, length: 1 }
+		];
+		hc.showFrame(0);
+		const host = new Together(A, 'Ana', hc, session.net(A));
+		session.apps.set(A, host);
+		await host.startHost();
+		await session.settle();
+		const bc = new FakeCanvas();
+		const bo = new Together(B, 'Bo', bc, session.net(B));
+		session.apps.set(B, bo);
+		bo.startJoin(A);
+		await session.settle();
+
+		// Ana makes a clean-up layer from the rough (on her canvas, as the studio does)
+		const clean = hc.addLayer('Clean-up (Rough)');
+		expect(await host.shareAbove(clean, rough)).toBeTruthy();
+		followTiming(hc.tl, rough, clean, () => hc.newDrawing());
+		setStage(hc.tl, clean, 'clean');
+		host.timelineChanged();
+		await session.settle();
+		const names = (c: FakeCanvas) => c.layerList.filter((l) => l.visible).map((l) => l.name);
+		const order = ['Rough', 'Clean-up (Rough)', 'Sky', 'Bo’s layer'];
+		expect(names(hc)).toEqual(order);
+		expect(names(bc)).toEqual(order);
+		const bClean = bc.byName('Clean-up (Rough)').id;
+		const t = bc.tl.scenes[0].cuts[0].tracks[bClean];
+		expect(t.map((e) => e.length)).toEqual([2, 1, 1]);
+		expect(t[0].drawing && t[2].drawing && t[0].drawing !== t[2].drawing).toBeTruthy();
+		expect(t[1].drawing).toBe(0);
+		expect(bc.tl.stages?.[bClean]).toBe('clean');
 	});
 
 	it('shares layer stages by shared layer, keeping unshared layers’ own', () => {

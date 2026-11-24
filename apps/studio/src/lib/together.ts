@@ -1300,6 +1300,26 @@ export class Together {
 		if (this.shared.layers.get(lid)?.owner === this.me) this.net.edit({ k: 'move', lid, to });
 	}
 
+	/**
+	 * A layer just made here: shared now (so the timeline sent next carries its tracks) and
+	 * put just above `above`, a shared layer, for everyone. Its lid (null: not shared).
+	 */
+	async shareAbove(id: number, above: number): Promise<string | null> {
+		if (!this.#synced) return null;
+		// (sending may be busy: the layer goes with the batch being sent)
+		for (let i = 0; i < 40 && !this.lidOf(id); i++) {
+			await this.localChanged();
+			if (!this.lidOf(id)) await new Promise((r) => setTimeout(r, 50));
+		}
+		const lid = this.lidOf(id);
+		const at = this.lidOf(above);
+		if (!lid || !at) return lid;
+		// the session takes the new layer before the move: it's this app's by then
+		const i = this.shared.order.filter((x) => x !== lid).indexOf(at);
+		if (i >= 0) this.net.edit({ k: 'move', lid, to: i + 1 });
+		return lid;
+	}
+
 	ask(lid: string) {
 		this.net.edit({ k: 'ask', lid, why: 'draw', own: false });
 	}

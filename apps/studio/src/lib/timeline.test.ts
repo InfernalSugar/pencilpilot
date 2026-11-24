@@ -11,6 +11,7 @@ import {
 	drawingsIn,
 	findDrawing,
 	fitCamera,
+	followTiming,
 	fromFile,
 	inset,
 	insertExposure,
@@ -35,6 +36,7 @@ import {
 	staticsToFile,
 	toFile,
 	type Cut,
+	type Timeline,
 	type Track
 } from './timeline';
 
@@ -318,5 +320,95 @@ describe('layer stages', () => {
 		expect(stagesFromFile(file, ids)).toEqual({ 30: 'rough', 40: 'clean' });
 		expect(stagesFromFile({ 3: 'wobbly', 4: 'flats', 7: 'rough' }, ids)).toEqual({ 40: 'flats' });
 		expect(stagesFromFile(undefined, ids)).toEqual({});
+	});
+});
+
+describe('a layer timed as another (to trace it)', () => {
+	const tl = (): Timeline => ({
+		scenes: [
+			{
+				id: 1,
+				name: 'Scene 1',
+				cuts: [
+					// layer 1: A held 3, an empty cel for 2, B, then A again (a cycle)
+					{
+						id: 1,
+						name: 'Cut 1',
+						tracks: {
+							1: [
+								{ drawing: 10, length: 3 },
+								{ drawing: 0, length: 2 },
+								{ drawing: 11, length: 1 },
+								{ drawing: 10, length: 2 }
+							],
+							2: [{ drawing: 20, length: 8 }]
+						}
+					},
+					// layer 1 has no track here: none made
+					{ id: 2, name: 'Cut 2', tracks: { 2: [{ drawing: 21, length: 4 }] } }
+				]
+			},
+			{
+				id: 2,
+				name: 'Scene 2',
+				cuts: [{ id: 1, name: 'Cut 1', tracks: { 1: [{ drawing: 12, length: 2 }] } }]
+			}
+		],
+		statics: [],
+		kinds: { 10: 'key', 11: 'inbetween' }
+	});
+	const counter = () => {
+		let n = 100;
+		return () => ++n;
+	};
+
+	it('copies holds and gaps, with a new drawing for each one shown', () => {
+		const t = tl();
+		const made = followTiming(t, 1, 5, counter());
+		expect(made).toEqual([101, 102, 103]);
+		expect(t.scenes[0].cuts[0].tracks[5]).toEqual([
+			{ drawing: 101, length: 3 },
+			{ drawing: 0, length: 2 },
+			{ drawing: 102, length: 1 },
+			// the same drawing again: the same new one
+			{ drawing: 101, length: 2 }
+		]);
+		expect(frames(t.scenes[0].cuts[0].tracks[5])).toEqual([101, 101, 101, 0, 0, 102, 101, 101]);
+		// the source is unchanged
+		expect(t.scenes[0].cuts[0].tracks[1][0]).toEqual({ drawing: 10, length: 3 });
+	});
+
+	it('does every cut the layer has a track in, and only those', () => {
+		const t = tl();
+		followTiming(t, 1, 5, counter());
+		expect(t.scenes[0].cuts[1].tracks[5]).toBeUndefined();
+		expect(t.scenes[1].cuts[0].tracks[5]).toEqual([{ drawing: 103, length: 2 }]);
+		expect(cutLength(t.scenes[0].cuts[0])).toBe(8);
+	});
+
+	it('marks the new drawings as their own are (keys, in-betweens)', () => {
+		const t = tl();
+		followTiming(t, 1, 5, counter());
+		expect(t.kinds).toEqual({ 10: 'key', 11: 'inbetween', 101: 'key', 102: 'inbetween' });
+	});
+
+	it('a static layer’s is static too', () => {
+		const t = tl();
+		setStatic(t, 2, true);
+		const made = followTiming(t, 2, 6, counter());
+		expect(made).toEqual([101, 102]);
+		expect(t.statics).toEqual([2, 6]);
+		expect(staticDrawing(t.scenes[0].cuts[0].tracks[6])).toBe(101);
+		expect(staticDrawing(t.scenes[0].cuts[1].tracks[6])).toBe(102);
+		// a cel layer's stays a cel layer
+		followTiming(t, 1, 7, counter());
+		expect(t.statics).not.toContain(7);
+	});
+
+	it('an empty track gives an empty track', () => {
+		const t = tl();
+		t.scenes[0].cuts[1].tracks[1] = [];
+		followTiming(t, 1, 5, counter());
+		expect(t.scenes[0].cuts[1].tracks[5]).toEqual([]);
 	});
 });

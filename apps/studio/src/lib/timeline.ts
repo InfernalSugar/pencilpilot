@@ -483,6 +483,36 @@ export function layerOfDrawing(tl: Timeline, drawing: number): number | null {
 	return null;
 }
 
+/**
+ * Give layer `to` the timing of layer `from` (a layer to trace it on): in every cut where
+ * `from` has a track, a new empty drawing (`make()`) wherever `from` shows one, held for
+ * as long, and empty cels where it shows none. A drawing `from` shows again (a cycle)
+ * gets the same new one again; each new drawing is marked as its own is (key, breakdown,
+ * in-between). Static if `from` is. Returns the new drawings, in the order they were made.
+ */
+export function followTiming(tl: Timeline, from: number, to: number, make: () => number): number[] {
+	const made = new Map<number, number>();
+	const copy = (d: number) => {
+		if (!d) return 0;
+		let n = made.get(d);
+		if (n === undefined) {
+			n = make();
+			made.set(d, n);
+			const k = tl.kinds?.[d];
+			if (n && k) setKind(tl, n, k);
+		}
+		return n;
+	};
+	for (const s of tl.scenes)
+		for (const c of s.cuts) {
+			const t = c.tracks[from];
+			if (!t) continue;
+			c.tracks[to] = t.map((e) => ({ drawing: copy(e.drawing), length: e.length }));
+		}
+	setStatic(tl, to, tl.statics.includes(from));
+	return [...made.values()].filter((d) => d);
+}
+
 /** A new timeline: one scene, one cut, each layer showing its drawing for a frame. */
 export function newTimeline(layers: { id: number; drawing: number }[]): Timeline {
 	const tracks: Record<number, Track> = {};
