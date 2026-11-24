@@ -218,6 +218,10 @@
 		exportPasses,
 		guessStage,
 		layersInView,
+		lightTableLayers,
+		LIGHT_TABLE_OFF,
+		readLightTable,
+		type LightTable,
 		readView,
 		singleStage,
 		VIEW_ALL,
@@ -287,6 +291,7 @@
 		];
 		cache.touch(touched);
 		together?.touch(touched);
+		underChanged(s);
 		// drawing on an empty cel started a drawing (or a pasted picture got one): it's
 		// on this frame now
 		if (timelineFor !== canvasKey) return;
@@ -400,6 +405,7 @@
 			for (const [l, d] of now) lastShown.set(l, d);
 			cache.shown(now.map(([, d]) => d));
 			void updateOnion();
+			underShown++;
 			// what stopped showing goes to the store; the engine keeps a few
 			const gone = leaving.filter((d) => d && !now.some(([, n]) => n === d));
 			void cache.push(gone).then(() => cache.trim());
@@ -1278,8 +1284,153 @@
 	// a new canvas or project: every layer (an opened project then shows its own view)
 	$effect(() => {
 		void canvasKey;
-		untrack(() => (stageView = VIEW_ALL));
+		untrack(() => {
+			stageView = VIEW_ALL;
+			lightTable = LIGHT_TABLE_OFF;
+		});
 	});
+
+	// ---- light table: another stage's drawings on this frame, faint, under the view ----
+	// (a view as well: never exported, never an undo step, never shared; not in playback,
+	// which plays the film as it will look)
+	let lightTable = $state<LightTable>(LIGHT_TABLE_OFF);
+	/** the layers it shows (its stage's, not the view's own) */
+	const underLayers = $derived(
+		lightTableLayers(
+			(status?.layers ?? []).map((l) => ({
+				id: l.id,
+				adjust: l.adjust,
+				visible: l.visible && (status?.groups.find((g) => g.id === l.group)?.visible ?? true)
+			})),
+			timeline.stages,
+			lightTable,
+			inView.shown
+		)
+	);
+	/** why it shows nothing */
+	const lightTableNote = $derived.by(() => {
+		const st = lightTable.stage;
+		if (!st || underLayers.length) return '';
+		const tagged = (status?.layers ?? []).some((l) => timeline.stages?.[l.id] === st);
+		return !tagged
+			? `No layers are in ${STAGE_LABELS[st]}.`
+			: inView.shown.some((id) => timeline.stages?.[id] === st)
+				? 'The view shows this stage already.'
+				: 'Its layers are hidden.';
+	});
+	let underImage = $state.raw<ImageBitmap | null>(null);
+	let underKey = '';
+	/** the drawings it shows now */
+	let underNow = new Set<number>();
+	let underToken = 0;
+	/** bumps when a light table drawing may have changed (not when another layer is drawn on) */
+	let underTick = $state(0);
+	/** bumps when the canvas shows another frame */
+	let underShown = $state(0);
+	/** pictures made, by what they show: stepping back and forth doesn't make them again */
+	// eslint-disable-next-line svelte/prefer-svelte-reactivity -- a cache, not state
+	const underMade = new Map<string, ImageBitmap>();
+
+	/** Make (or find) the light table for the frame the canvas shows. */
+	async function updateUnder(pairs: [number, number][]) {
+		const token = ++underToken;
+		const c = canvas;
+		const lt = lightTable;
+		underNow = new Set(pairs.map(([, d]) => d).filter((d) => d));
+		if (!c || !pairs.some(([, d]) => d)) {
+			underKey = '';
+			underImage = null;
+			return;
+		}
+		const k = Math.max(1, Math.ceil(canvasSize.width / 1920));
+		const key = JSON.stringify([
+			pairs,
+			lt.tint,
+			lt.opacity,
+			k,
+			canvasSize.width,
+			canvasSize.height,
+			canvasKey,
+			underTick
+		]);
+		if (key === underKey) return;
+		let bmp = underMade.get(key);
+		if (!bmp) {
+			await cache.ensure(pairs.map(([, d]) => d));
+			if (token !== underToken || !canvas) return;
+			if (lt.tint) {
+				const img = canvas.onionRgba(
+					pairs.map(([, d]) => ({ drawing: d, colour: lt.tint!, opacity: lt.opacity })),
+					k
+				);
+				if (!img) return;
+				bmp = await createImageBitmap(img);
+			} else {
+				// its own colours: the frame of just these layers, on transparency, faint
+				const keep = new Set(pairs.map(([l]) => l));
+				const others = (status?.layers ?? []).map((l) => l.id).filter((id) => !keep.has(id));
+				const r = canvas.renderFrame(pairs, k, true, others);
+				if (!r) return;
+				const src = await createImageBitmap(new ImageData(r.rgba, r.width, r.height));
+				const out = new OffscreenCanvas(r.width, r.height);
+				const g = out.getContext('2d')!;
+				g.globalAlpha = lt.opacity;
+				g.drawImage(src, 0, 0);
+				src.close();
+				bmp = out.transferToImageBitmap();
+			}
+			if (token !== underToken) return bmp.close();
+			underMade.set(key, bmp);
+			// a few frames' worth stay made (oldest go first; never the one showing)
+			for (const [old, b] of underMade) {
+				if (underMade.size <= 12) break;
+				if (b === underImage) continue;
+				b.close();
+				underMade.delete(old);
+			}
+		} else {
+			// (most recently used last)
+			underMade.delete(key);
+			underMade.set(key, bmp);
+		}
+		if (token !== underToken) return;
+		underKey = key;
+		underImage = bmp;
+	}
+	// follows the frame, the settings, the stages and the layers (not every stroke)
+	$effect(() => {
+		void underShown;
+		const cut = timeline.scenes[onCanvas.scene]?.cuts[onCanvas.cut];
+		const pairs =
+			cut && timelineFor === canvasKey && underLayers.length
+				? showing(cut, underLayers, onCanvas.frame, timeline.statics)
+				: [];
+		void [lightTable.tint, lightTable.opacity, underTick, canvasSize.width, canvasSize.height];
+		untrack(() => void updateUnder(pairs));
+	});
+	// a new canvas: what was made was another's
+	$effect(() => {
+		void canvasKey;
+		untrack(() => {
+			for (const b of underMade.values()) b.close();
+			underMade.clear();
+			underKey = '';
+			underImage = null;
+		});
+	});
+	/**
+	 * The canvas changed: the light table is made again unless it was drawing on another
+	 * layer (or undoing that), which can't change it.
+	 */
+	function underChanged(s: CanvasStatus) {
+		if (!underNow.size) return;
+		if (underLayers.includes(s.active)) underTick++;
+		else underTouched(canvas?.undoDrawing() ?? 0, canvas?.redoDrawing() ?? 0);
+	}
+	/** These drawings changed (someone drawing together, an undo): one of the light table's? */
+	function underTouched(...ds: number[]) {
+		if (ds.some((d) => d && underNow.has(d))) underTick++;
+	}
 
 	/** Show a view; drawing on a layer it leaves out moves to the top one it shows. */
 	function setView(v: StageView) {
@@ -2045,11 +2196,18 @@
 			isLineLayer: (id) => c.isLines(id),
 			setLineLayer: (id, on) => c.setLinesLayerQuiet(id, on),
 			lineStrokes: (d) => c.lineStrokes(d),
-			setLineStrokes: (d, list, plain) => c.setLinesQuiet(d, list, false, plain),
+			setLineStrokes: (d, list, plain) => {
+				underTouched(d);
+				return c.setLinesQuiet(d, list, false, plain);
+			},
 			plainStrokes: (d) => c.plainStrokes(d),
 			baseChanges: (d) => c.baseChanges(d),
 			baseAll: (d) => c.baseAll(d),
-			putBaseChanges: (d, bytes) => c.putBaseChanges(d, bytes),
+			putBaseChanges: (d, bytes) => {
+				// (their change may be to the light table's drawings)
+				underTouched(d);
+				return c.putBaseChanges(d, bytes);
+			},
 			drawingsOfLayer: (id) =>
 				timeline.scenes.flatMap((sc) =>
 					sc.cuts.flatMap((cut) => (cut.tracks[id] ?? []).map((e) => e.drawing).filter((d) => d))
@@ -2062,6 +2220,7 @@
 			put: (d, p) => {
 				const ok = c.putDrawingTiles(d, p);
 				if (ok) cache.touch([d]);
+				if (ok) underTouched(d);
 				return ok;
 			},
 			sound: (file) => {
@@ -2519,6 +2678,10 @@
 				guides: $state.snapshot(toolOpts.guides),
 				// what it showed (a view by stage)
 				...(stageView.id !== 'all' ? { view: $state.snapshot(stageView) } : {}),
+				// and the stage on its light table
+				...(JSON.stringify(lightTable) !== JSON.stringify(LIGHT_TABLE_OFF)
+					? { lightTable: $state.snapshot(lightTable) }
+					: {}),
 				// a shared project keeps its session, to rejoin later
 				...(together && sharing
 					? { share: together.save(sharing.invite, everyone(sharing.members)) }
@@ -3365,6 +3528,7 @@
 			const stages = stagesFromFile(doc.stages, ids);
 			if (Object.keys(stages).length) timeline.stages = stages;
 			stageView = readView(doc.extra.view);
+			lightTable = readLightTable(doc.extra.lightTable);
 			timelineFor = canvasKey;
 			onCanvas = { scene, cut: cutIndex, frame };
 			if (anim) {
@@ -4231,6 +4395,7 @@
 						onchange={canvasChanged}
 						locked={switching}
 						onionImage={playing ? null : onionImage}
+						underImage={playing ? null : underImage}
 						camera={cameraOverlay}
 					/>
 				{/key}
@@ -4281,6 +4446,9 @@
 					{stageView}
 					onview={setView}
 					viewHidden={inView.hidden}
+					{lightTable}
+					onlighttable={(t) => (lightTable = t)}
+					{lightTableNote}
 					layers={status.layers}
 					active={status.active}
 					newDrawing={() => canvas?.newDrawing() ?? 0}

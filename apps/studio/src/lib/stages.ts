@@ -122,6 +122,65 @@ export function singleStage(view: StageView): Stage | null {
 	return st?.length === 1 ? st[0] : null;
 }
 
+// ---- light table: another stage's drawings, faint, under the view (a view too) ----
+
+/** Non-photo blue: the pencil colour a camera (or a scanner) doesn't see. */
+export const NON_PHOTO_BLUE = '#a4dded';
+
+export interface LightTable {
+	/** the stage shown under the view (null: off) */
+	stage: Stage | null;
+	/** the colour its lines show in; null: their own colours */
+	tint: string | null;
+	/** 0.05–1 */
+	opacity: number;
+}
+
+export const LIGHT_TABLE_OFF: LightTable = { stage: null, tint: NON_PHOTO_BLUE, opacity: 0.5 };
+
+/** A light table as kept (in a project's settings): anything unknown is off. */
+export function readLightTable(raw: unknown): LightTable {
+	const o = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+	const D = LIGHT_TABLE_OFF;
+	const tint =
+		o.tint === null
+			? null
+			: typeof o.tint === 'string' && /^#[0-9a-f]{6}$/i.test(o.tint)
+				? o.tint
+				: D.tint;
+	const opacity =
+		typeof o.opacity === 'number' && Number.isFinite(o.opacity)
+			? Math.min(1, Math.max(0.05, o.opacity))
+			: D.opacity;
+	return { stage: isStage(o.stage) ? o.stage : null, tint, opacity };
+}
+
+/** A layer as far as the light table goes. */
+export interface LightTableLayer {
+	id: number;
+	/** its eye (and its group's) */
+	visible: boolean;
+	/** an adjustment layer (no drawings to show) */
+	adjust?: unknown;
+}
+
+/**
+ * The layers the light table shows (bottom → top): the paint layers in its stage whose
+ * eye is open, but not ones the view shows already (they'd show twice).
+ */
+export function lightTableLayers(
+	layers: LightTableLayer[],
+	stages: Record<number, Stage> | undefined,
+	table: Pick<LightTable, 'stage'>,
+	shown: number[]
+): number[] {
+	if (!table.stage) return [];
+	const inView = new Set(shown);
+	return layers
+		.filter((l) => l.visible && !l.adjust && !inView.has(l.id) && stages?.[l.id] === table.stage)
+		.map((l) => l.id);
+}
+
 // ---- exporting by stage ----
 
 /**

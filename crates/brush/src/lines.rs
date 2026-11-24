@@ -29,7 +29,7 @@ use std::collections::{HashMap, HashSet};
 use hokusai::tile::empty_tile;
 use hokusai::{Brush, BrushState, TILE_SIZE, TilePixels};
 
-use crate::{Edit, Painter, Snapshot, TileKey, TileMap, UndoSurface};
+use crate::{Edit, H_IDENTITY, Painter, Snapshot, TileKey, TileMap, TransformSession, UndoSurface};
 
 /// One tile of a base, kept small: most are under line art, so equal pixels in a row
 /// are stored once (`Runs`: per run a little-endian u16 length and the pixel's four
@@ -301,6 +301,8 @@ pub(crate) struct Redraw {
     queue_group: u32,
     /// replaying into the last transform's stash (`xf_without_begin`)
     into_stash: bool,
+    /// replaying the strokes to lift onto nothing (`lines_lift_begin`)
+    into_lift: bool,
 }
 
 /// The last transform kept (see `transform_commit_keeping`), for editable strokes to
@@ -355,6 +357,7 @@ impl Redraw {
             queue: Vec::new(),
             queue_group: 0,
             into_stash: false,
+            into_lift: false,
         }
     }
 
@@ -787,6 +790,127 @@ impl Painter {
         self.xf_stash = None;
     }
 
+    // ---- strokes lifted while they're dragged ----
+
+    /// Start lifting strokes of `layer` (a drag of heavy strokes): the strokes that
+    /// follow (`lines_stroke`…, then `lines_commit`) are drawn onto nothing over `tiles`
+    /// (as `lines_begin`) and kept as a float that `lines_lift_preview` slides over the
+    /// layer as pixels, without drawing a dab, till `lines_lift_end`. The app takes the
+    /// strokes off the layer first and draws them exactly where they land after.
+    pub fn lines_lift_begin(&mut self, layer: u32, tiles: &[i32]) -> bool {
+        if !self.idle() || !tiles.len().is_multiple_of(2) {
+            return false;
+        }
+        let Some(l) = self.index_of(layer).map(|i| &self.layers[i]) else {
+            return false;
+        };
+        if l.props.locked || l.props.adjust.is_some() || l.editing_mask {
+            return false;
+        }
+        let keys: HashSet<TileKey> = tiles
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&[x, y]| (x, y))
+            .collect();
+        let mut r = Redraw::new(
+            layer,
+            UndoSurface {
+                style: self.style.clone(),
+                only: Some(Box::new(Area::new(keys))),
+                ..Default::default()
+            },
+            None,
+        );
+        r.into_lift = true;
+        self.line_redraw = Some(Box::new(r));
+        true
+    }
+
+    /// The lifted strokes' pixels (`tiles`) become the float (false: nothing to lift).
+    fn lift_float(&mut self, layer: u32, tiles: &TileMap) -> bool {
+        let ts = TILE_SIZE as i64;
+        let (mut x0, mut y0, mut x1, mut y1) = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
+        for (&(tx, ty), tile) in tiles {
+            for (py, row) in tile.iter().enumerate() {
+                for (px, p) in row.iter().enumerate() {
+                    if p[3] > 0 {
+                        let (cx, cy) = (tx as i64 * ts + px as i64, ty as i64 * ts + py as i64);
+                        x0 = x0.min(cx);
+                        y0 = y0.min(cy);
+                        x1 = x1.max(cx);
+                        y1 = y1.max(cy);
+                    }
+                }
+            }
+        }
+        if x0 > x1 {
+            return false;
+        }
+        let (fw, fh) = ((x1 - x0 + 1) as usize, (y1 - y0 + 1) as usize);
+        let mut float = vec![[0u16; 4]; fw * fh];
+        for (&(tx, ty), tile) in tiles {
+            for (py, row) in tile.iter().enumerate() {
+                for (px, p) in row.iter().enumerate() {
+                    let (cx, cy) = (tx as i64 * ts + px as i64, ty as i64 * ts + py as i64);
+                    if p[3] > 0 {
+                        float[((cy - y0) as usize) * fw + (cx - x0) as usize] = *p;
+                    }
+                }
+            }
+        }
+        self.line_lift = Some(Box::new(TransformSession {
+            layer,
+            original: TileMap::new(),
+            base: TileMap::new(),
+            float,
+            fx0: x0,
+            fy0: y0,
+            fw,
+            fh,
+            last: None,
+            m: H_IDENTITY,
+            cover: None,
+            under: Some(HashMap::new()),
+        }));
+        true
+    }
+
+    /// Whether strokes are lifted (`lines_lift_begin`).
+    pub fn lifting(&self) -> bool {
+        self.line_lift.is_some()
+    }
+
+    /// Show the lifted strokes moved by `m` (dest = a·x + c·y + e, b·x + d·y + f) over
+    /// the layer as it is under them. False if none are lifted.
+    pub fn lines_lift_preview(&mut self, m: [f32; 6]) -> bool {
+        let Some(mut t) = self.line_lift.take() else {
+            return false;
+        };
+        let [a, b, c, d, e, f] = m;
+        let ok = self.preview_float(&mut t, [a, c, e, b, d, f, 0.0, 0.0, 1.0]);
+        self.line_lift = Some(t);
+        ok
+    }
+
+    /// Drop the lifted strokes: every tile they passed over goes back to how it was.
+    pub fn lines_lift_end(&mut self) {
+        let Some(t) = self.line_lift.take() else {
+            return;
+        };
+        let Some(li) = self.index_of(t.layer) else {
+            return;
+        };
+        let tiles = &mut self.layers[li].surface.tiles;
+        for (key, was) in t.under.unwrap_or_default() {
+            match was {
+                Some(p) => tiles.insert(key, p),
+                None => tiles.remove(&key),
+            };
+            self.dirty.insert(key);
+        }
+    }
+
     /// Forget base tiles no editable stroke needs any more (joins the last undo step).
     /// The tiles: (x, y) pairs.
     pub fn base_drop(&mut self, drawing: u32, tiles: &[i32]) -> bool {
@@ -915,7 +1039,7 @@ impl Painter {
         let Some(area) = r.scratch.only.take() else {
             return u32::MAX;
         };
-        if r.into_base.is_some() || r.into_stash {
+        if r.into_base.is_some() || r.into_stash || r.into_lift {
             return u32::MAX;
         }
         let Some(l) = self.index_of(r.layer).map(|i| &self.layers[i]) else {
@@ -951,11 +1075,15 @@ impl Painter {
             mut scratch,
             into_base,
             into_stash,
+            into_lift,
             ..
         } = *r;
         let Some(area) = scratch.only.take() else {
             return false;
         };
+        if into_lift {
+            return self.lift_float(layer, &scratch.tiles);
+        }
         if into_stash {
             let Some(st) = self.xf_stash.as_mut() else {
                 return false;
@@ -1060,6 +1188,7 @@ impl Painter {
     /// Undo the line edits since the last push (a cancelled drag), and drop a redraw
     /// in progress.
     pub fn lines_cancel(&mut self) {
+        self.lines_lift_end();
         self.line_redraw = None;
         let Some(p) = self.line_pending.take() else {
             return;
@@ -1548,6 +1677,77 @@ mod tests {
         redraw(&mut p, a, &all(), &b, &[]);
         assert!(!p.undo());
         assert_eq!(painted(&p, a), original);
+    }
+
+    #[test]
+    fn lifted_strokes_slide_as_pixels_and_leave_the_layer_as_it_was() {
+        let b = pen();
+        let mut p = Painter::new(300, 200);
+        let a = p.add_line_layer("");
+        let stay = wave(20.0, 280.0, 50.0);
+        let go = wave(30.0, 200.0, 120.0);
+        live(&mut p, &b, 3, &stay);
+        live(&mut p, &b, 5, &go);
+        // the app takes the strokes being dragged off the layer…
+        redraw(&mut p, a, &all(), &b, &[(3, &stay)]);
+        let without = painted(&p, a);
+        // …and lifts them
+        assert!(p.lines_lift_begin(a, &all()));
+        p.lines_stroke(&b, 5, &go, 0);
+        assert!(p.lines_commit());
+        assert!(p.lifting());
+        assert!(!p.idle(), "nothing else while strokes are lifted");
+        assert!(!p.lines_begin(a, &all()));
+        assert_eq!(painted(&p, a), without, "lifting alone changes nothing");
+        // moved by whole pixels: what drawing them there gives
+        assert!(p.lines_lift_preview([1.0, 0.0, 0.0, 1.0, 7.0, 20.0]));
+        let slid = painted(&p, a);
+        let mut q = Painter::new(300, 200);
+        let r = q.add_line_layer("");
+        redraw(
+            &mut q,
+            r,
+            &all(),
+            &b,
+            &[(3, &stay), (5, &shifted(&go, 7.0, 20.0))],
+        );
+        assert_eq!(differing(&slid, &painted(&q, r), 8), 0);
+        // a turn, then let go: every tile it passed over is back
+        assert!(p.lines_lift_preview([0.9, 0.3, -0.3, 0.9, 40.0, -10.0]));
+        assert_ne!(painted(&p, a), without);
+        p.lines_lift_end();
+        assert!(!p.lifting());
+        assert!(p.idle());
+        assert_eq!(painted(&p, a), without);
+        // a cancelled drag drops them too
+        assert!(p.lines_lift_begin(a, &all()));
+        p.lines_stroke(&b, 5, &go, 0);
+        assert!(p.lines_commit());
+        assert!(p.lines_lift_preview([1.0, 0.0, 0.0, 1.0, -30.0, 0.0]));
+        p.lines_cancel();
+        assert!(!p.lifting());
+        // (and the redraw without them, still pending, with it)
+        assert_eq!(painted(&p, a).len(), {
+            let mut q = Painter::new(300, 200);
+            let c = q.add_line_layer("");
+            live(&mut q, &b, 3, &stay);
+            live(&mut q, &b, 5, &go);
+            painted(&q, c).len()
+        });
+    }
+
+    #[test]
+    fn nothing_to_lift_lifts_nothing() {
+        let b = pen();
+        let mut p = Painter::new(300, 200);
+        let a = p.add_line_layer("");
+        assert!(p.lines_lift_begin(a, &[0, 0]));
+        // (a stroke far from the tile drawn: nothing lands on it)
+        p.lines_stroke(&b, 5, &wave(200.0, 290.0, 180.0), 0);
+        assert!(!p.lines_commit());
+        assert!(!p.lifting());
+        assert!(p.idle());
+        assert!(!p.lines_lift_preview([1.0, 0.0, 0.0, 1.0, 1.0, 1.0]));
     }
 
     #[test]

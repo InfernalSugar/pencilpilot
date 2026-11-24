@@ -2,6 +2,10 @@ import { describe, expect, it } from 'vitest';
 import {
 	guessStage,
 	layersInView,
+	lightTableLayers,
+	LIGHT_TABLE_OFF,
+	NON_PHOTO_BLUE,
+	readLightTable,
 	readView,
 	singleStage,
 	VIEW_PRESETS,
@@ -125,5 +129,56 @@ describe('viewing by stage', () => {
 		expect(readView({ id: 'sideways' })).toEqual({ id: 'all' });
 		expect(readView(undefined)).toEqual({ id: 'all' });
 		expect(readView('final')).toEqual({ id: 'all' });
+	});
+});
+
+describe('the light table', () => {
+	// bottom → top: two roughs (one with its eye shut), a rough adjustment, the lines, a note
+	const layers = [
+		{ id: 1, visible: true },
+		{ id: 2, visible: false },
+		{ id: 3, visible: true, adjust: '{}' },
+		{ id: 4, visible: true },
+		{ id: 5, visible: true },
+		{ id: 6, visible: true }
+	];
+	const stages: Record<number, Stage> = {
+		1: 'rough',
+		2: 'rough',
+		3: 'rough',
+		4: 'clean',
+		6: 'rough'
+	};
+
+	it('shows its stage’s paint layers with their eye open, the view’s own not again', () => {
+		const clean = layersInView(
+			layers.map((l) => ({ id: l.id, clip: false })),
+			stages,
+			{ id: 'clean' }
+		).shown;
+		expect(lightTableLayers(layers, stages, { stage: 'rough' }, clean)).toEqual([1, 6]);
+		// off, or a stage with no layers: nothing
+		expect(lightTableLayers(layers, stages, { stage: null }, clean)).toEqual([]);
+		expect(lightTableLayers(layers, stages, { stage: 'board' }, clean)).toEqual([]);
+		// the view shows the rough already (All): not drawn twice
+		expect(lightTableLayers(layers, stages, { stage: 'rough' }, [1, 2, 3, 4, 5, 6])).toEqual([]);
+		// untagged layers are never under (they show in every view)
+		expect(lightTableLayers(layers, undefined, { stage: 'rough' }, [])).toEqual([]);
+	});
+
+	it('reads kept settings back (anything unknown is off, in non-photo blue)', () => {
+		expect(readLightTable(undefined)).toEqual(LIGHT_TABLE_OFF);
+		expect(LIGHT_TABLE_OFF.tint).toBe(NON_PHOTO_BLUE);
+		expect(readLightTable({ stage: 'rough', tint: null, opacity: 0.3 })).toEqual({
+			stage: 'rough',
+			tint: null,
+			opacity: 0.3
+		});
+		expect(readLightTable({ stage: 'nope', tint: 'blue', opacity: 7 })).toEqual({
+			stage: null,
+			tint: NON_PHOTO_BLUE,
+			opacity: 1
+		});
+		expect(readLightTable({ stage: 'tiedown', tint: '#FF0000', opacity: 0 }).opacity).toBe(0.05);
 	});
 });
