@@ -2258,6 +2258,131 @@ test('stages: Show one stage on the canvas, in playback and the onion skin; kept
 	await expect.poll(top).toBe(0);
 });
 
+test('stages: the light table shows the rough faintly in blue under the clean-up, never in an export', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	const tl = page.getByRole('region', { name: 'Timeline' });
+	// a rough at the top (an empty drawing on frame 2), clean lines at the bottom
+	await scribble(page, 0.25);
+	await renameLayer(page, 'Layer 1', 'Rough');
+	await tl.getByRole('button', { name: 'New drawing' }).click();
+	await page.getByRole('button', { name: 'New layer' }).click();
+	await tl.getByRole('button', { name: 'Frame 1', exact: true }).click();
+	await scribble(page, 0.75);
+	await renameLayer(page, 'Layer 2', 'Lines');
+	await page.getByRole('button', { name: 'Sort layers into stages' }).click();
+	await expect(layerRow(page, 'Rough').getByTitle('Stage: Rough')).toBeVisible();
+
+	// show the clean-up, with the rough under it
+	await tl.getByRole('button', { name: 'Show: All' }).click();
+	const pop = tl.getByRole('group', { name: 'Show stages' });
+	await pop.getByRole('radio', { name: 'Clean-up' }).click();
+	await expect.poll(() => ink(page, 0, 0.45)).toBe(0);
+	await tl.getByRole('button', { name: 'Show: Clean-up' }).click();
+	const table = pop.getByRole('group', { name: 'Light table' });
+	await table.getByLabel('Under').selectOption('rough');
+	await expect(tl.getByRole('button', { name: 'Show: Clean-up' })).toContainText('Under Rough');
+	const under = page.getByTestId('light-table');
+	/** the light table's pixels in a band: how many, and how many of them are blue */
+	const underInk = (y0: number, y1: number) =>
+		under.evaluate(
+			(el: HTMLCanvasElement, [y0, y1]) => {
+				const t = Math.round(el.height * y0);
+				const d = el
+					.getContext('2d')!
+					.getImageData(0, t, el.width, Math.max(1, Math.round(el.height * (y1 - y0)))).data;
+				let [n, blue, most] = [0, 0, 0];
+				for (let i = 0; i < d.length; i += 4)
+					if (d[i + 3] > 20) {
+						n++;
+						if (d[i + 2] > d[i] + 40) blue++;
+						most = Math.max(most, d[i + 3]);
+					}
+				return { n, blue, faint: most < 255 };
+			},
+			[y0, y1]
+		);
+	await expect.poll(async () => (await underInk(0, 0.45)).n).toBeGreaterThan(20);
+	const rough = await underInk(0, 0.45);
+	expect(rough.blue).toBe(rough.n);
+	expect(rough.faint).toBe(true);
+	expect((await underInk(0.55, 1)).n).toBe(0);
+	// only to see by: the canvas itself still shows the clean-up alone
+	expect(await ink(page, 0, 0.45)).toBe(0);
+	expect(await ink(page, 0.55, 1)).toBeGreaterThan(50);
+
+	// it follows the frame: frame 2's rough is empty, frame 1's comes back
+	await tl.getByRole('button', { name: 'Frame 2', exact: true }).click();
+	await expect.poll(async () => (await under.count()) && (await underInk(0, 1)).n).toBe(0);
+	await tl.getByRole('button', { name: 'Frame 1', exact: true }).click();
+	await expect.poll(async () => (await underInk(0, 0.45)).n).toBeGreaterThan(20);
+
+	// in its own colours (the rough's black, faint)
+	await table.getByLabel('Original colours').check();
+	await expect
+		.poll(async () => {
+			const r = await underInk(0, 0.45);
+			return r.n > 20 && r.blue === 0;
+		})
+		.toBe(true);
+	await table.getByLabel('Original colours').uncheck();
+
+	// the clean-up shown too: the light table's stage shows already, nothing under
+	await pop.getByRole('radio', { name: 'All' }).click();
+	await expect(under).toHaveCount(0);
+	await tl.getByRole('button', { name: /^Show: All/ }).click();
+	await expect(table.getByText('The view shows this stage already.')).toBeVisible();
+	await pop.getByRole('radio', { name: 'Clean-up' }).click();
+	await expect.poll(async () => (await underInk(0, 0.45)).n).toBeGreaterThan(20);
+
+	// playback plays the film, not the light table
+	await tl.getByRole('radio', { name: 'Loop' }).click();
+	await tl.getByRole('button', { name: 'Play' }).click();
+	await expect(page.getByTestId('player')).toBeVisible();
+	await expect(under).toHaveCount(0);
+	await tl.getByRole('button', { name: 'Stop' }).click();
+	await expect(under).toHaveCount(1);
+	await tl.getByRole('button', { name: 'Frame 1', exact: true }).click();
+	await expect.poll(async () => (await underInk(0, 0.45)).n).toBeGreaterThan(20);
+
+	// the final film has no rough in it (the light table is no part of it)
+	const dlg = page.getByRole('dialog', { name: 'Export the animation' });
+	const before = (await calls(page)).length;
+	await page.getByRole('button', { name: 'Export', exact: true }).click();
+	await page.getByRole('button', { name: /^Animation…/ }).click();
+	await dlg.getByRole('radio', { name: /^GIF/ }).click();
+	await expect(dlg.getByLabel('Show')).toHaveValue('final');
+	await dlg.getByRole('button', { name: 'Export…' }).click();
+	await expect(dlg).toHaveCount(0, { timeout: 15_000 });
+	const frames = (await calls(page)).slice(before).filter((c) => c.cmd === 'export_frame');
+	expect(frames.length).toBeGreaterThan(0);
+	const cleanOnly = frames[0].ink!;
+	// every layer (the rough drawn in) has more ink: so the final film had none of it
+	const before2 = (await calls(page)).length;
+	await page.getByRole('button', { name: 'Export', exact: true }).click();
+	await page.getByRole('button', { name: /^Animation…/ }).click();
+	await dlg.getByRole('radio', { name: /^GIF/ }).click();
+	await dlg.getByLabel('Show').selectOption('all');
+	await dlg.getByRole('button', { name: 'Export…' }).click();
+	await expect(dlg).toHaveCount(0, { timeout: 15_000 });
+	const all = (await calls(page)).slice(before2).filter((c) => c.cmd === 'export_frame');
+	expect(all[0].ink!).toBeGreaterThan(cleanOnly + 20);
+
+	// kept with the project
+	await page.keyboard.press('Control+s');
+	await expect(page.getByTestId('project-name')).toHaveText('Walk cycle', { timeout: 20_000 });
+	await tl.getByRole('button', { name: 'Show: Clean-up' }).click();
+	await table.getByLabel('Under').selectOption('');
+	await expect(under).toHaveCount(0);
+	await page.keyboard.press('Control+o');
+	await expect(tl.getByRole('button', { name: 'Show: Clean-up' })).toContainText('Under Rough', {
+		timeout: 20_000
+	});
+	await expect.poll(async () => (await underInk(0, 0.45)).n).toBeGreaterThan(20);
+});
+
 test('stages: the export leaves the rough out of the final film, or makes a file a stage', async ({
 	page
 }) => {

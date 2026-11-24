@@ -241,6 +241,7 @@
 		overlaySrc = null,
 		overlayOpacity = 0.3,
 		onionImage = null,
+		underImage = null,
 		camera = null,
 		overlayTransform = { x: 0, y: 0, scale: 1, rotate: 0 },
 		adjustOverlay = false,
@@ -325,6 +326,11 @@
 		overlayOpacity?: number;
 		/** onion skin / light table: tinted drawings over the canvas (from `onionRgba`) */
 		onionImage?: ImageBitmap | null;
+		/**
+		 * a light table: another stage's drawings, faint, under the onion skin (multiplied
+		 * like it, so lines on the canvas stay dark over it); never part of the drawing
+		 */
+		underImage?: ImageBitmap | null;
 		/**
 		 * an animation cut's camera (canvas pixels): outside it is dimmed, and its safe
 		 * areas (action 90%, title 80%) are marked when `safe` is on
@@ -1175,15 +1181,16 @@
 
 	// ---- onion skin: the picture the page made, drawn over the canvas ----
 	let onionEl = $state<HTMLCanvasElement>();
-	$effect(() => {
-		const img = onionImage;
-		const el = onionEl;
+	let underEl = $state<HTMLCanvasElement>();
+	function blit(img: ImageBitmap | null, el: HTMLCanvasElement | undefined) {
 		if (!img || !el) return;
 		[el.width, el.height] = [img.width, img.height];
 		const g = el.getContext('2d');
 		g?.clearRect(0, 0, img.width, img.height);
 		g?.drawImage(img, 0, 0);
-	});
+	}
+	$effect(() => blit(onionImage, onionEl));
+	$effect(() => blit(underImage, underEl));
 
 	// ---- timelapse: a frame after every change ----
 
@@ -6128,6 +6135,11 @@
 					/>
 				{/if}
 			</svg>
+		{/if}
+		{#if underImage}
+			<div class="overlay-clip">
+				<canvas class="overlay onion" bind:this={underEl} data-testid="light-table"></canvas>
+			</div>
 		{/if}
 		{#if onionImage}
 			<div class="overlay-clip">
