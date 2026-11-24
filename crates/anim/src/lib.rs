@@ -410,6 +410,22 @@ impl FrameStore {
         true
     }
 
+    /// `a` and `b` trade their tiles (one that doesn't exist: the other becomes
+    /// missing). Nothing is copied: a canvas size change keeps every drawing's other
+    /// size under a second id and swaps the two on undo and redo.
+    pub fn swap(&mut self, a: u32, b: u32) {
+        if a == b {
+            return;
+        }
+        let (x, y) = (self.drawings.remove(&a), self.drawings.remove(&b));
+        if let Some(y) = y {
+            self.drawings.insert(a, y);
+        }
+        if let Some(x) = x {
+            self.drawings.insert(b, x);
+        }
+    }
+
     pub fn remove(&mut self, id: u32) {
         if let Some(old) = self.drawings.remove(&id) {
             self.release(&old);

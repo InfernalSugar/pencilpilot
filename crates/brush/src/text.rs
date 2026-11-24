@@ -203,6 +203,40 @@ impl Painter {
         true
     }
 
+    /// Draw text layer `id` again: its pixels become `rgba` (straight-alpha sRGB,
+    /// `w`×`h`) placed at (`x`, `y`), as the app draws its description now (one undo
+    /// step: a canvas size that scaled the text joins it to its own, so the text is drawn
+    /// at its new size rather than its old pixels stretched). Locked or hidden layers too.
+    /// False if busy or it isn't a text layer.
+    #[allow(clippy::too_many_arguments)]
+    pub fn text_redraw(&mut self, id: u32, x: i32, y: i32, w: u32, h: u32, rgba: &[u8]) -> bool {
+        let (w, h) = (w as usize, h as usize);
+        if !self.idle() || rgba.len() != w * h * 4 {
+            return false;
+        }
+        let Some(idx) = self.index_of(id) else {
+            return false;
+        };
+        if self.layers[idx].props.text.is_empty() || self.layers[idx].editing_mask {
+            return false;
+        }
+        let tiles = self.placed_tiles(x, y, w, h, rgba);
+        let l = &mut self.layers[idx];
+        let mut snap: Snapshot = tiles.keys().map(|k| (*k, None)).collect();
+        let old = std::mem::replace(&mut l.surface.tiles, tiles);
+        let keys: Vec<TileKey> = old.keys().chain(l.surface.tiles.keys()).copied().collect();
+        l.surface.dirty.extend(keys);
+        snap.extend(old.into_iter().map(|(k, v)| (k, Some(v))));
+        self.push_step(Edit::Tiles {
+            layer: id,
+            snap,
+            mask: false,
+            drawing: 0,
+        });
+        self.mark_layer(idx);
+        true
+    }
+
     /// Set a layer's text description without an undo step (opening a project).
     pub fn set_text_silent(&mut self, id: u32, spec: &str) -> bool {
         match self.layer_mut(id) {
@@ -345,6 +379,33 @@ mod tests {
         p.text_cancel();
         assert_eq!(px(&p, 5, 5), 255);
         assert!(info(&p).contains(r#""text":"A""#));
+    }
+
+    #[test]
+    fn a_scaled_text_is_drawn_again_in_the_canvas_size_step() {
+        let mut p = Painter::new(200, 100);
+        let id = p.text_begin(0, "");
+        p.text_preview("A", 10, 10, 10, 10, &red(10, 10));
+        p.text_commit();
+        let steps = p.undo.len();
+        // twice as tall: the pixels stretch, then the text is drawn again (taller and wider)
+        assert!(p.resize_canvas(200, 200, 0, 0, true, &[(id, "B".into())]));
+        assert!(p.text_redraw(id, 20, 20, 20, 20, &red(20, 20)));
+        assert!(p.join_last_edits());
+        assert_eq!(p.undo.len(), steps + 1, "one step");
+        let px =
+            |p: &Painter, x: usize, y: usize| p.layer_rgba(id)[(y * p.width as usize + x) * 4 + 3];
+        assert_eq!((px(&p, 35, 35), px(&p, 12, 22)), (255, 0));
+        p.undo();
+        assert_eq!((p.width(), p.height()), (200, 100));
+        assert_eq!((px(&p, 15, 15), px(&p, 25, 15)), (255, 0));
+        assert!(info(&p).contains(r#""text":"A""#));
+        p.redo();
+        assert_eq!((px(&p, 35, 35), px(&p, 12, 22)), (255, 0));
+        assert!(info(&p).contains(r#""text":"B""#));
+        // not a text layer: refused
+        let plain = p.add_layer("plain");
+        assert!(!p.text_redraw(plain, 0, 0, 1, 1, &red(1, 1)));
     }
 
     #[test]

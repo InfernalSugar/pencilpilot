@@ -167,8 +167,18 @@ export function videoType(): { mime: string; ext: string } | null {
 }
 
 /**
- * Record the frames to a video (in real time, so it takes as long as the film).
- * The last frame is held for a second at the end.
+ * Where a `w`×`h` picture goes in a `W`×`H` film: as big as fits, in the middle (frames
+ * from before a canvas size change keep their shape, with paper around them).
+ */
+export function fitRect(w: number, h: number, W: number, H: number) {
+	const k = Math.min(W / Math.max(1, w), H / Math.max(1, h));
+	const [width, height] = [w * k, h * k];
+	return { x: (W - width) / 2, y: (H - height) / 2, width, height };
+}
+
+/**
+ * Record the frames to a video (in real time, so it takes as long as the film), the
+ * size of the last (the finished picture). The last frame is held for a second at the end.
  */
 export async function recordFilm(
 	frames: ImageBitmap[],
@@ -178,7 +188,8 @@ export async function recordFilm(
 	const type = videoType();
 	if (!type) throw new Error('This browser can’t record video.');
 	if (!frames.length) throw new Error('Nothing to record yet.');
-	const [w, h] = [frames[0].width & ~1, frames[0].height & ~1];
+	const last = frames[frames.length - 1];
+	const [w, h] = [last.width & ~1, last.height & ~1];
 	const c = document.createElement('canvas');
 	c.width = w;
 	c.height = h;
@@ -191,7 +202,8 @@ export async function recordFilm(
 	const draw = (f: ImageBitmap) => {
 		g.fillStyle = '#fff';
 		g.fillRect(0, 0, w, h);
-		g.drawImage(f, 0, 0, w, h);
+		const at = fitRect(f.width, f.height, w, h);
+		g.drawImage(f, at.x, at.y, at.width, at.height);
 	};
 	draw(frames[0]);
 	rec.start();
