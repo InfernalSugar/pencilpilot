@@ -1,5 +1,5 @@
 /**
- * Drawing guides: a grid, perspective (1/2/3 point) and a ruler, plus the
+ * Drawing guides: a grid, perspective (1/2/3 point), a ruler and composition overlays, plus the
  * "assist" that keeps a stroke on a guide direction (like Procreate's
  * Drawing Assist, turned on per layer). All positions are canvas pixels.
  */
@@ -16,6 +16,27 @@ export interface GuideSettings {
 	ruler: { on: boolean; a: Pt; b: Pt };
 	/** strokes mirrored / rotated live about `c` */
 	symmetry: { mode: 'off' | 'vertical' | 'horizontal' | 'quadrant' | 'radial'; n: number; c: Pt };
+	/** a composition overlay fitted to the canvas (only shown, never drawn into the picture) */
+	composition: Composition;
+}
+
+export const COMPOSITIONS = [
+	'off',
+	'thirds',
+	'phi',
+	'spiral',
+	'triangles',
+	'diagonals',
+	'cross',
+	'armature',
+	'safe'
+] as const;
+export type CompositionPreset = (typeof COMPOSITIONS)[number];
+export interface Composition {
+	preset: CompositionPreset;
+	/** mirrored left to right / top to bottom (the spiral and triangles) */
+	flipX: boolean;
+	flipY: boolean;
 }
 
 export const SYMMETRY_MODES = ['off', 'vertical', 'horizontal', 'quadrant', 'radial'] as const;
@@ -25,20 +46,43 @@ export function defaultGuides(w: number, h: number): GuideSettings {
 		grid: { on: false, kind: 'square', size: Math.round(Math.min(w, h) / 8) },
 		perspective: { points: 0, vps: vpLayout(1, w, h) },
 		ruler: { on: false, a: [w * 0.2, h * 0.5], b: [w * 0.8, h * 0.5] },
-		symmetry: { mode: 'off', n: 6, c: [w / 2, h / 2] }
+		symmetry: { mode: 'off', n: 6, c: [w / 2, h / 2] },
+		composition: { preset: 'off', flipX: false, flipY: false }
 	};
 }
 
 /**
  * Where the vanishing points start, centred on the canvas: 1-point in the middle;
- * 2-point either side of the middle, as far from it; 3-point adds one below the middle.
+ * 2-point either side of the middle, as far from it; 3-point adds one below the middle,
+ * just inside the canvas's bottom edge (further down it would start out of sight).
  */
 export function vpLayout(points: number, w: number, h: number): Pt[] {
 	return [
 		points >= 2 ? [w * 0.15, h * 0.4] : [w * 0.5, h * 0.4],
 		[w * 0.85, h * 0.4],
-		[w * 0.5, h * 1.6]
+		[w * 0.5, h * 0.9]
 	];
+}
+
+/** Where 3-point's third point used to start (below the canvas): still counts as not moved. */
+const oldLayout = (w: number, h: number): Pt[] => [
+	[w * 0.15, h * 0.4],
+	[w * 0.85, h * 0.4],
+	[w * 0.5, h * 1.6]
+];
+
+/**
+ * A handle for a point off the canvas: pinned to the canvas edge (`inset` inside it) on
+ * the line from the middle to the point, with the direction it lies in. Null when on the canvas.
+ */
+export function edgePin(p: Pt, w: number, h: number, inset = 0): { at: Pt; angle: number } | null {
+	if (p[0] >= 0 && p[0] <= w && p[1] >= 0 && p[1] <= h) return null;
+	const [cx, cy] = [w / 2, h / 2];
+	const [dx, dy] = [p[0] - cx, p[1] - cy];
+	const hx = Math.max(0, w / 2 - inset);
+	const hy = Math.max(0, h / 2 - inset);
+	const t = Math.min(dx ? hx / Math.abs(dx) : Infinity, dy ? hy / Math.abs(dy) : Infinity);
+	return { at: [cx + dx * t, cy + dy * t], angle: Math.atan2(dy, dx) };
 }
 
 /** The same guides (which are on, grid kind and size) with every point back in its centred place. */
@@ -48,7 +92,8 @@ export function centredGuides(g: GuideSettings, w: number, h: number): GuideSett
 		grid: { ...g.grid },
 		perspective: { ...g.perspective, vps: vpLayout(g.perspective.points, w, h) },
 		ruler: { ...g.ruler, a: d.ruler.a, b: d.ruler.b },
-		symmetry: { ...g.symmetry, c: d.symmetry.c }
+		symmetry: { ...g.symmetry, c: d.symmetry.c },
+		composition: { ...(g.composition ?? d.composition) }
 	};
 }
 
@@ -63,7 +108,8 @@ export function withPerspective(
 		a.length === b.length && a.every((p, i) => Math.hypot(p[0] - b[i][0], p[1] - b[i][1]) < 1);
 	const untouched =
 		near(g.perspective.vps, vpLayout(g.perspective.points, w, h)) ||
-		near(g.perspective.vps, vpLayout(points ? 1 : 2, w, h));
+		near(g.perspective.vps, vpLayout(points ? 1 : 2, w, h)) ||
+		near(g.perspective.vps, oldLayout(w, h));
 	return {
 		...g,
 		perspective: {
@@ -102,13 +148,28 @@ export function readGuides(v: unknown): GuideSettings | null {
 					vps: g.perspective.vps.map((p) => [p[0], p[1]])
 				},
 				ruler: { on: g.ruler.on, a: [g.ruler.a[0], g.ruler.a[1]], b: [g.ruler.b[0], g.ruler.b[1]] },
-				symmetry: { mode: g.symmetry.mode, n: g.symmetry.n, c: [g.symmetry.c[0], g.symmetry.c[1]] }
+				symmetry: { mode: g.symmetry.mode, n: g.symmetry.n, c: [g.symmetry.c[0], g.symmetry.c[1]] },
+				composition: readComposition(g.composition)
 			}
 		: null;
 }
 
+/** A saved composition overlay (projects from before it, or anything odd: off). */
+function readComposition(v: unknown): Composition {
+	const c = v as Partial<Composition> | null;
+	const ok = !!c && typeof c === 'object' && COMPOSITIONS.includes(c.preset!);
+	return {
+		preset: ok ? c.preset! : 'off',
+		flipX: ok && c.flipX === true,
+		flipY: ok && c.flipY === true
+	};
+}
+
 export const anyGuide = (g: GuideSettings | null | undefined) =>
-	!!g && (g.grid.on || g.perspective.points > 0 || g.ruler.on || symmetryOn(g));
+	!!g && (g.grid.on || g.perspective.points > 0 || g.ruler.on || symmetryOn(g) || compositionOn(g));
+
+export const compositionOn = (g: GuideSettings | null | undefined) =>
+	!!g?.composition && g.composition.preset !== 'off';
 
 export const symmetryOn = (g: GuideSettings | null | undefined) =>
 	!!g?.symmetry && g.symmetry.mode !== 'off';
@@ -243,4 +304,147 @@ export function perspectiveRays(
 		const a = (i / n) * Math.PI * 2;
 		return [vp[0], vp[1], vp[0] + Math.cos(a) * far, vp[1] + Math.sin(a) * far];
 	});
+}
+
+// ---- composition overlays: lines and arcs fitted to the canvas rectangle ----
+
+export type Seg = [number, number, number, number];
+/** A quarter of an ellipse from `from` to `to` (radii `rx`, `ry`), as an SVG arc draws it. */
+export interface Arc {
+	from: Pt;
+	to: Pt;
+	rx: number;
+	ry: number;
+	/** SVG's sweep flag: 1 turns clockwise on screen */
+	sweep: 0 | 1;
+}
+
+/** 1 / φ: the golden ratio's long part of 1 */
+export const PHI_CUT = (Math.sqrt(5) - 1) / 2;
+
+/** The flips each preset can take (none, across only, or both ways). */
+export function compositionFlips(preset: CompositionPreset): 'none' | 'x' | 'xy' {
+	return preset === 'spiral' ? 'xy' : preset === 'triangles' ? 'x' : 'none';
+}
+
+/** The lines (and the spiral's arcs) of a composition overlay, in canvas pixels for w × h. */
+export function compositionShapes(
+	c: Composition,
+	w: number,
+	h: number
+): { lines: Seg[]; arcs: Arc[] } {
+	const lines: Seg[] = [];
+	const arcs: Arc[] = [];
+	const across = (k: number) => lines.push([w * k, 0, w * k, h]);
+	const down = (k: number) => lines.push([0, h * k, w, h * k]);
+	const box = (k: number) => {
+		const [x0, y0, x1, y1] = [w * k, h * k, w * (1 - k), h * (1 - k)];
+		lines.push([x0, y0, x1, y0], [x1, y0, x1, y1], [x1, y1, x0, y1], [x0, y1, x0, y0]);
+	};
+	switch (c.preset) {
+		case 'thirds':
+			for (const k of [1 / 3, 2 / 3]) across(k);
+			for (const k of [1 / 3, 2 / 3]) down(k);
+			break;
+		case 'phi':
+			for (const k of [1 - PHI_CUT, PHI_CUT]) across(k);
+			for (const k of [1 - PHI_CUT, PHI_CUT]) down(k);
+			break;
+		case 'cross':
+			across(0.5);
+			down(0.5);
+			lines.push([0, 0, w, h], [w, 0, 0, h]);
+			break;
+		case 'diagonals': {
+			// 45° from each corner, as far as the far side
+			const m = Math.min(w, h);
+			lines.push([0, 0, m, m], [w, 0, w - m, m], [0, h, m, h - m], [w, h, w - m, h - m]);
+			break;
+		}
+		case 'armature': {
+			// the two diagonals, the diamond through the sides' middles, and from each
+			// corner to the middles of the two sides across from it: 14 lines
+			const [mx, my] = [w / 2, h / 2];
+			lines.push([0, 0, w, h], [w, 0, 0, h]);
+			lines.push([mx, 0, w, my], [w, my, mx, h], [mx, h, 0, my], [0, my, mx, 0]);
+			lines.push([0, 0, w, my], [0, 0, mx, h], [w, 0, 0, my], [w, 0, mx, h]);
+			lines.push([0, h, w, my], [0, h, mx, 0], [w, h, 0, my], [w, h, mx, 0]);
+			break;
+		}
+		case 'safe':
+			box(0.05); // action safe: 90%
+			box(0.1); // title safe: 80%
+			break;
+		case 'triangles': {
+			// a diagonal, and from the other two corners straight across to it
+			const foot = (p: Pt): Pt => {
+				const t = (p[0] * w + p[1] * h) / (w * w + h * h);
+				return [t * w, t * h];
+			};
+			const [a, b] = [foot([w, 0]), foot([0, h])];
+			lines.push([0, 0, w, h], [w, 0, a[0], a[1]], [0, h, b[0], b[1]]);
+			break;
+		}
+		case 'spiral':
+			spiral(w, h, lines, arcs);
+			break;
+	}
+	if (!c.flipX && !c.flipY) return { lines, arcs };
+	const f = (p: Pt): Pt => [c.flipX ? w - p[0] : p[0], c.flipY ? h - p[1] : p[1]];
+	// mirrored once, the spiral turns the other way
+	const turn = c.flipX !== c.flipY;
+	return {
+		lines: lines.map(([x1, y1, x2, y2]) => [...f([x1, y1]), ...f([x2, y2])] as Seg),
+		arcs: arcs.map((a) => ({
+			...a,
+			from: f(a.from),
+			to: f(a.to),
+			sweep: turn ? ((1 - a.sweep) as 0 | 1) : a.sweep
+		}))
+	};
+}
+
+/**
+ * The golden spiral stretched to the rectangle: a golden cut taken off one side after
+ * another (going round clockwise), a quarter ellipse across each piece, joined end to end.
+ * The cuts are drawn too.
+ */
+function spiral(w: number, h: number, lines: Seg[], arcs: Arc[]) {
+	let [x, y, rw, rh] = [0, 0, w, h];
+	// the first cut across the long side: the left on a wide canvas, the top on a tall one
+	let side = w >= h ? 0 : 1; // 0 left, 1 top, 2 right, 3 bottom
+	const s = PHI_CUT;
+	for (let i = 0; i < 24 && rw > 1 && rh > 1; i++) {
+		if (side === 0) {
+			const pw = rw * s;
+			arcs.push({ from: [x, y + rh], to: [x + pw, y], rx: pw, ry: rh, sweep: 1 });
+			lines.push([x + pw, y, x + pw, y + rh]);
+			[x, rw] = [x + pw, rw - pw];
+		} else if (side === 1) {
+			const ph = rh * s;
+			arcs.push({ from: [x, y], to: [x + rw, y + ph], rx: rw, ry: ph, sweep: 1 });
+			lines.push([x, y + ph, x + rw, y + ph]);
+			[y, rh] = [y + ph, rh - ph];
+		} else if (side === 2) {
+			const pw = rw * s;
+			arcs.push({ from: [x + rw, y], to: [x + rw - pw, y + rh], rx: pw, ry: rh, sweep: 1 });
+			lines.push([x + rw - pw, y, x + rw - pw, y + rh]);
+			rw -= pw;
+		} else {
+			const ph = rh * s;
+			arcs.push({ from: [x + rw, y + rh], to: [x, y + rh - ph], rx: rw, ry: ph, sweep: 1 });
+			lines.push([x, y + rh - ph, x + rw, y + rh - ph]);
+			rh -= ph;
+		}
+		side = (side + 1) % 4;
+	}
+}
+
+/** The spiral's arcs as one SVG path (each starts where the last ended). */
+export function arcsPath(arcs: Arc[]): string {
+	if (!arcs.length) return '';
+	const n = (v: number) => +v.toFixed(2);
+	let d = `M${n(arcs[0].from[0])} ${n(arcs[0].from[1])}`;
+	for (const a of arcs) d += ` A${n(a.rx)} ${n(a.ry)} 0 0 ${a.sweep} ${n(a.to[0])} ${n(a.to[1])}`;
+	return d;
 }

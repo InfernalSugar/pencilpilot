@@ -140,6 +140,8 @@ export function moveGuides(g: GuideSettings, p: ResizePlan): GuideSettings {
 	const [kx, ky] = stretch(p);
 	const pt = (q: [number, number]) => movePoint(p, q);
 	return {
+		// (the composition overlay fits whatever the canvas is: it stays as it is)
+		...g,
 		grid: { ...g.grid, size: Math.max(2, Math.round(g.grid.size * Math.min(kx, ky))) },
 		perspective: { ...g.perspective, vps: g.perspective.vps.map(pt) },
 		ruler: { ...g.ruler, a: pt(g.ruler.a), b: pt(g.ruler.b) },

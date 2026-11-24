@@ -163,7 +163,10 @@
 	/** other players don't have "My brushes": they see the brush it's based on */
 	const sharedBrushId = (id: string) => (isCustom(id) ? (customBrush(id)?.base ?? id) : id);
 	import {
+		arcsPath,
 		closestDirection,
+		compositionShapes,
+		edgePin,
 		gridLines,
 		perspectiveRays,
 		project,
@@ -2917,9 +2920,12 @@
 		if (guides.symmetry?.mode !== 'off' && guides.symmetry && near(guides.symmetry.c))
 			return { what: 'sym', i: 0, start: p, from: $state.snapshot(guides) as GuideSettings };
 		const n = guides.perspective.points;
-		for (let i = 0; i < n; i++)
-			if (near(guides.perspective.vps[i]))
+		for (let i = 0; i < n; i++) {
+			// (a point off the canvas is picked up by its handle on the edge)
+			const pin = edgePin(guides.perspective.vps[i], width, height, r);
+			if (near(guides.perspective.vps[i]) || (pin && near(pin.at)))
 				return { what: 'vp', i, start: p, from: $state.snapshot(guides) as GuideSettings };
+		}
 		if (guides.ruler.on) {
 			if (near(guides.ruler.a))
 				return { what: 'a', i: 0, start: p, from: $state.snapshot(guides) as GuideSettings };
@@ -2956,6 +2962,12 @@
 	});
 
 	const guideGrid = $derived(guides?.grid.on ? gridLines(guides, width, height) : []);
+	/** the composition overlay (thirds, the golden spiral…): only shown, never in the picture */
+	const guideComp = $derived(
+		guides?.composition && guides.composition.preset !== 'off'
+			? compositionShapes(guides.composition, width, height)
+			: null
+	);
 	const guideRays = $derived(
 		guides && guides.perspective.points
 			? guides.perspective.vps
@@ -5247,7 +5259,7 @@
 		></canvas>
 		<canvas class="sel-tint" bind:this={tintEl} {width} {height} aria-hidden="true"></canvas>
 		<canvas class="ants" bind:this={antsEl} {width} {height} aria-hidden="true"></canvas>
-		{#if guides && (guideGrid.length || guideRays.length || guides.ruler.on || guideAxes.length)}
+		{#if guides && (guideGrid.length || guideRays.length || guides.ruler.on || guideAxes.length || guideComp)}
 			{@const hr = 8 / Math.max(0.01, fit * zoom)}
 			<svg
 				class="guides"
@@ -5262,6 +5274,20 @@
 				{#each guideRays as [x1, y1, x2, y2], i (i)}
 					<line class="ray" {x1} {y1} {x2} {y2} />
 				{/each}
+				{#if guideComp}
+					<g
+						class="composition"
+						data-testid="composition-guide"
+						data-preset={guides.composition.preset}
+					>
+						{#each guideComp.lines as [x1, y1, x2, y2], i (i)}
+							<line {x1} {y1} {x2} {y2} />
+						{/each}
+						{#if guideComp.arcs.length}
+							<path class="spiral" d={arcsPath(guideComp.arcs)} />
+						{/if}
+					</g>
+				{/if}
 				{#if guides.perspective.points >= 1 && guides.perspective.points <= 2}
 					{@const v = guides.perspective.vps}
 					{@const [ax, ay] = v[0]}
@@ -5292,7 +5318,23 @@
 						<circle class="handle sym" cx={guides.symmetry.c[0]} cy={guides.symmetry.c[1]} r={hr} />
 					{/if}
 					{#each guides.perspective.vps.slice(0, guides.perspective.points) as [x, y], i (i)}
-						<circle class="handle" cx={x} cy={y} r={hr} />
+						{@const pin = edgePin([x, y], width, height, 2 * hr)}
+						{#if pin}
+							<!-- off the canvas: its handle waits on the edge, an arrow pointing to it -->
+							{@const [px, py] = pin.at}
+							{@const [ux, uy] = [Math.cos(pin.angle), Math.sin(pin.angle)]}
+							<g class="vp-pin" data-testid="vp-handle" data-off="true">
+								<polygon
+									class="arrow"
+									points="{px + ux * hr * 1.9},{py + uy * hr * 1.9} {px + ux * hr - uy * hr},{py +
+										uy * hr +
+										ux * hr} {px + ux * hr + uy * hr},{py + uy * hr - ux * hr}"
+								/>
+								<circle class="handle" cx={px} cy={py} r={hr} />
+							</g>
+						{:else}
+							<circle class="handle" data-testid="vp-handle" cx={x} cy={y} r={hr} />
+						{/if}
 					{/each}
 					{#if guides.ruler.on}
 						<circle class="handle" cx={guides.ruler.a[0]} cy={guides.ruler.a[1]} r={hr} />
@@ -6323,6 +6365,20 @@
 		stroke: var(--guide, #e8492f);
 		stroke-opacity: 0.6;
 		stroke-width: 1.5;
+	}
+	.guides .composition line,
+	.guides .composition path {
+		fill: none;
+		stroke: var(--guide, #e8492f);
+		stroke-opacity: 0.6;
+		stroke-width: 1.5;
+		vector-effect: non-scaling-stroke;
+	}
+	.guides .composition .spiral {
+		stroke-width: 2;
+	}
+	.guides .vp-pin .arrow {
+		fill: var(--guide, #e8492f);
 	}
 	.guides .ruler {
 		stroke: rgba(22, 22, 26, 0.35);

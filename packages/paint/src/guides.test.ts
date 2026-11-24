@@ -1,15 +1,23 @@
 import { describe, expect, it } from 'vitest';
 import {
+	anyGuide,
+	arcsPath,
 	centredGuides,
 	closestDirection,
+	COMPOSITIONS,
+	compositionFlips,
+	compositionShapes,
 	defaultGuides,
+	edgePin,
 	gridLines,
+	PHI_CUT,
 	readGuides,
 	project,
 	rulerLine,
 	snapDirections,
 	vpLayout,
-	withPerspective
+	withPerspective,
+	type CompositionPreset
 } from './guides';
 
 describe('guides', () => {
@@ -139,5 +147,160 @@ describe('guides in the middle', () => {
 		expect(readGuides({ ...g, symmetry: { mode: 'sideways', n: 2, c: [0, 0] } })).toBeNull();
 		expect(readGuides({ ...g, ruler: { on: true, a: [0, 'x'], b: [1, 1] } })).toBeNull();
 		expect(readGuides(null)).toBeNull();
+	});
+});
+
+describe('3-point perspective', () => {
+	it('starts with all three points on the canvas, so each can be seen and dragged', () => {
+		const [w, h] = [1000, 800];
+		for (const from of [0, 1, 2] as const) {
+			const g = withPerspective(withPerspective(defaultGuides(w, h), from, w, h), 3, w, h);
+			expect(g.perspective.points).toBe(3);
+			for (const [x, y] of g.perspective.vps) {
+				expect(x).toBeGreaterThan(0);
+				expect(x).toBeLessThan(w);
+				expect(y).toBeGreaterThan(0);
+				expect(y).toBeLessThan(h);
+				expect(edgePin([x, y], w, h)).toBeNull();
+			}
+		}
+		// the third point below the other two, in the middle
+		const v = vpLayout(3, w, h);
+		expect(v[2][0]).toBe(w / 2);
+		expect(v[2][1]).toBeGreaterThan(v[0][1]);
+	});
+
+	it('the old start below the canvas (kept by older projects) is laid out again', () => {
+		const g = defaultGuides(1000, 800);
+		g.perspective = {
+			points: 0,
+			vps: [
+				[150, 320],
+				[850, 320],
+				[500, 1280]
+			]
+		};
+		expect(withPerspective(g, 3, 1000, 800).perspective.vps).toEqual(vpLayout(3, 1000, 800));
+	});
+
+	it('a point moved off the canvas gets a handle pinned to its edge, pointing at it', () => {
+		const pin = edgePin([500, 1600], 1000, 800, 10)!;
+		expect(pin.at[0]).toBeCloseTo(500);
+		expect(pin.at[1]).toBeCloseTo(790);
+		expect(pin.angle).toBeCloseTo(Math.PI / 2);
+		const side = edgePin([3000, 400], 1000, 800)!;
+		expect(side.at).toEqual([1000, 400]);
+		expect(side.angle).toBeCloseTo(0);
+		// up and to the left: on the top edge, along the line from the middle
+		const corner = edgePin([-500, -1000], 1000, 800)!;
+		expect(corner.at[1]).toBeCloseTo(0);
+		expect((corner.at[0] - 500) / (corner.at[1] - 400)).toBeCloseTo(1000 / 1400);
+	});
+});
+
+describe('composition overlays', () => {
+	const W = 1200;
+	const H = 800;
+	const on = (preset: CompositionPreset, flipX = false, flipY = false) =>
+		compositionShapes({ preset, flipX, flipY }, W, H);
+	const inside = ([x1, y1, x2, y2]: number[]) =>
+		[x1, x2].every((x) => x >= -1e-6 && x <= W + 1e-6) &&
+		[y1, y2].every((y) => y >= -1e-6 && y <= H + 1e-6);
+
+	it('every preset fits the canvas; off draws nothing', () => {
+		expect(on('off')).toEqual({ lines: [], arcs: [] });
+		for (const p of COMPOSITIONS.slice(1)) {
+			const s = on(p);
+			expect(s.lines.length, p).toBeGreaterThan(0);
+			expect(s.lines.every(inside), p).toBe(true);
+		}
+	});
+
+	it('thirds and the phi grid', () => {
+		const thirds = on('thirds').lines.map((l) => l.map(Math.round));
+		expect(thirds).toEqual([
+			[400, 0, 400, 800],
+			[800, 0, 800, 800],
+			[0, 267, 1200, 267],
+			[0, 533, 1200, 533]
+		]);
+		const phi = on('phi').lines;
+		expect(phi).toHaveLength(4);
+		expect(phi[0][0]).toBeCloseTo(1200 * 0.382, 0);
+		expect(phi[1][0]).toBeCloseTo(1200 * 0.618, 0);
+		expect(phi[1][0] / phi[0][0]).toBeCloseTo(PHI_CUT / (1 - PHI_CUT)); // φ
+	});
+
+	it('centre lines with diagonals, the diagonal method, safe areas', () => {
+		expect(on('cross').lines).toContainEqual([600, 0, 600, 800]);
+		expect(on('cross').lines).toContainEqual([0, 0, 1200, 800]);
+		// 45° from each corner
+		for (const [x1, y1, x2, y2] of on('diagonals').lines)
+			expect(Math.abs(x2 - x1)).toBeCloseTo(Math.abs(y2 - y1));
+		expect(on('diagonals').lines).toHaveLength(4);
+		const safe = on('safe').lines;
+		expect(safe).toHaveLength(8);
+		expect(safe[0]).toEqual([60, 40, 1140, 40]); // 90%
+		expect(safe[4]).toEqual([120, 80, 1080, 80]); // 80%
+	});
+
+	it('the armature of the rectangle has its 14 lines', () => {
+		const a = on('armature').lines;
+		expect(a).toHaveLength(14);
+		expect(new Set(a.map((l) => l.join())).size).toBe(14);
+	});
+
+	it('golden triangles: a diagonal and two lines meeting it square on, flippable', () => {
+		const [d, l1, l2] = on('triangles').lines;
+		expect(d).toEqual([0, 0, 1200, 800]);
+		for (const [x1, y1, x2, y2] of [l1, l2])
+			expect((x2 - x1) * 1200 + (y2 - y1) * 800).toBeCloseTo(0);
+		expect(on('triangles', true).lines[0]).toEqual([1200, 0, 0, 800]);
+		expect(compositionFlips('triangles')).toBe('x');
+		expect(compositionFlips('spiral')).toBe('xy');
+		expect(compositionFlips('thirds')).toBe('none');
+	});
+
+	it('the golden spiral: joined quarter turns, winding in, in four ways round', () => {
+		const { arcs, lines } = on('spiral');
+		expect(arcs.length).toBeGreaterThan(5);
+		expect(lines).toHaveLength(arcs.length);
+		expect(arcs[0].from).toEqual([0, 800]);
+		expect(arcs[0].to[0]).toBeCloseTo(1200 * PHI_CUT);
+		for (let i = 1; i < arcs.length; i++) {
+			expect(arcs[i].from[0]).toBeCloseTo(arcs[i - 1].to[0]);
+			expect(arcs[i].from[1]).toBeCloseTo(arcs[i - 1].to[1]);
+			expect(arcs[i].rx * arcs[i].ry).toBeLessThan(arcs[i - 1].rx * arcs[i - 1].ry);
+		}
+		expect(arcsPath(arcs)).toMatch(/^M0 800 A/);
+		// where it winds to (its last point), for each way round: four different places
+		const ways = [
+			[false, false],
+			[true, false],
+			[false, true],
+			[true, true]
+		] as const;
+		const ends = ways.map(([fx, fy]) => {
+			const s = on('spiral', fx, fy);
+			expect(s.arcs.every((a) => a.sweep === (fx !== fy ? 0 : 1))).toBe(true);
+			const e = s.arcs.at(-1)!.to;
+			return [Math.sign(e[0] - W / 2), Math.sign(e[1] - H / 2)].join();
+		});
+		expect(new Set(ends).size).toBe(4);
+		// a tall canvas starts with a cut across the top
+		const tall = compositionShapes({ preset: 'spiral', flipX: false, flipY: false }, 600, 1000);
+		expect(tall.arcs[0].from).toEqual([0, 0]);
+	});
+
+	it('kept with the guides: older projects without it read back as off', () => {
+		const g = defaultGuides(100, 100);
+		g.composition = { preset: 'spiral', flipX: true, flipY: false };
+		expect(readGuides(JSON.parse(JSON.stringify(g)))).toEqual(g);
+		const old: Record<string, unknown> = { ...g };
+		delete old.composition;
+		expect(readGuides(old)?.composition).toEqual({ preset: 'off', flipX: false, flipY: false });
+		expect(readGuides({ ...g, composition: { preset: 'nope' } })?.composition.preset).toBe('off');
+		expect(anyGuide(defaultGuides(100, 100))).toBe(false);
+		expect(anyGuide(g)).toBe(true);
 	});
 });

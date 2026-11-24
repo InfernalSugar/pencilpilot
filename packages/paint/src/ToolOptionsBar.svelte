@@ -9,7 +9,16 @@
 	import TextOptions from './TextOptions.svelte';
 	import type PaintCanvas from './PaintCanvas.svelte';
 	import type { CanvasStatus } from './PaintCanvas.svelte';
-	import { anyGuide, SYMMETRY_MODES, symmetryOn } from './guides';
+	import {
+		anyGuide,
+		arcsPath,
+		COMPOSITIONS,
+		compositionFlips,
+		compositionShapes,
+		SYMMETRY_MODES,
+		symmetryOn,
+		type CompositionPreset
+	} from './guides';
 	import { MAP_PRESETS } from './tone';
 	import type { ToolOptions } from './tool-options.svelte';
 
@@ -30,6 +39,22 @@
 		/** the unit marked on the reference, in canvas px (0: measure in pixels) */
 		measureUnit?: number;
 	} = $props();
+
+	/** the composition overlays' names, as the picker shows them */
+	const COMPOSITION_NAMES: Record<CompositionPreset, string> = {
+		off: 'Off',
+		thirds: 'Thirds',
+		phi: 'Golden grid',
+		spiral: 'Golden spiral',
+		triangles: 'Golden triangles',
+		diagonals: 'Diagonals',
+		cross: 'Centre lines',
+		armature: 'Armature',
+		safe: 'Safe areas'
+	};
+	const composition = $derived(
+		opts.guides.composition ?? { preset: 'off' as const, flipX: false, flipY: false }
+	);
 
 	const onLines = $derived(!!status.layers.find((l) => l.id === status.active)?.lines);
 	/** how many line strokes are selected (the status bumps on every change) */
@@ -232,6 +257,70 @@
 						})}
 				/>
 			</label>
+		{/if}
+		<span class="opt-label">Composition</span>
+		<div class="seg" role="radiogroup" aria-label="Composition">
+			{#each COMPOSITIONS as p (p)}
+				{@const shapes = compositionShapes({ preset: p, flipX: false, flipY: false }, 24, 16)}
+				<button
+					type="button"
+					class="tool"
+					class:thumb={p !== 'off'}
+					role="radio"
+					aria-checked={composition.preset === p}
+					aria-label={COMPOSITION_NAMES[p]}
+					title={p === 'safe'
+						? 'Safe areas: action (90%) and title (80%)'
+						: p === 'off'
+							? 'No composition guide'
+							: COMPOSITION_NAMES[p]}
+					onclick={() => opts.setComposition({ preset: p })}
+				>
+					{#if p === 'off'}
+						Off
+					{:else}
+						<svg viewBox="-1 -1 26 18" width="26" height="18" aria-hidden="true">
+							<rect x="0" y="0" width="24" height="16" />
+							{#each shapes.lines as [x1, y1, x2, y2], i (i)}
+								<line {x1} {y1} {x2} {y2} />
+							{/each}
+							{#if shapes.arcs.length}<path d={arcsPath(shapes.arcs)} />{/if}
+						</svg>
+					{/if}
+				</button>
+			{/each}
+		</div>
+		{#if compositionFlips(composition.preset) === 'x'}
+			<button
+				type="button"
+				class="tool"
+				aria-pressed={composition.flipX}
+				title="Flip the guide left to right"
+				onclick={() => opts.setComposition({ flipX: !composition.flipX })}
+			>
+				Flip
+			</button>
+		{:else if compositionFlips(composition.preset) === 'xy'}
+			<button
+				type="button"
+				class="tool"
+				aria-pressed={composition.flipX}
+				aria-label="Flip left to right"
+				title="Flip the guide left to right"
+				onclick={() => opts.setComposition({ flipX: !composition.flipX })}
+			>
+				Flip ↔
+			</button>
+			<button
+				type="button"
+				class="tool"
+				aria-pressed={composition.flipY}
+				aria-label="Flip top to bottom"
+				title="Flip the guide top to bottom"
+				onclick={() => opts.setComposition({ flipY: !composition.flipY })}
+			>
+				Flip ↕
+			</button>
 		{/if}
 		{#if opts.guides.perspective.points || opts.guides.ruler.on || symmetryOn(opts.guides)}
 			<button
@@ -811,6 +900,19 @@
 	.seg {
 		display: flex;
 		gap: 2px;
+	}
+	/* the composition picker: a small drawing of each guide */
+	.tool.thumb {
+		padding: 0 6px;
+	}
+	.thumb svg {
+		display: block;
+		fill: none;
+		stroke: currentColor;
+		stroke-width: 1;
+	}
+	.thumb svg rect {
+		stroke-opacity: 0.6;
 	}
 	.slider {
 		display: flex;
