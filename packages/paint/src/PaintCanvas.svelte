@@ -5481,7 +5481,12 @@
 				items.push(folder);
 			}
 		}
-		const flat = frame ? renderFrame(frame.pairs, 1, frame.transparent)?.rgba : null;
+		// (the file's flat picture is the document's, not a view's: the canvas shows the view)
+		const flat = frame
+			? renderFrame(frame.pairs, 1, frame.transparent)?.rgba
+			: viewHidden.size
+				? renderFrame([], 1)?.rgba
+				: null;
 		return {
 			width,
 			height,
