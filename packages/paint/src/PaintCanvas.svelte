@@ -2178,6 +2178,7 @@
 	/**
 	 * Close and fill: a stroke that ends near where it began (within ~24 screen pixels,
 	 * and long enough to be a shape) fills inside with its colour, in the same undo step.
+	 * With symmetry on, its mirrored / turned copies fill too (they were painted with it).
 	 */
 	function fillClosed(points: { x: number; y: number }[]): boolean {
 		if (!paint || points.length < 8) return false;
@@ -2191,11 +2192,20 @@
 		const off = new OffscreenCanvas(width, height);
 		const c = off.getContext('2d')!;
 		c.fillStyle = '#fff';
-		c.beginPath();
-		c.moveTo(a.x, a.y);
-		for (const p of points.slice(1)) c.lineTo(p.x, p.y);
-		c.closePath();
-		c.fill();
+		const shape = (pts: [number, number][]) => {
+			c.beginPath();
+			c.moveTo(pts[0][0], pts[0][1]);
+			for (const p of pts.slice(1)) c.lineTo(p[0], p[1]);
+			c.closePath();
+			c.fill();
+		};
+		shape(points.map((p) => [p.x, p.y]));
+		const sym = guides?.symmetry;
+		const mode = sym?.mode;
+		if (sym && mode && mode !== 'off') {
+			const at = points.map((p) => symmetryCopies(mode, sym.n, sym.c[0], sym.c[1], p.x, p.y));
+			for (let k = 0; k < at[0].length; k++) shape(at.map((copies) => copies[k]));
+		}
 		const rgba = c.getImageData(0, 0, width, height).data;
 		const coverage = new Uint8Array(width * height);
 		for (let i = 0; i < coverage.length; i++) coverage[i] = rgba[i * 4 + 3];
