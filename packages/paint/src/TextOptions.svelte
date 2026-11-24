@@ -38,16 +38,22 @@
 	});
 
 	// the canvas changed: typing may have been stopped (undo); a text layer picked with
-	// the text tool opens
+	// the text tool opens (picked: from layers there already, not a project opened or a
+	// canvas made, whose keys would go on into the text)
 	let lastActive = 0;
+	let lastIds = new Set<number>();
 	$effect(() => {
 		void status.version;
 		const active = status.active;
+		const ids = new Set(status.layers.map((l) => l.id));
 		untrack(() => {
 			text.check();
 			const was = lastActive;
+			const known = lastIds;
 			lastActive = active;
+			lastIds = ids;
 			if (tool !== 'text' || text.spec || active === was || active === text.last) return;
+			if (!known.has(was) || !known.has(active)) return;
 			if (status.layers.find((l) => l.id === active)?.text) text.open(active);
 		});
 	});
