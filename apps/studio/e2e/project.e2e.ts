@@ -2633,6 +2633,34 @@ test('layer style: an outline, undone in one step, kept in the file', async ({ p
 	await expect.poll(async () => Math.abs((await red()) - outlined)).toBeLessThan(outlined * 0.02);
 });
 
+test("text: opening a project with the text tool on doesn't open its text (keys stay keys)", async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	await page.keyboard.press('t');
+	const b = (await canvas(page).boundingBox())!;
+	await page.mouse.click(b.x + b.width * 0.3, b.y + b.height * 0.4);
+	const typed = page.getByRole('textbox', { name: 'Text', exact: true });
+	await expect(typed).toBeFocused();
+	await page.keyboard.type('Hello there');
+	await page.getByRole('group', { name: 'Text' }).getByRole('button', { name: 'Done' }).click();
+	await expect(page.getByTestId('text-frame')).toHaveCount(0);
+	await page.keyboard.press('Control+s');
+	await expect(page.getByTestId('project-name')).toHaveText('Walk cycle', { timeout: 20_000 });
+	await page.keyboard.press('Control+o');
+	// (the project's layers in: a moment for anything that would open the text)
+	await expect(page.getByRole('tab', { name: /Layers/ })).toContainText('2 layers');
+	await page.waitForTimeout(500);
+	await expect(page.getByTestId('text-frame')).toHaveCount(0);
+	await expect(typed).toHaveCount(0);
+	await page.keyboard.type('tx');
+	// the text as it was, opened on purpose
+	await page.keyboard.press('t');
+	await page.getByRole('button', { name: /Change the text of/ }).click();
+	await expect(typed).toHaveValue('Hello there');
+});
+
 test('text: typed on the canvas, one undo step, changed later, kept in the file, rasterized', async ({
 	page
 }) => {
