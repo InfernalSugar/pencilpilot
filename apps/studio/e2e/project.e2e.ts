@@ -2709,6 +2709,98 @@ test('a new canvas starts with its guides in the middle; Re-centre puts moved on
 	await expect.poll(axisAt).toBeCloseTo(0.5, 2);
 });
 
+test('3-point perspective shows all three vanishing points, each can be dragged', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	await page.getByRole('button', { name: 'Guides', exact: true }).click();
+	const persp = page.getByRole('radiogroup', { name: 'Perspective' });
+	await persp.getByRole('radio', { name: '2-point' }).click();
+	await persp.getByRole('radio', { name: '3-point' }).click();
+	await page.getByRole('button', { name: 'Move guides' }).click();
+	const handles = page.getByTestId('vp-handle');
+	await expect(handles).toHaveCount(3);
+	// all on the canvas, where they can be seen
+	const c = (await canvas(page).boundingBox())!;
+	for (let i = 0; i < 3; i++) {
+		const b = (await handles.nth(i).boundingBox())!;
+		expect(b.x).toBeGreaterThanOrEqual(c.x);
+		expect(b.x + b.width).toBeLessThanOrEqual(c.x + c.width);
+		expect(b.y).toBeGreaterThanOrEqual(c.y);
+		expect(b.y + b.height).toBeLessThanOrEqual(c.y + c.height);
+	}
+	/** drag handle i by (dx, dy) screen pixels */
+	const drag = async (i: number, dx: number, dy: number) => {
+		const b = (await handles.nth(i).boundingBox())!;
+		await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2);
+		await page.mouse.down();
+		await page.mouse.move(b.x + b.width / 2 + dx, b.y + b.height / 2 + dy, { steps: 6 });
+		await page.mouse.up();
+	};
+	const third = async () => (await handles.nth(2).boundingBox())!;
+	const before = await third();
+	await drag(2, 60, -40);
+	await expect.poll(async () => (await third()).x).toBeGreaterThan(before.x + 40);
+	// dragged off the canvas: its handle stays on the edge (with an arrow), still draggable
+	await drag(2, 0, 600);
+	await expect(handles.nth(2)).toHaveAttribute('data-off', 'true');
+	await expect(handles).toHaveCount(3);
+	const pinned = await third();
+	expect(pinned.y + pinned.height).toBeLessThanOrEqual(c.y + c.height + 1);
+	await drag(2, 0, -800);
+	await expect(handles.nth(2)).not.toHaveAttribute('data-off', 'true');
+});
+
+test('composition guides: one click on, flip, off; kept in the project file', async ({ page }) => {
+	await stubTauri(page);
+	await ready(page);
+	await page.getByRole('button', { name: 'Guides', exact: true }).click();
+	const pick = page.getByRole('radiogroup', { name: 'Composition' });
+	const overlay = page.getByTestId('composition-guide');
+	await expect(overlay).toHaveCount(0);
+	await pick.getByRole('radio', { name: 'Thirds' }).click();
+	await expect(overlay).toHaveAttribute('data-preset', 'thirds');
+	await expect(overlay.locator('line')).toHaveCount(4);
+	await expect(page.getByRole('button', { name: 'Guides', exact: true })).toHaveAttribute(
+		'aria-pressed',
+		'true'
+	);
+	// the golden spiral, turned the other way round
+	await pick.getByRole('radio', { name: 'Golden spiral' }).click();
+	await expect(overlay).toHaveAttribute('data-preset', 'spiral');
+	const path = overlay.locator('path');
+	await expect(path).toHaveCount(1);
+	const d0 = await path.getAttribute('d');
+	await page.getByRole('button', { name: 'Flip left to right' }).click();
+	await expect(page.getByRole('button', { name: 'Flip left to right' })).toHaveAttribute(
+		'aria-pressed',
+		'true'
+	);
+	await expect(path).not.toHaveAttribute('d', d0!);
+	const flipped = await path.getAttribute('d');
+	// only shown: the picture itself stays blank
+	expect(await ink(page)).toBe(0);
+	// off
+	await pick.getByRole('radio', { name: 'Off' }).click();
+	await expect(overlay).toHaveCount(0);
+	// on again, saved, switched off, opened again: back as it was saved
+	await pick.getByRole('radio', { name: 'Golden spiral' }).click();
+	await expect(path).toHaveAttribute('d', flipped!);
+	await scribble(page, 0.5);
+	await page.keyboard.press('Control+s');
+	await expect(page.getByTestId('project-name')).toHaveText('Walk cycle', { timeout: 20_000 });
+	await pick.getByRole('radio', { name: 'Off' }).click();
+	await expect(overlay).toHaveCount(0);
+	await page.keyboard.press('Control+o');
+	await expect(overlay).toHaveAttribute('data-preset', 'spiral', { timeout: 15_000 });
+	await expect(overlay.locator('path')).toHaveAttribute('d', flipped!);
+	await expect(pick.getByRole('radio', { name: 'Golden spiral' })).toHaveAttribute(
+		'aria-checked',
+		'true'
+	);
+});
+
 test('line layers: strokes stay editable (select, move, recolour, erase, reshape, save, convert)', async ({
 	page
 }) => {

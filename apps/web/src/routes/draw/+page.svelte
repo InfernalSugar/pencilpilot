@@ -229,7 +229,8 @@
 			grid: { ...g.grid, size: Math.round(g.grid.size * Math.min(kx, ky)) },
 			perspective: { ...g.perspective, vps: g.perspective.vps.map(sc) },
 			ruler: { ...g.ruler, a: sc(g.ruler.a), b: sc(g.ruler.b) },
-			symmetry: g.symmetry ? { ...g.symmetry, c: sc(g.symmetry.c) } : defaultGuides(w, h).symmetry
+			symmetry: g.symmetry ? { ...g.symmetry, c: sc(g.symmetry.c) } : defaultGuides(w, h).symmetry,
+			composition: g.composition ?? defaultGuides(w, h).composition
 		};
 	}
 	/** pen pressure and tilt on/off (remembered) */

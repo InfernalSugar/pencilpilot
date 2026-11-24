@@ -6,7 +6,13 @@
  */
 import type PaintCanvas from './PaintCanvas.svelte';
 import type { CanvasStatus, ImportResult } from './PaintCanvas.svelte';
-import { centredGuides, defaultGuides, withPerspective, type GuideSettings } from './guides';
+import {
+	centredGuides,
+	defaultGuides,
+	withPerspective,
+	type Composition,
+	type GuideSettings
+} from './guides';
 import { smoothTool, type SmoothTool } from './stabilizer';
 import { NO_SPEC, parseSpec, specName, type AdjustSpec } from './tone';
 import { pickFilter, type FilterSpec } from './filters';
@@ -156,6 +162,15 @@ export class ToolOptions {
 	centreGuides() {
 		const s = this.host.size?.();
 		if (s) this.setGuides(centredGuides(this.guides, s.width, s.height));
+	}
+	/** a composition overlay (or off), or which way round it goes */
+	setComposition(c: Partial<Composition>) {
+		const was: Composition = this.guides.composition ?? {
+			preset: 'off',
+			flipX: false,
+			flipY: false
+		};
+		this.setGuides({ ...this.guides, composition: { ...was, ...c } });
 	}
 	/** 1-, 2- or 3-point perspective (or off), the points laid out for it unless moved */
 	setPerspective(points: 0 | 1 | 2 | 3) {
