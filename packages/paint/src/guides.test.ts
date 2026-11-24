@@ -14,7 +14,12 @@ import {
 	readGuides,
 	project,
 	rulerLine,
+	shiftOffset,
+	shiftPoint,
+	snapAlong,
+	snapAngle,
 	snapDirections,
+	snapToGrid,
 	vpLayout,
 	withPerspective,
 	type CompositionPreset
@@ -302,5 +307,87 @@ describe('composition overlays', () => {
 		expect(readGuides({ ...g, composition: { preset: 'nope' } })?.composition.preset).toBe('off');
 		expect(anyGuide(defaultGuides(100, 100))).toBe(false);
 		expect(anyGuide(g)).toBe(true);
+	});
+});
+
+describe('Shift: snapping while dragging', () => {
+	const grid = (kind: 'square' | 'isometric', size = 40) => {
+		const g = defaultGuides(800, 600);
+		g.grid = { on: true, kind, size };
+		return g;
+	};
+	const close = (p: [number, number], q: [number, number]) => {
+		expect(p[0]).toBeCloseTo(q[0], 6);
+		expect(p[1]).toBeCloseTo(q[1], 6);
+	};
+
+	it('a square grid: the nearest crossing', () => {
+		const g = grid('square');
+		expect(snapToGrid(g, [57, 21])).toEqual([40, 40]);
+		expect(snapToGrid(g, [61, 19])).toEqual([80, 0]);
+		expect(snapToGrid(g, [-15, 99])).toEqual([-0, 80]);
+		// the grid off: the point stays put
+		g.grid.on = false;
+		expect(snapToGrid(g, [57, 21])).toEqual([57, 21]);
+		expect(snapToGrid(null, [57, 21])).toEqual([57, 21]);
+	});
+
+	it('an isometric grid: the nearest crossing, on all three of its lines', () => {
+		const g = grid('isometric');
+		const d = 40 / Math.cos(Math.PI / 6);
+		close(snapToGrid(g, [3, d - 2]), [0, d]);
+		// the next column is half a step down
+		close(snapToGrid(g, [38, d / 2 + 3]), [40, d / 2]);
+		// every crossing is on an upright line and on both slanted ones that gridLines draws
+		const lines = gridLines(g, 800, 600);
+		const on = (p: [number, number]) =>
+			lines.filter(([x1, y1, x2, y2]) => {
+				const cross = (x2 - x1) * (p[1] - y1) - (y2 - y1) * (p[0] - x1);
+				return Math.abs(cross) / Math.hypot(x2 - x1, y2 - y1) < 1e-6;
+			}).length;
+		for (const q of [
+			[200, 300],
+			[333, 123],
+			[517, 401]
+		] as [number, number][])
+			expect(on(snapToGrid(g, q))).toBe(3);
+	});
+
+	it('along a line: the nearest crossing on it, else just on the line', () => {
+		const g = grid('square');
+		close(snapAlong(g, [40, 40], [1, 0], [97, 52]), [80, 40]);
+		const D = Math.SQRT1_2;
+		close(snapAlong(g, [0, 0], [D, D], [70, 95]), [80, 80]);
+		// the line misses every crossing: on the line, wherever the pointer is
+		close(snapAlong(g, [0, 10], [1, 0], [97, 52]), [97, 10]);
+		// no grid: just held to the line
+		close(snapAlong(null, [0, 0], [1, 0], [97, 52]), [97, 0]);
+		// isometric: across, the crossings come every two columns
+		close(snapAlong(grid('isometric'), [0, 0], [1, 0], [70, 5]), [80, 0]);
+	});
+
+	it('angles turn to the nearest step, as far out as before', () => {
+		const p = snapAngle([10, 10], [20, 11], 15);
+		close(p, [10 + Math.hypot(10, 1), 10]);
+		const q = snapAngle([0, 0], [10, 9], 45);
+		close(q, [Math.hypot(10, 9) * Math.SQRT1_2, Math.hypot(10, 9) * Math.SQRT1_2]);
+		const r = snapAngle([0, 0], [10, 2], 15);
+		expect((Math.atan2(r[1], r[0]) * 180) / Math.PI).toBeCloseTo(15);
+		expect(snapAngle([5, 5], [5, 5], 15)).toEqual([5, 5]);
+	});
+
+	it('a Shift move goes across, down or at 45°; whole cells with the grid on', () => {
+		close(shiftOffset(null, [50, 8]), [50, 0]);
+		close(shiftOffset(null, [-6, 70]), [0, 70]);
+		close(shiftOffset(null, [30, -34]), [32, -32]);
+		const g = grid('square');
+		close(shiftOffset(g, [50, 8]), [40, 0]);
+		close(shiftOffset(g, [65, 61]), [80, 80]);
+	});
+
+	it('a Shift-dragged point: on the grid when it is on, else held to an axis from its start', () => {
+		close(shiftPoint(null, [100, 100], [160, 107]), [160, 100]);
+		close(shiftPoint(null, [100, 100], [96, 40]), [100, 40]);
+		close(shiftPoint(grid('square'), [100, 100], [163, 107]), [160, 120]);
 	});
 });

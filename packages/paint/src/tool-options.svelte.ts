@@ -95,6 +95,8 @@ export class ToolOptions {
 	quickShape = $state(true);
 	/** close and fill: a stroke that ends where it began fills inside */
 	closeFill = $state(false);
+	/** snap to ink: a stroke's start and end go onto lines close by (off unless switched on) */
+	inkSnap = $state(false);
 	guides = $state<GuideSettings>(defaultGuides(800, 600));
 	guidesOpen = $state(false);
 	/** a note about the last import or paste */

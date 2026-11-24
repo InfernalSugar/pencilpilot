@@ -3,6 +3,7 @@
  * a clean shape, its points can be dragged until the next stroke.
  */
 import type { Shape } from './quickshape';
+import { shiftPoint, snapAngle, snapToGrid, type GuideSettings } from './guides';
 
 export type Pt = [number, number];
 
@@ -141,8 +142,22 @@ export function shapeHandles(s: EditShape): Pt[] {
 	return [s.c, [s.c[0] + s.a * cs, s.c[1] + s.a * sn], [s.c[0] - s.b * sn, s.c[1] + s.b * cs]];
 }
 
-/** The shape with handle `i` dragged to `p`. */
-export function moveHandle(s: EditShape, i: number, p: Pt): EditShape {
+/**
+ * The shape with handle `i` dragged to `p`. With `shift`: a rectangle's corner keeps its
+ * proportions (or, with the grid on, goes to a grid crossing and the rest stays a rectangle
+ * round it), a line's or polyline's point turns in 15° steps from the point before it (on a
+ * grid crossing with the grid on), an ellipse keeps its proportions and turns in 15° steps,
+ * and its centre (dragged from `from`) moves across, down or at 45°, or to a grid crossing.
+ */
+export function moveHandle(
+	s: EditShape,
+	i: number,
+	p: Pt,
+	shift = false,
+	g: GuideSettings | null = null,
+	from?: Pt
+): EditShape {
+	if (shift) return shiftHandle(s, i, p, g, from ?? shapeHandles(s)[i]);
 	if (s.kind === 'poly') return { ...s, pts: s.pts.map((q, k) => (k === i ? p : q)) };
 	if (i === 0) return { ...s, c: p };
 	const r = Math.max(2, dist(s.c, p));
@@ -151,6 +166,56 @@ export function moveHandle(s: EditShape, i: number, p: Pt): EditShape {
 		return { ...s, theta, a: r, b: s.circle ? r : s.b };
 	}
 	return { ...s, b: r, a: s.circle ? r : s.a };
+}
+
+function shiftHandle(s: EditShape, i: number, p: Pt, g: GuideSettings | null, from: Pt): EditShape {
+	const grid = !!g?.grid.on;
+	if (s.kind === 'ellipse') {
+		if (i === 0) return { ...s, c: shiftPoint(g, from, p) };
+		const r = Math.max(2, dist(s.c, p));
+		if (i === 1) {
+			const q = snapAngle(s.c, p, 15);
+			const theta = Math.atan2(q[1] - s.c[1], q[0] - s.c[0]);
+			return { ...s, theta, a: r, b: s.b * (r / s.a) };
+		}
+		return { ...s, b: r, a: s.a * (r / s.b) };
+	}
+	const n = s.pts.length;
+	if (s.closed && n === 4) {
+		// the opposite corner stays put
+		const o = s.pts[(i + 2) % 4];
+		if (grid) {
+			// on a grid crossing; the corners either side slide along their sides: still a rectangle
+			const t = snapToGrid(g, p);
+			const along = (e: Pt): Pt => {
+				const [ex, ey] = [e[0] - o[0], e[1] - o[1]];
+				const l2 = ex * ex + ey * ey;
+				if (l2 < 1e-9) return e;
+				const k = ((t[0] - o[0]) * ex + (t[1] - o[1]) * ey) / l2;
+				return [o[0] + ex * k, o[1] + ey * k];
+			};
+			const pts = [...s.pts];
+			pts[i] = t;
+			pts[(i + 1) % 4] = along(s.pts[(i + 1) % 4]);
+			pts[(i + 3) % 4] = along(s.pts[(i + 3) % 4]);
+			return { ...s, pts };
+		}
+		// the same proportions: scaled about the opposite corner, along its diagonal
+		const q = s.pts[i];
+		const [dx, dy] = [q[0] - o[0], q[1] - o[1]];
+		const l2 = dx * dx + dy * dy;
+		if (l2 < 1e-9) return s;
+		const k = ((p[0] - o[0]) * dx + (p[1] - o[1]) * dy) / l2;
+		if (Math.abs(k) < 0.02) return s;
+		return {
+			...s,
+			pts: s.pts.map(([x, y]) => [o[0] + (x - o[0]) * k, o[1] + (y - o[1]) * k] as Pt)
+		};
+	}
+	// a line's (or polyline's, triangle's) point: on the grid, or 15° steps from the point before
+	const prev = s.pts[i > 0 ? i - 1 : s.closed ? n - 1 : 1];
+	const to = grid ? snapToGrid(g, p) : n > 1 ? snapAngle(prev, p, 15) : p;
+	return { ...s, pts: s.pts.map((q, k) => (k === i ? to : q)) };
 }
 
 /** What a shape is, in words (for its Edit Shape buttons). */
