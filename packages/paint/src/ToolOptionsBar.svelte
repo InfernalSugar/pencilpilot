@@ -98,7 +98,7 @@
 				class="msg"
 				data-testid="lines-picked"
 				title={picked
-					? 'Drag to move; the corners scale (Shift: in proportion), the round handle turns, the dots reshape. Arrow keys nudge, Delete removes. The colour, size, opacity and brush you pick change the selected lines.'
+					? 'Drag to move (Shift: straight across, down or at 45°); the corners scale (Shift: in proportion), the round handle turns (Shift: in 15° steps), the dots reshape. Arrow keys nudge, Delete removes. The colour, size, opacity and brush you pick change the selected lines.'
 					: 'Shift+tap adds or takes away a line; drag on empty canvas for a box.'}
 			>
 				{picked
@@ -156,6 +156,7 @@
 					aria-checked={id === 'off'
 						? !opts.guides.grid.on
 						: opts.guides.grid.on && opts.guides.grid.kind === id}
+					title={id === 'off' ? undefined : 'Shift: points snap to the grid'}
 					onclick={() =>
 						opts.setGuides({
 							...opts.guides,
@@ -213,6 +214,15 @@
 				Guide snap
 			</button>
 		{/if}
+		<button
+			type="button"
+			class="tool"
+			aria-pressed={opts.inkSnap}
+			title="Snap to ink: a stroke starts and ends on a line close by (a line's end first), so lines meet with no gap. Dragged line points too."
+			onclick={() => (opts.inkSnap = !opts.inkSnap)}
+		>
+			Snap to ink
+		</button>
 		<button
 			type="button"
 			class="tool"
@@ -487,12 +497,21 @@
 {/if}
 {#if tool === 'transform' && !pickedElsewhere && strokesShown}
 	<div class="fill-opts move-hint" role="group" aria-label="Move">
-		<span class="msg" data-testid="move-strokes-hint">
+		<span
+			class="msg"
+			data-testid="move-strokes-hint"
+			title="Shift: move straight across, down or at 45°"
+		>
 			Tap a stroke to change it, or drag it. Drag anywhere else to move the whole layer.
 		</span>
 	</div>
 {:else if tool === 'transform' && !pickedElsewhere}
-	<div class="fill-opts" role="group" aria-label="Transform">
+	<div
+		class="fill-opts"
+		role="group"
+		aria-label="Transform"
+		title="Shift: move straight across, down or at 45°, turn in 15° steps, a corner scales each way on its own"
+	>
 		<button
 			type="button"
 			class="tool"
@@ -563,11 +582,12 @@
 		{/if}
 		{#if tool === 'select-rect'}
 			<div class="seg" role="radiogroup" aria-label="Selection shape">
-				{#each [['rect', 'Rectangle'], ['ellipse', 'Ellipse']] as [id, label] (id)}
+				{#each [['rect', 'Rectangle', 'Shift: keep it square'], ['ellipse', 'Ellipse', 'Shift: keep it round']] as [id, label, title] (id)}
 					<button
 						type="button"
 						class="tool"
 						role="radio"
+						{title}
 						aria-checked={opts.selectShape === id}
 						onclick={() => (opts.selectShape = id as typeof opts.selectShape)}
 					>

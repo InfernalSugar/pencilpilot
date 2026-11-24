@@ -280,16 +280,101 @@ export function gridLines(
 		for (let y = s; y < h; y += s) out.push([0, y, w, y]);
 		return out;
 	}
-	// isometric: verticals plus lines at ±30°
-	const step = s;
-	for (let x = step; x < w; x += step) out.push([x, 0, x, h]);
+	// isometric: verticals plus lines at ±30°, through the same points as `snapToGrid`
+	for (let x = s; x < w; x += s) out.push([x, 0, x, h]);
 	const k = Math.tan(Math.PI / 6);
-	const span = w * k + h;
-	for (let c = -span; c < span + h; c += step / Math.cos(Math.PI / 6)) {
-		out.push([0, c, w, c - w * k]);
-		out.push([0, c - w * k, w, c]);
-	}
+	const d = isoStep(s);
+	// falling lines y = c - x·k cross the canvas for c in [0, h + w·k]; rising y = c + x·k for [-w·k, h]
+	for (let n = 0; n * d <= h + w * k; n++) out.push([0, n * d, w, n * d - w * k]);
+	for (let n = Math.ceil((-w * k) / d); n * d <= h; n++) out.push([0, n * d, w, n * d + w * k]);
 	return out;
+}
+
+/** an isometric grid's distance between crossings along its upright lines (its triangles' side) */
+const isoStep = (s: number) => s / Math.cos(Math.PI / 6);
+
+// ---- Shift: constraints while dragging ----
+
+const D = Math.SQRT1_2;
+/** across, down and the two diagonals: Shift + drag keeps a stroke or a move to these */
+export const STRAIGHT_DIRS: Pt[] = [
+	[1, 0],
+	[0, 1],
+	[D, D],
+	[D, -D]
+];
+
+/**
+ * The grid crossing nearest `p` (with the grid off, `p` itself). A square grid crosses at
+ * every (m·s, n·s); an isometric one at (m·s, (j + m/2)·d) with d = s / cos 30°.
+ */
+export function snapToGrid(g: GuideSettings | null | undefined, p: Pt): Pt {
+	if (!g?.grid.on) return p;
+	const s = Math.max(4, g.grid.size);
+	if (g.grid.kind === 'square') return [Math.round(p[0] / s) * s, Math.round(p[1] / s) * s];
+	const d = isoStep(s);
+	let best: Pt = p;
+	let bd = Infinity;
+	// (the nearest crossing is always in one of the two columns either side)
+	for (const m of [Math.floor(p[0] / s), Math.floor(p[0] / s) + 1]) {
+		const q: Pt = [m * s, (Math.round(p[1] / d - m / 2) + m / 2) * d];
+		const dist = Math.hypot(q[0] - p[0], q[1] - p[1]);
+		if (dist < bd) [best, bd] = [q, dist];
+	}
+	return best;
+}
+
+/**
+ * `p` held to the line through `origin` along unit `u`, and on it the nearest grid crossing
+ * when the grid is on and the line passes through crossings near there.
+ */
+export function snapAlong(g: GuideSettings | null | undefined, origin: Pt, u: Pt, p: Pt): Pt {
+	const q = project(origin, u, p);
+	if (!g?.grid.on) return q;
+	const s = Math.max(4, g.grid.size);
+	const step = g.grid.kind === 'square' ? s : isoStep(s);
+	const c = snapToGrid(g, q);
+	let best: Pt = q;
+	let bd = Infinity;
+	for (let i = -2; i <= 2; i++)
+		for (let j = -2; j <= 2; j++) {
+			const r = snapToGrid(g, [c[0] + i * s, c[1] + j * step]);
+			// on the line?
+			const off = Math.abs((r[0] - origin[0]) * u[1] - (r[1] - origin[1]) * u[0]);
+			if (off > 1e-6 * s) continue;
+			const dist = Math.hypot(r[0] - q[0], r[1] - q[1]);
+			if (dist < bd) [best, bd] = [r, dist];
+		}
+	return best;
+}
+
+/** `p` turned about `origin` to the nearest `stepDeg` step, as far from it as before. */
+export function snapAngle(origin: Pt, p: Pt, stepDeg: number): Pt {
+	const [dx, dy] = [p[0] - origin[0], p[1] - origin[1]];
+	const r = Math.hypot(dx, dy);
+	if (r === 0) return p;
+	const step = (stepDeg * Math.PI) / 180;
+	const a = Math.round(Math.atan2(dy, dx) / step) * step;
+	return [origin[0] + r * Math.cos(a), origin[1] + r * Math.sin(a)];
+}
+
+/**
+ * Shift on a move: the offset `d` (from where the drag started) held across, down or at 45°,
+ * whichever is closest, and a whole number of grid cells along it when the grid is on.
+ */
+export function shiftOffset(g: GuideSettings | null | undefined, d: Pt): Pt {
+	const u = closestDirection(STRAIGHT_DIRS, d);
+	return u ? snapAlong(g, [0, 0], u, d) : d;
+}
+
+/**
+ * Shift on a dragged point (it started at `from`, the pointer is at `to`): with the grid on,
+ * the nearest grid crossing; otherwise held across, down or at 45° from where it started.
+ */
+export function shiftPoint(g: GuideSettings | null | undefined, from: Pt, to: Pt): Pt {
+	if (g?.grid.on) return snapToGrid(g, to);
+	const d = shiftOffset(null, [to[0] - from[0], to[1] - from[1]]);
+	return [from[0] + d[0], from[1] + d[1]];
 }
 
 /** Rays from a vanishing point, for drawing the perspective guide. */

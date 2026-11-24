@@ -1233,3 +1233,46 @@ test('save: a PNG picture and a layered Photoshop file', async ({ page }) => {
 	for (const n of ['Layer 1', 'Layer 2', 'Group 1'])
 		expect(buf.includes(Buffer.from(n, 'utf16le').swap16())).toBe(true);
 });
+
+test('Shift: a straight stroke starts and ends on the grid when it is on', async ({ page }) => {
+	await ready(page);
+	await page.getByRole('button', { name: 'Guides' }).click();
+	const g = page.getByRole('group', { name: 'Guides' });
+	await g.getByRole('radio', { name: 'Square' }).click();
+	await g.getByLabel(/^Grid size/).fill('40');
+	await expect(g).toContainText('Grid size 40');
+	await page.getByRole('button', { name: 'Guides' }).click();
+	// Shift + drag, from off the grid, a little off level
+	const b = await box(page);
+	await page.keyboard.down('Shift');
+	await page.mouse.move(b.x + b.width * 0.213, b.y + b.height * 0.317);
+	await page.mouse.down();
+	await page.mouse.move(b.x + b.width * 0.7237, b.y + b.height * 0.33, { steps: 20 });
+	await page.mouse.up();
+	await page.keyboard.up('Shift');
+	// the ink, in canvas px: level, its middle on a grid line, its ends a grid cell apart
+	const ink = await canvas(page).evaluate((c: HTMLCanvasElement) => {
+		const d = c.getContext('2d')!.getImageData(0, 0, c.width, c.height).data;
+		let [x0, y0, x1, y1] = [c.width, c.height, -1, -1];
+		for (let i = 0; i < d.length; i += 4)
+			if (d[i] < 225) {
+				const [x, y] = [(i / 4) % c.width, Math.floor(i / 4 / c.width)];
+				[x0, y0, x1, y1] = [Math.min(x0, x), Math.min(y0, y), Math.max(x1, x), Math.max(y1, y)];
+			}
+		return { x0, y0, x1, y1 };
+	});
+	const r = (ink.y1 - ink.y0) / 2;
+	expect(r).toBeLessThan(12);
+	const mid = (ink.y0 + ink.y1 + 1) / 2;
+	expect(Math.abs(mid - Math.round(mid / 40) * 40)).toBeLessThan(1.5);
+	// it ends on the grid crossing nearest where the pointer stopped, not where it stopped
+	// (the brush's last dab can fall a few px short of its end)
+	const w = await canvas(page).evaluate((c: HTMLCanvasElement) => c.width);
+	const stopped = 0.7237 * w;
+	const crossing = Math.round(stopped / 40) * 40;
+	expect(Math.abs(stopped - crossing)).toBeGreaterThan(15);
+	expect(ink.x1 - r).toBeLessThan(crossing + 2);
+	expect(ink.x1 - r).toBeGreaterThan(crossing - 12);
+	const start = ink.x0 + r;
+	expect(Math.abs(start - Math.round(start / 40) * 40)).toBeLessThan(2);
+});
