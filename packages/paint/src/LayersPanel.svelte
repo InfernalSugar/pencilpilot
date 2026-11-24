@@ -37,6 +37,15 @@
 		/** a new line (vector) layer above the current one */
 		addLineLayer?(name?: string): void;
 	}
+
+	/** A stage a layer can be put in (the app's production stages). */
+	export interface LayerStage {
+		id: string;
+		/** the stage's name */
+		label: string;
+		/** a short name for the layer list */
+		short: string;
+	}
 </script>
 
 <script lang="ts">
@@ -49,7 +58,11 @@
 		aspect = 4 / 3,
 		onadjustment,
 		ontext,
-		lineLayers = false
+		lineLayers = false,
+		stages,
+		stageOf,
+		onstage,
+		onsortstages
 	}: {
 		status: CanvasStatus;
 		controls: LayerControls | undefined;
@@ -60,7 +73,19 @@
 		ontext?: (id: number) => void;
 		/** offer line (vector) layers (the screen has the Select line tool) */
 		lineLayers?: boolean;
+		/** production stages layers can be put in (none: no stages) */
+		stages?: LayerStage[];
+		/** a layer's stage (null: none) */
+		stageOf?: (id: number) => string | null;
+		/** put a layer in a stage (null: in none) */
+		onstage?: (id: number, stage: string | null) => void;
+		/** put the layers with no stage in one, guessed from their names */
+		onsortstages?: () => void;
 	} = $props();
+	const stageInfo = (id: number) => {
+		const st = stageOf?.(id);
+		return st ? (stages?.find((x) => x.id === st) ?? null) : null;
+	};
 
 	const BLENDS: { id: BlendMode; label: string }[] = [
 		{ id: 'normal', label: 'Normal' },
@@ -414,6 +439,29 @@
 					onchange={() => controls?.commitLayer()}
 				/>
 			</label>
+			{#if stages?.length && onstage}
+				<label class="field">
+					<span>Stage</span>
+					<select
+						value={stageOf?.(active.id) ?? ''}
+						title="The production stage this layer belongs to (none: it shows in every stage)"
+						onchange={(e) => onstage?.(active.id, e.currentTarget.value || null)}
+					>
+						<option value="">None</option>
+						{#each stages as st (st.id)}<option value={st.id}>{st.label}</option>{/each}
+					</select>
+				</label>
+				{#if onsortstages}
+					<button
+						type="button"
+						class="chip"
+						title="Put each layer with no stage in one, guessed from its name"
+						onclick={() => onsortstages?.()}
+					>
+						Sort layers into stages
+					</button>
+				{/if}
+			{/if}
 			<div class="toggles">
 				<button
 					type="button"
@@ -942,6 +990,12 @@
 							</span>
 						</button>
 					{/if}
+					{#if stageInfo(l.id)}
+						{@const st = stageInfo(l.id)!}
+						<span class="stage-badge" data-stage={st.id} title="Stage: {st.label}">
+							{st.short}
+						</span>
+					{/if}
 					{#if l.lines}
 						<span class="badge line-badge" title="Line layer: its lines stay editable">
 							<svg viewBox="0 0 24 24" aria-label="Line layer" role="img">
@@ -1284,6 +1338,15 @@
 		display: grid;
 		place-items: center;
 		color: var(--pp-muted);
+	}
+	.stage-badge {
+		flex: none;
+		padding: 2px 6px;
+		border-radius: 999px;
+		background: var(--pp-surface-sunk);
+		color: var(--pp-ink-2);
+		font: 700 11px var(--pp-font-body);
+		white-space: nowrap;
 	}
 	.mini {
 		flex: none;

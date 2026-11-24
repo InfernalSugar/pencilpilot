@@ -125,6 +125,16 @@ describe('project packets', () => {
 		expect(back.drawings![1].lines).toBeUndefined();
 	});
 
+	it('round-trip layer stages (old files have none)', () => {
+		const d = doc();
+		d.stages = { 1: 'clean', 5: 'comp' };
+		expect(unpack(pack(d))).toEqual(d);
+		// a picture with no animation keeps its stages too
+		const still = { ...d, scenes: undefined, drawings: undefined, statics: undefined };
+		expect(unpack(pack(still)).stages).toEqual({ 1: 'clean', 5: 'comp' });
+		expect(unpack(pack(doc())).stages).toBeUndefined();
+	});
+
 	it('start with the magic word and the header length', () => {
 		const p = pack(doc());
 		expect([...p.subarray(0, 4)]).toEqual([0x50, 0x50, 0x53, 0x31]);

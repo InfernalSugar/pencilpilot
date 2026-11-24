@@ -14,15 +14,17 @@ import {
 	type CanvasPort,
 	type TileMap
 } from './together';
-import { newTimeline, type Timeline } from './timeline';
+import { newTimeline, setStage, type Timeline } from './timeline';
 import { STRIDE, transformStroke, type LineStroke } from '@pencilpilot/paint/lines';
 import {
 	applyLineEdit,
+	fromShared,
 	lineEdits,
 	readLineEdit,
 	splitBase,
 	strokeFromShare,
 	strokeToShare,
+	toShared,
 	withBase
 } from './together';
 
@@ -791,6 +793,12 @@ describe('drawing together: apps', () => {
 		await session.settle();
 		expect(bc.tl.scenes[0].cuts[0].tracks[bBall].map((e) => e.length)).toEqual([3, 2]);
 
+		// the host puts the ball in clean-up: Bo's ball layer is in it too
+		setStage(hc.tl, ball, 'clean');
+		host.timelineChanged();
+		await session.settle();
+		expect(bc.tl.stages).toEqual({ [bBall]: 'clean' });
+
 		// Ana draws on frame 2 (showing it): Bo's frame 2 changes, not frame 1
 		hc.showFrame(3);
 		hc.paint(ball, 2, 2, 33);
@@ -798,6 +806,31 @@ describe('drawing together: apps', () => {
 		await session.settle();
 		expect(bc.drawings.get(track[1].drawing)!.get('2,2')?.[0]).toBe(33);
 		expect(bc.drawings.get(track[0].drawing)!.has('2,2')).toBe(false);
+	});
+
+	it('shares layer stages by shared layer, keeping unshared layers’ own', () => {
+		const local = newTimeline([
+			{ id: 1, drawing: 0 },
+			{ id: 2, drawing: 0 }
+		]);
+		setStage(local, 1, 'rough');
+		setStage(local, 2, 'comp');
+		const lid = (l: number) => (l === 1 ? 'm:1' : null);
+		const out = toShared(local, lid, () => '');
+		expect(out.stages).toEqual({ 'm:1': 'rough' });
+		const back = (stages: Record<string, string> | undefined) =>
+			fromShared(
+				{ ...out, stages: stages as never },
+				(l) => (l === 'm:1' ? 1 : undefined),
+				() => 0,
+				local,
+				(l) => l === 1
+			).stages;
+		// theirs for the shared layer (unknown stages and layers left out), mine for my own
+		expect(back({ 'm:1': 'clean', 'm:9': 'rough' })).toEqual({ 1: 'clean', 2: 'comp' });
+		expect(back({ 'm:1': 'wobbly' })).toEqual({ 2: 'comp' });
+		// an app that sends no stages leaves mine as they were
+		expect(back(undefined)).toEqual({ 1: 'rough', 2: 'comp' });
 	});
 
 	it('comes back after a break: own work kept, the others’ caught up', async () => {
