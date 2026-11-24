@@ -874,8 +874,25 @@
 		const groups = new Map(groupList().map((g) => [g.id, g]));
 		return layerList().map((l) => {
 			const g = groups.get(l.group);
-			return g ? { ...l, visible: l.visible && g.visible, opacity: l.opacity * g.opacity } : l;
+			const shown = g
+				? { ...l, visible: l.visible && g.visible, opacity: l.opacity * g.opacity }
+				: l;
+			// (left out of the view: hidden, as far as painting and showing go)
+			return viewHidden.has(l.id) ? { ...shown, visible: false } : shown;
 		});
+	}
+
+	/** layers the view leaves out (not part of the document; see `setViewHidden`) */
+	let viewHidden = new Set<number>();
+	/**
+	 * Leave these layers out of the view (an app's "show one stage"): they show and take
+	 * paint as hidden layers do, but nothing about them changes: no undo step, no change
+	 * to the document, their eye as it was. [] shows every layer again.
+	 */
+	export function setViewHidden(ids: number[]) {
+		if (!paint) return;
+		viewHidden = new Set(ids);
+		if (paint.setViewHidden(new Uint32Array(ids))) schedule();
 	}
 
 	function visibleLayerIds(): Set<number> {
@@ -4748,12 +4765,17 @@
 		pairs: [number, number][],
 		shrink = 1,
 		/** on transparency (straight alpha), not on the paper: for exports with alpha */
-		transparent = false
+		transparent = false,
+		/** layers left out (as if hidden; the view's own aren't, unless named here) */
+		hidden: number[] = []
 	): { rgba: Uint8ClampedArray<ArrayBuffer>; width: number; height: number } | null {
 		if (!paint) return null;
 		const k = Math.max(1, Math.round(shrink));
 		const flat = new Uint32Array(pairs.flat());
-		const rgba = transparent ? paint.renderFrameAlpha(flat, k) : paint.renderFrame(flat, k);
+		const out = new Uint32Array(hidden);
+		const rgba = transparent
+			? paint.renderFrameAlpha(flat, k, out)
+			: paint.renderFrame(flat, k, out);
 		return {
 			rgba: new Uint8ClampedArray(rgba.buffer as ArrayBuffer, rgba.byteOffset, rgba.length),
 			width: Math.ceil(width / k),

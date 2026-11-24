@@ -535,6 +535,9 @@ pub struct Painter {
     alpha_lock_stroke: bool,
     /// tiles to recomposite (structural changes); strokes use each surface's own set
     dirty: HashSet<TileKey>,
+    /// layers the view leaves out (an app's "show one stage"): not part of the document,
+    /// never an undo step; they show and take paint as hidden layers do
+    view_hidden: HashSet<u32>,
     /// the selection: 255 = selected, per canvas pixel (None = no selection)
     selection: Option<Vec<u8>>,
     /// an adjustment / gradient being previewed: (layer, its tiles before)
@@ -596,6 +599,7 @@ impl Painter {
             stroke_brush: None,
             alpha_lock_stroke: false,
             dirty: HashSet::new(),
+            view_hidden: HashSet::new(),
             selection: None,
             adjusting: None,
             transform: None,
@@ -830,10 +834,50 @@ impl Painter {
             .map_or((true, 1.0), |g| (g.visible, g.opacity))
     }
 
-    /// Shown on the canvas (its own eye and its group's).
+    /// Shown on the canvas (its own eye, its group's, and the view's).
     fn shown(&self, idx: usize) -> bool {
         let l = &self.layers[idx];
-        l.props.visible && self.group_of(l).0
+        l.props.visible && self.group_of(l).0 && !self.view_hidden.contains(&l.id)
+    }
+
+    /// Leave these layers out of the view (a stage's view, say): they show and take
+    /// paint as hidden layers do, but their own eye, the document and the undo history
+    /// don't change. Whether the view changed (its tiles are recomposited on `flush`).
+    pub fn set_view_hidden(&mut self, ids: &[u32]) -> bool {
+        let now: HashSet<u32> = ids.iter().copied().collect();
+        if now == self.view_hidden {
+            return false;
+        }
+        let changed: HashSet<u32> = now
+            .symmetric_difference(&self.view_hidden)
+            .copied()
+            .collect();
+        self.view_hidden = now;
+        // (an adjustment layer changes everything under it)
+        if self
+            .layers
+            .iter()
+            .any(|l| changed.contains(&l.id) && l.props.adjust.is_some())
+        {
+            self.mark_all();
+            return true;
+        }
+        let mut keys: Vec<TileKey> = Vec::new();
+        for l in self.layers.iter().filter(|l| changed.contains(&l.id)) {
+            keys.extend(l.colour().tiles.keys().copied());
+            if let Some(st) = &l.styled {
+                keys.extend(st.tiles.keys().copied());
+            }
+        }
+        self.dirty.extend(keys);
+        true
+    }
+
+    /// The layers the view leaves out.
+    pub fn view_hidden(&self) -> Vec<u32> {
+        let mut v: Vec<u32> = self.view_hidden.iter().copied().collect();
+        v.sort_unstable();
+        v
     }
 
     pub fn groups(&self) -> &[Group] {
@@ -4248,17 +4292,19 @@ impl Painter {
         key: TileKey,
         over: Option<&HashMap<u32, Option<&TileMap>>>,
     ) -> Option<ComposedTile> {
-        self.composite_tile_on(key, over, None, [1.0; 3])
+        self.composite_tile_on(key, over, None, [1.0; 3], &self.view_hidden)
     }
 
     /// One tile composited over a paper of colour `paper` (white for the canvas).
     /// `restyled`: styled pixels for layers showing other drawings (layer id → them).
+    /// `hidden`: layers left out (as if their eye were off).
     fn composite_tile_on(
         &self,
         (tx, ty): TileKey,
         over: Option<&HashMap<u32, Option<&TileMap>>>,
         restyled: Option<&HashMap<u32, TileMap>>,
         paper_rgb: [f32; 3],
+        hidden: &HashSet<u32>,
     ) -> Option<ComposedTile> {
         let ts = TILE_SIZE as i32;
         let (w, h) = (self.width as i32, self.height as i32);
@@ -4282,7 +4328,7 @@ impl Painter {
                     .find(|g| g.id == l.group)
                     .map_or((true, 1.0), |g| (g.visible, g.opacity));
                 let opacity = l.props.opacity * go;
-                let visible = l.props.visible && gv && opacity > 0.0;
+                let visible = l.props.visible && gv && opacity > 0.0 && !hidden.contains(&l.id);
                 let adjust = l.props.adjust.as_deref();
                 // a styled layer shows its styled pixels (its mask is in them)
                 let styled = if adjust.is_some() || !l.props.style.any() {
@@ -4517,17 +4563,19 @@ impl Painter {
     /// (drawing 0 = an empty cel; layers not named show what they show). Made `shrink`
     /// times smaller (each pixel the average of its square), as RGBA8 over the paper.
     /// Drawings must be here (showing or kept); a missing one shows as empty.
-    pub fn render_frame(&self, pairs: &[u32], shrink: u32) -> Vec<u8> {
-        self.render_frame_on(pairs, shrink, [1.0; 3])
+    /// `hidden`: layers left out (as if their eye were off; the view's aren't used, so
+    /// a frame is the same whatever the canvas shows).
+    pub fn render_frame(&self, pairs: &[u32], shrink: u32, hidden: &[u32]) -> Vec<u8> {
+        self.render_frame_on(pairs, shrink, [1.0; 3], hidden)
     }
 
     /// A frame as `render_frame` makes it, but on transparency (straight-alpha RGBA8):
     /// for exports with an alpha channel. It's composited over white and over black,
     /// and the difference gives each pixel's alpha (exact for normal layers; blend
     /// modes that need the paper show as they would over black).
-    pub fn render_frame_alpha(&self, pairs: &[u32], shrink: u32) -> Vec<u8> {
-        let white = self.render_frame_on(pairs, shrink, [1.0; 3]);
-        let mut out = self.render_frame_on(pairs, shrink, [0.0; 3]);
+    pub fn render_frame_alpha(&self, pairs: &[u32], shrink: u32, hidden: &[u32]) -> Vec<u8> {
+        let white = self.render_frame_on(pairs, shrink, [1.0; 3], hidden);
+        let mut out = self.render_frame_on(pairs, shrink, [0.0; 3], hidden);
         for (b, w) in out
             .as_chunks_mut::<4>()
             .0
@@ -4552,8 +4600,15 @@ impl Painter {
         out
     }
 
-    fn render_frame_on(&self, pairs: &[u32], shrink: u32, paper: [f32; 3]) -> Vec<u8> {
+    fn render_frame_on(
+        &self,
+        pairs: &[u32],
+        shrink: u32,
+        paper: [f32; 3],
+        hidden: &[u32],
+    ) -> Vec<u8> {
         let k = shrink.max(1) as usize;
+        let hidden: HashSet<u32> = hidden.iter().copied().collect();
         let over: HashMap<u32, Option<&TileMap>> = pairs
             .as_chunks::<2>()
             .0
@@ -4595,13 +4650,17 @@ impl Painter {
         let done: Vec<ComposedTile> = {
             use rayon::prelude::*;
             keys.par_iter()
-                .filter_map(|&key| self.composite_tile_on(key, Some(&over), Some(&restyled), paper))
+                .filter_map(|&key| {
+                    self.composite_tile_on(key, Some(&over), Some(&restyled), paper, &hidden)
+                })
                 .collect()
         };
         #[cfg(target_arch = "wasm32")]
         let done: Vec<ComposedTile> = keys
             .iter()
-            .filter_map(|&key| self.composite_tile_on(key, Some(&over), Some(&restyled), paper))
+            .filter_map(|&key| {
+                self.composite_tile_on(key, Some(&over), Some(&restyled), paper, &hidden)
+            })
             .collect();
         let (ow, oh) = (w.div_ceil(k), h.div_ceil(k));
         let mut sum = vec![[0u32; 4]; ow * oh];
@@ -6120,7 +6179,7 @@ mod tests {
         p.flush();
         let before = p.rgba().to_vec();
         // frame 1 at full size: the top line, not the bottom one
-        let f1 = p.render_frame(&[layer, first], 1);
+        let f1 = p.render_frame(&[layer, first], 1, &[]);
         let dark = |img: &[u8], w: usize, y0: usize, y1: usize| {
             img[y0 * w * 4..y1 * w * 4]
                 .as_chunks::<4>()
@@ -6132,7 +6191,7 @@ mod tests {
         assert!(dark(&f1, 256, 20, 40) > 50);
         assert_eq!(dark(&f1, 256, 90, 110), 0);
         // what shows now, at a quarter of the size (each side): about the same ink area
-        let small = p.render_frame(&[], 4);
+        let small = p.render_frame(&[], 4, &[]);
         assert_eq!(p.frame_size(4), (64, 32));
         assert_eq!(small.len(), 64 * 32 * 4);
         let grey = small
@@ -6143,7 +6202,7 @@ mod tests {
             .count();
         assert!(grey > 5, "{grey}");
         // an empty cel, and the canvas untouched by any of it
-        let blank = p.render_frame(&[layer, 0], 2);
+        let blank = p.render_frame(&[layer, 0], 2, &[]);
         assert!(blank.iter().all(|&v| v == 255));
         assert_eq!(p.rgba(), &before[..]);
     }
@@ -6193,7 +6252,7 @@ mod tests {
         let layer = p.active_layer();
         line(&mut p, &pen(), 32.0);
         let d = p.layer_drawing(layer);
-        let img = p.render_frame_alpha(&[layer, d], 1);
+        let img = p.render_frame_alpha(&[layer, d], 1, &[]);
         let at = |x: usize, y: usize| {
             let i = (y * 64 + x) * 4;
             [img[i], img[i + 1], img[i + 2], img[i + 3]]
@@ -6209,7 +6268,7 @@ mod tests {
         q.set_selection(&sel, 0);
         q.fill_selection([200, 40, 40], 0.5);
         let l = q.active_layer();
-        let im = q.render_frame_alpha(&[l, q.layer_drawing(l)], 1);
+        let im = q.render_frame_alpha(&[l, q.layer_drawing(l)], 1, &[]);
         let px = [im[0], im[1], im[2], im[3]];
         assert!((px[3] as i32 - 128).abs() <= 3, "{px:?}");
         assert!(
@@ -7164,6 +7223,91 @@ mod tests {
     }
 
     #[test]
+    fn the_view_leaves_layers_out_without_touching_the_document() {
+        let mut p = Painter::new(256, 128);
+        let rough = p.active_layer();
+        line(&mut p, &pen(), 30.0); // the rough: a line at the top
+        let clean = p.add_layer("Clean");
+        line(&mut p, &pen(), 100.0); // the clean-up: a line at the bottom
+        p.flush();
+        let all = p.rgba().to_vec();
+        let dark = |img: &[u8], y0: usize, y1: usize| {
+            img[y0 * 256 * 4..y1 * 256 * 4]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|px| px[0] < 128)
+                .count()
+        };
+        let (undo, edits) = (p.can_undo(), p.edits);
+        let json = p.layers_json();
+        // show the clean-up only: the rough is gone from the canvas
+        assert!(p.set_view_hidden(&[rough]));
+        assert!(!p.set_view_hidden(&[rough]), "no change, nothing to do");
+        p.flush();
+        assert_eq!(dark(p.rgba(), 20, 40), 0);
+        assert!(dark(p.rgba(), 90, 110) > 50);
+        assert_eq!(p.view_hidden(), vec![rough]);
+        // not a change to the document: no undo step, its eye still open
+        assert_eq!((p.can_undo(), p.edits), (undo, edits));
+        assert_eq!(p.layers_json(), json);
+        assert!(p.layers().iter().all(|l| l.props.visible));
+        // left out of the view, it takes no paint (as a hidden layer)
+        p.set_active_layer(rough);
+        assert!(!p.begin_stroke());
+        // undo still undoes the last stroke, not the view
+        assert!(p.undo());
+        p.flush();
+        assert_eq!(dark(p.rgba(), 90, 110), 0);
+        assert!(p.redo());
+        // a frame renders with the layers it's told to leave out, not the view's
+        let f = p.render_frame(&[], 1, &[]);
+        assert!(dark(&f, 20, 40) > 50 && dark(&f, 90, 110) > 50);
+        let f = p.render_frame(&[], 1, &[clean]);
+        assert!(dark(&f, 20, 40) > 50);
+        assert_eq!(dark(&f, 90, 110), 0);
+        // the same as a hidden layer
+        let (left_out, left_out_alpha) = (
+            p.render_frame(&[], 1, &[clean]),
+            p.render_frame_alpha(&[], 1, &[clean]),
+        );
+        let mut hc = props(&p, clean);
+        hc.visible = false;
+        p.set_layer_props(clean, hc.clone(), true);
+        assert_eq!(p.render_frame(&[], 1, &[]), left_out);
+        assert_eq!(p.render_frame_alpha(&[], 1, &[]), left_out_alpha);
+        hc.visible = true;
+        p.set_layer_props(clean, hc, true);
+        // everything again
+        assert!(p.set_view_hidden(&[]));
+        p.flush();
+        assert_eq!(p.rgba(), &all[..]);
+    }
+
+    #[test]
+    fn the_view_hides_what_is_clipped_to_a_base_it_leaves_out() {
+        let mut p = Painter::new(256, 128);
+        line(&mut p, &pen(), 60.0);
+        let base = p.active_layer();
+        let top = p.add_layer("Shade");
+        let mut red = pen();
+        set_brush_rgb(&mut red, 220, 0, 0);
+        line(&mut p, &red, 60.0);
+        let mut c = props(&p, top);
+        c.clip = true;
+        p.set_layer_props(top, c, true);
+        p.flush();
+        let on = px(&p, 100, 60);
+        assert!(on[0] > on[1] + 60, "red on the base line: {on:?}");
+        p.set_view_hidden(&[base]);
+        p.flush();
+        assert_eq!(dark_pixels(&p), 0);
+        assert!(px(&p, 100, 60)[1] > 240, "nothing clipped shows");
+        let f = p.render_frame(&[], 1, &[base]);
+        assert!(f.as_chunks::<4>().0.iter().all(|px| px[1] > 240));
+    }
+
+    #[test]
     fn layer_masks_hide_and_show_and_undo() {
         let mut p = Painter::new(256, 128);
         let b = pen();
@@ -7351,7 +7495,7 @@ mod tests {
         line(&mut p, &b, 60.0);
         p.flush();
         assert!(px(&p, 100, 50)[0] > 200 && px(&p, 100, 30)[0] == 255);
-        let f = p.render_frame(&[id, first], 1);
+        let f = p.render_frame(&[id, first], 1, &[]);
         let at = |x: usize, y: usize| &f[(y * 256 + x) * 4..(y * 256 + x) * 4 + 3];
         assert!(
             at(100, 30)[0] > 200 && at(100, 30)[1] < 60,

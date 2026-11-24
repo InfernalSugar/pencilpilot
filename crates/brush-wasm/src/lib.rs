@@ -1375,13 +1375,19 @@ impl PaintCanvas {
     /// `shrink` times smaller; RGBA8. Changes nothing.
     /// A frame on transparency (straight-alpha RGBA8), for exports with alpha.
     #[wasm_bindgen(js_name = renderFrameAlpha)]
-    pub fn render_frame_alpha(&self, pairs: &[u32], shrink: u32) -> Vec<u8> {
-        self.inner.render_frame_alpha(pairs, shrink)
+    pub fn render_frame_alpha(&self, pairs: &[u32], shrink: u32, hidden: &[u32]) -> Vec<u8> {
+        self.inner.render_frame_alpha(pairs, shrink, hidden)
     }
 
     #[wasm_bindgen(js_name = renderFrame)]
-    pub fn render_frame(&self, pairs: &[u32], shrink: u32) -> Vec<u8> {
-        self.inner.render_frame(pairs, shrink)
+    pub fn render_frame(&self, pairs: &[u32], shrink: u32, hidden: &[u32]) -> Vec<u8> {
+        self.inner.render_frame(pairs, shrink, hidden)
+    }
+
+    /// Leave these layers out of the view (not an undo step; see `Painter::set_view_hidden`).
+    #[wasm_bindgen(js_name = setViewHidden)]
+    pub fn set_view_hidden(&mut self, ids: &[u32]) -> bool {
+        self.inner.set_view_hidden(ids)
     }
 
     /// The drawing the next undo changes (0 = none).
