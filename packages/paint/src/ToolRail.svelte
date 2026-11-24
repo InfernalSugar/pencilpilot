@@ -55,6 +55,7 @@
 
 <script lang="ts">
 	/** The studio's tool strip: the tools a screen offers, plus size and opacity. */
+	import FillSlider from './FillSlider.svelte';
 	let {
 		tools = ALL_TOOLS,
 		tool = $bindable('brush'),
@@ -82,6 +83,16 @@
 		/** the largest size the slider goes to (a multiple of the brush's own size) */
 		maxSize?: number;
 	} = $props();
+
+	/** a narrow screen: the rail lies across the top and so do the sliders (as the CSS) */
+	let across = $state(false);
+	$effect(() => {
+		const q = matchMedia('(max-width: 700px)');
+		const f = () => (across = q.matches);
+		f();
+		q.addEventListener('change', f);
+		return () => q.removeEventListener('change', f);
+	});
 
 	const has = (t: ToolId) => tools.includes(t);
 	const key = (id: ToolId, usual: string) => keys[id] ?? usual;
@@ -535,22 +546,27 @@
 		{/if}
 	</div>
 	<div class="rail-sliders">
-		<label class="slider">
-			<span>Size <b>{Math.round(size * 100)}%</b></span>
-			<input
-				type="range"
-				min="-2"
-				max={Math.log2(maxSize).toFixed(2)}
-				step="0.05"
-				value={Math.log2(Math.min(size, maxSize))}
-				oninput={(e) => (size = +(2 ** +e.currentTarget.value).toFixed(2))}
-			/>
-		</label>
+		<FillSlider
+			label="Size"
+			text="{Math.round(size * 100)}%"
+			min={-2}
+			max={+Math.log2(maxSize).toFixed(2)}
+			step={0.05}
+			value={Math.log2(Math.min(size, maxSize))}
+			{across}
+			onchange={(v) => (size = +(2 ** v).toFixed(2))}
+		/>
 		{#if showOpacity}
-			<label class="slider">
-				<span>Opacity <b>{Math.round(opacity * 100)}%</b></span>
-				<input type="range" min="0.05" max="1" step="0.05" bind:value={opacity} />
-			</label>
+			<FillSlider
+				label="Opacity"
+				text="{Math.round(opacity * 100)}%"
+				min={0.05}
+				max={1}
+				step={0.05}
+				value={opacity}
+				{across}
+				onchange={(v) => (opacity = v)}
+			/>
 		{/if}
 	</div>
 </div>
@@ -594,26 +610,6 @@
 		padding-top: 8px;
 		border-top: 1px solid #34343c;
 	}
-	.slider {
-		display: flex;
-		flex-direction: column;
-		gap: 4px;
-		width: 44px;
-		align-items: center;
-		text-align: center;
-		font-size: 11px;
-		color: var(--pp-on-ink-muted);
-	}
-	.slider b {
-		color: var(--pp-on-ink);
-	}
-	.slider input {
-		accent-color: var(--pp-yellow);
-		writing-mode: vertical-lr;
-		direction: rtl;
-		width: 22px;
-		height: 120px;
-	}
 	@media (max-width: 700px) {
 		.rail-inner {
 			gap: 8px;
@@ -628,23 +624,17 @@
 		.tool {
 			flex: none;
 		}
+		.rail-sliders :global(.fill-slider) {
+			flex: 1 1 0;
+		}
+		.rail-sliders :global(.bar) {
+			height: 22px;
+		}
 		.rail-sliders {
 			order: -1;
 			gap: 12px;
 			padding: 0 4px;
 			border: 0;
-		}
-		.slider {
-			flex: 1 1 0;
-			width: auto;
-			align-items: stretch;
-			text-align: left;
-		}
-		.slider input {
-			writing-mode: horizontal-tb;
-			direction: ltr;
-			width: auto;
-			height: auto;
 		}
 	}
 </style>
