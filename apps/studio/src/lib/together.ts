@@ -33,6 +33,7 @@ import {
 } from '@pencilpilot/paint/lines';
 import {
 	DRAWING_KINDS,
+	isStage,
 	MOUTH_SHAPES,
 	type Camera,
 	type DrawingKind,
@@ -40,6 +41,7 @@ import {
 	type MouthChart,
 	type MouthShape,
 	type Scene,
+	type Stage,
 	type Timeline,
 	type Track
 } from './timeline';
@@ -2136,6 +2138,8 @@ export interface SharedTimeline {
 	statics: string[];
 	mouths: { lid: string; shapes: Record<string, string> }[];
 	kinds: Record<string, DrawingKind>;
+	/** layer stages, by lid (older apps send none) */
+	stages?: Record<string, Stage>;
 }
 
 const DID = /^[0-9a-f]{12}:[0-9]{1,12}$/;
@@ -2195,6 +2199,12 @@ export function toShared(
 		}),
 		kinds: Object.fromEntries(
 			Object.entries(tl.kinds ?? {}).flatMap(([d, k]) => (+d ? [[did(+d), k]] : []))
+		),
+		stages: Object.fromEntries(
+			Object.entries(tl.stages ?? {}).flatMap(([l, st]) => {
+				const lid = lidOf(+l);
+				return lid ? [[lid, st]] : [];
+			})
 		)
 	};
 }
@@ -2299,10 +2309,21 @@ export function fromShared(
 	const kinds: Record<number, DrawingKind> = {};
 	for (const [d, k] of Object.entries(s.kinds ?? {}))
 		if ((DRAWING_KINDS as string[]).includes(k) && drawing(d)) kinds[drawing(d)] = k;
+	const stages: Record<number, Stage> = {};
+	if (s.stages && typeof s.stages === 'object')
+		for (const [lid, st] of Object.entries(s.stages)) {
+			const id = idOf(lid);
+			if (id !== undefined && isStage(st)) stages[id] = st;
+		}
+	// this app's own, unshared layers keep their stages (all of them, from an app that
+	// doesn't send any)
+	for (const [l, st] of Object.entries(local.stages ?? {}))
+		if (!isShared(+l) || !s.stages) stages[+l] = st;
 	return {
 		scenes: scenes.length ? scenes : local.scenes,
 		statics,
 		...(mouths.length ? { mouths } : {}),
-		...(Object.keys(kinds).length ? { kinds } : {})
+		...(Object.keys(kinds).length ? { kinds } : {}),
+		...(Object.keys(stages).length ? { stages } : {})
 	};
 }

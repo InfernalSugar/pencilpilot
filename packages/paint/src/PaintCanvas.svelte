@@ -292,6 +292,7 @@
 		onquickmenu,
 		onpenpath,
 		onfill,
+		oncolourlayer,
 		cursors = [],
 		oncursor,
 		ontext,
@@ -468,6 +469,8 @@
 		onpenpath?: (s: { points: number; closed: boolean }) => void;
 		/** a fill was made with the fill tool, at canvas point x, y (for carrying it on) */
 		onfill?: (f: { x: number; y: number; hex: string; tolerance: number }) => void;
+		/** a fill on a line layer made a new Colour layer under it (in the fill's undo step) */
+		oncolourlayer?: (id: number) => void;
 		/** other people's cursors (drawing together), in canvas pixels */
 		cursors?: RemoteCursor[];
 		/** this person's pointer over the canvas, in canvas pixels (null: it left) */
@@ -1540,7 +1543,9 @@
 			if (made && paint.joinLastEdits()) log.joinLast();
 			log.labelLast('Fill');
 		} else if (made && paint.undo()) log.undo();
-		return changed(done, () => {}, undefined);
+		const ok = changed(done, () => {}, undefined);
+		if (ok && made) oncolourlayer?.(made);
+		return ok;
 	}
 
 	/**

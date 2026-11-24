@@ -105,7 +105,36 @@ export interface Timeline {
 	mouths?: MouthChart[];
 	/** what each drawing is in the animation: a key, a breakdown or an in-between */
 	kinds?: Record<number, DrawingKind>;
+	/** each layer's production stage (layers with none show in every view) */
+	stages?: Record<number, Stage>;
 }
+
+/** A layer's production stage, in the order the work goes. */
+export type Stage = 'board' | 'rough' | 'tiedown' | 'clean' | 'flats' | 'shade' | 'comp';
+export const STAGES: Stage[] = ['board', 'rough', 'tiedown', 'clean', 'flats', 'shade', 'comp'];
+export const STAGE_LABELS: Record<Stage, string> = {
+	board: 'Storyboard',
+	rough: 'Rough',
+	tiedown: 'Tie-down',
+	clean: 'Clean-up',
+	flats: 'Colour',
+	shade: 'Shading',
+	comp: 'Compositing'
+};
+export const isStage = (s: unknown): s is Stage => (STAGES as unknown[]).includes(s);
+
+/** Put a layer in a stage (null: in none). */
+export function setStage(tl: Timeline, layer: number, stage: Stage | null) {
+	if (!layer) return;
+	if (!tl.stages) tl.stages = {};
+	const st = tl.stages;
+	if (stage) st[layer] = stage;
+	else delete st[layer];
+	if (!Object.keys(st).length) delete tl.stages;
+}
+
+/** A layer's stage (null: none). */
+export const stageOf = (tl: Timeline, layer: number): Stage | null => tl.stages?.[layer] ?? null;
 
 /** What a drawing is in the animation (shown on the timeline and the X-sheet). */
 export type DrawingKind = 'key' | 'breakdown' | 'inbetween';
@@ -568,6 +597,27 @@ export function kindsFromFile(
 	for (const [d, k] of Object.entries(raw ?? {})) {
 		const id = Number(d.replace(/^D/, ''));
 		if (id > 0 && (DRAWING_KINDS as string[]).includes(k)) out[id] = k as DrawingKind;
+	}
+	return out;
+}
+
+/** Layer stages as the file keeps them (layer id → stage), for the layers that exist. */
+export function stagesToFile(tl: Timeline, layers: number[]): Record<string, Stage> {
+	const keep = new Set(layers);
+	return Object.fromEntries(
+		Object.entries(tl.stages ?? {}).filter(([l, st]) => keep.has(+l) && isStage(st))
+	);
+}
+
+/** A file's layer stages back; `layerIds` maps the file's layer ids to the canvas's (unknown stages and layers left out). */
+export function stagesFromFile(
+	raw: Record<string, string> | undefined,
+	layerIds: Map<number, number>
+): Record<number, Stage> {
+	const out: Record<number, Stage> = {};
+	for (const [l, st] of Object.entries(raw ?? {})) {
+		const id = layerIds.get(+l);
+		if (id !== undefined && id > 0 && isStage(st)) out[id] = st;
 	}
 	return out;
 }
