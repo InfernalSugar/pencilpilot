@@ -14,11 +14,21 @@
 		arcsPath,
 		COMPOSITIONS,
 		compositionFlips,
+		compositionOn,
+		compositionPlaced,
 		compositionShapes,
+		NO_COMPOSITION,
 		SYMMETRY_MODES,
 		symmetryOn,
 		type CompositionPreset
 	} from './guides';
+	import type { CompositionDef } from './composition-elements';
+	import CompositionCreator from './CompositionCreator.svelte';
+	import {
+		customCompositions,
+		importCompositionFiles,
+		onCustomCompositions
+	} from './custom-compositions';
 	import { MAP_PRESETS } from './tone';
 	import type { ToolOptions } from './tool-options.svelte';
 
@@ -28,7 +38,8 @@
 		status,
 		canvas,
 		measureUnit = 0,
-		eraser = false
+		eraser = false,
+		askToDelete = true
 	}: {
 		opts: ToolOptions;
 		tool?: string;
@@ -38,6 +49,8 @@
 		canvas: ReturnType<typeof PaintCanvas> | undefined;
 		/** the unit marked on the reference, in canvas px (0: measure in pixels) */
 		measureUnit?: number;
+		/** ask before deleting one of "My compositions" */
+		askToDelete?: boolean;
 	} = $props();
 
 	/** the composition overlays' names, as the picker shows them */
@@ -52,9 +65,44 @@
 		armature: 'Armature',
 		safe: 'Safe areas'
 	};
-	const composition = $derived(
-		opts.guides.composition ?? { preset: 'off' as const, flipX: false, flipY: false }
-	);
+	const composition = $derived(opts.guides.composition ?? NO_COMPOSITION);
+
+	// ---- My compositions: guides of your own ----
+	let mine = $state<CompositionDef[]>(customCompositions());
+	$effect(() => onCustomCompositions(() => (mine = [...customCompositions()])));
+	/** the guide in use is one of your own, but not (or no longer) in My compositions */
+	const projectOwn = $derived.by(() => {
+		const c = composition.custom;
+		return composition.preset === 'custom' && c && !mine.some((d) => d.id === c.id) ? c : null;
+	});
+	const usingOwn = (d: CompositionDef) =>
+		composition.preset === 'custom' && composition.custom?.id === d.id;
+	/** the creator, open on a guide (or on a new one: null) */
+	let creator = $state<{ start: CompositionDef | null; n: number } | null>(null);
+	let opened = 0;
+	const create = (start: CompositionDef | null) => (creator = { start, n: ++opened });
+	let compNote = $state('');
+	let compFiles = $state<HTMLInputElement>();
+
+	/** use a guide of your own (its copy goes into the project's guides) */
+	const useOwn = (d: CompositionDef) =>
+		opts.setComposition({
+			preset: 'custom',
+			custom: $state.snapshot(d) as CompositionDef,
+			flipX: false,
+			flipY: false
+		});
+
+	async function importComps(list: File[], thenEdit: boolean): Promise<string> {
+		if (!list.length) return '';
+		const r = await importCompositionFiles(list);
+		compNote = r.note;
+		if (r.saved[0]) {
+			useOwn(r.saved[0]);
+			if (thenEdit) create(r.saved[0]);
+		}
+		return r.note;
+	}
 
 	const onLines = $derived(!!status.layers.find((l) => l.id === status.active)?.lines);
 	/** how many line strokes are selected (the status bumps on every change) */
@@ -323,7 +371,45 @@
 					{/if}
 				</button>
 			{/each}
+			{#each projectOwn ? [...mine, projectOwn] : mine as d (d.id)}
+				{@const shapes = compositionShapes(
+					{ preset: 'custom', custom: d, flipX: false, flipY: false },
+					24,
+					16
+				)}
+				<button
+					type="button"
+					class="tool thumb mine"
+					role="radio"
+					aria-checked={usingOwn(d)}
+					aria-label={d.name}
+					title={d === projectOwn ? `${d.name} (kept in this project)` : d.name}
+					onclick={() => useOwn(d)}
+				>
+					<svg viewBox="-1 -1 26 18" width="26" height="18" aria-hidden="true">
+						<rect x="0" y="0" width="24" height="16" />
+						{#each shapes.lines as [x1, y1, x2, y2], i (i)}
+							<line {x1} {y1} {x2} {y2} />
+						{/each}
+						{#if shapes.arcs.length}<path d={arcsPath(shapes.arcs)} />{/if}
+						{#each shapes.ellipses as e, i (i)}
+							<ellipse cx={e.c[0]} cy={e.c[1]} rx={e.rx} ry={e.ry} />
+						{/each}
+					</svg>
+				</button>
+			{/each}
 		</div>
+		{#if composition.preset === 'custom' && composition.custom}
+			{@const own = composition.custom}
+			<button
+				type="button"
+				class="tool"
+				title="Change this guide in the composition creator"
+				onclick={() => create(mine.find((d) => d.id === own.id) ?? own)}
+			>
+				Edit “{own.name}”
+			</button>
+		{/if}
 		{#if compositionFlips(composition.preset) === 'x'}
 			<button
 				type="button"
@@ -356,17 +442,90 @@
 				Flip ↕
 			</button>
 		{/if}
-		{#if composition.flipX || composition.flipY}
+		{#if compositionOn(opts.guides)}
 			<button
 				type="button"
 				class="tool"
-				title="Put the guide back the way it started"
-				onclick={() => opts.setComposition({ flipX: false, flipY: false })}
+				aria-pressed={tool === 'guides'}
+				title="Drag the guide's middle to move it, its corner to size it"
+				onclick={() => (tool = tool === 'guides' ? 'brush' : 'guides')}
+			>
+				Move guides
+			</button>
+		{/if}
+		{#if compositionPlaced(composition)}
+			<button
+				type="button"
+				class="tool"
+				title="Put the guide back to filling the canvas"
+				onclick={() => opts.recentreComposition()}
+			>
+				Re-centre
+			</button>
+		{/if}
+		{#if composition.flipX || composition.flipY || compositionPlaced(composition)}
+			<button
+				type="button"
+				class="tool"
+				title="Put the guide back the way it started: not flipped, filling the canvas"
+				onclick={() =>
+					opts.setComposition({ flipX: false, flipY: false, offset: [0, 0], scale: 1 })}
 			>
 				Reset
 			</button>
 		{/if}
+		<button
+			type="button"
+			class="tool"
+			title="Make a composition guide of your own"
+			onclick={() => create(null)}
+		>
+			New composition…
+		</button>
+		<button
+			type="button"
+			class="tool"
+			title="Bring in composition guides from .ppcomp.json files"
+			onclick={() => compFiles?.click()}
+		>
+			Import…
+		</button>
+		<input
+			bind:this={compFiles}
+			class="visually-hidden"
+			type="file"
+			multiple
+			accept=".json,application/json"
+			tabindex="-1"
+			aria-label="Composition files to import"
+			onchange={(e) => {
+				const list = [...(e.currentTarget.files ?? [])];
+				e.currentTarget.value = '';
+				void importComps(list, false);
+			}}
+		/>
+		{#if compNote}<span class="msg" role="status">{compNote}</span>{/if}
 	</div>
+{/if}
+{#if creator}
+	{#key creator.n}
+		<CompositionCreator
+			start={creator.start}
+			canvasSize={opts.canvasSize}
+			{askToDelete}
+			ondone={(saved, deleted) => {
+				creator = null;
+				if (saved) useOwn(saved);
+				else if (deleted && composition.custom?.id === deleted)
+					opts.setComposition({ preset: 'off' });
+			}}
+			onimport={(list) => importComps(list, true)}
+			onexport={async (name, text) => {
+				const at = await opts.saveFile(name, text);
+				return at ? `Exported as ${at.split(/[\\/]/).pop()}.` : '';
+			}}
+		/>
+	{/key}
 {/if}
 {#if opts.adjustMsg}<p class="adjust-msg" role="alert">{opts.adjustMsg}</p>{/if}
 {#if opts.importNote}<p class="adjust-msg" role="alert">{opts.importNote}</p>{/if}
@@ -946,6 +1105,29 @@
 	}
 	.thumb svg rect {
 		stroke-opacity: 0.6;
+	}
+	/* one of My compositions: a dot under it */
+	.tool.mine {
+		position: relative;
+	}
+	.tool.mine::after {
+		content: '';
+		position: absolute;
+		bottom: 2px;
+		left: 50%;
+		width: 4px;
+		height: 4px;
+		margin-left: -2px;
+		border-radius: 50%;
+		background: currentColor;
+		opacity: 0.6;
+	}
+	.visually-hidden {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		overflow: hidden;
+		clip: rect(0 0 0 0);
 	}
 	.slider {
 		display: flex;

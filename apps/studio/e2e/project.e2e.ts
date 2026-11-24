@@ -2814,6 +2814,178 @@ test('composition guides: one click on, flip, off; kept in the project file', as
 	);
 });
 
+test('composition creator: a guide of your own, previewed live, saved, placed on the canvas, kept in the project, imported and exported', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	await page.getByRole('button', { name: 'Composition', exact: true }).click();
+	const row = page.getByRole('group', { name: 'Composition guides' });
+	await row.getByRole('button', { name: 'New composition…' }).click();
+	const win = page.getByRole('dialog', { name: 'New composition' });
+	await expect(win).toBeVisible();
+	const preview = win.getByTestId('composition-preview');
+	const adds = win.getByRole('group', { name: 'Add an element' });
+	await expect(preview.locator('line')).toHaveCount(0);
+
+	// a grid: the preview shows it at once, and again as its columns change
+	await adds.getByRole('button', { name: 'Grid' }).click();
+	await expect(preview.locator('line')).toHaveCount(4);
+	await win.getByRole('slider', { name: 'Columns' }).fill('4');
+	await expect(preview.locator('line')).toHaveCount(5);
+	// a circle
+	await adds.getByRole('button', { name: 'Circle or ellipse' }).click();
+	await expect(preview.locator('ellipse')).toHaveCount(1);
+	// a line, dashed, its end dragged in the preview
+	await adds.getByRole('button', { name: 'Line', exact: true }).click();
+	await win
+		.getByRole('radiogroup', { name: 'Line' })
+		.getByRole('radio', { name: 'Dashed' })
+		.click();
+	const dashed = preview.locator('g.dashed line');
+	await expect(dashed).toHaveCount(1);
+	const x1 = Number(await dashed.getAttribute('x1'));
+	const end = (await win.getByTestId('line-end-a').boundingBox())!;
+	await page.mouse.move(end.x + end.width / 2, end.y + end.height / 2);
+	await page.mouse.down();
+	await page.mouse.move(end.x + end.width / 2 + 60, end.y + end.height / 2 - 20, { steps: 5 });
+	await page.mouse.up();
+	await expect.poll(async () => Number(await dashed.getAttribute('x1'))).toBeGreaterThan(x1 + 30);
+	// another frame shape for the preview
+	await win.getByRole('radiogroup', { name: 'Frame' }).getByRole('radio', { name: '9:16' }).click();
+	const box = (await preview.boundingBox())!;
+	expect(box.height).toBeGreaterThan(box.width);
+	// the test area takes a sketch
+	const pad = win.getByTestId('composition-test-pad');
+	const pb = (await pad.boundingBox())!;
+	await page.mouse.move(pb.x + 10, pb.y + 10);
+	await page.mouse.down();
+	await page.mouse.move(pb.x + pb.width - 10, pb.y + pb.height - 10, { steps: 8 });
+	await page.mouse.up();
+	await expect(win.getByRole('button', { name: 'Clear' })).toBeEnabled();
+	// nothing in the row until Save
+	await expect(row.getByRole('radio', { name: 'Hero shot' })).toHaveCount(0);
+	await win.getByLabel('Composition name').fill('Hero shot');
+	await win.getByRole('button', { name: 'Save to My compositions' }).click();
+	await expect(win).toHaveCount(0);
+
+	// picked in the row, drawn over the canvas (never into the picture)
+	const mine = row.getByRole('radio', { name: 'Hero shot' });
+	await expect(mine).toHaveAttribute('aria-checked', 'true');
+	const overlay = page.getByTestId('composition-guide');
+	await expect(overlay).toHaveAttribute('data-preset', 'custom');
+	await expect(overlay).toHaveAttribute('data-name', 'Hero shot');
+	await expect(overlay.locator('line')).toHaveCount(6);
+	await expect(overlay.locator('g.dashed line')).toHaveCount(1);
+	await expect(overlay.locator('ellipse')).toHaveCount(1);
+	expect(await ink(page)).toBe(0);
+	await row.getByRole('radio', { name: 'Thirds' }).click();
+	await mine.click();
+	await expect(overlay).toHaveAttribute('data-name', 'Hero shot');
+
+	// moved and sized on the canvas, then Re-centre
+	const circle = overlay.locator('ellipse');
+	const cx0 = Number(await circle.getAttribute('cx'));
+	const rx0 = Number(await circle.getAttribute('rx'));
+	await row.getByRole('button', { name: 'Move guides' }).click();
+	/** drag a handle (of the size handles, the top left one, held just inside the canvas) */
+	const drag = async (id: string, dx: number, dy: number) => {
+		const b = (await page.getByTestId(id).first().boundingBox())!;
+		const [x, y] = [b.x + b.width * 0.8, b.y + b.height * 0.8];
+		await page.mouse.move(x, y);
+		await page.mouse.down();
+		await page.mouse.move(x + dx, y + dy, { steps: 6 });
+		await page.mouse.up();
+	};
+	await drag('composition-move', 80, 40);
+	await expect.poll(async () => Number(await circle.getAttribute('cx'))).toBeGreaterThan(cx0 + 40);
+	await drag('composition-size', 150, 100);
+	await expect.poll(async () => Number(await circle.getAttribute('rx'))).toBeLessThan(rx0 * 0.9);
+	await row.getByRole('button', { name: 'Re-centre' }).click();
+	await expect.poll(async () => Number(await circle.getAttribute('cx'))).toBeCloseTo(cx0, 1);
+	await expect.poll(async () => Number(await circle.getAttribute('rx'))).toBeCloseTo(rx0, 1);
+	await expect(row.getByRole('button', { name: 'Re-centre' })).toHaveCount(0);
+	// placed again, then saved with the project
+	await drag('composition-size', 150, 100);
+	await expect.poll(async () => Number(await circle.getAttribute('rx'))).toBeLessThan(rx0 * 0.9);
+	const placed = await circle.getAttribute('rx');
+	await row.getByRole('button', { name: 'Move guides' }).click();
+	await scribble(page, 0.5);
+	await page.keyboard.press('Control+s');
+	await expect(page.getByTestId('project-name')).toHaveText('Walk cycle', { timeout: 20_000 });
+	// (the project carries the guide itself: another machine has no "Hero shot")
+	const kept = (await calls(page)).filter((c) => c.cmd === 'project_save').length;
+	expect(kept).toBeGreaterThan(0);
+	await row.getByRole('radio', { name: 'Off' }).click();
+	await expect(overlay).toHaveCount(0);
+	// another machine, without "Hero shot" in its compositions
+	await page.evaluate(() => localStorage.removeItem('pp.myCompositions'));
+	await ready(page);
+	await page.getByRole('button', { name: 'Composition', exact: true }).click();
+	await expect(mine).toHaveCount(0);
+	await page.keyboard.press('Control+o');
+	await expect(overlay).toHaveAttribute('data-name', 'Hero shot', { timeout: 15_000 });
+	await expect(overlay.locator('ellipse')).toHaveAttribute('rx', placed!);
+	await expect(overlay.locator('g.dashed line')).toHaveCount(1);
+	await expect(mine).toHaveAttribute('aria-checked', 'true');
+
+	// export it from the creator (a small JSON file, where the dialog says)
+	await row.getByRole('button', { name: 'Edit “Hero shot”' }).click();
+	const edit = page.getByRole('dialog', { name: 'Edit “Hero shot”' });
+	await edit.getByRole('button', { name: 'Export…' }).click();
+	await expect(edit.getByRole('status')).toContainText('Exported as');
+	const written = (await calls(page)).filter((c) => c.cmd === 'export_write').at(-1)!;
+	expect(written.path).toMatch(/\.json$/);
+	expect(written.bytes).toBeGreaterThan(50);
+	await edit.getByRole('button', { name: 'Cancel' }).click();
+
+	// import a file of two
+	const file = {
+		kind: 'pencilpilot-composition',
+		version: 1,
+		compositions: [
+			{
+				name: 'Low horizon',
+				color: '#3d6bff',
+				opacity: 0.8,
+				elements: [
+					{
+						kind: 'ratio',
+						on: true,
+						style: 'solid',
+						ratio: 'third',
+						from: 'end',
+						dir: 'horizontal'
+					}
+				]
+			},
+			{ name: 'Big frame', elements: [{ kind: 'frame', on: true, inset: 20 }, { kind: 'nope' }] }
+		]
+	};
+	await page.getByLabel('Composition files to import').setInputFiles({
+		name: 'mine.ppcomp.json',
+		mimeType: 'application/json',
+		buffer: Buffer.from(JSON.stringify(file))
+	});
+	await expect(row.getByRole('status')).toHaveText('2 compositions added to My compositions.');
+	await expect(row.getByRole('radio', { name: 'Big frame' })).toHaveCount(1);
+	await expect(row.getByRole('radio', { name: 'Low horizon' })).toHaveAttribute(
+		'aria-checked',
+		'true'
+	);
+	await expect(overlay).toHaveAttribute('data-name', 'Low horizon');
+	await expect(overlay.locator('line')).toHaveCount(1);
+
+	// deleted (asking first): gone from the row
+	await row.getByRole('button', { name: 'Edit “Low horizon”' }).click();
+	const del = page.getByRole('dialog', { name: 'Edit “Low horizon”' });
+	await del.getByRole('button', { name: 'Delete composition' }).click();
+	await expect(del.getByText('Delete this composition?')).toBeVisible();
+	await del.getByRole('button', { name: 'Delete', exact: true }).click();
+	await expect(row.getByRole('radio', { name: 'Low horizon' })).toHaveCount(0);
+	await expect(overlay).toHaveCount(0);
+});
+
 test('line layers: strokes stay editable (select, move, recolour, erase, reshape, save, convert)', async ({
 	page
 }) => {

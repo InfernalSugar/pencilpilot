@@ -3,6 +3,21 @@
  * "assist" that keeps a stroke on a guide direction (like Procreate's
  * Drawing Assist, turned on per layer). All positions are canvas pixels.
  */
+import {
+	defShapes,
+	flipped,
+	moved,
+	PHI_CUT,
+	readCompositionDef,
+	spiral,
+	type Arc,
+	type CompositionDef,
+	type Seg,
+	type Shapes
+} from './composition-elements';
+export { arcsPath, PHI_CUT } from './composition-elements';
+export type { Arc, Ellipse, Seg, Shapes } from './composition-elements';
+
 export type Pt = [number, number];
 
 export interface GuideSettings {
@@ -33,11 +48,30 @@ export const COMPOSITIONS = [
 ] as const;
 export type CompositionPreset = (typeof COMPOSITIONS)[number];
 export interface Composition {
-	preset: CompositionPreset;
+	/** a built-in guide, or 'custom': one of your own (`custom`) */
+	preset: CompositionPreset | 'custom';
 	/** mirrored left to right / top to bottom (the spiral and triangles) */
 	flipX: boolean;
 	flipY: boolean;
+	/**
+	 * Where it sits: its middle moved from the canvas's middle by this share of the
+	 * canvas's width and height, and its size as a share of the canvas's (it fills the
+	 * canvas when left out).
+	 */
+	offset?: Pt;
+	scale?: number;
+	/** a guide of your own, kept whole here so the project opens the same anywhere */
+	custom?: CompositionDef;
 }
+
+/** no composition guide */
+export const NO_COMPOSITION: Composition = {
+	preset: 'off',
+	flipX: false,
+	flipY: false,
+	offset: [0, 0],
+	scale: 1
+};
 
 export const SYMMETRY_MODES = ['off', 'vertical', 'horizontal', 'quadrant', 'radial'] as const;
 
@@ -47,7 +81,7 @@ export function defaultGuides(w: number, h: number): GuideSettings {
 		perspective: { points: 0, vps: vpLayout(1, w, h) },
 		ruler: { on: false, a: [w * 0.2, h * 0.5], b: [w * 0.8, h * 0.5] },
 		symmetry: { mode: 'off', n: 6, c: [w / 2, h / 2] },
-		composition: { preset: 'off', flipX: false, flipY: false }
+		composition: { ...NO_COMPOSITION, offset: [0, 0] }
 	};
 }
 
@@ -154,15 +188,48 @@ export function readGuides(v: unknown): GuideSettings | null {
 		: null;
 }
 
-/** A saved composition overlay (projects from before it, or anything odd: off). */
-function readComposition(v: unknown): Composition {
+/**
+ * A saved composition overlay (projects from before it, or anything odd: off). A guide of
+ * your own is checked element by element; where it sits is held to sensible limits.
+ */
+export function readComposition(v: unknown): Composition {
 	const c = v as Partial<Composition> | null;
-	const ok = !!c && typeof c === 'object' && COMPOSITIONS.includes(c.preset!);
+	const custom = c?.preset === 'custom' ? readCompositionDef(c.custom) : null;
+	const ok =
+		!!c &&
+		typeof c === 'object' &&
+		(COMPOSITIONS.includes(c.preset as CompositionPreset) || !!custom);
+	const num = (v: unknown, a: number, b: number, d: number) =>
+		typeof v === 'number' && isFinite(v) ? Math.max(a, Math.min(b, v)) : d;
+	const o = ok && Array.isArray(c.offset) ? c.offset : [0, 0];
 	return {
 		preset: ok ? c.preset! : 'off',
 		flipX: ok && c.flipX === true,
-		flipY: ok && c.flipY === true
+		flipY: ok && c.flipY === true,
+		offset: [num(o[0], -1, 1, 0), num(o[1], -1, 1, 0)],
+		scale: ok ? num(c.scale, MIN_SCALE, MAX_SCALE, 1) : 1,
+		...(custom ? { custom } : {})
 	};
+}
+
+/** how small or big a composition guide can be made on the canvas (of the canvas's size) */
+export const MIN_SCALE = 0.1;
+export const MAX_SCALE = 4;
+
+/** the guide has been moved or resized on the canvas */
+export const compositionPlaced = (c: Composition | null | undefined) =>
+	!!c && (!!c.offset?.[0] || !!c.offset?.[1] || (c.scale ?? 1) !== 1);
+
+/** The rectangle a composition guide fills on a w × h canvas: [x, y, width, height]. */
+export function compositionFrame(
+	c: Composition,
+	w: number,
+	h: number
+): [number, number, number, number] {
+	const s = c.scale ?? 1;
+	const [ox, oy] = c.offset ?? [0, 0];
+	const [fw, fh] = [w * s, h * s];
+	return [w * (0.5 + ox) - fw / 2, h * (0.5 + oy) - fh / 2, fw, fh];
 }
 
 export const anyGuide = (g: GuideSettings | null | undefined) =>
@@ -173,7 +240,9 @@ export const drawingGuide = (g: GuideSettings | null | undefined) =>
 	!!g && (g.grid.on || g.perspective.points > 0 || g.ruler.on || symmetryOn(g));
 
 export const compositionOn = (g: GuideSettings | null | undefined) =>
-	!!g?.composition && g.composition.preset !== 'off';
+	!!g?.composition &&
+	g.composition.preset !== 'off' &&
+	(g.composition.preset !== 'custom' || !!g.composition.custom);
 
 export const symmetryOn = (g: GuideSettings | null | undefined) =>
 	!!g?.symmetry && g.symmetry.mode !== 'off';
@@ -397,28 +466,46 @@ export function perspectiveRays(
 
 // ---- composition overlays: lines and arcs fitted to the canvas rectangle ----
 
-export type Seg = [number, number, number, number];
-/** A quarter of an ellipse from `from` to `to` (radii `rx`, `ry`), as an SVG arc draws it. */
-export interface Arc {
-	from: Pt;
-	to: Pt;
-	rx: number;
-	ry: number;
-	/** SVG's sweep flag: 1 turns clockwise on screen */
-	sweep: 0 | 1;
-}
-
-/** 1 / φ: the golden ratio's long part of 1 */
-export const PHI_CUT = (Math.sqrt(5) - 1) / 2;
-
 /** The flips each preset can take (none, across only, or both ways). */
-export function compositionFlips(preset: CompositionPreset): 'none' | 'x' | 'xy' {
-	return preset === 'spiral' ? 'xy' : preset === 'triangles' ? 'x' : 'none';
+export function compositionFlips(preset: Composition['preset']): 'none' | 'x' | 'xy' {
+	return preset === 'spiral' || preset === 'custom' ? 'xy' : preset === 'triangles' ? 'x' : 'none';
 }
 
-/** The lines (and the spiral's arcs) of a composition overlay, in canvas pixels for w × h. */
-export function compositionShapes(
+/**
+ * A composition overlay's lines, arcs and ellipses in canvas pixels for a w × h canvas
+ * (flipped, then moved and sized as placed), the solid ones and the dashed ones apart.
+ */
+export function compositionParts(
 	c: Composition,
+	w: number,
+	h: number
+): { solid: Shapes; dashed: Shapes } {
+	const [x, y, fw, fh] = compositionFrame(c, w, h);
+	const parts =
+		c.preset === 'custom'
+			? c.custom
+				? defShapes(c.custom, fw, fh)
+				: { solid: none(), dashed: none() }
+			: { solid: { ...presetShapes(c.preset, fw, fh), ellipses: [] }, dashed: none() };
+	const place = (s: Shapes) => moved(flipped(s, fw, fh, c.flipX, c.flipY), x, y);
+	return { solid: place(parts.solid), dashed: place(parts.dashed) };
+}
+
+const none = (): Shapes => ({ lines: [], arcs: [], ellipses: [] });
+
+/** All of a composition overlay's shapes, in canvas pixels for w × h (as `compositionParts`). */
+export function compositionShapes(c: Composition, w: number, h: number): Shapes {
+	const { solid, dashed } = compositionParts(c, w, h);
+	return {
+		lines: [...solid.lines, ...dashed.lines],
+		arcs: [...solid.arcs, ...dashed.arcs],
+		ellipses: [...solid.ellipses, ...dashed.ellipses]
+	};
+}
+
+/** A built-in guide's lines (and the spiral's arcs) for a w × h frame. */
+function presetShapes(
+	preset: CompositionPreset,
 	w: number,
 	h: number
 ): { lines: Seg[]; arcs: Arc[] } {
@@ -430,7 +517,7 @@ export function compositionShapes(
 		const [x0, y0, x1, y1] = [w * k, h * k, w * (1 - k), h * (1 - k)];
 		lines.push([x0, y0, x1, y0], [x1, y0, x1, y1], [x1, y1, x0, y1], [x0, y1, x0, y0]);
 	};
-	switch (c.preset) {
+	switch (preset) {
 		case 'thirds':
 			for (const k of [1 / 3, 2 / 3]) across(k);
 			for (const k of [1 / 3, 2 / 3]) down(k);
@@ -478,62 +565,5 @@ export function compositionShapes(
 			spiral(w, h, lines, arcs);
 			break;
 	}
-	if (!c.flipX && !c.flipY) return { lines, arcs };
-	const f = (p: Pt): Pt => [c.flipX ? w - p[0] : p[0], c.flipY ? h - p[1] : p[1]];
-	// mirrored once, the spiral turns the other way
-	const turn = c.flipX !== c.flipY;
-	return {
-		lines: lines.map(([x1, y1, x2, y2]) => [...f([x1, y1]), ...f([x2, y2])] as Seg),
-		arcs: arcs.map((a) => ({
-			...a,
-			from: f(a.from),
-			to: f(a.to),
-			sweep: turn ? ((1 - a.sweep) as 0 | 1) : a.sweep
-		}))
-	};
-}
-
-/**
- * The golden spiral stretched to the rectangle: a golden cut taken off one side after
- * another (going round clockwise), a quarter ellipse across each piece, joined end to end.
- * The cuts are drawn too.
- */
-function spiral(w: number, h: number, lines: Seg[], arcs: Arc[]) {
-	let [x, y, rw, rh] = [0, 0, w, h];
-	// the first cut across the long side: the left on a wide canvas, the top on a tall one
-	let side = w >= h ? 0 : 1; // 0 left, 1 top, 2 right, 3 bottom
-	const s = PHI_CUT;
-	for (let i = 0; i < 24 && rw > 1 && rh > 1; i++) {
-		if (side === 0) {
-			const pw = rw * s;
-			arcs.push({ from: [x, y + rh], to: [x + pw, y], rx: pw, ry: rh, sweep: 1 });
-			lines.push([x + pw, y, x + pw, y + rh]);
-			[x, rw] = [x + pw, rw - pw];
-		} else if (side === 1) {
-			const ph = rh * s;
-			arcs.push({ from: [x, y], to: [x + rw, y + ph], rx: rw, ry: ph, sweep: 1 });
-			lines.push([x, y + ph, x + rw, y + ph]);
-			[y, rh] = [y + ph, rh - ph];
-		} else if (side === 2) {
-			const pw = rw * s;
-			arcs.push({ from: [x + rw, y], to: [x + rw - pw, y + rh], rx: pw, ry: rh, sweep: 1 });
-			lines.push([x + rw - pw, y, x + rw - pw, y + rh]);
-			rw -= pw;
-		} else {
-			const ph = rh * s;
-			arcs.push({ from: [x + rw, y + rh], to: [x, y + rh - ph], rx: rw, ry: ph, sweep: 1 });
-			lines.push([x, y + rh - ph, x + rw, y + rh - ph]);
-			rh -= ph;
-		}
-		side = (side + 1) % 4;
-	}
-}
-
-/** The spiral's arcs as one SVG path (each starts where the last ended). */
-export function arcsPath(arcs: Arc[]): string {
-	if (!arcs.length) return '';
-	const n = (v: number) => +v.toFixed(2);
-	let d = `M${n(arcs[0].from[0])} ${n(arcs[0].from[1])}`;
-	for (const a of arcs) d += ` A${n(a.rx)} ${n(a.ry)} 0 0 ${a.sweep} ${n(a.to[0])} ${n(a.to[1])}`;
-	return d;
+	return { lines, arcs };
 }
