@@ -99,6 +99,8 @@ export class ToolOptions {
 	inkSnap = $state(false);
 	guides = $state<GuideSettings>(defaultGuides(800, 600));
 	guidesOpen = $state(false);
+	/** the Composition row (thirds, the golden spiral…), open */
+	compositionOpen = $state(false);
 	/** a note about the last import or paste */
 	importNote = $state('');
 

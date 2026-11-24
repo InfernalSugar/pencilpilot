@@ -166,7 +166,11 @@ function readComposition(v: unknown): Composition {
 }
 
 export const anyGuide = (g: GuideSettings | null | undefined) =>
-	!!g && (g.grid.on || g.perspective.points > 0 || g.ruler.on || symmetryOn(g) || compositionOn(g));
+	drawingGuide(g) || compositionOn(g);
+
+/** a guide of the Guides row on (grid, perspective, ruler, symmetry; not composition) */
+export const drawingGuide = (g: GuideSettings | null | undefined) =>
+	!!g && (g.grid.on || g.perspective.points > 0 || g.ruler.on || symmetryOn(g));
 
 export const compositionOn = (g: GuideSettings | null | undefined) =>
 	!!g?.composition && g.composition.preset !== 'off';

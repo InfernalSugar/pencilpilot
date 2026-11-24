@@ -27,7 +27,8 @@
 	import { addToSession, clockOf, startSession, timeLabel } from '#lib/timed.js';
 	import ColorPanel, { rememberColor } from '@pencilpilot/paint/ColorPanel.svelte';
 	import {
-		anyGuide,
+		compositionOn,
+		drawingGuide,
 		defaultGuides,
 		gridLines as canvasGridLines,
 		type GuideSettings
@@ -1323,12 +1324,28 @@
 		<button
 			type="button"
 			class="tool"
-			aria-pressed={anyGuide(toolOpts.guides)}
+			aria-pressed={drawingGuide(toolOpts.guides)}
 			aria-expanded={toolOpts.guidesOpen}
 			title="Guides: grid, perspective and ruler"
-			onclick={() => (toolOpts.guidesOpen = !toolOpts.guidesOpen)}
+			onclick={() => {
+				toolOpts.guidesOpen = !toolOpts.guidesOpen;
+				if (toolOpts.guidesOpen) toolOpts.compositionOpen = false;
+			}}
 		>
 			Guides
+		</button>
+		<button
+			type="button"
+			class="tool"
+			aria-pressed={compositionOn(toolOpts.guides)}
+			aria-expanded={toolOpts.compositionOpen}
+			title="Composition: thirds, golden ratio, spiral and more"
+			onclick={() => {
+				toolOpts.compositionOpen = !toolOpts.compositionOpen;
+				if (toolOpts.compositionOpen) toolOpts.guidesOpen = false;
+			}}
+		>
+			Composition
 		</button>
 		<button
 			type="button"
