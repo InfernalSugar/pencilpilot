@@ -213,7 +213,7 @@ describe('composition overlays', () => {
 		[y1, y2].every((y) => y >= -1e-6 && y <= H + 1e-6);
 
 	it('every preset fits the canvas; off draws nothing', () => {
-		expect(on('off')).toEqual({ lines: [], arcs: [] });
+		expect(on('off')).toEqual({ lines: [], arcs: [], ellipses: [] });
 		for (const p of COMPOSITIONS.slice(1)) {
 			const s = on(p);
 			expect(s.lines.length, p).toBeGreaterThan(0);
@@ -299,11 +299,17 @@ describe('composition overlays', () => {
 
 	it('kept with the guides: older projects without it read back as off', () => {
 		const g = defaultGuides(100, 100);
-		g.composition = { preset: 'spiral', flipX: true, flipY: false };
+		g.composition = { preset: 'spiral', flipX: true, flipY: false, offset: [0, 0], scale: 1 };
 		expect(readGuides(JSON.parse(JSON.stringify(g)))).toEqual(g);
 		const old: Record<string, unknown> = { ...g };
 		delete old.composition;
-		expect(readGuides(old)?.composition).toEqual({ preset: 'off', flipX: false, flipY: false });
+		expect(readGuides(old)?.composition).toEqual({
+			preset: 'off',
+			flipX: false,
+			flipY: false,
+			offset: [0, 0],
+			scale: 1
+		});
 		expect(readGuides({ ...g, composition: { preset: 'nope' } })?.composition.preset).toBe('off');
 		expect(anyGuide(defaultGuides(100, 100))).toBe(false);
 		expect(anyGuide(g)).toBe(true);

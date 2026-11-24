@@ -46,6 +46,7 @@
 	import { onMount, tick, untrack } from 'svelte';
 	import { isTauri } from '@tauri-apps/api/core';
 	import {
+		askCompositionPath,
 		askExportPath,
 		askOpenPath,
 		askSavePath,
@@ -1415,7 +1416,13 @@
 		color: () => color,
 		setTool: (t) => (tool = t),
 		onguides: (g) => keepLocal('pp.app.guides', { w: canvasSize.width, h: canvasSize.height, g }),
-		size: () => canvasSize
+		size: () => canvasSize,
+		saveFile: async (name, text) => {
+			const target = await askCompositionPath(name, settings.projectFolder);
+			if (!target) return null;
+			await writeExport(target, new TextEncoder().encode(text));
+			return target;
+		}
 	});
 	function keepLocal(key: string, value: unknown) {
 		try {
@@ -3919,7 +3926,14 @@
 		{/snippet}
 		{#snippet context()}
 			{#if status}
-				<ToolOptionsBar opts={toolOpts} bind:tool {status} {canvas} {eraser} />
+				<ToolOptionsBar
+					opts={toolOpts}
+					bind:tool
+					{status}
+					{canvas}
+					{eraser}
+					askToDelete={settings.askToDelete}
+				/>
 			{/if}
 		{/snippet}
 		{#snippet stage()}

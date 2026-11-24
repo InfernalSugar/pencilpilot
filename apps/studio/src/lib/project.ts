@@ -413,6 +413,18 @@ export async function askExportPath(
 	});
 }
 
+/** Ask where to save a composition guide (`name` has its .ppcomp.json); null if cancelled. */
+export async function askCompositionPath(
+	name: string,
+	folder?: string | null
+): Promise<string | null> {
+	const { save } = await import('@tauri-apps/plugin-dialog');
+	return save({
+		defaultPath: await inFolder(folder, name),
+		filters: [{ name: 'Composition guide', extensions: ['json'] }]
+	});
+}
+
 export async function writeExport(path: string, bytes: Uint8Array): Promise<string> {
 	const { invoke } = await import('@tauri-apps/api/core');
 	return invoke<string>('export_write', bytes, { headers: { path: encodeURIComponent(path) } });

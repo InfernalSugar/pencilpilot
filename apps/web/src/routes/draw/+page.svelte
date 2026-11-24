@@ -31,6 +31,7 @@
 		drawingGuide,
 		defaultGuides,
 		gridLines as canvasGridLines,
+		readComposition,
 		type GuideSettings
 	} from '@pencilpilot/paint/guides';
 	import TracePanel, {
@@ -231,7 +232,7 @@
 			perspective: { ...g.perspective, vps: g.perspective.vps.map(sc) },
 			ruler: { ...g.ruler, a: sc(g.ruler.a), b: sc(g.ruler.b) },
 			symmetry: g.symmetry ? { ...g.symmetry, c: sc(g.symmetry.c) } : defaultGuides(w, h).symmetry,
-			composition: g.composition ?? defaultGuides(w, h).composition
+			composition: readComposition(g.composition)
 		};
 	}
 	/** pen pressure and tilt on/off (remembered) */
