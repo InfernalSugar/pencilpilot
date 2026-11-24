@@ -3,7 +3,16 @@
 	import { onMount, untrack } from 'svelte';
 	import { filmFps, recordFilm, videoType, type Timelapse } from './timelapse';
 
-	let { film, onclose }: { film: Timelapse; onclose: () => void } = $props();
+	let {
+		film,
+		onclose,
+		onsave
+	}: {
+		film: Timelapse;
+		onclose: () => void;
+		/** saves the video some other way (the app: its own encoder), at this speed */
+		onsave?: (fps: number, frames: number) => void;
+	} = $props();
 
 	let canvas = $state<HTMLCanvasElement>();
 	let count = $state(untrack(() => film.length));
@@ -12,7 +21,7 @@
 	let fps = $state(untrack(() => filmFps(film.length)));
 	let saving = $state<number | null>(null);
 	let note = $state('');
-	const canSave = videoType() !== null;
+	const canSave = untrack(() => !!onsave) || videoType() !== null;
 	let dialog = $state<HTMLDialogElement>();
 
 	function draw(i: number) {
@@ -55,6 +64,10 @@
 
 	async function save() {
 		playing = false;
+		if (onsave) {
+			onsave(fps, count);
+			return;
+		}
 		note = '';
 		saving = 0;
 		try {

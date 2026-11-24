@@ -1767,6 +1767,33 @@ test('export a PSD per frame and a PNG sequence per layer', async ({ page }) => 
 	for (const c of w) expect(c.head).toEqual([0x89, 0x50, 0x4e, 0x47]);
 });
 
+test('timelapse window: Save video exports the film with the app (the web view can’t record)', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	for (const y of [0.2, 0.4, 0.6]) await scribble(page, y);
+	await page.getByRole('button', { name: 'Timelapse', exact: true }).click();
+	const player = page.getByRole('dialog', { name: 'Timelapse' });
+	await expect(player.getByTestId('timelapse-canvas')).toBeVisible();
+	await player.getByRole('combobox').selectOption('4');
+	const save = player.getByRole('button', { name: 'Save video' });
+	await expect(save).toBeEnabled();
+	await save.click();
+	// the film export opens on the timelapse, its length the nearest to the speed chosen
+	await expect(player).toHaveCount(0);
+	const dlg = page.getByRole('dialog', { name: 'Export a film of the drawing' });
+	await expect(dlg.getByRole('radio', { name: /^Timelapse/ })).toHaveAttribute(
+		'aria-checked',
+		'true'
+	);
+	await expect(dlg.getByLabel('Length')).toHaveValue('10');
+	await dlg.getByRole('button', { name: 'Export…' }).click();
+	await expect(page.getByText(/Exported to/)).toBeVisible({ timeout: 20_000 });
+	const begun = (await calls(page)).filter((c) => c.cmd === 'export_begin');
+	expect(begun.length).toBe(1);
+});
+
 test('films: the timelapse (kept in the file) and this frame drawn live', async ({ page }) => {
 	await stubTauri(page);
 	await ready(page);
