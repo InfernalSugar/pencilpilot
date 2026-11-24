@@ -2755,16 +2755,23 @@ test('3-point perspective shows all three vanishing points, each can be dragged'
 test('composition guides: one click on, flip, off; kept in the project file', async ({ page }) => {
 	await stubTauri(page);
 	await ready(page);
+	// its own row, beside Guides (opening one closes the other)
+	const compBtn = page.getByRole('button', { name: 'Composition', exact: true });
 	await page.getByRole('button', { name: 'Guides', exact: true }).click();
+	await expect(page.getByRole('group', { name: 'Guides', exact: true })).toBeVisible();
+	await expect(page.getByRole('radiogroup', { name: 'Composition' })).toHaveCount(0);
+	await compBtn.click();
+	await expect(page.getByRole('group', { name: 'Guides', exact: true })).toHaveCount(0);
 	const pick = page.getByRole('radiogroup', { name: 'Composition' });
 	const overlay = page.getByTestId('composition-guide');
 	await expect(overlay).toHaveCount(0);
 	await pick.getByRole('radio', { name: 'Thirds' }).click();
 	await expect(overlay).toHaveAttribute('data-preset', 'thirds');
 	await expect(overlay.locator('line')).toHaveCount(4);
+	await expect(compBtn).toHaveAttribute('aria-pressed', 'true');
 	await expect(page.getByRole('button', { name: 'Guides', exact: true })).toHaveAttribute(
 		'aria-pressed',
-		'true'
+		'false'
 	);
 	// the golden spiral, turned the other way round
 	await pick.getByRole('radio', { name: 'Golden spiral' }).click();
@@ -2779,6 +2786,12 @@ test('composition guides: one click on, flip, off; kept in the project file', as
 	);
 	await expect(path).not.toHaveAttribute('d', d0!);
 	const flipped = await path.getAttribute('d');
+	// Reset: the way it started; flipped again for the rest
+	await page.getByRole('button', { name: 'Reset', exact: true }).click();
+	await expect(path).toHaveAttribute('d', d0!);
+	await expect(page.getByRole('button', { name: 'Reset', exact: true })).toHaveCount(0);
+	await page.getByRole('button', { name: 'Flip left to right' }).click();
+	await expect(path).toHaveAttribute('d', flipped!);
 	// only shown: the picture itself stays blank
 	expect(await ink(page)).toBe(0);
 	// off
@@ -4021,7 +4034,7 @@ test('Shift: a line’s point dragged with the grid on lands on a grid crossing'
 
 	// the square grid on
 	await page.getByRole('button', { name: 'Guides', exact: true }).click();
-	const g = page.getByRole('group', { name: 'Guides' });
+	const g = page.getByRole('group', { name: 'Guides', exact: true });
 	await g.getByRole('radio', { name: 'Square' }).click();
 	const size = 100;
 	await g.getByLabel(/^Grid size/).fill(String(size));
@@ -4111,7 +4124,7 @@ test('snap to ink: a line’s start and end join lines close by (an end first), 
 
 	// on (in Guides, next to the ruler)
 	await page.getByRole('button', { name: 'Guides', exact: true }).click();
-	const toggle = page.getByRole('group', { name: 'Guides' }).getByRole('button', {
+	const toggle = page.getByRole('group', { name: 'Guides', exact: true }).getByRole('button', {
 		name: 'Snap to ink'
 	});
 	await expect(toggle).toHaveAttribute('aria-pressed', 'false');
