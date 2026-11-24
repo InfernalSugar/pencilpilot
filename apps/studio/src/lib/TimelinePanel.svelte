@@ -33,6 +33,7 @@
 		trackIn,
 		STAGES,
 		STAGE_LABELS,
+		isStage,
 		type Camera,
 		type Stage,
 		type Timeline,
@@ -57,7 +58,16 @@
 	import type { AudioBank } from './audio';
 	import { AUDIO_TYPES } from './audio';
 	import { TRANSITIONS } from './exporting';
-	import { VIEW_ALL, VIEW_PRESETS, viewLabel, viewStages, type StageView } from './stages';
+	import {
+		LIGHT_TABLE_OFF,
+		NON_PHOTO_BLUE,
+		VIEW_ALL,
+		VIEW_PRESETS,
+		viewLabel,
+		viewStages,
+		type LightTable,
+		type StageView
+	} from './stages';
 
 	let {
 		timeline,
@@ -75,6 +85,9 @@
 		stageView = VIEW_ALL,
 		onview,
 		viewHidden = [],
+		lightTable = LIGHT_TABLE_OFF,
+		onlighttable,
+		lightTableNote = '',
 		onion,
 		pinned = $bindable<number[]>([]),
 		onpin,
@@ -117,6 +130,11 @@
 		onview?: (v: StageView) => void;
 		/** the layers the view leaves out (their rows are dimmed) */
 		viewHidden?: number[];
+		/** the light table: another stage, faintly, under the view */
+		lightTable?: LightTable;
+		onlighttable?: (t: LightTable) => void;
+		/** why the light table shows nothing (its stage shows already, or has no layers) */
+		lightTableNote?: string;
 		/** onion skin settings (changed in place) */
 		onion: OnionSettings;
 		/** frames on the light table */
@@ -692,7 +710,9 @@
 					title="Show the layers of some stages only (on the canvas, in playback and in the onion skin)"
 					onclick={() => (showOpen = !showOpen)}
 				>
-					Show: {viewLabel(stageView)} ▾
+					Show: {viewLabel(stageView)}{lightTable.stage
+						? ` · Under ${STAGE_LABELS[lightTable.stage]}`
+						: ''} ▾
 				</button>
 				{#if showOpen}
 					<div class="pop" role="group" aria-label="Show stages">
@@ -737,6 +757,70 @@
 								</button>
 							</div>
 						{/each}
+						{#if onlighttable}
+							<div class="table" role="group" aria-label="Light table">
+								<b>Light table</b>
+								<label
+									title="Another stage's drawings, faintly, under what shows (only to see by: never in an export)"
+								>
+									Under
+									<select
+										value={lightTable.stage ?? ''}
+										onchange={(e) => {
+											const v = e.currentTarget.value;
+											onlighttable({ ...lightTable, stage: isStage(v) ? v : null });
+										}}
+									>
+										<option value="">Off</option>
+										{#each STAGES as st (st)}
+											<option value={st}>{STAGE_LABELS[st]}</option>
+										{/each}
+									</select>
+								</label>
+								{#if lightTable.stage}
+									{#if lightTableNote}
+										<p class="hint">{lightTableNote}</p>
+									{/if}
+									<label class="check">
+										<input
+											type="checkbox"
+											checked={lightTable.tint === null}
+											onchange={(e) =>
+												onlighttable({
+													...lightTable,
+													tint: e.currentTarget.checked ? null : NON_PHOTO_BLUE
+												})}
+										/>
+										Original colours
+									</label>
+									{#if lightTable.tint !== null}
+										<label>
+											Tint
+											<input
+												type="color"
+												aria-label="Light table tint"
+												value={lightTable.tint}
+												onchange={(e) =>
+													onlighttable({ ...lightTable, tint: e.currentTarget.value })}
+											/>
+										</label>
+									{/if}
+									<label>
+										Opacity <b>{Math.round(lightTable.opacity * 100)}%</b>
+										<input
+											type="range"
+											aria-label="Light table opacity"
+											min="0.05"
+											max="1"
+											step="0.05"
+											value={lightTable.opacity}
+											oninput={(e) =>
+												onlighttable({ ...lightTable, opacity: +e.currentTarget.value })}
+										/>
+									</label>
+								{/if}
+							</div>
+						{/if}
 					</div>
 				{/if}
 			</div>
@@ -1892,6 +1976,13 @@
 	}
 	.cel[data-kind='key'] {
 		box-shadow: inset 0 0 0 2px var(--pp-ink);
+	}
+	.table {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		padding-top: 6px;
+		border-top: 1px solid rgba(255, 255, 255, 0.12);
 	}
 	.shift {
 		display: flex;
