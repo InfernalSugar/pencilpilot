@@ -148,6 +148,8 @@
 		newId,
 		newSeed,
 		linkedCopies,
+		pickable,
+		shownOf,
 		transformStroke,
 		type Affine,
 		type LineStroke,
@@ -522,6 +524,7 @@
 			log.labelLast(label);
 			log.attachLast({ undo, redo });
 		},
+		attach: (effect) => log.attachLast(effect),
 		schedule: () => schedule(),
 		notify: () => notify()
 	});
@@ -530,7 +533,10 @@
 	/** a stroke's path for the selection overlay (SVG points) */
 	function linePoints(s: LineStroke) {
 		let out = '';
-		for (let i = 0; i + 1 < s.pts.length; i += STRIDE) out += `${s.pts[i]},${s.pts[i + 1]} `;
+		// (a cut piece: the part it shows)
+		const [from, to] = shownOf(s);
+		for (let i = from * STRIDE; i + 1 < to * STRIDE; i += STRIDE)
+			out += `${s.pts[i]},${s.pts[i + 1]} `;
 		return out;
 	}
 
@@ -548,15 +554,25 @@
 	 * again exactly (not the eraser, nor clipped by a selection or alpha lock, nor a mask).
 	 */
 	function keepsStroke(): boolean {
-		if (!paint || eraser || paint.isEditingMask()) return false;
+		if (!paint || paint.isEditingMask()) return false;
 		const l = layerList().find((x) => x.id === paint!.activeLayer);
 		if (!l || l.adjust || l.text) return false;
+		// the eraser over editable strokes: kept as a stroke too, so it cuts them exactly
+		// (see `lines.erased`); with a selection or alpha lock it erases pixels as ever
+		if (eraser)
+			return (
+				lineEraser === 'normal' &&
+				hasStrokes(l.id) &&
+				!l.alphaLock &&
+				!paint.hasSelection() &&
+				(l.lines || strokeLimit() > 0)
+			);
 		if (l.lines) return true;
 		return strokeLimit() > 0 && !l.alphaLock && !paint.hasSelection();
 	}
 
 	/** the layer has strokes the Select line tool (or a pick) can take */
-	const hasStrokes = (layer: number) => lines.strokesOf(layer).length > 0;
+	const hasStrokes = (layer: number) => pickable(lines.strokesOf(layer)).length > 0;
 
 	/** a stroke picked to edit from another tool (Transform, a held brush): it acts as Select line */
 	let picking2 = $state(false);
@@ -657,6 +673,11 @@
 			...(brushTexture ? { texture: $state.snapshot(brushTexture) as typeof brushTexture } : {}),
 			...(shape ? { shape } : {})
 		};
+		// the eraser kept as a stroke: an erase mark (never a shape)
+		if (current?.eraser) {
+			stroke.erase = true;
+			delete stroke.shape;
+		}
 		const sym = guides?.symmetry;
 		// with symmetry, the copies are linked: picking one picks them all, edits mirror
 		const all =
@@ -2051,10 +2072,27 @@
 
 	/** what was copied: a full-canvas picture (straight RGBA), transparent outside the selection */
 	let clip: Uint8Array | null = null;
+	/** or (the last copied) editable strokes, picked when copied: pasted as strokes */
+	let lineClip: LineStroke[] | null = null;
 
-	/** Copy the selected part of the layer (all of it with no selection); `cut` also clears it. */
+	/**
+	 * Copy the selected part of the layer (all of it with no selection); `cut` also clears
+	 * it. With editable strokes picked (Select line, or picked with Move or the brush),
+	 * those strokes are copied (and cut) instead.
+	 */
 	export function copySelection(cut = false, merged = !cut): boolean {
 		if (!paint || xf) return false;
+		if (lineTool && lines.sel?.ids.length && !lines.busy) {
+			const strokes = lines.copySelected();
+			if (!strokes.length) return false;
+			lineClip = strokes;
+			clip = null;
+			if (cut) {
+				lines.deleteSelected('Cut lines');
+				picking2 = false;
+			}
+			return true;
+		}
 		// a copy takes what shows in the selection, from every visible layer (not the
 		// paper); a cut (and "copy to a new layer") takes the active layer's own pixels
 		const shown = merged ? renderFrame([], 1, true)?.rgba : null;
@@ -2071,6 +2109,7 @@
 		}
 		if (!any) return false;
 		clip = rgba;
+		lineClip = null;
 		if (cut) {
 			const layer = paint.activeLayer;
 			changed(paint.clear(), () => log.clear(layer), 'Cut');
@@ -2078,9 +2117,41 @@
 		return true;
 	}
 
-	/** Paste what was copied as a new layer, in the same place; false if nothing was copied. */
-	export function paste(): boolean {
-		if (!paint || !clip || xf) return false;
+	/**
+	 * Paste what was copied as a new layer, in the same place; false if nothing was
+	 * copied. Strokes copied go on the active layer (a line layer or a plain one), where
+	 * they were (a little further when pasted onto copies of them), editable and picked,
+	 * in one undo step: 'lines' (it finishes on its own).
+	 */
+	export function paste(): boolean | 'lines' {
+		if (!paint) return false;
+		if (lineClip) {
+			const layer = paint.activeLayer;
+			const l = layerList().find((x) => x.id === layer);
+			if (!l || l.adjust || l.text || paint.isEditingMask()) return false;
+			if (l.locked || !l.visible) {
+				onblocked?.(l.visible ? 'locked' : 'hidden');
+				return false;
+			}
+			if (!l.lines && strokeLimit() <= 0) return false;
+			lines.cancel();
+			// (Move's layer box goes: the strokes come picked)
+			if (xf) {
+				picking2 = true;
+				transformCommit();
+			}
+			const done = (ok: boolean) => {
+				// the pasted strokes are picked, as Select line has them
+				picking2 = ok && tool !== 'lines' && !!lines.sel;
+				schedule();
+				notify();
+			};
+			const r = lines.paste(layer, lineClip, l.lines ? Infinity : strokeLimit());
+			if (typeof r === 'boolean') done(r);
+			else void r.then(done);
+			return 'lines';
+		}
+		if (!clip || xf) return false;
 		const id = paint.addImageLayer('Pasted', clip);
 		if (!id) return false;
 		paint.deselect();
@@ -2090,7 +2161,7 @@
 	}
 
 	/** Something has been copied (Ctrl+V pastes it). */
-	export const hasClip = () => !!clip;
+	export const hasClip = () => !!clip || !!lineClip;
 
 	/** Soften the selection's edge over about `radius` canvas px. */
 	export function featherSelection(radius: number) {
@@ -2290,11 +2361,13 @@
 		void lines.version;
 		if (tool !== 'transform' || picking2 || !ready || !paint) return false;
 		if (paint.hasSelection() || paint.isEditingMask()) return false;
-		return lines.strokesOf(paint.activeLayer).length > 0;
+		return hasStrokes(paint.activeLayer);
 	});
 	/** the strokes Move shows to pick */
 	const moveList = $derived.by(() =>
-		moveStrokes && paint ? lines.strokesOf(paint.activeLayer) : ([] as readonly LineStroke[])
+		moveStrokes && paint
+			? pickable(lines.strokesOf(paint.activeLayer))
+			: ([] as readonly LineStroke[])
 	);
 	/** the stroke under the pointer, with Move showing strokes (its id) */
 	let hoverStroke = $state<string | null>(null);
@@ -3361,7 +3434,9 @@
 		const onLines = !paint.isEditingMask() && isLineLayer(paint.activeLayer);
 		const strokesHere = !paint.isEditingMask() && hasStrokes(paint.activeLayer);
 		const wholeHere = strokesHere && lineEraser === 'whole';
-		if (lineTool || ((onLines || wholeHere) && tool === 'brush' && eraser)) {
+		// (the normal eraser over editable strokes is drawn as a stroke: see `keepsStroke`)
+		const exactErase = tool === 'brush' && eraser && !lineTool && keepsStroke();
+		if (lineTool || ((onLines || wholeHere) && tool === 'brush' && eraser && !exactErase)) {
 			const [x, y] = toCanvas(e.clientX, e.clientY);
 			// a stroke picked from another tool: a press away from it puts that tool back
 			if (picking2 && tool !== 'lines' && !lines.onSelection(x, y, fit * zoom)) {
@@ -3498,6 +3573,9 @@
 		// on a line layer the stroke is kept as a line (seeded: redrawn, it paints the same)
 		const asLine = !off && tool === 'brush' && keepsStroke();
 		if (asLine) lineSeed = newSeed();
+		// (the eraser's brush redraws its mark: loaded before the stroke ends)
+		if (asLine && eraser && !lineBrushes.has(brushId))
+			void lines.ready([{ brush: brushId } as LineStroke]);
 		const began = off
 			? paint.beginCloneStroke(off[0], off[1], cloneAllLayers, cloneHeal)
 			: asLine
@@ -3892,12 +3970,15 @@
 		let kept: ReturnType<typeof lines.added> = undefined;
 		if (line) {
 			// its drawing is known now (a first stroke gives an empty cel one)
-			const effect = lines.added(lineLayer, line.strokes, strokeLimit());
-			shapeOf = editShape && effect ? { layer: lineLayer, id: line.strokes[0].id } : null;
+			const erase = !!line.strokes[0]?.erase;
+			const effect = erase
+				? lines.erased(lineLayer, line.strokes, strokeLimit())
+				: lines.added(lineLayer, line.strokes, strokeLimit());
+			shapeOf = editShape && effect && !erase ? { layer: lineLayer, id: line.strokes[0].id } : null;
 			if (effect && !isLineLayer(lineLayer)) kept = effect;
 			else if (effect) {
 				log.add(current);
-				log.labelLast(snapped ? 'Shape' : 'Line');
+				if (!erase) log.labelLast(snapped ? 'Shape' : 'Line');
 				log.attachLast(effect);
 				current = null;
 			}
@@ -3945,7 +4026,11 @@
 			const layer = current.layer ?? 0;
 			const line = linePts ? finishLineStroke(null) : null;
 			paint.endStroke(brush);
-			const effect = line ? lines.added(layer, line.strokes, strokeLimit()) : null;
+			const effect = !line
+				? null
+				: line.strokes[0]?.erase
+					? lines.erased(layer, line.strokes, strokeLimit())
+					: lines.added(layer, line.strokes, strokeLimit());
 			if (effect) {
 				log.add(current);
 				log.attachLast(effect);
@@ -4121,7 +4206,7 @@
 	/** how many line strokes are selected */
 	export const linesSelected = () => lines.sel?.ids.length ?? 0;
 	/** How many editable strokes a layer has (the drawing showing). */
-	export const layerStrokes = (id: number) => lines.strokesOf(id).length;
+	export const layerStrokes = (id: number) => pickable(lines.strokesOf(id)).length;
 	/** A stroke picked with another tool (Move, a held brush) is being edited. */
 	export const strokePicked = () => picking2;
 	/** Move shows the active layer's editable strokes to pick (no layer box yet). */

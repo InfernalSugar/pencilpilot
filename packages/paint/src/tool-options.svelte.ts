@@ -180,7 +180,8 @@ export class ToolOptions {
 
 	/** paste what was copied as a new layer, then move it */
 	pasteCopied() {
-		if (this.host.canvas()?.paste()) this.host.setTool('transform');
+		// (strokes pasted are picked to edit: the tool stays)
+		if (this.host.canvas()?.paste() === true) this.host.setTool('transform');
 	}
 
 	/** everything in the panel as one adjustment */

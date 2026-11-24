@@ -45,6 +45,24 @@ export interface LineStroke {
 	reach?: number;
 	/** the brush smudges (reads the paint around it): redraws take in all it reaches */
 	smudge?: boolean;
+	/**
+	 * An eraser stroke kept as one (an "erase mark"): replayed in its place, it erases
+	 * what's under it exactly as it did. Never picked; the strokes it cut are pieces.
+	 */
+	erase?: true;
+	/**
+	 * A piece of a stroke the eraser cut: only its dabs `from`..`to` (not included,
+	 * counted as the whole stroke paints them) are drawn; the others move the brush as
+	 * they did, so the dabs fall exactly where the whole stroke put them (see
+	 * `cutStroke`). `span` is the points it shows (to pick it, and its path).
+	 */
+	dabs?: [number, number];
+	span?: [number, number];
+	/**
+	 * Erase marks that erase only this stroke (moved with it): a cut piece moved away
+	 * from the eraser that cut it keeps its cut ends (see `detach`).
+	 */
+	clip?: LineStroke[];
 }
 
 /**
@@ -87,6 +105,35 @@ export const newSeed = rand32;
 
 export const pointCount = (s: LineStroke) => Math.floor(s.pts.length / STRIDE);
 
+/** The points a stroke shows (`from`..`to`, not included): a cut piece's span, else all. */
+export function spanOf(s: LineStroke): [number, number] {
+	const n = pointCount(s);
+	if (!s.span) return [0, n];
+	const to = Math.min(n, Math.max(0, s.span[1]));
+	return [Math.min(to, Math.max(0, s.span[0])), to];
+}
+/** (the same: the points to pick a stroke by, and draw its path) */
+export const shownOf = spanOf;
+
+/**
+ * A cut piece made a stroke of its own: its points (the ones it shows), drawn afresh.
+ * For changes its part of the whole stroke's dabs can't follow (a reshape, a boil).
+ */
+export function ownStroke(s: LineStroke): LineStroke {
+	if (!s.dabs && !s.span) return s;
+	const [from, to] = spanOf(s);
+	const out: LineStroke = {
+		...s,
+		pts: s.pts.slice(from * STRIDE, Math.max(from + 1, to) * STRIDE)
+	};
+	delete out.dabs;
+	delete out.span;
+	return out;
+}
+
+/** The strokes that can be picked (not erase marks). */
+export const pickable = (list: readonly LineStroke[]) => list.filter((s) => !s.erase);
+
 // ---- bounds ----
 
 const boundsCache = new WeakMap<LineStroke, Box>();
@@ -100,6 +147,7 @@ export function bounds(s: LineStroke): Box {
 	if (known) return known;
 	let [x0, y0, x1, y1] = [Infinity, Infinity, -Infinity, -Infinity];
 	const p = s.pts;
+	// (a cut piece: all of the whole stroke's points, its dabs fall along them)
 	for (let i = 0; i + 1 < p.length; i += STRIDE) {
 		if (p[i] < x0) x0 = p[i];
 		if (p[i] > x1) x1 = p[i];
@@ -130,7 +178,7 @@ export function union(boxes: Box[]): Box | null {
 export function pathBox(strokes: readonly LineStroke[]): Box | null {
 	let [x0, y0, x1, y1] = [Infinity, Infinity, -Infinity, -Infinity];
 	for (const s of strokes)
-		for (let i = 0; i + 1 < s.pts.length; i += STRIDE) {
+		for (let i = shownOf(s)[0] * STRIDE; i + 1 < shownOf(s)[1] * STRIDE; i += STRIDE) {
 			x0 = Math.min(x0, s.pts[i]);
 			x1 = Math.max(x1, s.pts[i]);
 			y0 = Math.min(y0, s.pts[i + 1]);
@@ -200,11 +248,12 @@ function segDist(px: number, py: number, ax: number, ay: number, bx: number, by:
 /** Distance from (x, y) to a stroke's path. */
 export function distTo(s: LineStroke, x: number, y: number): number {
 	const p = s.pts;
-	const n = pointCount(s);
-	if (!n) return Infinity;
-	if (n === 1) return Math.hypot(x - p[0], y - p[1]);
+	const [from, to] = shownOf(s);
+	const n = to - from;
+	if (n <= 0) return Infinity;
+	if (n === 1) return Math.hypot(x - p[from * STRIDE], y - p[from * STRIDE + 1]);
 	let best = Infinity;
-	for (let i = STRIDE; i + 1 < p.length; i += STRIDE) {
+	for (let i = (from + 1) * STRIDE; i + 1 < to * STRIDE; i += STRIDE) {
 		const d = segDist(x, y, p[i - STRIDE], p[i - STRIDE + 1], p[i], p[i + 1]);
 		if (d < best) best = d;
 	}
@@ -214,12 +263,12 @@ export function distTo(s: LineStroke, x: number, y: number): number {
 /** Distance between segment ab and a stroke's path (0 when they cross). */
 function distToSeg(s: LineStroke, ax: number, ay: number, bx: number, by: number): number {
 	const p = s.pts;
-	const n = pointCount(s);
-	if (!n) return Infinity;
+	const [from, to] = shownOf(s);
+	if (to <= from) return Infinity;
 	let best = Infinity;
-	for (let i = 0; i + 1 < p.length; i += STRIDE) {
+	for (let i = from * STRIDE; i + 1 < to * STRIDE; i += STRIDE) {
 		best = Math.min(best, segDist(p[i], p[i + 1], ax, ay, bx, by));
-		if (i >= STRIDE) {
+		if (i >= (from + 1) * STRIDE) {
 			const [cx, cy, dx, dy] = [p[i - STRIDE], p[i - STRIDE + 1], p[i], p[i + 1]];
 			if (segmentsCross(ax, ay, bx, by, cx, cy, dx, dy)) return 0;
 			best = Math.min(best, segDist(ax, ay, cx, cy, dx, dy), segDist(bx, by, cx, cy, dx, dy));
@@ -259,6 +308,7 @@ export function hitTest(strokes: readonly LineStroke[], x: number, y: number, to
 	let nearD = Infinity;
 	for (let i = strokes.length - 1; i >= 0; i--) {
 		const s = strokes[i];
+		if (s.erase) continue;
 		const r = pickReach(s, tol);
 		const b = bounds(s);
 		if (x < b.x0 - r || x > b.x1 + r || y < b.y0 - r || y > b.y1 + r) continue;
@@ -273,8 +323,10 @@ export function hitTest(strokes: readonly LineStroke[], x: number, y: number, to
 export function inBox(strokes: readonly LineStroke[], box: Box): number[] {
 	const out: number[] = [];
 	strokes.forEach((s, i) => {
+		if (s.erase) return;
 		const p = s.pts;
-		for (let k = 0; k + 1 < p.length; k += STRIDE)
+		const [from, to] = shownOf(s);
+		for (let k = from * STRIDE; k + 1 < to * STRIDE; k += STRIDE)
 			if (p[k] >= box.x0 && p[k] <= box.x1 && p[k + 1] >= box.y0 && p[k + 1] <= box.y1) {
 				out.push(i);
 				return;
@@ -298,7 +350,7 @@ export function eraseWhole(strokes: readonly LineStroke[], a: Pt, b: Pt, r: numb
 		y1: Math.max(a[1], b[1]) + r
 	};
 	strokes.forEach((s, i) => {
-		if (!touches(bounds(s), box)) return;
+		if (s.erase || !touches(bounds(s), box)) return;
 		if (distToSeg(s, a[0], a[1], b[0], b[1]) <= r + s.radius * 0.5) out.push(i);
 	});
 	return out;
@@ -310,12 +362,15 @@ export function eraseWhole(strokes: readonly LineStroke[], a: Pt, b: Pt, r: numb
  * it doesn't touch the stroke; [] when nothing is left.
  */
 export function eraseCut(s: LineStroke, a: Pt, b: Pt, r: number): LineStroke[] | null {
+	if (s.erase) return null;
 	const p = s.pts;
 	const n = pointCount(s);
+	const [from, to] = spanOf(s);
 	const reachR = r + s.radius * 0.35;
 	const gone = new Uint8Array(n);
+	for (let i = 0; i < n; i++) if (i < from || i >= to) gone[i] = 1;
 	let any = false;
-	for (let i = 0; i < n; i++) {
+	for (let i = from; i < to; i++) {
 		if (segDist(p[i * STRIDE], p[i * STRIDE + 1], a[0], a[1], b[0], b[1]) <= reachR) {
 			gone[i] = 1;
 			any = true;
@@ -339,7 +394,9 @@ export function eraseCut(s: LineStroke, a: Pt, b: Pt, r: number): LineStroke[] |
 					id: newId(),
 					seed: (s.seed + pieces.length * 7919 + 1) >>> 0,
 					pts,
-					shape: undefined
+					shape: undefined,
+					span: undefined,
+					dabs: undefined
 				});
 			}
 			start = -1;
@@ -348,14 +405,246 @@ export function eraseCut(s: LineStroke, a: Pt, b: Pt, r: number): LineStroke[] |
 	return pieces.map(clean);
 }
 
+// ---- the eraser cutting strokes exactly ----
+//
+// The eraser on editable strokes is kept as a stroke of its own (an erase mark, replayed
+// in its place, so it erases exactly what it did). The strokes it cut through become
+// pieces: each draws only its part of the whole stroke's dabs (`span`), so the pieces,
+// the mark over them and what's under give the same pixels the eraser left. A piece moved
+// away from the mark takes it along as its own `clip`, so its cut ends go with it.
+
+/** Distance between segments ab and cd. */
+function segSeg(a: Pt, b: Pt, c: Pt, d: Pt) {
+	if (segmentsCross(a[0], a[1], b[0], b[1], c[0], c[1], d[0], d[1])) return 0;
+	return Math.min(
+		segDist(a[0], a[1], c[0], c[1], d[0], d[1]),
+		segDist(b[0], b[1], c[0], c[1], d[0], d[1]),
+		segDist(c[0], c[1], a[0], a[1], b[0], b[1]),
+		segDist(d[0], d[1], a[0], a[1], b[0], b[1])
+	);
+}
+
+/** The path a stroke's dabs follow (a piece: from the point before its span). */
+function dabPath(s: LineStroke): Pt[] {
+	const [from, to] = spanOf(s);
+	const out: Pt[] = [];
+	for (let i = Math.max(0, from - 1); i < to; i++)
+		out.push([s.pts[i * STRIDE], s.pts[i * STRIDE + 1]]);
+	return out;
+}
+
+/** Whether an erase mark's paint can reach a stroke's (generously: within both reaches). */
+export function markReaches(m: LineStroke, s: LineStroke): boolean {
+	if (!touches(bounds(m), bounds(s))) return false;
+	const r = reach(m) + reach(s);
+	const segs = (p: Pt[]): [Pt, Pt][] =>
+		p.length === 1 ? [[p[0], p[0]]] : p.slice(1).map((q, i) => [p[i], q]);
+	const a = segs(dabPath(m));
+	const b = segs(dabPath(s));
+	for (const [p, q] of a) for (const [u, v] of b) if (segSeg(p, q, u, v) <= r) return true;
+	return false;
+}
+
+/** Distance from (x, y) to an erase mark's path. */
+function markDist(m: LineStroke, x: number, y: number) {
+	const p = m.pts;
+	if (pointCount(m) === 1) return Math.hypot(x - p[0], y - p[1]);
+	let best = Infinity;
+	for (let i = STRIDE; i + 1 < p.length; i += STRIDE)
+		best = Math.min(best, segDist(x, y, p[i - STRIDE], p[i - STRIDE + 1], p[i], p[i + 1]));
+	return best;
+}
+
+/**
+ * Where a stroke's dabs fall, as the engine says (`linesDabs`: per dab the point that
+ * painted it, x, y, radius), and the erase marks' (theirs, in order).
+ */
+export interface Dabs {
+	stroke: Float32Array | null;
+	marks: (Float32Array | null)[];
+}
+
+/**
+ * A stroke cut by erase marks: its pieces, or null when they don't cut it through (it
+ * stays as it is; the marks erase what they reach of it). Goes by where the dabs fall
+ * (`dabs`: the engine's, for the stroke and each mark; brushes trail behind the pen):
+ * a dab is gone when it lies within `core` of one of the eraser's. Each piece draws
+ * the dabs left on its side. With `whole`, the pieces share every dab between them
+ * (split halfway across each gap): exactly the whole stroke's, whatever the eraser's
+ * edge. Null without the stroke's dabs.
+ */
+export function cutStroke(
+	s: LineStroke,
+	marks: readonly LineStroke[],
+	core = 1,
+	whole = false,
+	dabs?: Dabs
+): LineStroke[] | null {
+	const own = dabs?.stroke;
+	if (s.erase || !own) return null;
+	const n = pointCount(s);
+	const total = Math.floor(own.length / 4);
+	const [lo, hi] = s.dabs ? [s.dabs[0], Math.min(total, s.dabs[1])] : [0, total];
+	const reaching = marks.flatMap((m, i) => (markReaches(m, s) ? [i] : []));
+	if (!reaching.length || hi <= lo) return null;
+	const near = reaching.map((i) => marks[i]);
+	// the eraser's dabs (x, y, radius), else its path
+	const erasers = reaching.map((i) => dabs?.marks[i] ?? null);
+	const inside = (x: number, y: number, r: number) =>
+		near.some((m, k) => {
+			const e = erasers[k];
+			if (!e) return markDist(m, x, y) + r <= core * m.radius;
+			for (let j = 0; j + 3 < e.length; j += 4)
+				if (Math.hypot(e[j + 1] - x, e[j + 2] - y) + r <= core * e[j + 3]) return true;
+			return false;
+		});
+	// what's left: runs of dabs not gone, [a, b]
+	const runs: [number, number][] = [];
+	let any = false;
+	for (let k = lo, a = -1; k <= hi; k++) {
+		const out = k < hi && inside(own[k * 4 + 1], own[k * 4 + 2], own[k * 4 + 3]);
+		any ||= out;
+		if (k < hi && !out) {
+			if (a < 0) a = k;
+		} else if (a >= 0) {
+			runs.push([a, k - 1]);
+			a = -1;
+		}
+	}
+	if (!any) return null;
+	// (specks the eraser's scattered dabs left aren't lines of their own: they go with the
+	// gap, so `whole` pieces still draw them)
+	const left = runs.filter(([a, b]) => b - a >= 3);
+	runs.length = 0;
+	runs.push(...left);
+	let spans: [number, number][];
+	if (!whole) spans = runs.map(([a, b]) => [a, b + 1]);
+	else {
+		if (runs.length < 2) return null;
+		const cuts = runs.slice(1).map(([a], i) => Math.floor((runs[i][1] + 1 + a) / 2));
+		spans = [lo, ...cuts].map((c, i) => [c, i < cuts.length ? cuts[i] : hi]);
+	}
+	if (spans.length === 1 && spans[0][0] === lo && spans[0][1] === hi) return null;
+	/** the point nearest dab k (what the piece shows goes from it) */
+	const pointAt = (k: number) => {
+		const [x, y] = [own[k * 4 + 1], own[k * 4 + 2]];
+		let best = 0;
+		let bd = Infinity;
+		for (let i = 0; i < n; i++) {
+			const d = Math.hypot(s.pts[i * STRIDE] - x, s.pts[i * STRIDE + 1] - y);
+			if (d < bd) [best, bd] = [i, d];
+		}
+		return best;
+	};
+	return spans.map(([a, b], i) => {
+		const p0 = a === 0 ? 0 : pointAt(a);
+		const p1 = b === total ? n : Math.max(p0, pointAt(b - 1)) + 1;
+		return clean({
+			...s,
+			id: i === 0 ? s.id : newId(),
+			dabs: [a, b],
+			span: p0 === 0 && p1 === n ? undefined : [p0, p1],
+			shape: undefined
+		});
+	});
+}
+
+/**
+ * Strokes `ids` of `list` about to move: the erase marks over them that reach them go
+ * with them as their own `clip` (`keep`: not taken, only stepped over), and they move up
+ * past those marks in the list, so the marks erase them where they go, not where they
+ * were. The others, and the marks, stay as they are.
+ */
+export function detach(
+	list: readonly LineStroke[],
+	ids: ReadonlySet<string>,
+	keep = false
+): readonly LineStroke[] {
+	const after = new Map<string, LineStroke[]>();
+	const lifted = new Set<number>();
+	list.forEach((s, i) => {
+		if (!ids.has(s.id) || s.erase) return;
+		let last = -1;
+		const over: LineStroke[] = [];
+		for (let j = i + 1; j < list.length; j++)
+			if (list[j].erase && markReaches(list[j], s)) {
+				last = j;
+				over.push(list[j]);
+			}
+		if (last < 0) return;
+		lifted.add(i);
+		let moved = s;
+		if (!keep) {
+			const have = new Set((s.clip ?? []).map((c) => c.id));
+			moved = { ...s, clip: [...(s.clip ?? []), ...over.filter((m) => !have.has(m.id))] };
+		}
+		const at = list[last].id;
+		after.set(at, [...(after.get(at) ?? []), moved]);
+	});
+	if (!lifted.size) return list;
+	const out: LineStroke[] = [];
+	list.forEach((s, i) => {
+		if (!lifted.has(i)) out.push(s);
+		const more = after.get(s.id);
+		if (more) out.push(...more);
+	});
+	return out;
+}
+
+/** Strokes copied, to paste: new ids (linked twins stay linked together), moved by (dx, dy). */
+export function pasteCopies(strokes: readonly LineStroke[], dx = 0, dy = 0): LineStroke[] {
+	const groups = new Map<string, string>();
+	return strokes.map((s) => {
+		const t = dx || dy ? transformStroke(s, [1, 0, 0, 1, dx, dy]) : s;
+		const out: LineStroke = { ...t, id: newId() };
+		if (s.link) {
+			const g = groups.get(s.link.g) ?? newId();
+			groups.set(s.link.g, g);
+			out.link = { ...s.link, g, cx: s.link.cx + dx, cy: s.link.cy + dy };
+		}
+		return out;
+	});
+}
+
+/**
+ * How far strokes pasted into `list` go: where they were copied from, or `step` px
+ * further down and right for each time copies are already there (pasting again).
+ */
+export function pasteOffset(
+	list: readonly LineStroke[],
+	strokes: readonly LineStroke[],
+	step = 12
+): number {
+	const key = (s: LineStroke, d: number) => {
+		const i = spanOf(s)[0] * STRIDE;
+		const at = (v: number) => Math.round((v + d) * 10);
+		return `${s.brush}|${pointCount(s)}|${at(s.pts[i])},${at(s.pts[i + 1])}`;
+	};
+	const there = new Set(list.map((s) => key(s, 0)));
+	for (let k = 0; k < 200; k++)
+		if (!strokes.some((s) => there.has(key(s, k * step)))) return k * step;
+	return 0;
+}
+
 /** No `shape: undefined` left lying around (it would travel as a key). */
 function clean(s: LineStroke): LineStroke {
-	if (s.shape === undefined && 'shape' in s) {
-		const { shape: _, ...rest } = s;
+	let out = s;
+	if (out.shape === undefined && 'shape' in out) {
+		const { shape: _, ...rest } = out;
 		void _;
-		return rest;
+		out = rest;
 	}
-	return s;
+	if (out.span === undefined && 'span' in out) {
+		const { span: _, ...rest } = out;
+		void _;
+		out = rest;
+	}
+	if (out.dabs === undefined && 'dabs' in out) {
+		const { dabs: _, ...rest } = out;
+		void _;
+		out = rest;
+	}
+	return out;
 }
 
 // ---- edits ----
@@ -381,6 +670,7 @@ export function transformStroke(s: LineStroke, m: Affine): LineStroke {
 		radius: s.radius * k
 	};
 	if (s.shape) out.shape = transformShape(s.shape, m);
+	if (s.clip) out.clip = s.clip.map((c) => transformStroke(c, m));
 	return out;
 }
 
@@ -432,7 +722,8 @@ export function rotateAbout(rad: number, cx: number, cy: number): Affine {
 /** The points of a stroke as [x, y] pairs. */
 export function pathOf(s: LineStroke): Pt[] {
 	const out: Pt[] = [];
-	for (let i = 0; i + 1 < s.pts.length; i += STRIDE) out.push([s.pts[i], s.pts[i + 1]]);
+	const [from, to] = shownOf(s);
+	for (let i = from * STRIDE; i + 1 < to * STRIDE; i += STRIDE) out.push([s.pts[i], s.pts[i + 1]]);
 	return out;
 }
 
@@ -462,19 +753,21 @@ function rdp(p: Float32Array, i0: number, i1: number, eps: number, keep: Uint8Ar
  * `max` of them, always both ends.
  */
 export function handles(s: LineStroke, max = 24): number[] {
-	const n = pointCount(s);
-	if (n <= 2) return n === 2 ? [0, 1] : n ? [0] : [];
+	// (a cut piece: the points it shows)
+	const [from, to] = shownOf(s);
+	const n = to - from;
+	if (n <= 2) return n === 2 ? [from, from + 1] : n > 0 ? [from] : [];
 	let eps = Math.max(1.5, s.radius * 0.5);
 	for (let tries = 0; tries < 12; tries++) {
-		const keep = new Uint8Array(n);
-		keep[0] = keep[n - 1] = 1;
-		rdp(s.pts, 0, n - 1, eps, keep);
+		const keep = new Uint8Array(to);
+		keep[from] = keep[to - 1] = 1;
+		rdp(s.pts, from, to - 1, eps, keep);
 		const out: number[] = [];
 		keep.forEach((k, i) => k && out.push(i));
 		if (out.length <= max) return out;
 		eps *= 1.6;
 	}
-	return [0, n - 1];
+	return [from, to - 1];
 }
 
 /**
@@ -489,6 +782,17 @@ export function dragHandle(
 	dx: number,
 	dy: number
 ): LineStroke {
+	// (a cut piece reshaped: a stroke of its own, its handles counted from its first point)
+	if (s.dabs || s.span) {
+		const from = spanOf(s)[0];
+		return dragHandle(
+			ownStroke(s),
+			hs.map((i) => i - from),
+			h,
+			dx,
+			dy
+		);
+	}
 	const n = pointCount(s);
 	const at = hs[h];
 	const from = h > 0 ? hs[h - 1] : at;
@@ -685,7 +989,9 @@ function mulberry(seed: number) {
 export function boilStrokes(strokes: readonly LineStroke[], amount: number, seed: number) {
 	const rnd = mulberry(seed);
 	const wave = 40; // px between wobble knots along a line
-	return strokes.map((s) => {
+	return strokes.map((whole) => {
+		// (a cut piece wobbles as a stroke of its own)
+		const s = ownStroke(whole);
 		const n = pointCount(s);
 		const pts = s.pts.slice();
 		let length = 0;
@@ -718,6 +1024,12 @@ export function boilStrokes(strokes: readonly LineStroke[], amount: number, seed
 // padding to 4 bytes, then every stroke's points as little-endian f32 ----
 
 const MAGIC = [0x50, 0x50, 0x4c, 0x31]; // "PPL1"
+/**
+ * "PPL2": the same, with erase marks, cut pieces or erasers a stroke carries (`erase`,
+ * `dabs`, `clip`; a clip's points follow its stroke's). Apps that only know "PPL1" turn
+ * it down rather than draw erasers as lines; their drawings keep their pixels.
+ */
+const MAGIC2 = [0x50, 0x50, 0x4c, 0x32];
 
 interface Meta {
 	id: string;
@@ -733,11 +1045,15 @@ interface Meta {
 	link?: Link;
 	reach?: number;
 	smudge?: boolean;
+	erase?: true;
+	span?: [number, number];
+	dabs?: [number, number];
+	/** its own erase marks: their points follow the stroke's */
+	clip?: Meta[];
 }
 
-/** Strokes as bytes (a drawing in a project file, or an edit shared with others). */
-export function encodeLines(strokes: readonly LineStroke[]): Uint8Array {
-	const meta: Meta[] = strokes.map((s) => ({
+function metaOf(s: LineStroke): Meta {
+	return {
 		id: s.id,
 		n: pointCount(s),
 		brush: s.brush,
@@ -750,22 +1066,37 @@ export function encodeLines(strokes: readonly LineStroke[]): Uint8Array {
 		...(s.shape ? { shape: s.shape } : {}),
 		...(s.link ? { link: s.link } : {}),
 		...(s.reach ? { reach: s.reach } : {}),
-		...(s.smudge ? { smudge: true } : {})
-	}));
+		...(s.smudge ? { smudge: true } : {}),
+		...(s.erase ? { erase: true as const } : {}),
+		...(s.span ? { span: [s.span[0], s.span[1]] as [number, number] } : {}),
+		...(s.dabs ? { dabs: [s.dabs[0], s.dabs[1]] as [number, number] } : {}),
+		...(s.clip?.length ? { clip: s.clip.map(metaOf) } : {})
+	};
+}
+
+/** a stroke's points, then its clip's, in the order they're saved */
+const allPoints = (s: LineStroke): Float32Array[] => [s.pts, ...(s.clip ?? []).map((c) => c.pts)];
+const metaPoints = (m: Meta): number =>
+	m.n * STRIDE + (m.clip ?? []).reduce((t, c) => t + c.n * STRIDE, 0);
+
+/** Strokes as bytes (a drawing in a project file, or an edit shared with others). */
+export function encodeLines(strokes: readonly LineStroke[]): Uint8Array {
+	const meta: Meta[] = strokes.map(metaOf);
 	const json = new TextEncoder().encode(JSON.stringify(meta));
 	const head = 8 + json.length;
 	const pad = (4 - (head % 4)) % 4;
-	const floats = meta.reduce((t, m) => t + m.n * STRIDE, 0);
+	const floats = meta.reduce((t, m) => t + metaPoints(m), 0);
 	const out = new Uint8Array(head + pad + floats * 4);
-	out.set(MAGIC, 0);
+	out.set(strokes.some((s) => s.erase || s.dabs || s.clip?.length) ? MAGIC2 : MAGIC, 0);
 	const dv = new DataView(out.buffer);
 	dv.setUint32(4, json.length, true);
 	out.set(json, 8);
 	let o = head + pad;
-	for (const s of strokes) {
-		const n = pointCount(s) * STRIDE;
-		for (let i = 0; i < n; i++, o += 4) dv.setFloat32(o, s.pts[i], true);
-	}
+	for (const s of strokes)
+		for (const pts of allPoints(s)) {
+			const n = Math.floor(pts.length / STRIDE) * STRIDE;
+			for (let i = 0; i < n; i++, o += 4) dv.setFloat32(o, pts[i], true);
+		}
 	return out;
 }
 
@@ -829,7 +1160,11 @@ function readShape(v: unknown): EditShape | undefined {
 
 /** Bytes back into strokes, checked: throws when they aren't line data. */
 export function decodeLines(bytes: Uint8Array): LineStroke[] {
-	if (bytes.length < 8 || MAGIC.some((m, i) => bytes[i] !== m)) throw new Error('not line data');
+	if (
+		bytes.length < 8 ||
+		(MAGIC.some((m, i) => bytes[i] !== m) && MAGIC2.some((m, i) => bytes[i] !== m))
+	)
+		throw new Error('not line data');
 	const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 	const len = dv.getUint32(4, true);
 	if (8 + len > bytes.length) throw new Error('line data ends inside its header');
@@ -838,7 +1173,8 @@ export function decodeLines(bytes: Uint8Array): LineStroke[] {
 	const head = 8 + len;
 	let o = head + ((4 - (head % 4)) % 4);
 	const out: LineStroke[] = [];
-	for (const m of raw as Meta[]) {
+	let points = 0;
+	const read = (m: Meta, nested: boolean): LineStroke => {
 		if (
 			!m ||
 			typeof m.id !== 'string' ||
@@ -853,10 +1189,13 @@ export function decodeLines(bytes: Uint8Array): LineStroke[] {
 			!num(m.size, 0.01, 1000) ||
 			!num(m.opacity, 0, 1) ||
 			!num(m.radius, 0, 5000) ||
-			!num(m.seed, 0, 2 ** 32 - 1)
+			!num(m.seed, 0, 2 ** 32 - 1) ||
+			(m.clip !== undefined && (nested || !Array.isArray(m.clip) || m.clip.length > 64))
 		)
 			throw new Error('bad stroke in line data');
 		const count = m.n * STRIDE;
+		points += m.n;
+		if (points > MAX_POINTS * 8) throw new Error('too many points in line data');
 		if (o + count * 4 > bytes.length) throw new Error('line data is cut short');
 		const pts = new Float32Array(count);
 		for (let i = 0; i < count; i++, o += 4) {
@@ -867,7 +1206,31 @@ export function decodeLines(bytes: Uint8Array): LineStroke[] {
 		const texture = readTexture(m.texture);
 		const shape = readShape(m.shape);
 		const link = readLink(m.link);
-		out.push({
+		const span =
+			m.erase !== true &&
+			Array.isArray(m.span) &&
+			m.span.length === 2 &&
+			Number.isInteger(m.span[0]) &&
+			Number.isInteger(m.span[1]) &&
+			m.span[0] >= 0 &&
+			m.span[0] < m.span[1] &&
+			m.span[1] <= m.n
+				? ([m.span[0], m.span[1]] as [number, number])
+				: undefined;
+		const pair = (v: unknown, most: number) =>
+			Array.isArray(v) &&
+			v.length === 2 &&
+			Number.isInteger(v[0]) &&
+			Number.isInteger(v[1]) &&
+			v[0] >= 0 &&
+			v[0] < v[1] &&
+			v[1] <= most
+				? ([v[0], v[1]] as [number, number])
+				: undefined;
+		const cut = m.erase !== true ? pair(m.dabs, 2 ** 31) : undefined;
+		// (its erase marks' points come next)
+		const clip = m.clip?.map((c) => read(c, true)).filter((c) => c.erase);
+		return {
 			id: m.id,
 			pts,
 			brush: m.brush,
@@ -880,9 +1243,14 @@ export function decodeLines(bytes: Uint8Array): LineStroke[] {
 			...(shape ? { shape } : {}),
 			...(link ? { link } : {}),
 			...(num(m.reach, 0, 1000) ? { reach: m.reach } : {}),
-			...(m.smudge === true ? { smudge: true } : {})
-		});
-	}
+			...(m.smudge === true ? { smudge: true } : {}),
+			...(m.erase === true ? { erase: true as const } : {}),
+			...(span && cut ? { span } : {}),
+			...(cut ? { dabs: cut } : {}),
+			...(clip?.length ? { clip } : {})
+		};
+	};
+	for (const m of raw as Meta[]) out.push(read(m, false));
 	return out;
 }
 
@@ -912,8 +1280,11 @@ export function decodeLineData(bytes: Uint8Array): {
 	const strokes = decodeLines(bytes);
 	const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 	const head = 8 + dv.getUint32(4, true);
+	const floats = (p: Float32Array) => Math.floor(p.length / STRIDE) * STRIDE * 4;
 	const end =
-		head + ((4 - (head % 4)) % 4) + strokes.reduce((n, s) => n + pointCount(s) * STRIDE * 4, 0);
+		head +
+		((4 - (head % 4)) % 4) +
+		strokes.reduce((n, s) => n + allPoints(s).reduce((t, p) => t + floats(p), 0), 0);
 	if (end + 8 > bytes.length || BASE_MAGIC.some((m, i) => bytes[end + i] !== m))
 		return { strokes, base: null };
 	const len = dv.getUint32(end + 4, true);
@@ -999,8 +1370,10 @@ export function smudgeArea(
 export function replayGroups(strokes: readonly LineStroke[]): number[] {
 	let n = 0;
 	return strokes.map((s, i) => {
-		if (!s.link) return 0;
-		if (i > 0 && strokes[i - 1].link?.g === s.link.g) return n;
+		// (a stroke with erasers of its own is drawn on its own)
+		if (!s.link || s.clip?.length) return 0;
+		const prev = strokes[i - 1];
+		if (prev && !prev.clip?.length && prev.link?.g === s.link.g) return n;
 		return ++n;
 	});
 }
@@ -1089,15 +1462,18 @@ export function bakePlan(
 	}
 }
 
-/** The oldest strokes past `limit` (indices): they become plain pixels. */
+/** The oldest strokes past `limit` (indices; erase marks don't count): they become plain pixels. */
 export function overLimit(strokes: readonly LineStroke[], limit: number): number[] {
-	const n = Math.max(0, strokes.length - Math.max(0, limit));
-	return Array.from({ length: n }, (_, i) => i);
+	const idx = strokes.flatMap((s, i) => (s.erase ? [] : [i]));
+	return idx.slice(0, Math.max(0, idx.length - Math.max(0, limit)));
 }
 
 /** Roughly the bytes a drawing's strokes take (their points, and the rest). */
 export function strokesBytes(strokes: readonly LineStroke[]): number {
-	return strokes.reduce((n, s) => n + s.pts.byteLength + 240, 0);
+	return strokes.reduce(
+		(n, s) => n + s.pts.byteLength + 240 + (s.clip ? strokesBytes(s.clip) : 0),
+		0
+	);
 }
 
 // ---- drawing together: what changed in a drawing, as a small edit ----

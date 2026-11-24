@@ -6,7 +6,14 @@ import {
 	bakePlan,
 	boilStrokes,
 	compose,
+	cutStroke,
 	decodeLineData,
+	detach,
+	ownStroke,
+	pasteCopies,
+	pasteOffset,
+	pickable,
+	spanOf,
 	encodeLineData,
 	invert,
 	linkedCopies,
@@ -507,5 +514,204 @@ describe('strokes that smudge, and snapped shapes with symmetry', () => {
 			reach: 4.5,
 			smudge: true
 		});
+	});
+});
+
+const link = (k: number) => ({ g: 'g', k, mode: 'vertical' as const, n: 2, cx: 100, cy: 100 });
+
+describe('the eraser cutting strokes exactly', () => {
+	const mark = (x: number, extra: Partial<LineStroke> = {}) =>
+		line(x, 0, x, 100, { id: `e${x}`, erase: true, radius: 8, brush: 'rubber', ...extra });
+	/** dabs as the engine lists them (straight strokes): every `step` px, trailing `lag` px */
+	const dabsOf = (s: LineStroke, step = 1, lag = 0) => {
+		const n = pointCount(s);
+		const [ax, ay] = [s.pts[0], s.pts[1]];
+		const [bx, by] = [s.pts[(n - 1) * STRIDE], s.pts[(n - 1) * STRIDE + 1]];
+		const len = Math.hypot(bx - ax, by - ay);
+		const out: number[] = [];
+		for (let t = 0; t < len; t += step) {
+			const f = Math.max(0, t - lag) / (len || 1);
+			const i = Math.min(n - 1, Math.floor((t / (len || 1)) * (n - 1)) + 1);
+			out.push(i, ax + (bx - ax) * f, ay + (by - ay) * f, s.radius);
+		}
+		return new Float32Array(out);
+	};
+	const cut = (s: LineStroke, marks: LineStroke[], core = 1, whole = false) =>
+		cutStroke(s, marks, core, whole, { stroke: dabsOf(s), marks: marks.map((m) => dabsOf(m)) });
+
+	it('cuts a stroke into pieces that draw its own dabs, each its part', () => {
+		const s = line(0, 50, 200, 50);
+		const n = pointCount(s);
+		const all = dabsOf(s).length / 4;
+		const pieces = cut(s, [mark(100)])!;
+		expect(pieces).toHaveLength(2);
+		const [a, b] = pieces;
+		// the same points and seed: each piece draws its part of the whole stroke's dabs
+		expect(a.pts).toBe(s.pts);
+		expect(b.seed).toBe(s.seed);
+		expect(a.id).toBe(s.id);
+		expect(b.id).not.toBe(s.id);
+		expect(a.dabs![0]).toBe(0);
+		expect(b.dabs![1]).toBe(all);
+		// what the eraser took isn't drawn: dabs within its reach (5 px each side)
+		const gap = b.dabs![0] - a.dabs![1];
+		expect(gap).toBeGreaterThan(8);
+		expect(gap).toBeLessThan(12);
+		// they show only their side: picking, boxes, handles, the path
+		expect(spanOf(a)[0]).toBe(0);
+		expect(spanOf(b)[1]).toBe(n);
+		expect(hitTest(pieces, 100, 50, 1)).toBe(-1);
+		expect(hitTest(pieces, 150, 50, 1)).toBe(1);
+		expect(pathOf(b).every(([x]) => x > 100)).toBe(true);
+		expect(pathOf(a).every(([x]) => x < 100)).toBe(true);
+		expect(handles(b).every((i) => i >= spanOf(b)[0] && i < spanOf(b)[1])).toBe(true);
+		// (their paint can reach as far as the whole stroke's)
+		expect(bounds(a)).toEqual(bounds(s));
+	});
+
+	it('goes by where the dabs fall: a brush trailing behind the pen', () => {
+		const s = line(0, 50, 200, 50);
+		const marks = [mark(100)];
+		const [a, b] = cutStroke(s, marks, 1, false, {
+			stroke: dabsOf(s, 1, 6),
+			marks: marks.map((m) => dabsOf(m))
+		})!;
+		const [c, d] = cut(s, marks)!;
+		expect(a.dabs![1]).toBeGreaterThan(c.dabs![1]);
+		expect(b.dabs![0]).toBeGreaterThan(d.dabs![0]);
+		// no dabs listed: not cut (it stays whole under the eraser)
+		expect(cutStroke(s, marks)).toBeNull();
+	});
+
+	it('keeps every dab between the pieces when asked (`whole`), split across the gap', () => {
+		const s = line(0, 50, 200, 50);
+		const [a, b] = cut(s, [mark(100)], 1, true)!;
+		expect(a.dabs![0]).toBe(0);
+		expect(a.dabs![1]).toBe(b.dabs![0]);
+		expect(b.dabs![1]).toBe(dabsOf(s).length / 4);
+	});
+
+	it('leaves strokes it does not cut through, or does not reach', () => {
+		// a thick stroke under a thin eraser: notched, not cut
+		expect(cut(line(0, 50, 200, 50, { radius: 12 }), [mark(100)])).toBeNull();
+		expect(cut(line(0, 50, 60, 50), [mark(150)])).toBeNull();
+		// an eraser over the whole of it: nothing left
+		expect(cut(line(97, 50, 103, 50), [mark(100)])).toEqual([]);
+		// the end: one piece left
+		const [one, more] = cut(line(0, 50, 100, 50), [mark(100)])!;
+		expect(more).toBeUndefined();
+		expect(one.dabs![0]).toBe(0);
+	});
+
+	it('cuts a piece again within its part', () => {
+		const s = line(0, 50, 200, 50);
+		const [, b] = cut(s, [mark(60)])!;
+		const [c, d] = cut(b, [mark(140)])!;
+		expect(c.dabs![0]).toBe(b.dabs![0]);
+		expect(d.dabs![1]).toBe(b.dabs![1]);
+		expect(c.dabs![1]).toBeLessThan(d.dabs![0]);
+	});
+
+	it('a piece reshaped or boiled becomes a stroke of its own', () => {
+		const [, b] = cut(line(0, 50, 200, 50), [mark(100)])!;
+		const [from, to] = spanOf(b);
+		const own = ownStroke(b);
+		expect(own.dabs).toBeUndefined();
+		expect(own.span).toBeUndefined();
+		expect(pointCount(own)).toBe(to - from);
+		expect(own.pts[0]).toBe(b.pts[from * STRIDE]);
+		const hs = handles(b);
+		const moved = dragHandle(b, hs, 1, 0, 20);
+		expect(moved.dabs).toBeUndefined();
+		expect(pointCount(moved)).toBe(to - from);
+		expect(Math.max(...pathOf(moved).map(([, y]) => y))).toBeCloseTo(70);
+		const [boiled] = boilStrokes([b], 2, 1);
+		expect(boiled.dabs).toBeUndefined();
+		expect(pointCount(boiled)).toBe(to - from);
+	});
+
+	it('erase marks are never picked, boxed, erased whole or counted', () => {
+		const s = line(0, 50, 200, 50);
+		const m = mark(100);
+		const list = [s, m];
+		expect(hitTest(list, 100, 20, 2)).toBe(-1);
+		expect(inBox(list, { x0: 90, y0: 0, x1: 110, y1: 30 })).toEqual([]);
+		expect(eraseWhole(list, [100, 10], [100, 20], 3)).toEqual([]);
+		expect(pickable(list)).toEqual([s]);
+		expect(overLimit([s, m, line(0, 0, 5, 5)], 1)).toEqual([0]);
+	});
+
+	it('detaches moving strokes: the marks over them come along, and they move up past them', () => {
+		const s = line(0, 50, 200, 50);
+		const other = line(0, 300, 200, 300, { id: 'other' });
+		const m = mark(100);
+		const later = line(0, 70, 200, 70, { id: 'later' });
+		const list = [s, other, m, later];
+		const out = detach(list, new Set([s.id]));
+		expect(out.map((x) => x.id)).toEqual(['other', m.id, s.id, 'later']);
+		expect(out[2].clip).toEqual([m]);
+		// moved by a transform, the clip goes with it
+		const t = transformStroke(out[2], [1, 0, 0, 1, 30, 0]);
+		expect(t.clip![0].pts[0]).toBeCloseTo(130);
+		// only stepping over (not taken): no clip
+		const kept = detach(list, new Set([s.id]), true);
+		expect(kept[2].clip).toBeUndefined();
+		// nothing over it: unchanged
+		expect(detach(list, new Set(['other']))).toBe(list);
+		// a stroke with its own erasers is replayed on its own
+		const groups = replayGroups([
+			{ ...s, link: link(0), clip: [m] },
+			{ ...s, link: link(1) }
+		]);
+		expect(groups).toEqual([0, 1]);
+	});
+
+	it('saves and shares marks, pieces and clips', () => {
+		const s = line(0, 50, 200, 50);
+		const [a, b] = cut(s, [mark(100)])!;
+		const moved = { ...b, clip: [mark(100), mark(120)] };
+		const bytes = encodeLines([a, moved, mark(100)]);
+		// (a new version: apps that don't know erase marks turn it down)
+		expect([...bytes.slice(0, 4)]).toEqual([0x50, 0x50, 0x4c, 0x32]);
+		expect([...encodeLines([s]).slice(0, 4)]).toEqual([0x50, 0x50, 0x4c, 0x31]);
+		const back = decodeLines(bytes);
+		expect(back[0].dabs).toEqual(a.dabs);
+		expect(back[0].span).toEqual(a.span);
+		expect(back[1].dabs).toEqual(b.dabs);
+		expect(back[1].clip!.map((c) => c.id)).toEqual(['e100', 'e120']);
+		expect(back[1].clip![1].pts).toEqual(mark(120).pts);
+		expect(back[2].erase).toBe(true);
+		expect(back[2].pts).toEqual(mark(100).pts);
+		expect(strokesBytes([moved])).toBeGreaterThan(strokesBytes([b]));
+		// and with a base after them
+		const data = encodeLineData([moved, mark(1)], new Uint8Array([1, 2, 3]));
+		const { strokes, base } = decodeLineData(data);
+		expect(strokes[0].clip).toHaveLength(2);
+		expect([...base!]).toEqual([1, 2, 3]);
+	});
+});
+
+describe('pasting strokes', () => {
+	it('gives copies new ids, keeping twins linked together', () => {
+		const a = line(10, 10, 50, 10, { id: 'a', link: link(0) });
+		const b = line(190, 10, 150, 10, { id: 'b', link: link(1) });
+		const [x, y] = pasteCopies([a, b], 12, 12);
+		expect(x.id).not.toBe('a');
+		expect(x.link!.g).not.toBe('g');
+		expect(x.link!.g).toBe(y.link!.g);
+		expect(x.link!.cx).toBe(112);
+		expect(x.pts[0]).toBeCloseTo(22);
+		// another paste: another group
+		const [z] = pasteCopies([a]);
+		expect(z.link!.g).not.toBe(x.link!.g);
+		expect(z.pts).toBe(a.pts);
+	});
+
+	it('goes where it was copied from, or further on when copies are there', () => {
+		const a = line(10, 10, 50, 10, { id: 'a' });
+		expect(pasteOffset([], [a])).toBe(0);
+		expect(pasteOffset([a], [a])).toBe(12);
+		const once = pasteCopies([a], 12, 12);
+		expect(pasteOffset([a, ...once], [a])).toBe(24);
 	});
 });
