@@ -92,9 +92,7 @@
 				class="tool"
 				role="radio"
 				aria-checked={opts.lineEraser === 'normal'}
-				title={onLines
-					? 'Cut lines where the eraser passes (the rest stays editable)'
-					: 'Erase pixels (strokes it touches stop being editable)'}
+				title="Erase where it passes: lines it cuts through stay editable, in pieces"
 				onclick={() => (opts.lineEraser = 'normal')}
 			>
 				Normal

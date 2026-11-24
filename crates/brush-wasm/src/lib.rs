@@ -1187,6 +1187,34 @@ impl PaintCanvas {
         self.inner.lines_stroke(&brush.inner, seed, pts, group);
     }
 
+    /// The stroke just given is a piece of a cut one: only the dabs of its points
+    /// `from..to` are drawn (the points before move the brush without drawing).
+    #[wasm_bindgen(js_name = linesSpan)]
+    pub fn lines_span(&mut self, from: u32, to: u32) {
+        self.inner.lines_span(from, to);
+    }
+
+    /// The stroke just given carries an eraser stroke (`brush` set to erase) that
+    /// erases only it.
+    #[wasm_bindgen(js_name = linesClip)]
+    pub fn lines_clip(&mut self, brush: &PaintBrush, seed: u32, pts: &[f32]) {
+        self.inner.lines_clip(&brush.inner, seed, pts);
+    }
+
+    /// Where a stroke's dabs fall, nothing drawn: per dab the point that painted it,
+    /// x, y and radius.
+    #[wasm_bindgen(js_name = linesDabs)]
+    pub fn lines_dabs(&self, brush: &PaintBrush, seed: u32, pts: &[f32]) -> Vec<f32> {
+        self.inner.lines_dabs(&brush.inner, seed, pts)
+    }
+
+    /// End the redraw without keeping it: how many of its pixels differ from the
+    /// layer's now (0: exactly what's there).
+    #[wasm_bindgen(js_name = linesDiff)]
+    pub fn lines_diff(&mut self) -> u32 {
+        self.inner.lines_diff()
+    }
+
     /// Put the redrawn tiles on the layer (not an undo step until `linesPush`).
     #[wasm_bindgen(js_name = linesCommit)]
     pub fn lines_commit(&mut self) -> bool {

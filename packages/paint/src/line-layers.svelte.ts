@@ -22,12 +22,18 @@ import {
 	LineStore,
 	bakePlan,
 	bounds,
+	cutStroke,
+	detach,
 	dragHandle,
 	eraseCut,
 	eraseWhole,
 	handles,
 	hitTest,
 	inBox,
+	markReaches,
+	pasteCopies,
+	pasteOffset,
+	pickable,
 	replayGroups,
 	smudgeArea,
 	strokeTiles,
@@ -70,6 +76,8 @@ export interface LineHost {
 	restoreDabStyle(): void;
 	/** the engine just made an undo step: log it (named), with the strokes' undo / redo */
 	step(label: string, undo: () => void, redo: () => void): void;
+	/** more to undo / redo with the last step logged */
+	attach(effect: Effect): void;
 	schedule(): void;
 	notify(): void;
 }
@@ -170,20 +178,33 @@ export class LineLayers {
 		const on = tiles ? strokesOnTiles(list, tiles) : list;
 		// (strokes made together are replayed together, as symmetry painted them)
 		const groups = replayGroups(on);
-		for (const [i, s] of on.entries()) {
+		/** the brush set for `s` (an erase mark erases), its dab style too */
+		const use = (s: LineStroke) => {
 			const b = this.host.brush(s.brush);
-			if (!b) continue;
+			if (!b) return null;
 			b.setSizeScale(s.size);
 			b.setOpacity(s.opacity);
 			const n = parseInt(s.color.slice(1), 16) || 0;
 			b.setColor((n >> 16) & 255, (n >> 8) & 255, n & 255);
-			b.setEraser(false);
+			b.setEraser(!!s.erase);
 			const key = s.texture ? JSON.stringify(s.texture) : '';
 			if (key !== style) {
 				this.host.dabStyle(s.texture);
 				style = key;
 			}
+			return b;
+		};
+		for (const [i, s] of on.entries()) {
+			const b = use(s);
+			if (!b) continue;
 			e.linesStroke(b, s.seed, s.pts, groups[i]);
+			// a cut piece draws its part of the whole stroke's dabs
+			if (s.dabs) e.linesSpan(s.dabs[0], s.dabs[1]);
+			// and erasers of its own erase only it
+			for (const c of s.clip ?? []) {
+				const cb = use(c);
+				if (cb) e.linesClip(cb, c.seed, c.pts);
+			}
 		}
 		if (style !== undefined) this.host.restoreDabStyle();
 	}
@@ -352,7 +373,7 @@ export class LineLayers {
 			if (!this.store.isPlain(d)) continue;
 			const list = this.store.get(d);
 			strokes += strokesBytes(list);
-			count += list.length;
+			count += pickable(list).length;
 		}
 		return { strokes, base: this.host.engine()?.baseBytes(0) ?? 0, count };
 	}
@@ -376,6 +397,7 @@ export class LineLayers {
 		if (!e.linesPush()) return false;
 		// (the first change to an empty cel gives the layer its drawing)
 		const d = this.drawingOf(layer);
+		if (!this.host.isLineLayer(layer)) this.store.setPlain(d);
 		this.store.set(d, after);
 		this.host.step(
 			label,
@@ -387,11 +409,24 @@ export class LineLayers {
 		return true;
 	}
 
+	/**
+	 * Strokes an edit moved (their points changed) go up past the erase marks reaching
+	 * them where they are now: a mark erases where it erased, not a stroke moved under it.
+	 */
+	#settle(before: readonly LineStroke[], next: readonly LineStroke[]) {
+		const was = new Map(before.map((s) => [s.id, s.pts]));
+		const moved = new Set(
+			next.filter((s) => !s.erase && was.has(s.id) && was.get(s.id) !== s.pts).map((s) => s.id)
+		);
+		return moved.size ? detach(next, moved, true) : next;
+	}
+
 	/** One edit, as one undo step: the strokes become `after`. */
-	async edit(layer: number, after: readonly LineStroke[], label: string): Promise<boolean> {
+	async edit(layer: number, next: readonly LineStroke[], label: string): Promise<boolean> {
 		if (this.#live) return false;
 		const before = this.strokesOf(layer);
-		if (after === before) return false;
+		if (next === before) return false;
+		const after = this.#settle(before, next);
 		await this.ready(after);
 		if (!this.#redraw(layer, after, this.#changed(before, after))) return false;
 		return this.#record(layer, before, after, label);
@@ -404,6 +439,7 @@ export class LineLayers {
 			before: this.strokesOf(layer),
 			shown: this.strokesOf(layer)
 		});
+		next = this.#settle(live.before, next);
 		const boxes = this.#changed(live.shown, next);
 		if (!boxes.length) return;
 		if (this.#redraw(layer, next, boxes)) live.shown = this.shown = next;
@@ -499,6 +535,198 @@ export class LineLayers {
 		};
 	}
 
+	// ---- the eraser over editable strokes, kept as erase marks ----
+
+	/** Where a stroke's dabs fall (see `Dabs`; null: its brush isn't loaded). */
+	#dabs(s: LineStroke): Float32Array | null {
+		const e = this.host.engine();
+		const b = this.host.brush(s.brush);
+		if (!e || !b) return null;
+		b.setSizeScale(s.size);
+		b.setOpacity(s.opacity);
+		b.setEraser(!!s.erase);
+		return e.linesDabs(b, s.seed, s.pts);
+	}
+
+	/** Whether redrawing `tiles` of `layer` from `list` gives exactly the pixels there now. */
+	#same(layer: number, list: readonly LineStroke[], tiles: Int32Array): boolean {
+		const e = this.host.engine();
+		if (!e || !tiles.length || !e.linesBegin(layer, tiles)) return false;
+		this.#replay(list, tiles);
+		return e.linesDiff() === 0;
+	}
+
+	/**
+	 * The eraser just ended on `layer`, drawn as a line stroke (`marks`: it and its
+	 * symmetry copies, `erase` set; the engine's step has it). The strokes it cut through
+	 * become pieces, and it stays as an erase mark over them, so redrawn they give
+	 * exactly the pixels the eraser left (checked: if a cut can't be exact, the strokes
+	 * stay whole under the mark, which is). On a plain layer strokes that smudge become
+	 * plain pixels instead. An eraser that reached no editable stroke isn't kept. What to
+	 * undo and redo with the step (undefined: nothing changed).
+	 */
+	erased(layer: number, marks: LineStroke[], limit = Infinity): Effect | undefined {
+		const e = this.host.engine();
+		const d = this.drawingOf(layer);
+		if (!e || !d || !marks.length) return;
+		const line = this.host.isLineLayer(layer);
+		const before = this.store.get(d);
+		const list = this.strokesOf(layer);
+		const [w, h] = [this.host.width(), this.host.height()];
+		const reached = list.filter((s) => !s.erase && marks.some((m) => markReaches(m, s)));
+		if (!reached.length) {
+			// (the pixels under the strokes there, erased as the eraser erased them)
+			if (!line) this.#sink(layer, d, list, marks);
+			return;
+		}
+		// pieces, each drawing its share of the whole stroke's dabs; checked against what
+		// the eraser left (with a soft edge, gone points can't be told: every dab is kept)
+		const tiles = smudgeArea(
+			[...list, ...marks],
+			tilesOf([...marks, ...reached].map(bounds), w, h),
+			w,
+			h
+		);
+		const ready = [...list, ...marks].every((s) => this.host.brush(s.brush));
+		let after: readonly LineStroke[] = [...list, ...marks];
+		// where their dabs fall (the brush trails behind the pen: cuts go by the dabs)
+		const markDabs = ready ? marks.map((m) => this.#dabs(m)) : [];
+		const dabsOf = new Map(
+			ready ? reached.filter((s) => !s.smudge).map((s) => [s, this.#dabs(s)] as const) : []
+		);
+		for (const [core, whole] of [
+			[1, false],
+			[0.6, false],
+			[1, true]
+		] as const) {
+			if (!ready) break;
+			const cut = list.flatMap((s) =>
+				s.erase || s.smudge || !reached.includes(s)
+					? [s]
+					: (cutStroke(s, marks, core, whole, {
+							stroke: dabsOf.get(s) ?? null,
+							marks: markDabs
+						}) ?? [s])
+			);
+			if (cut.length === list.length && cut.every((s, i) => s === list[i])) break;
+			const next = [...cut, ...marks];
+			if (this.#same(layer, next, tiles)) {
+				after = next;
+				break;
+			}
+		}
+		if (!line) {
+			this.store.setPlain(d);
+			// strokes that smudge can't be cut exactly: they become plain pixels
+			const smudged = after.flatMap((s, i) => (s.smudge && reached.includes(s) ? [i] : []));
+			if (smudged.length) after = this.#bake(layer, d, after, smudged) ?? after;
+			const over = overLimit(after, limit);
+			if (over.length) after = this.#bake(layer, d, after, over) ?? after;
+		}
+		this.store.set(d, after);
+		this.#keepSelection();
+		return {
+			undo: () => this.store.set(d, before),
+			redo: () => this.store.set(d, after)
+		};
+	}
+
+	/**
+	 * Erase marks that reached no editable stroke on a plain layer: the pixels under the
+	 * strokes (the base) take what they erased, and tiles no stroke reaches leave it (in
+	 * the last undo step). Exact: no stroke has paint where they erased.
+	 */
+	#sink(layer: number, d: number, list: readonly LineStroke[], marks: readonly LineStroke[]) {
+		const e = this.host.engine();
+		if (!e) return;
+		const keep = new Set(list.flatMap((s) => strokeTiles(s)));
+		const all = [...new Set(marks.flatMap((m) => strokeTiles(m)))];
+		const pairs = (keys: string[]) => new Int32Array(keys.flatMap((k) => k.split(',').map(Number)));
+		const under = all.filter((k) => keep.has(k));
+		if (
+			under.length &&
+			marks.every((m) => this.host.brush(m.brush)) &&
+			e.baseBegin(d, layer, pairs(under))
+		) {
+			this.#replay(marks, pairs(under));
+			e.linesCommit();
+		}
+		const drop = all.filter((k) => !keep.has(k));
+		if (drop.length) e.baseDrop(d, pairs(drop));
+	}
+
+	// ---- copy and paste ----
+
+	/**
+	 * The selected strokes, to copy: the erase marks over them come along as their own
+	 * (so cut pieces keep their cut ends wherever they're pasted).
+	 */
+	copySelected(): LineStroke[] {
+		const s = this.sel;
+		if (!s) return [];
+		const ids = new Set(s.ids);
+		return detach(this.strokesOf(s.layer), ids).filter((x) => ids.has(x.id) && !x.erase);
+	}
+
+	/**
+	 * Strokes pasted onto `layer` (a line layer, or a plain one: they stay editable up to
+	 * `limit`), where they were copied from (a little further each time copies are
+	 * already there), as one undo step; then they're selected. False if they can't be.
+	 */
+	paste(
+		layer: number,
+		strokes: readonly LineStroke[],
+		limit = Infinity
+	): boolean | Promise<boolean> {
+		if (this.#live || !strokes.length) return false;
+		// (brushes loaded already: done now; else once they are)
+		const need = [...strokes, ...strokes.flatMap((s) => s.clip ?? [])];
+		if (need.every((s) => this.host.brush(s.brush))) return this.#paste(layer, strokes, limit);
+		return this.ready(need).then(() => this.#paste(layer, strokes, limit));
+	}
+
+	#paste(layer: number, strokes: readonly LineStroke[], limit: number): boolean {
+		if (this.#live) return false;
+		const line = this.host.isLineLayer(layer);
+		const list = this.strokesOf(layer);
+		const step = pasteOffset(list, strokes);
+		const copies = pasteCopies(strokes, step, step);
+		const d0 = this.drawingOf(layer);
+		const was = this.store.get(d0);
+		const plain = this.store.isPlain(d0);
+		const after = [...list, ...copies];
+		if (!this.#redraw(layer, after, copies.map(bounds))) return false;
+		if (!this.#record(layer, was, after, 'Paste lines')) return false;
+		const d = this.drawingOf(layer);
+		let kept: readonly LineStroke[] = after;
+		if (!line) {
+			// past the limit, the oldest become plain pixels (with the paste)
+			const over = overLimit(after, limit);
+			if (over.length) kept = this.#bake(layer, d, after, over) ?? after;
+			if (kept !== after) this.store.set(d, kept);
+			this.host.attach({
+				undo: () => {
+					this.store.setPlain(d, plain && d === d0);
+					this.store.set(d, was);
+				},
+				redo: () => {
+					this.store.setPlain(d);
+					this.store.set(d, kept);
+				}
+			});
+		}
+		const ids = new Set(kept.map((s) => s.id));
+		const picked = copies.filter((s) => ids.has(s.id));
+		const p = picked.find((s) => s.link && picked.some((t) => t !== s && t.link?.g === s.link?.g));
+		this.select(
+			layer,
+			picked.map((s) => s.id),
+			p?.id
+		);
+		this.host.notify();
+		return true;
+	}
+
 	// ---- the selection ----
 
 	/** the selected strokes as they are now */
@@ -576,16 +804,23 @@ export class LineLayers {
 			: null;
 	}
 
-	/** After undo, a frame change…: strokes that went drop out of the selection. */
+	/**
+	 * After undo, a frame change…: strokes that went drop out of the selection. Another
+	 * drawing showing (a frame change) keeps the strokes it has too: the same drawing held
+	 * over frames, or a copy of it (a duplicated frame has the same strokes).
+	 */
 	#keepSelection() {
 		const s = this.sel;
 		if (!s) return;
-		if (this.drawingOf(s.layer) !== s.drawing) return void (this.sel = null);
-		const here = new Set(this.store.get(s.drawing).map((x) => x.id));
+		const d = this.drawingOf(s.layer);
+		if (!d) return void (this.sel = null);
+		const here = new Set(pickable(this.strokesOf(s.layer)).map((x) => x.id));
 		const ids = s.ids.filter((id) => here.has(id));
-		if (ids.length !== s.ids.length) {
+		if (ids.length !== s.ids.length || d !== s.drawing) {
 			const primary = s.primary && ids.includes(s.primary) ? s.primary : undefined;
-			this.sel = ids.length ? { layer: s.layer, drawing: s.drawing, ids, primary } : null;
+			this.sel = ids.length
+				? { layer: s.layer, drawing: d, ids, ...(primary ? { primary } : {}) }
+				: null;
 		}
 	}
 	check() {
@@ -641,17 +876,24 @@ export class LineLayers {
 			const box = this.selBox();
 			if (hit === 4 && box) {
 				const c: Pt = [(box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2];
-				this.#drag = { kind: 'rotate', start: [x, y], c, before: list, ids };
+				this.#drag = { kind: 'rotate', start: [x, y], c, before: detach(list, ids), ids };
 				return;
 			}
 			if (hit >= 0 && box) {
-				this.#drag = { kind: 'scale', corner: hit, box, before: list, ids };
+				this.#drag = { kind: 'scale', corner: hit, box, before: detach(list, ids), ids };
 				return;
 			}
 			const ph = this.pointHandles();
 			const pi = ph ? ph.pts.findIndex(near) : -1;
 			if (ph && pi >= 0) {
-				this.#drag = { kind: 'point', id: ph.id, hs: ph.hs, h: pi, start: [x, y], before: list };
+				this.#drag = {
+					kind: 'point',
+					id: ph.id,
+					hs: ph.hs,
+					h: pi,
+					start: [x, y],
+					before: detach(list, new Set(this.sel?.ids ?? [ph.id]))
+				};
 				return;
 			}
 		}
@@ -673,13 +915,13 @@ export class LineLayers {
 				ids.clear();
 				for (const g of group) ids.add(g);
 			}
-			this.#drag = { kind: 'move', start: [x, y], before: list, ids };
+			this.#drag = { kind: 'move', start: [x, y], before: detach(list, ids), ids };
 			return;
 		}
 		// inside the selection's box: move it
 		const b = this.selBox();
 		if (!shift && b && x >= b.x0 && x <= b.x1 && y >= b.y0 && y <= b.y1 && ids.size) {
-			this.#drag = { kind: 'move', start: [x, y], before: list, ids };
+			this.#drag = { kind: 'move', start: [x, y], before: detach(list, ids), ids };
 			return;
 		}
 		if (!shift) this.sel = null;
@@ -784,7 +1026,8 @@ export class LineLayers {
 		const s = this.sel;
 		if (!s || this.#live) return;
 		const ids = new Set(s.ids);
-		const list = this.strokesOf(s.layer);
+		// (erase marks over them go along, erasing only them)
+		const list = detach(this.strokesOf(s.layer), ids);
 		const p = this.primary();
 		const m: Affine = [1, 0, 0, 1, dx, dy];
 		void this.edit(
@@ -799,7 +1042,7 @@ export class LineLayers {
 	}
 
 	/** Delete the selected strokes (one step). */
-	deleteSelected() {
+	deleteSelected(label = 'Delete lines') {
 		const s = this.sel;
 		if (!s || this.#live) return false;
 		const ids = new Set(s.ids);
@@ -807,7 +1050,7 @@ export class LineLayers {
 		const after = list.filter((x) => !ids.has(x.id));
 		if (after.length === list.length) return false;
 		this.sel = null;
-		void this.edit(s.layer, after, 'Delete lines');
+		void this.edit(s.layer, after, label);
 		return true;
 	}
 

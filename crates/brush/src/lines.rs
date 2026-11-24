@@ -241,6 +241,7 @@ pub(crate) fn moved_keys(
 }
 
 /// The tiles being redrawn: dabs that touch none of them aren't drawn at all.
+#[derive(Clone)]
 pub(crate) struct Area {
     tiles: HashSet<TileKey>,
     /// the tiles' bounds (inclusive), to turn most dabs away at once
@@ -318,12 +319,28 @@ pub(crate) struct XfStash {
     pub(crate) without: TileMap,
 }
 
-/// A stroke waiting in a group: its brush, seed, points and dab style.
+/// A stroke waiting in a group: its brush, seed, points and dab style; the dabs it
+/// draws (a piece: `lines_span`) and the erasers it carries (`lines_clip`).
 struct Queued {
     brush: Brush,
     seed: u32,
     pts: Vec<f32>,
     style: Option<std::sync::Arc<crate::texture::DabStyle>>,
+    span: Option<(u32, u32)>,
+    clips: Vec<Clip>,
+}
+
+/// An eraser stroke that erases only the stroke carrying it (see `lines_clip`).
+struct Clip {
+    brush: Brush,
+    seed: u32,
+    pts: Vec<f32>,
+    style: Option<std::sync::Arc<crate::texture::DabStyle>>,
+}
+
+/// Point `i` of `pts` (6 numbers a point) into `brush` on `s`.
+fn point_to(brush: &Brush, st: &mut BrushState, s: &mut UndoSurface, p: &[f32]) {
+    brush.stroke_to(st, s, p[0], p[1], p[2], p[3], p[4], p[5] as f64);
 }
 
 impl Redraw {
@@ -342,33 +359,80 @@ impl Redraw {
     }
 
     /// Replay the strokes waiting: point by point, each stroke in turn (as symmetry
-    /// paints its copies), then each finished.
+    /// paints its copies), then each finished. A piece draws only its span of the
+    /// stroke's dabs (the rest move its brush as they did). A stroke carrying erasers
+    /// is painted on its own (see `clipped`).
     fn flush(&mut self) {
         let queue = std::mem::take(&mut self.queue);
         self.queue_group = 0;
+        if queue.iter().any(|q| !q.clips.is_empty()) {
+            for q in &queue {
+                self.clipped(q);
+            }
+            return;
+        }
         let mut states: Vec<BrushState> = queue.iter().map(|q| BrushState::new(q.seed)).collect();
+        let mut counts = vec![0u32; queue.len()];
         let most = queue.iter().map(|q| q.pts.len() / 6).max().unwrap_or(0);
+        let s = &mut self.scratch;
         for i in 0..most {
-            for (q, st) in queue.iter().zip(states.iter_mut()) {
+            for (k, (q, st)) in queue.iter().zip(states.iter_mut()).enumerate() {
                 let Some(p) = q.pts.get(i * 6..i * 6 + 6) else {
                     continue;
                 };
-                self.scratch.style = q.style.clone();
-                q.brush.stroke_to(
-                    st,
-                    &mut self.scratch,
-                    p[0],
-                    p[1],
-                    p[2],
-                    p[3],
-                    p[4],
-                    p[5] as f64,
-                );
+                s.style = q.style.clone();
+                (s.span, s.dab_no) = (q.span, counts[k]);
+                point_to(&q.brush, st, s, p);
+                counts[k] = s.dab_no;
             }
         }
-        for (q, st) in queue.iter().zip(states.iter_mut()) {
-            self.scratch.style = q.style.clone();
-            q.brush.finish_stroke(st, &mut self.scratch);
+        for (k, (q, st)) in queue.iter().zip(states.iter_mut()).enumerate() {
+            s.style = q.style.clone();
+            (s.span, s.dab_no) = (q.span, counts[k]);
+            q.brush.finish_stroke(st, s);
+        }
+        s.span = None;
+    }
+
+    /// A stroke carrying erasers: painted alone (on nothing), its erasers erase it
+    /// there, and the result goes over the tiles being redrawn.
+    fn clipped(&mut self, q: &Queued) {
+        let mut own = UndoSurface {
+            style: q.style.clone(),
+            only: self.scratch.only.clone(),
+            fixed_sampling: true,
+            ..Default::default()
+        };
+        let mut st = BrushState::new(q.seed);
+        own.span = q.span;
+        for p in q.pts.as_chunks::<6>().0 {
+            point_to(&q.brush, &mut st, &mut own, p);
+        }
+        q.brush.finish_stroke(&mut st, &mut own);
+        own.span = None;
+        for c in &q.clips {
+            own.style = c.style.clone();
+            let mut st = BrushState::new(c.seed);
+            for p in c.pts.as_chunks::<6>().0 {
+                point_to(&c.brush, &mut st, &mut own, p);
+            }
+            c.brush.finish_stroke(&mut st, &mut own);
+        }
+        for (k, t) in own.tiles {
+            if self
+                .scratch
+                .only
+                .as_ref()
+                .is_some_and(|a| !a.tiles.contains(&k))
+            {
+                continue;
+            }
+            let dst = self.scratch.tiles.entry(k).or_insert_with(empty_tile);
+            for (d, s) in dst.iter_mut().flatten().zip(t.iter().flatten()) {
+                if s[3] > 0 {
+                    *d = crate::merge_pixel(*d, *s, 1.0, crate::Blend::Normal);
+                }
+            }
         }
     }
 }
@@ -751,7 +815,9 @@ impl Painter {
     /// Replay one whole stroke into the redraw: `pts` is x, y, pressure, x tilt,
     /// y tilt, seconds since the previous point (6 numbers a point; a partial point at
     /// the end is ignored), painted with `brush`, the dab style set now and a brush
-    /// state seeded with `seed`. Nothing without a redraw begun.
+    /// state seeded with `seed`. Nothing without a redraw begun. (It's painted when the
+    /// next stroke comes or the redraw ends, so `lines_span` and `lines_clip` can still
+    /// change it.)
     ///
     /// `group` (0: none) gathers strokes made together (symmetry's copies, given one
     /// after the other with the same number): they're replayed point by point
@@ -766,15 +832,108 @@ impl Painter {
             r.flush();
         }
         r.queue_group = group;
+        let pts = pts[..pts.len() / 6 * 6].to_vec();
         r.queue.push(Queued {
             brush: brush.clone(),
             seed,
-            pts: pts[..pts.len() / 6 * 6].to_vec(),
+            pts,
             style,
+            span: None,
+            clips: Vec::new(),
         });
-        if group == 0 {
-            r.flush();
+    }
+
+    /// The stroke just given (`lines_stroke`) is a piece of a stroke the eraser cut:
+    /// only its dabs `from..to` (counted in the order it paints them, as `lines_dabs`
+    /// lists them) are drawn; the others move the brush as they did, so the dabs fall
+    /// exactly where the whole stroke put them. (For brushes that don't smudge: one
+    /// that does reads paint the dabs not drawn never put down.)
+    pub fn lines_span(&mut self, from: u32, to: u32) {
+        if let Some(q) = self.line_redraw.as_mut().and_then(|r| r.queue.last_mut()) {
+            q.span = Some((from, to));
         }
+    }
+
+    /// The stroke just given (`lines_stroke`) carries an eraser stroke (`brush` set to
+    /// erase, the dab style set now, `seed` and `pts` as `lines_stroke`'s) that erases
+    /// only it: it's painted on its own, erased, then laid over the rest (a line cut
+    /// by the eraser and moved away keeps its cut ends).
+    pub fn lines_clip(&mut self, brush: &Brush, seed: u32, pts: &[f32]) {
+        let style = self.style.clone();
+        if let Some(q) = self.line_redraw.as_mut().and_then(|r| r.queue.last_mut()) {
+            q.clips.push(Clip {
+                brush: brush.clone(),
+                seed,
+                pts: pts[..pts.len() / 6 * 6].to_vec(),
+                style,
+            });
+        }
+    }
+
+    /// Where a stroke's dabs fall (`brush`, `seed`, `pts` as `lines_stroke` takes
+    /// them), nothing drawn: for each dab, the point whose stroke-to painted it, then
+    /// its x, y and radius (4 numbers a dab). Brushes trail behind the pen, so a point's
+    /// dabs can lie well back along the line (the eraser's cuts go by them). For brushes
+    /// that don't smudge (one that does would read paint this doesn't have).
+    pub fn lines_dabs(&self, brush: &Brush, seed: u32, pts: &[f32]) -> Vec<f32> {
+        let mut s = UndoSurface {
+            probe: Some(Vec::new()),
+            fixed_sampling: true,
+            ..Default::default()
+        };
+        let mut st = BrushState::new(seed);
+        let mut out = Vec::new();
+        let flush = |s: &mut UndoSurface, i: usize, out: &mut Vec<f32>| {
+            for d in s
+                .probe
+                .as_mut()
+                .map(std::mem::take)
+                .unwrap_or_default()
+                .chunks(3)
+            {
+                out.extend([i as f32, d[0], d[1], d[2]]);
+            }
+        };
+        let points = pts.as_chunks::<6>().0;
+        for (i, p) in points.iter().enumerate() {
+            point_to(brush, &mut st, &mut s, p);
+            flush(&mut s, i, &mut out);
+        }
+        brush.finish_stroke(&mut st, &mut s);
+        flush(&mut s, points.len().saturating_sub(1), &mut out);
+        out
+    }
+
+    /// End the redraw begun with `lines_begin` without keeping it: how many pixels of
+    /// its tiles come out other than the layer has them now (0: the strokes given
+    /// paint exactly what's there). Nothing changes.
+    pub fn lines_diff(&mut self) -> u32 {
+        let Some(mut r) = self.line_redraw.take() else {
+            return u32::MAX;
+        };
+        r.flush();
+        let Some(area) = r.scratch.only.take() else {
+            return u32::MAX;
+        };
+        if r.into_base.is_some() || r.into_stash {
+            return u32::MAX;
+        }
+        let Some(l) = self.index_of(r.layer).map(|i| &self.layers[i]) else {
+            return u32::MAX;
+        };
+        let clear = empty_tile();
+        let mut n = 0u32;
+        for k in &area.tiles {
+            let a = r.scratch.tiles.get(k).map_or(&*clear, |t| &**t);
+            let b = l.surface.tiles.get(k).map_or(&*clear, |t| &**t);
+            n += a
+                .iter()
+                .flatten()
+                .zip(b.iter().flatten())
+                .filter(|(x, y)| x != y && (x[3] != 0 || y[3] != 0))
+                .count() as u32;
+        }
+        n
     }
 
     /// The redrawn tiles replace the layer's (fully transparent ones are dropped).
@@ -2170,5 +2329,180 @@ mod tests {
             redraw(&mut p, a, &tiles, &b, &list);
             eprintln!("200 strokes × 150 points into {name}: {:?}", t.elapsed());
         }
+    }
+
+    // ---- the eraser cutting editable strokes ----
+
+    /// a round eraser
+    fn rubber(radius: f32, hardness: f32) -> Brush {
+        let mut b = Brush::new();
+        b.get_mut(BrushSetting::Radius).base_value = radius.ln();
+        b.get_mut(BrushSetting::Opaque).base_value = 1.0;
+        b.get_mut(BrushSetting::Hardness).base_value = hardness;
+        b.get_mut(BrushSetting::DabsPerActualRadius).base_value = 3.0;
+        b.get_mut(BrushSetting::Eraser).base_value = 1.0;
+        b
+    }
+
+    /// a vertical eraser stroke at x, from y0 to y1
+    fn down_at(x: f32, y0: f32, y1: f32) -> Vec<f32> {
+        (0..30)
+            .flat_map(|i| {
+                let t = i as f32 / 29.0;
+                [x, y0 + (y1 - y0) * t, 0.5 + 0.5 * t, 0.0, 0.0, 0.01]
+            })
+            .collect()
+    }
+
+    /// pixels of `a` and `b` farther apart than `tol` in any channel
+    fn differing(a: &TileMap, b: &TileMap, tol: u16) -> usize {
+        let clear = empty_tile();
+        let mut k: Vec<TileKey> = a.keys().chain(b.keys()).copied().collect();
+        k.sort_unstable();
+        k.dedup();
+        k.iter()
+            .map(|k| {
+                let (x, y) = (a.get(k).unwrap_or(&clear), b.get(k).unwrap_or(&clear));
+                x.iter()
+                    .flatten()
+                    .zip(y.iter().flatten())
+                    .filter(|(p, q)| p.iter().zip(q.iter()).any(|(u, v)| u.abs_diff(*v) > tol))
+                    .count()
+            })
+            .sum()
+    }
+
+    #[test]
+    fn a_stroke_replayed_in_pieces_paints_what_it_did_whole() {
+        let b = pen();
+        let mut p = Painter::new(300, 200);
+        let layer = p.active_layer();
+        let a = wave(20.0, 280.0, 100.0);
+        live(&mut p, &b, 7, &a);
+        let want = painted(&p, layer);
+        // where its dabs fall: each once, along the line, from the points that painted them
+        let dabs = p.lines_dabs(&b, 7, &a);
+        let n = (dabs.len() / 4) as u32;
+        assert!(n > 60);
+        for d in dabs.as_chunks::<4>().0 {
+            let i = d[0] as usize;
+            assert!(i < 60);
+            assert!((d[1] - a[i * 6]).abs() < 20.0 && (d[2] - a[i * 6 + 1]).abs() < 40.0);
+        }
+        // pieces: every dab once, where it was
+        let (k1, k2) = (n / 3, n * 2 / 3);
+        assert!(p.lines_begin(layer, &all()));
+        for (from, to) in [(0, k1), (k1, k2), (k2, n)] {
+            p.lines_stroke(&b, 7, &a, 0);
+            p.lines_span(from, to);
+        }
+        assert_eq!(p.lines_diff(), 0);
+        // and a piece left out leaves a gap
+        assert!(p.lines_begin(layer, &all()));
+        p.lines_stroke(&b, 7, &a, 0);
+        p.lines_span(0, k1);
+        p.lines_stroke(&b, 7, &a, 0);
+        p.lines_span(k2, n);
+        assert!(p.lines_diff() > 0);
+        assert_eq!(painted(&p, layer), want, "nothing changed");
+    }
+
+    #[test]
+    fn an_eraser_kept_as_a_stroke_replays_exactly_over_strokes_and_paint() {
+        let b = pen();
+        for (hard, opaque) in [(0.95, 1.0), (0.3, 1.0), (0.6, 0.5)] {
+            let mut e = rubber(9.0, hard);
+            e.get_mut(BrushSetting::Opaque).base_value = opaque;
+            for lines in [false, true] {
+                let mut p = Painter::new(300, 200);
+                let layer = if lines {
+                    p.add_line_layer("")
+                } else {
+                    p.active_layer()
+                };
+                if !lines {
+                    plain(&mut p, &b, 100.0);
+                }
+                let a = wave(20.0, 280.0, 90.0);
+                let c = wave(60.0, 280.0, 110.0);
+                live(&mut p, &b, 1, &a);
+                live(&mut p, &b, 2, &c);
+                let cut = down_at(150.0, 40.0, 160.0);
+                live(&mut p, &e, 3, &cut);
+                assert_eq!(is_lines(&p, layer), lines, "a line layer stays one");
+                // the strokes, then the eraser: what's there
+                assert!(p.lines_begin(layer, &all()));
+                p.lines_stroke(&b, 1, &a, 0);
+                p.lines_stroke(&b, 2, &c, 0);
+                p.lines_stroke(&e, 3, &cut, 0);
+                assert_eq!(p.lines_diff(), 0, "hardness {hard}, opacity {opaque}");
+                // the strokes cut in two (every dab kept), then the eraser: the same
+                assert!(p.lines_begin(layer, &all()));
+                for (seed, pts) in [(1, &a), (2, &c)] {
+                    let n = (p.lines_dabs(&b, seed, pts).len() / 4) as u32;
+                    p.lines_stroke(&b, seed, pts, 0);
+                    p.lines_span(0, n / 2);
+                    p.lines_stroke(&b, seed, pts, 0);
+                    p.lines_span(n / 2, n);
+                }
+                p.lines_stroke(&e, 3, &cut, 0);
+                assert_eq!(p.lines_diff(), 0);
+                // without the eraser: not the same
+                assert!(p.lines_begin(layer, &all()));
+                p.lines_stroke(&b, 1, &a, 0);
+                p.lines_stroke(&b, 2, &c, 0);
+                assert!(p.lines_diff() > 0);
+            }
+        }
+    }
+
+    #[test]
+    fn an_eraser_a_stroke_carries_erases_only_it_and_moves_with_it() {
+        let b = pen();
+        let e = rubber(9.0, 0.9);
+        let a = wave(20.0, 280.0, 100.0);
+        let cut = down_at(150.0, 40.0, 160.0);
+        // on its own, erased: as the stroke then the eraser (but for rounding)
+        let mut p = Painter::new(300, 200);
+        let layer = p.add_line_layer("");
+        live(&mut p, &b, 1, &a);
+        live(&mut p, &e, 3, &cut);
+        let want = painted(&p, layer);
+        let mut q = Painter::new(300, 200);
+        let ql = q.add_line_layer("");
+        assert!(q.lines_begin(ql, &all()));
+        q.lines_stroke(&b, 1, &a, 0);
+        q.lines_clip(&e, 3, &cut);
+        assert!(q.lines_commit());
+        assert_eq!(differing(&want, &painted(&q, ql), 2), 0);
+        // over other paint: only the stroke is erased
+        let mut r = Painter::new(300, 200);
+        let rl = r.active_layer();
+        plain(&mut r, &b, 100.0);
+        let under = painted(&r, rl);
+        assert!(r.lines_begin(rl, &all()));
+        r.lines_stroke(&b, 1, &shifted(&a, 0.0, 300.0), 0);
+        r.lines_clip(&e, 3, &cut);
+        assert!(r.lines_commit());
+        assert_eq!(
+            painted(&r, rl),
+            under,
+            "nothing of the plain line is erased"
+        );
+        // moved, it keeps its cut where it went
+        let mut m = Painter::new(300, 200);
+        let ml = m.add_line_layer("");
+        assert!(m.lines_begin(ml, &all()));
+        m.lines_stroke(&b, 1, &shifted(&a, 10.0, 20.0), 0);
+        m.lines_clip(&e, 3, &shifted(&cut, 10.0, 20.0));
+        assert!(m.lines_commit());
+        let moved = painted(&m, ml);
+        let alpha = |x: usize, y: usize| {
+            moved
+                .get(&((x / TILE_SIZE) as i32, (y / TILE_SIZE) as i32))
+                .map_or(0, |t| t[y % TILE_SIZE][x % TILE_SIZE][3])
+        };
+        assert!((60..180).all(|y| alpha(160, y) == 0), "the cut moved along");
+        assert!(!moved.is_empty());
     }
 }
