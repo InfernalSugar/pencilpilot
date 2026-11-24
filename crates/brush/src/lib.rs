@@ -374,6 +374,10 @@ struct TransformSession {
     /// after a warp: the box (inclusive) and which of its pixels the lifted paint
     /// now covers, row by row (the selection follows it)
     cover: Option<(PixelBox, Vec<bool>)>,
+    /// lifted strokes (see `lines_lift_begin`): `original` and `base` stay empty and
+    /// each tile is kept here as it was the first time the float reaches it (None:
+    /// there was none), so only the tiles a drag passes over are copied
+    under: Option<HashMap<TileKey, Option<Box<TilePixels>>>>,
 }
 
 /// A box of canvas pixels: (x0, y0, x1, y1), inclusive.
@@ -566,6 +570,8 @@ pub struct Painter {
     line_pending: Option<lines::Pending>,
     /// the last transform kept, for its editable strokes to follow (see `lines`)
     xf_stash: Option<Box<lines::XfStash>>,
+    /// strokes lifted to slide as pixels while they're dragged (see `lines_lift_begin`)
+    line_lift: Option<Box<TransformSession>>,
     /// editable strokes on plain layers: per drawing, the pixels under them (see [`lines`])
     bases: HashMap<u32, lines::Base>,
     /// base tiles other paint changed (their strokes must become plain pixels): the app
@@ -614,6 +620,7 @@ impl Painter {
             line_redraw: None,
             line_pending: None,
             xf_stash: None,
+            line_lift: None,
             bases: HashMap::new(),
             tainted: Vec::new(),
             base_changed: HashMap::new(),
@@ -1200,6 +1207,7 @@ impl Painter {
             && self.adjusting.is_none()
             && self.text_editing.is_none()
             && self.line_redraw.is_none()
+            && self.line_lift.is_none()
     }
 
     fn stop_mask_editing(&mut self) {
@@ -2778,6 +2786,7 @@ impl Painter {
             last: None,
             m: H_IDENTITY,
             cover: None,
+            under: None,
         }));
         self.transform_preview_h(H_IDENTITY);
         vec![x0 as f32, y0 as f32, (x1 + 1) as f32, (y1 + 1) as f32]
@@ -2804,8 +2813,14 @@ impl Painter {
         let Some(mut t) = self.transform.take() else {
             return false;
         };
+        let ok = self.preview_float(&mut t, hm);
+        self.transform = Some(t);
+        ok
+    }
+
+    /// `transform_preview_h` on a session `t` (a transform's, or lifted strokes').
+    pub(crate) fn preview_float(&mut self, t: &mut TransformSession, hm: [f32; 9]) -> bool {
         let Some(inv) = h_invert(hm) else {
-            self.transform = Some(t);
             return false;
         };
         let (fx0, fy0) = (t.fx0 as f32, t.fy0 as f32);
@@ -2816,7 +2831,6 @@ impl Painter {
             .enumerate()
         {
             let Some(q) = h_apply(hm, x, y) else {
-                self.transform = Some(t);
                 return false;
             };
             quad[k] = q;
@@ -2837,11 +2851,22 @@ impl Painter {
     /// in canvas px). Each cell is drawn with its own projective map, so a fine
     /// grid gives a smooth bend.
     pub fn transform_preview_mesh(&mut self, nodes: &[f32], cols: usize, rows: usize) -> bool {
-        let Some(t) = self.transform.take() else {
+        let Some(mut t) = self.transform.take() else {
             return false;
         };
+        let ok = self.preview_mesh(&mut t, nodes, cols, rows);
+        self.transform = Some(t);
+        ok
+    }
+
+    fn preview_mesh(
+        &mut self,
+        t: &mut TransformSession,
+        nodes: &[f32],
+        cols: usize,
+        rows: usize,
+    ) -> bool {
         if cols == 0 || rows == 0 || nodes.len() != 2 * (cols + 1) * (rows + 1) {
-            self.transform = Some(t);
             return false;
         }
         let (fx0, fy0) = (t.fx0 as f32, t.fy0 as f32);
@@ -2883,7 +2908,6 @@ impl Painter {
             }
         }
         if pieces.is_empty() {
-            self.transform = Some(t);
             return false;
         }
         self.render_float(t, pieces, true)
@@ -2895,12 +2919,7 @@ impl Painter {
     /// paint, for the selection to follow a warp.
     // pixel loops index tiles by (row, col) and map them to canvas coordinates
     #[allow(clippy::needless_range_loop)]
-    fn render_float(
-        &mut self,
-        mut t: Box<TransformSession>,
-        pieces: Vec<Piece>,
-        track: bool,
-    ) -> bool {
+    fn render_float(&mut self, t: &mut TransformSession, pieces: Vec<Piece>, track: bool) -> bool {
         let (w, h) = (self.width as i64, self.height as i64);
         let ts = TILE_SIZE as i64;
         let clip =
@@ -2940,6 +2959,10 @@ impl Painter {
                 float[yi as usize * fw + xi as usize].map(|v| v as f32)
             };
             let (x0, y0) = (x0 as i64, y0 as i64);
+            // (moved by whole pixels: the pixel itself)
+            if tx == 0.0 && ty == 0.0 {
+                return get(x0, y0).map(|v| v as u16);
+            }
             let (p00, p10, p01, p11) = (
                 get(x0, y0),
                 get(x0 + 1, y0),
@@ -2984,14 +3007,21 @@ impl Painter {
             )
         });
         let Some(li) = self.index_of(t.layer) else {
-            self.transform = Some(t);
             return false;
         };
         let tiles = &mut self.layers[li].surface.tiles;
         for ty in region.1.div_euclid(ts)..=region.3.div_euclid(ts) {
             for tx in region.0.div_euclid(ts)..=region.2.div_euclid(ts) {
                 let key = (tx as i32, ty as i32);
-                let mut tile = t.base.get(&key).cloned().unwrap_or_else(empty_tile);
+                let under = match t.under.as_mut() {
+                    // (lifted strokes: the tile as it was before the float first reached it)
+                    Some(u) => u
+                        .entry(key)
+                        .or_insert_with(|| tiles.get(&key).cloned())
+                        .as_ref(),
+                    None => t.base.get(&key),
+                };
+                let mut tile = under.cloned().unwrap_or_else(empty_tile);
                 for py in 0..TILE_SIZE {
                     for px in 0..TILE_SIZE {
                         let (cx, cy) = (tx * ts + px as i64, ty * ts + py as i64);
@@ -3014,7 +3044,6 @@ impl Painter {
                 self.dirty.insert(key);
             }
         }
-        self.transform = Some(t);
         true
     }
 

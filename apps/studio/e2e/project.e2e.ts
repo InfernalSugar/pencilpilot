@@ -2702,6 +2702,34 @@ test('layer style: an outline, undone in one step, kept in the file', async ({ p
 	await expect.poll(async () => Math.abs((await red()) - outlined)).toBeLessThan(outlined * 0.02);
 });
 
+test("text: opening a project with the text tool on doesn't open its text (keys stay keys)", async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	await page.keyboard.press('t');
+	const b = (await canvas(page).boundingBox())!;
+	await page.mouse.click(b.x + b.width * 0.3, b.y + b.height * 0.4);
+	const typed = page.getByRole('textbox', { name: 'Text', exact: true });
+	await expect(typed).toBeFocused();
+	await page.keyboard.type('Hello there');
+	await page.getByRole('group', { name: 'Text' }).getByRole('button', { name: 'Done' }).click();
+	await expect(page.getByTestId('text-frame')).toHaveCount(0);
+	await page.keyboard.press('Control+s');
+	await expect(page.getByTestId('project-name')).toHaveText('Walk cycle', { timeout: 20_000 });
+	await page.keyboard.press('Control+o');
+	// (the project's layers in: a moment for anything that would open the text)
+	await expect(page.getByRole('tab', { name: /Layers/ })).toContainText('2 layers');
+	await page.waitForTimeout(500);
+	await expect(page.getByTestId('text-frame')).toHaveCount(0);
+	await expect(typed).toHaveCount(0);
+	await page.keyboard.type('tx');
+	// the text as it was, opened on purpose
+	await page.keyboard.press('t');
+	await page.getByRole('button', { name: /Change the text of/ }).click();
+	await expect(typed).toHaveValue('Hello there');
+});
+
 test('text: typed on the canvas, one undo step, changed later, kept in the file, rasterized', async ({
 	page
 }) => {
@@ -3457,6 +3485,59 @@ test('the rail sliders: bars that fill with size and opacity, set by a press, a 
 	const small = parseInt((await size.getAttribute('aria-valuetext'))!);
 	await page.mouse.click(sb.x + sb.width / 2, sb.y + 2);
 	expect(parseInt((await size.getAttribute('aria-valuetext'))!)).toBeGreaterThan(small * 4);
+});
+
+test('line layers: a slow drag lifts the strokes it moves and draws them exactly after', async ({
+	page
+}) => {
+	// (every drag counts as slow: the strokes are lifted from the first move)
+	await page.addInitScript(() => localStorage.setItem('pp.liftAfterMs', '-1'));
+	await stubTauri(page);
+	await ready(page);
+	const layersTab = page.getByRole('tab', { name: /Layers/ });
+	await layersTab.click();
+	await page.getByRole('button', { name: 'New line layer' }).click();
+	await expect(layersTab).toContainText('2 layers');
+	for (let i = 0; i < 4; i++) await page.keyboard.press(']');
+	let b = (await canvas(page).boundingBox())!;
+	const at = (x: number, y: number) => [b.x + b.width * x, b.y + b.height * y] as const;
+	const line = async (y: number) => {
+		await page.mouse.move(...at(0.2, y));
+		await page.mouse.down();
+		await page.mouse.move(...at(0.8, y), { steps: 20 });
+		await page.mouse.up();
+	};
+	await line(0.3);
+	await line(0.6);
+	await page.waitForTimeout(300);
+	const upper = await ink(page, 0.25, 0.35);
+	const lower = await ink(page, 0.55, 0.65);
+	expect(upper).toBeGreaterThan(200);
+
+	await page.keyboard.press('Shift+V');
+	await page.waitForTimeout(100);
+	b = (await canvas(page).boundingBox())!;
+	await page.mouse.click(...at(0.5, 0.3));
+	await expect(page.getByTestId('line-selection')).toHaveAttribute('data-count', '1');
+	await page.mouse.move(...at(0.5, 0.3));
+	await page.mouse.down();
+	await page.mouse.move(...at(0.5, 0.38), { steps: 4 });
+	await page.mouse.move(...at(0.5, 0.45), { steps: 4 });
+	// while held: the stroke slides there, the other stays as it was
+	await expect.poll(() => ink(page, 0.25, 0.35)).toBe(0);
+	await expect.poll(() => ink(page, 0.4, 0.5)).toBeGreaterThan(upper * 0.8);
+	expect(await ink(page, 0.55, 0.65)).toBe(lower);
+	await page.mouse.up();
+	// let go: drawn exactly there (as much ink as before), one undo step
+	await expect.poll(() => ink(page, 0.4, 0.5)).toBeGreaterThan(upper * 0.9);
+	expect(await ink(page, 0.25, 0.35)).toBe(0);
+	expect(await ink(page, 0.55, 0.65)).toBe(lower);
+	await page.keyboard.press('Control+z');
+	await expect.poll(() => ink(page, 0.25, 0.35)).toBe(upper);
+	expect(await ink(page, 0.4, 0.5)).toBe(0);
+	expect(await ink(page, 0.55, 0.65)).toBe(lower);
+	await page.keyboard.press('Control+Shift+z');
+	await expect.poll(() => ink(page, 0.25, 0.35)).toBe(0);
 });
 
 test('line layers: strokes stay editable (select, move, recolour, erase, reshape, save, convert)', async ({
