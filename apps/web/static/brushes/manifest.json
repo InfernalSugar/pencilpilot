@@ -1158,6 +1158,13 @@
 			"preview": true
 		},
 		{
+			"id": "pencilpilot-hair-strands",
+			"name": "Hair strands",
+			"author": "PencilPilot",
+			"category": "inks",
+			"preview": true
+		},
+		{
 			"id": "ramon-wet-direction",
 			"name": "Wet Direction",
 			"author": "Ramón Miranda",
