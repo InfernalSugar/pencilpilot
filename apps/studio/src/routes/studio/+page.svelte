@@ -238,6 +238,8 @@
 		viewLabel,
 		type StageView
 	} from '#lib/stages.js';
+	import { flatColours, readPalettes, type Palette } from '#lib/palettes.js';
+	import PalettePanel from '#lib/PalettePanel.svelte';
 
 	let canvas = $state<PaintCanvas>();
 	let status = $state<CanvasStatus | null>(null);
@@ -1564,6 +1566,33 @@
 		docVersion++;
 	}
 
+	// ---- character palettes (Timeline.palettes) ----
+	function putPalettes(next: Palette[], label: string) {
+		timeline.palettes = next;
+		tlLabel = label;
+		docVersion++;
+	}
+	/** the reference picture's flat colours (a model sheet: its paper and lines left out) */
+	async function referenceColours() {
+		const pic = refShelf.pic;
+		if (!pic) return null;
+		const bmp = await createImageBitmap(new Blob([pic.bytes as BlobPart]));
+		try {
+			const k = Math.min(1, 480 / Math.max(bmp.width, bmp.height));
+			const [w, h] = [
+				Math.max(3, Math.round(bmp.width * k)),
+				Math.max(3, Math.round(bmp.height * k))
+			];
+			const c = document.createElement('canvas');
+			[c.width, c.height] = [w, h];
+			const g = c.getContext('2d', { willReadFrequently: true })!;
+			g.drawImage(bmp, 0, 0, w, h);
+			return { name: pic.name, colours: flatColours(g.getImageData(0, 0, w, h).data, w, h) };
+		} finally {
+			bmp.close();
+		}
+	}
+
 	/** Put each layer with no stage in the one its name suggests, one undo step. */
 	function sortStages() {
 		let n = 0;
@@ -2830,6 +2859,7 @@
 				timeline,
 				snap.layers.map((l) => l.id)
 			),
+			palettes: timeline.palettes ?? [],
 			audio: [
 				...new Set(timeline.scenes.flatMap((s) => (s.audio ?? []).map((a) => a.file)))
 			].flatMap((file) => {
@@ -3655,6 +3685,8 @@
 			}
 			const stages = stagesFromFile(doc.stages, ids);
 			if (Object.keys(stages).length) timeline.stages = stages;
+			const palettes = readPalettes(doc.palettes);
+			if (palettes.length) timeline.palettes = palettes;
 			stageView = readView(doc.extra.view);
 			lightTable = readLightTable(doc.extra.lightTable);
 			timelineFor = canvasKey;
@@ -4645,6 +4677,16 @@
 			{:else if t === 'history' && status}
 				<HistoryPanel history={status.history} ongo={historyGo} />
 			{:else if t === 'colour'}
+				<PalettePanel
+					palettes={timeline.palettes ?? []}
+					{color}
+					onchange={putPalettes}
+					onuse={(hex) => {
+						color = hex;
+						eraser = false;
+					}}
+					fromReference={referenceColours}
+				/>
 				<ColorPanel bind:color onclose={() => (tab = 'layers')} />
 			{/if}
 		{/snippet}

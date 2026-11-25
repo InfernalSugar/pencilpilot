@@ -875,6 +875,39 @@ describe('drawing together: apps', () => {
 		expect(back(undefined)).toEqual({ 1: 'rough', 2: 'comp' });
 	});
 
+	it('shares character palettes; an app that sends none leaves mine', () => {
+		const local = newTimeline([{ id: 1, drawing: 0 }]);
+		local.palettes = [{ name: 'Mina', colours: [{ name: 'Skin', hex: '#f2c9a8' }] }];
+		const out = toShared(
+			local,
+			() => 'm:1',
+			() => ''
+		);
+		expect(out.palettes).toEqual(local.palettes);
+		const back = (palettes: unknown) =>
+			fromShared(
+				{ ...out, palettes: palettes as never },
+				() => 1,
+				() => 0,
+				local,
+				() => true
+			).palettes;
+		// theirs (cleaned: a colour that isn't one goes)
+		expect(
+			back([
+				{
+					name: 'Rin',
+					colours: [
+						{ name: 'Hair', hex: '#223344' },
+						{ name: 'x', hex: 'red' }
+					]
+				}
+			])
+		).toEqual([{ name: 'Rin', colours: [{ name: 'Hair', hex: '#223344' }] }]);
+		expect(back([])).toBeUndefined();
+		expect(back(undefined)).toEqual(local.palettes);
+	});
+
 	it('comes back after a break: own work kept, the others’ caught up', async () => {
 		const session = new FakeSession();
 		const hc = new FakeCanvas(['Sky']);
