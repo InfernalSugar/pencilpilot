@@ -418,6 +418,36 @@
 						</a>, by Ramón Miranda (its brush settings).
 					</li>
 				</ul>
+				<p class="credit">Paper grains and brush tips (renamed here) come from:</p>
+				<ul class="credit">
+					<li>
+						<a href="https://ambientcg.com" target="_blank" rel="noreferrer">ambientCG</a>
+						(papers, CC0);
+					</li>
+					<li>
+						<a
+							href="https://opengameart.org/content/paper-textures-seamless"
+							target="_blank"
+							rel="noreferrer"
+						>
+							Paper textures
+						</a>, by Leschge (CC0);
+					</li>
+					<li>
+						<a href="https://krita.org" target="_blank" rel="noreferrer">Krita</a>’s default
+						resources, by David Revoy, with brushes derived from those of Ramón Miranda, Razvanc,
+						Radian, Wolthera, Storm, Scottyp and others: their papers and tips are under the
+						<a href="https://creativecommons.org/licenses/by/3.0/" target="_blank" rel="noreferrer">
+							Creative Commons Attribution 3.0
+						</a>
+						licence, attributed to
+						<a href="https://www.davidrevoy.com" target="_blank" rel="noreferrer">David Revoy</a>
+						and the
+						<a href="https://www.blender.org" target="_blank" rel="noreferrer">
+							Blender Foundation
+						</a>.
+					</li>
+				</ul>
 			{:else}
 				{@const g = PREFERENCE_GROUPS.find((x) => x.id === section)}
 				{#if g}
