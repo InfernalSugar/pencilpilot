@@ -1308,8 +1308,49 @@
 		return () => ro.disconnect();
 	});
 
+	/**
+	 * Pen input from somewhere else (a reference picture): while set, screen positions
+	 * map through it to canvas pixels instead of through this view. Set from the press
+	 * it forwards until the pen lifts, so timers and Shift replays in between map the same.
+	 */
+	let remap: ((clientX: number, clientY: number) => [number, number]) | null = null;
+
+	/**
+	 * Draw from another surface (a reference picture): its pointer events, with where each
+	 * screen point lands on the canvas. Every tool works as on the canvas (brush, eraser,
+	 * shapes, fills, symmetry), one undo step a stroke as usual. Pass touch elsewhere.
+	 */
+	export function forwardPointer(
+		e: PointerEvent,
+		map: (clientX: number, clientY: number) => [number, number]
+	) {
+		remap = map;
+		if (e.type === 'pointerdown') {
+			forwarding = e.pointerId;
+			down(e);
+		} else if (e.type === 'pointermove') move(e);
+		else if (e.type === 'pointerup' || e.type === 'pointercancel') {
+			up(e);
+			forwarding = null;
+		} else if (e.type === 'pointerleave' && forwarding === null) {
+			oncursor?.(null);
+			cursorAt = null;
+			lineHover = null;
+			hoverAt = null;
+		}
+		if (forwarding === null) remap = null;
+	}
+	/** the pointer a forwarded press is drawing with (null: none) */
+	let forwarding: number | null = null;
+
+	/** The drawing as shown (a 2D canvas, the size of the canvas): to copy from, never to draw on. */
+	export function shownCanvas(): HTMLCanvasElement | undefined {
+		return el;
+	}
+
 	/** client (screen) position → canvas pixels, undoing pan, rotation, zoom and mirror */
 	function toCanvas(clientX: number, clientY: number): [number, number] {
+		if (remap) return remap(clientX, clientY);
 		const r = vp.getBoundingClientRect();
 		const dx = clientX - (r.left + r.width / 2) - panX;
 		const dy = clientY - (r.top + r.height / 2) - panY;
@@ -3822,6 +3863,8 @@
 
 	/** capture the pointer (some synthetic / stylus edge cases can't be captured: then just don't) */
 	function capture(e: PointerEvent) {
+		// forwarded from a reference: that surface holds the pointer, not this one
+		if (remap) return;
 		try {
 			vp.setPointerCapture(e.pointerId);
 		} catch {

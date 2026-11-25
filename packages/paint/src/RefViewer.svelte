@@ -16,7 +16,10 @@
 		unit = null,
 		angle = null,
 		onunit,
-		onangle
+		onangle,
+		pen = false,
+		onpen,
+		mirror = null
 	}: {
 		src: string;
 		alt: string;
@@ -39,6 +42,15 @@
 		onunit?: (seg: [Seg, Seg] | null) => void;
 		/** an angle was marked (or cleared): the canvas shows it as a guide */
 		onangle?: (seg: [Seg, Seg] | null) => void;
+		/** draw on the picture: a pen or mouse on it goes to `onpen` (touch still pans) */
+		pen?: boolean;
+		/**
+		 * a pointer event on the picture while `pen` is on (down, move, up, cancel, leave),
+		 * with where a screen point is on the picture in fractions (0–1, past them off it)
+		 */
+		onpen?: (e: PointerEvent, frac: (clientX: number, clientY: number) => Seg | null) => void;
+		/** paint something over the picture each frame (the drawing, say), into a w × h canvas */
+		mirror?: ((g: CanvasRenderingContext2D, w: number, h: number) => void) | null;
 	} = $props();
 
 	type Seg = [number, number];
@@ -132,6 +144,46 @@
 		return [c((lx / k + natW / 2) / natW), c((ly / k + natH / 2) / natH)];
 	}
 
+	/** fracAt without the clamp: a pen can go past the picture's edge */
+	function penFrac(clientX: number, clientY: number): Seg | null {
+		if (!natW || !natH) return null;
+		const r = box.getBoundingClientRect();
+		const lx = (clientX - (r.left + r.width / 2) - panX) / (zoom * (flipped ? -1 : 1));
+		const ly = (clientY - (r.top + r.height / 2) - panY) / zoom;
+		const k = Math.min(r.width / natW, r.height / natH);
+		return [(lx / k + natW / 2) / natW, (ly / k + natH / 2) / natH];
+	}
+	/** the pointer drawing on the picture (null: none) */
+	let penId: number | null = null;
+	const penInput = (e: PointerEvent) => pen && !!onpen && e.pointerType !== 'touch';
+
+	// the mirror: the picture's shape (so the same "fit inside" lays it on the picture
+	// exactly), sharp on screen whatever the picture's own size: 1024 px long (more on
+	// dense screens)
+	let mirrorEl = $state<HTMLCanvasElement>();
+	const mirrorSize = $derived.by(() => {
+		if (!natW || !natH) return null;
+		const dpr = typeof window === 'undefined' ? 1 : Math.min(2, window.devicePixelRatio || 1);
+		const k = (1024 * Math.max(1, dpr)) / Math.max(natW, natH);
+		return { w: Math.max(1, Math.round(natW * k)), h: Math.max(1, Math.round(natH * k)) };
+	});
+	$effect(() => {
+		const paintIt = mirror;
+		const c = mirrorEl;
+		const size = mirrorSize;
+		if (!paintIt || !c || !size) return;
+		const g = c.getContext('2d');
+		if (!g) return;
+		let raf = 0;
+		const frame = () => {
+			g.clearRect(0, 0, size.w, size.h);
+			paintIt(g, size.w, size.h);
+			raf = requestAnimationFrame(frame);
+		};
+		frame();
+		return () => cancelAnimationFrame(raf);
+	});
+
 	/** an angle in degrees (0 = flat, counter-clockwise, 0–180) of a line in picture fractions */
 	const degOf = ([a, b]: [Seg, Seg]) =>
 		((((Math.atan2(-(b[1] - a[1]) * natH, (b[0] - a[0]) * natW) * 180) / Math.PI) % 180) + 180) %
@@ -189,7 +241,19 @@
 			if (zoom > 1) reset();
 			else zoomBy(2);
 		}}
+		class:penning={pen && !!onpen}
 		onpointerdown={(e) => {
+			if (penInput(e) && !lineMode && !picking && !e.altKey && e.button === 0) {
+				e.preventDefault();
+				try {
+					box.setPointerCapture(e.pointerId);
+				} catch {
+					/* not capturable */
+				}
+				penId = e.pointerId;
+				onpen?.(e, penFrac);
+				return;
+			}
 			if (lineMode) {
 				const p = fracAt(e.clientX, e.clientY);
 				if (!p) return;
@@ -207,6 +271,10 @@
 			drag = { id: e.pointerId, x: e.clientX, y: e.clientY, px: panX, py: panY };
 		}}
 		onpointermove={(e) => {
+			if (penId === e.pointerId || (penId === null && !drag && !drawing && penInput(e))) {
+				onpen?.(e, penFrac);
+				return;
+			}
 			if (drawing) {
 				const p = fracAt(e.clientX, e.clientY);
 				if (p) drawing = [drawing[0], p];
@@ -216,7 +284,12 @@
 			panX = drag.px + e.clientX - drag.x;
 			panY = drag.py + e.clientY - drag.y;
 		}}
-		onpointerup={() => {
+		onpointerup={(e) => {
+			if (penId === e.pointerId) {
+				penId = null;
+				onpen?.(e, penFrac);
+				return;
+			}
 			drag = null;
 			if (!drawing) return;
 			const seg = drawing;
@@ -227,7 +300,21 @@
 			else if (lineMode === 'angle') onangle?.(seg);
 			lineMode = '';
 		}}
-		onpointercancel={() => (drag = null)}
+		onpointercancel={(e) => {
+			drag = null;
+			if (penId !== e.pointerId) return;
+			penId = null;
+			onpen?.(e, penFrac);
+		}}
+		onlostpointercapture={(e) => {
+			// (capture lost without an up: end the stroke there)
+			if (penId !== e.pointerId) return;
+			penId = null;
+			onpen?.(new PointerEvent('pointerup', e), penFrac);
+		}}
+		onpointerleave={(e) => {
+			if (penId === null && penInput(e)) onpen?.(e, penFrac);
+		}}
 	>
 		<img
 			class="fade-in"
@@ -244,6 +331,18 @@
 				pixels = null;
 			}}
 		/>
+		{#if mirror && mirrorSize}
+			<!-- the drawing, on the picture: what you draw here lands on the canvas -->
+			<canvas
+				class="mirror"
+				bind:this={mirrorEl}
+				width={mirrorSize.w}
+				height={mirrorSize.h}
+				style={view}
+				aria-hidden="true"
+				data-testid="ref-mirror"
+			></canvas>
+		{/if}
 		{#if grid?.length && showGrid && natW}
 			<!-- the same "fit inside" as the picture, so the lines sit on it -->
 			<svg
@@ -432,6 +531,21 @@
 	.box.lining {
 		cursor: crosshair;
 		touch-action: none;
+	}
+	.box.penning {
+		cursor: crosshair;
+		touch-action: none;
+	}
+	.mirror {
+		position: absolute;
+		inset: 0;
+		width: 100%;
+		height: 100%;
+		object-fit: contain;
+		pointer-events: none;
+		/* white paper and empty canvas leave the picture be; the lines darken it */
+		mix-blend-mode: multiply;
+		transition: transform 0.12s ease-out;
 	}
 	.marks line {
 		stroke-width: 3;

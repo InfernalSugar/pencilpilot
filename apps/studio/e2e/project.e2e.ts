@@ -4569,6 +4569,82 @@ test('reference pictures: your own, in the corner, at the side or popped out, ke
 	).toBeVisible({ timeout: 20_000 });
 });
 
+test('draw on the reference: each line lands on the canvas where the picture puts it', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	await page.getByTestId('reference-toggle').click();
+	const side = page.getByTestId('reference-side');
+	// a square picture: fitted inside the canvas, as the grid method lays it
+	await side
+		.getByLabel('Reference picture files')
+		.setInputFiles([
+			{ name: 'grey.png', mimeType: 'image/png', buffer: solidPng(100, 100, [200, 200, 200, 255]) }
+		]);
+	await expect(side.getByRole('img', { name: 'Reference: grey.png' })).toBeVisible();
+	await side.getByRole('button', { name: 'Draw on it' }).click();
+	await expect(side.getByRole('button', { name: 'Show drawing' })).toHaveAttribute(
+		'aria-pressed',
+		'true'
+	);
+	// a line across the picture, from ¼ to ¾ of its width, halfway down
+	const box = (await side.getByTestId('ref-box').boundingBox())!;
+	const k = Math.min(box.width, box.height);
+	const at = (fx: number, fy: number) =>
+		[box.x + (box.width - k) / 2 + fx * k, box.y + (box.height - k) / 2 + fy * k] as const;
+	await page.mouse.move(...at(0.25, 0.5));
+	await page.mouse.down();
+	await page.mouse.move(...at(0.75, 0.5), { steps: 20 });
+	await page.mouse.up();
+	// on the canvas: the same line, in the picture's place (in fractions of the canvas)
+	const inkBox = () =>
+		canvas(page).evaluate((el: HTMLCanvasElement) => {
+			const d = el.getContext('2d')!.getImageData(0, 0, el.width, el.height).data;
+			let [x0, y0, x1, y1] = [el.width, el.height, -1, -1];
+			for (let y = 0; y < el.height; y++)
+				for (let x = 0; x < el.width; x++) {
+					const i = (y * el.width + x) * 4;
+					// (any ink: a pencil line's tapered ends are pale)
+					if (d[i + 3] && d[i] < 245) {
+						x0 = Math.min(x0, x);
+						y0 = Math.min(y0, y);
+						x1 = Math.max(x1, x);
+						y1 = Math.max(y1, y);
+					}
+				}
+			return x1 < 0 ? null : { w: el.width, h: el.height, x0, y0, x1, y1 };
+		});
+	// (the canvas paints a stroke over a few frames: wait for all of it)
+	const off = async () => {
+		const b = await inkBox();
+		if (!b) return Infinity;
+		const left = (b.w - b.h) / 2;
+		return Math.max(
+			Math.abs(b.x0 - (left + b.h * 0.25)),
+			Math.abs(b.x1 - (left + b.h * 0.75)),
+			Math.abs((b.y0 + b.y1) / 2 - b.h / 2)
+		);
+	};
+	// within a few canvas px of the picture's place (the brush's own width)
+	await expect.poll(off).toBeLessThan(16);
+
+	// and on the picture: the drawing over it
+	await expect
+		.poll(() =>
+			side.getByTestId('ref-mirror').evaluate((c: HTMLCanvasElement) => {
+				const d = c.getContext('2d')!.getImageData(0, 0, c.width, c.height).data;
+				let n = 0;
+				for (let i = 0; i < d.length; i += 4) if (d[i + 3] && d[i] < 200) n++;
+				return n;
+			})
+		)
+		.toBeGreaterThan(20);
+	// one undo step, as on the canvas
+	await page.keyboard.press('Control+z');
+	await expect.poll(inkBox).toBeNull();
+});
+
 // ---- Shift: constraints while dragging ----
 
 /** the box the selection's marching ants go round (canvas px) */
