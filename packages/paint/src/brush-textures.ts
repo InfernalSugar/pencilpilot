@@ -236,8 +236,17 @@ function speckleTip(): Uint8Array {
 
 let builtIns: Texture[] | null = null;
 
-/** The textures that come with the app (made once, on first use). */
+/**
+ * The textures that come with the app: the drawn ones (made once, on first use) and the
+ * picture ones (papers and tips from texture packs, loaded on first use: listeners hear
+ * when they're in).
+ */
 export function builtInTextures(): Texture[] {
+	if (!picturesLoad && typeof document !== 'undefined') void loadPictureTextures();
+	return [...drawnTextures(), ...pictures];
+}
+
+function drawnTextures(): Texture[] {
 	builtIns ??= [
 		{ id: 'grain-paper', name: 'Paper', kind: 'grain', w: N, h: N, px: paper() },
 		{ id: 'grain-canvas', name: 'Canvas', kind: 'grain', w: N, h: N, px: canvasWeave() },
@@ -249,6 +258,85 @@ export function builtInTextures(): Texture[] {
 		{ id: 'tip-speckle', name: 'Speckles', kind: 'tip', w: 64, h: 64, px: speckleTip() }
 	];
 	return builtIns;
+}
+
+// ---- picture textures that come with the app (tools/brush-pack/textures.mjs makes them) ----
+
+export interface PictureEntry {
+	id: string;
+	name: string;
+	kind: 'grain' | 'tip';
+	file: string;
+	w: number;
+	h: number;
+}
+
+/** The picture textures' list as served: anything unusable left out. */
+export function readPictureList(raw: unknown): PictureEntry[] {
+	if (!Array.isArray(raw)) return [];
+	return raw.flatMap((e) => {
+		const ok =
+			e &&
+			typeof e.id === 'string' &&
+			e.id.startsWith('pic-') &&
+			typeof e.name === 'string' &&
+			(e.kind === 'grain' || e.kind === 'tip') &&
+			typeof e.file === 'string' &&
+			/^[a-z0-9-]+\.png$/.test(e.file) &&
+			Number.isInteger(e.w) &&
+			Number.isInteger(e.h) &&
+			e.w > 0 &&
+			e.h > 0 &&
+			e.w <= 1024 &&
+			e.h <= 1024;
+		return ok
+			? [{ id: e.id, name: e.name.slice(0, 40), kind: e.kind, file: e.file, w: e.w, h: e.h }]
+			: [];
+	});
+}
+
+let pictures: Texture[] = [];
+let picturesLoad: Promise<void> | null = null;
+
+/** A grey picture's values (its red channel), `w` × `h`; null when it isn't that size. */
+async function greyOf(blob: Blob, w: number, h: number): Promise<Uint8Array | null> {
+	const bmp = await createImageBitmap(blob);
+	try {
+		if (bmp.width !== w || bmp.height !== h) return null;
+		const c = document.createElement('canvas');
+		[c.width, c.height] = [w, h];
+		const g = c.getContext('2d', { willReadFrequently: true })!;
+		g.drawImage(bmp, 0, 0);
+		const d = g.getImageData(0, 0, w, h).data;
+		const px = new Uint8Array(w * h);
+		for (let i = 0; i < px.length; i++) px[i] = d[i * 4];
+		return px;
+	} finally {
+		bmp.close();
+	}
+}
+
+/** Load the app's picture textures (once): from /brushes/textures, as the brushes are. */
+export function loadPictureTextures(fetcher: typeof fetch = fetch): Promise<void> {
+	picturesLoad ??= (async () => {
+		const r = await fetcher('/brushes/textures/manifest.json');
+		if (!r.ok) return;
+		const out: Texture[] = [];
+		for (const e of readPictureList(await r.json())) {
+			try {
+				const res = await fetcher(`/brushes/textures/${e.file}`);
+				const px = res.ok ? await greyOf(await res.blob(), e.w, e.h) : null;
+				if (px) out.push({ id: e.id, name: e.name, kind: e.kind, w: e.w, h: e.h, px });
+			} catch {
+				/* one that won't load: the rest still do */
+			}
+		}
+		pictures = out;
+		for (const l of listeners) l();
+	})().catch(() => {
+		/* none (offline, say): the drawn ones are still there */
+	});
+	return picturesLoad;
 }
 
 // ---- imported pictures, kept in this browser ----
