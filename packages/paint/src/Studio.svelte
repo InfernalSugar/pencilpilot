@@ -879,6 +879,11 @@
 		flex: none;
 		min-width: 0;
 	}
+	/* hidden wins over the display a hand-chosen height gives it (.sized, below) */
+	.bottom[hidden],
+	.bottom.sized[hidden] {
+		display: none;
+	}
 	/* a height chosen by hand: the bar fills it (its own rows scroll; --pp-bottom-rows
 	   lifts its usual cap on them) */
 	.bottom.sized {
