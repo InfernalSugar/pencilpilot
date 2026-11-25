@@ -461,9 +461,16 @@ impl FrameStore {
             .ok_or_else(|| Error::Invalid(format!("no drawing {id}")))?;
         self.wanted(&placed)?;
         let mut refs = Vec::with_capacity(placed.len());
+        let canvas = &p.manifest.canvas;
+        let (cols, rows) = (
+            canvas.width.div_ceil(TILE as u32) as i32,
+            canvas.height.div_ceil(TILE as u32) as i32,
+        );
         for t in placed {
-            if t.x < 0 || t.y < 0 {
-                continue; // (off the canvas: the file has no room for it)
+            // (off the canvas, on any side: paint a line spilled past the edge. The file
+            // has no room for it)
+            if t.x < 0 || t.y < 0 || t.x >= cols || t.y >= rows {
+                continue;
             }
             let name = hex(&t.hash);
             if !p.tiles.contains_key(&name) {

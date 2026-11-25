@@ -233,3 +233,33 @@ fn frames_on_disk_move_with_the_folder() {
     drop(s);
     assert!(!b.exists());
 }
+
+/// Paint spilled past the canvas edge (line layers keep a ring of tiles around it) stays
+/// out of the file, on every side.
+#[test]
+fn tiles_off_the_canvas_are_not_written() {
+    let mut s = FrameStore::new(usize::MAX, None).unwrap();
+    let ink = vec![200u8; TILE_BYTES];
+    // a 1920×1080 canvas: tiles 0..30 across, 0..17 down
+    s.put(
+        5,
+        [
+            (0, 0, ink.as_slice()),
+            (-1, 0, ink.as_slice()),
+            (30, 0, ink.as_slice()),
+            (0, 17, ink.as_slice()),
+            (29, 16, ink.as_slice()),
+        ],
+    )
+    .unwrap();
+    let mut p = Project::new("test", "2026-11-24T00:00:00Z", 1920, 1080, 24);
+    s.write_into(&mut p, 5, "D5", None).unwrap();
+    let mut at: Vec<(u32, u32)> = p.manifest.drawings["D5"]
+        .tiles
+        .iter()
+        .map(|t| (t.x, t.y))
+        .collect();
+    at.sort();
+    assert_eq!(at, vec![(0, 0), (29, 16)]);
+    assert!(p.drawing("D5").is_ok());
+}
