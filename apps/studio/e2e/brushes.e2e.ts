@@ -287,6 +287,49 @@ test('settings: the brush credit is under About', async ({ page }) => {
 		'href',
 		'https://github.com/mypaint/mypaint-brushes'
 	);
+	// and the other packs', each by its author
+	for (const [pack, who] of [
+		['Aotz', 'Anderson Prado'],
+		['Dirty', 'Anna Timm'],
+		['Concept Design', 'Ramón Miranda']
+	]) {
+		await expect(dialog.getByRole('link', { name: pack, exact: true })).toBeVisible();
+		await expect(dialog.getByText(who)).toBeVisible();
+	}
+});
+
+test('more brushes: the packs’ brushes under their own names, in their categories, and they draw', async ({
+	page
+}) => {
+	await studio(page);
+	const list = page.getByRole('list', { name: 'Brushes' });
+	for (const [tab, name] of [
+		['Inks & pens', 'G nib'],
+		['Pencils', 'Silverpoint'],
+		['Markers', 'Dark marker']
+	]) {
+		await page.getByRole('tab', { name: tab }).click();
+		const b = list.getByRole('button', { name, exact: true });
+		await b.click();
+		await expect(b).toHaveAttribute('aria-pressed', 'true');
+	}
+	// (the converted Concept Design marker paints)
+	const c = page.getByLabel(/Drawing canvas/);
+	const box = (await c.boundingBox())!;
+	await page.mouse.move(box.x + box.width * 0.2, box.y + box.height * 0.5);
+	await page.mouse.down();
+	await page.mouse.move(box.x + box.width * 0.8, box.y + box.height * 0.5, { steps: 30 });
+	await page.mouse.up();
+	await expect
+		.poll(() =>
+			c.evaluate((el: HTMLCanvasElement) => {
+				const d = el.getContext('2d')!.getImageData(0, el.height >> 1, el.width, 1).data;
+				let n = 0;
+				for (let i = 0; i < d.length; i += 4) if (d[i] < 200) n++;
+				return n;
+			})
+		)
+		.toBeGreaterThan(200);
 });
 
 /** in column `fx` (a fraction of the width) of a canvas: the dark runs down it, top to bottom */

@@ -385,12 +385,39 @@
 				<p>PencilPilot: a drawing and frame-by-frame animation app.</p>
 				<h3>Credits</h3>
 				<p class="credit">
-					The brushes are the
-					<a href="https://github.com/mypaint/mypaint-brushes" target="_blank" rel="noreferrer">
-						MyPaint brush pack
-					</a>
-					(CC0), by its artists, and they paint with a port of the MyPaint brush engine.
+					The brushes paint with a port of the MyPaint brush engine. Most come from these packs, all
+					CC0 (renamed here):
 				</p>
+				<ul class="credit">
+					<li>
+						the
+						<a href="https://github.com/mypaint/mypaint-brushes" target="_blank" rel="noreferrer">
+							MyPaint brush pack
+						</a>, by its artists;
+					</li>
+					<li>
+						<a href="https://github.com/andeon/aotz" target="_blank" rel="noreferrer">Aotz</a>, by
+						Anderson Prado;
+					</li>
+					<li>
+						<a
+							href="https://community.mypaint.app/t/brush-pack-dirty-a-rough-hairy-messy-brush-set/381"
+							target="_blank"
+							rel="noreferrer"
+						>
+							Dirty
+						</a>, by Anna Timm;
+					</li>
+					<li>
+						<a
+							href="https://github.com/mypaint/mypaint-brushes/releases/tag/pre_json_brushes"
+							target="_blank"
+							rel="noreferrer"
+						>
+							Concept Design
+						</a>, by Ramón Miranda (its brush settings).
+					</li>
+				</ul>
 			{:else}
 				{@const g = PREFERENCE_GROUPS.find((x) => x.id === section)}
 				{#if g}
@@ -644,6 +671,11 @@
 	.credit a {
 		color: inherit;
 		font-weight: 600;
+	}
+	ul.credit {
+		margin: 0;
+		padding-left: 20px;
+		line-height: 1.6;
 	}
 
 	/* narrow windows: the sections go across the top */
