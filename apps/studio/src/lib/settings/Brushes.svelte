@@ -3,7 +3,7 @@
 	import { BRUSH_SIZE_TOP, settings, tidySettings } from '../settings.svelte';
 	import './prefs.css';
 
-	const TOPS = [1, 1.5, 2, 3, 4, BRUSH_SIZE_TOP];
+	const TOPS = [1, 2, 4, 6.06, 16, 32, BRUSH_SIZE_TOP];
 </script>
 
 <div class="pp-prefs" onchange={tidySettings}>

@@ -112,7 +112,7 @@ describe('settings', () => {
 			checkerSize: 4,
 			checkerColour: '#e9e6de',
 			cursor: 'outline',
-			maxBrushSize: 6.06,
+			maxBrushSize: 64,
 			wheel: 'zoom',
 			zoomSpeed: 0.25,
 			units: 'px',
@@ -157,5 +157,14 @@ describe('settings', () => {
 			float: { x: 0, y: 40, w: 200, h: DEFAULTS.reference.float.h }
 		});
 		expect(cleanSettings({ reference: { place: 'nowhere' } }).reference.place).toBe('side');
+	});
+});
+
+describe('the largest brush size', () => {
+	it('goes to 64×; the old top (6.06, the most it allowed) means the new one', () => {
+		expect(cleanSettings({ maxBrushSize: 6.06 }).maxBrushSize).toBe(64);
+		expect(cleanSettings({ maxBrushSize: 4 }).maxBrushSize).toBe(4);
+		expect(cleanSettings({ maxBrushSize: 25 }).maxBrushSize).toBe(25);
+		expect(cleanSettings({}).maxBrushSize).toBe(64);
 	});
 });

@@ -167,8 +167,12 @@ export const AUTOSAVE_CHOICES = [0, 10, 20, 60, 300];
 export const UI_SCALES = [0.8, 0.9, 1, 1.1, 1.25, 1.5];
 export const ZOOM_SPEEDS = [0.5, 0.75, 1, 1.5, 2];
 export const EXPORT_FORMATS: ExportFormat[] = ['mp4', 'webm', 'prores', 'gif', 'apng', 'png'];
-/** the slider's own top (2^2.6) */
-export const BRUSH_SIZE_TOP = 6.06;
+/**
+ * The size slider's top: 64× (2^6) a brush's designed size. (The engine grows a brush faster
+ * than that number says, so a pencil-sized eraser reaches a few hundred px across, and
+ * the engine's own cap, 1000 px a dab, still stands.)
+ */
+export const BRUSH_SIZE_TOP = 64;
 
 export const DEFAULT_LAYOUT: StudioLayout = {
 	options: true,
@@ -316,7 +320,11 @@ export function cleanSettings(raw: unknown, legacy: { onion?: unknown } = {}): S
 		crosshairWhenSmall: bool(o.crosshairWhenSmall, D.crosshairWhenSmall),
 
 		brushFollowsZoom: bool(o.brushFollowsZoom, D.brushFollowsZoom),
-		maxBrushSize: num(o.maxBrushSize, D.maxBrushSize, 0.5, BRUSH_SIZE_TOP),
+		// (6.06 was the old top, chosen as "as big as it goes": that's the new top now)
+		maxBrushSize:
+			o.maxBrushSize === 6.06
+				? BRUSH_SIZE_TOP
+				: num(o.maxBrushSize, D.maxBrushSize, 0.5, BRUSH_SIZE_TOP),
 		perBrushSize: bool(o.perBrushSize, D.perBrushSize),
 
 		zoomToPointer: bool(o.zoomToPointer, D.zoomToPointer),

@@ -690,6 +690,14 @@ test('bars fold away and come back; the timeline and the side panel resize', asy
 	await expect.poll(async () => (await keptSettings(page))?.layout?.bottom).toBe(false);
 	await page.getByRole('button', { name: 'Show the timeline' }).click();
 	await expect(tl).toBeVisible();
+	// resized by hand, it still hides (its height used to keep it showing)
+	await page.getByRole('separator', { name: 'Resize the timeline' }).focus();
+	for (let i = 0; i < 3; i++) await page.keyboard.press('ArrowUp');
+	await page.getByRole('button', { name: 'Hide the timeline' }).click();
+	await expect(tl).toBeHidden();
+	await expect.poll(room).toBeGreaterThan(tall + 100);
+	await page.getByRole('button', { name: 'Show the timeline' }).click();
+	await expect(tl).toBeVisible();
 
 	// the brush options bar and the side panel fold the same way
 	await page.getByRole('button', { name: 'Hide the brush options' }).click();
@@ -901,6 +909,14 @@ test('studio layout: each tool shows its options, as on the website', async ({ p
 	// right-click: the quick menu
 	const b = (await canvas(page).boundingBox())!;
 	await page.mouse.click(b.x + b.width / 2, b.y + b.height / 2, { button: 'right' });
+	// each action is named in the middle as the pointer reaches it (no native tooltip,
+	// which a pen, a finger or some systems never show)
+	const menu = page.getByRole('menu', { name: 'Quick menu' });
+	await menu.getByRole('menuitem', { name: 'Eyedropper' }).hover();
+	await expect(menu.locator('.name')).toHaveText('Eyedropper');
+	await menu.getByRole('menuitem', { name: 'Eraser' }).hover();
+	await expect(menu.locator('.name')).toHaveText('Eraser');
+	await expect(menu.locator('[title]')).toHaveCount(0);
 	await page.getByRole('menuitem', { name: 'Eraser' }).click();
 	await expect(page.getByRole('button', { name: 'Eraser (E)' })).toHaveAttribute(
 		'aria-pressed',
@@ -5303,6 +5319,37 @@ test('lasso fill with Vertical symmetry: the fill and the cut both mirror, one u
 	// and one more takes both fills away
 	await page.keyboard.press('Control+z');
 	await expect.poll(() => ink(page)).toBe(0);
+});
+
+test('big brushes: the size goes to 6400%, and a stroke at the top is hundreds of pixels wide', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	const size = page.getByRole('slider', { name: 'Size', exact: true }).first();
+	await size.focus();
+	await page.keyboard.press('End');
+	await expect(size).toHaveAttribute('aria-valuetext', '6400%');
+	// a stroke across the canvas (a brush this big lays a dab every few hundred px):
+	// how tall is the band of ink it leaves
+	const b = (await canvas(page).boundingBox())!;
+	await page.mouse.move(b.x + b.width * 0.2, b.y + b.height / 2);
+	await page.mouse.down();
+	await page.mouse.move(b.x + b.width * 0.8, b.y + b.height / 2, { steps: 40 });
+	await page.mouse.up();
+	const tall = () =>
+		canvas(page).evaluate((el: HTMLCanvasElement) => {
+			const x = el.width >> 1;
+			let [first, last] = [-1, -1];
+			const d = el.getContext('2d')!.getImageData(x, 0, 1, el.height).data;
+			for (let y = 0; y < el.height; y++)
+				if (Math.min(d[y * 4], d[y * 4 + 1], d[y * 4 + 2]) < 245) {
+					if (first < 0) first = y;
+					last = y;
+				}
+			return first < 0 ? 0 : last - first;
+		});
+	await expect.poll(tall).toBeGreaterThan(600);
 });
 
 test('workspaces: layouts of the one canvas, switched from the top bar and customised', async ({
