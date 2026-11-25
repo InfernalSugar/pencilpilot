@@ -231,6 +231,7 @@
 		readView,
 		singleStage,
 		oneStageView,
+		toneLinesAbove,
 		traceName,
 		traceStages,
 		VIEW_ALL,
@@ -672,12 +673,25 @@
 	/** a fill is being carried through frames (its timeline changes make one step with it) */
 	let carrying = false;
 
-	/** The shapes a line drawing's lines close off. */
-	async function shapesOf(drawing: number) {
-		await cache.ensure([drawing]);
+	/** The shapes a line drawing's lines close off (and its tone lines', given theirs). */
+	async function shapesOf(drawing: number, tones: number[] = []) {
+		await cache.ensure([drawing, ...tones]);
 		const { width: w, height: h } = canvasSize;
-		const rgba = canvas!.drawingRgba(drawing);
-		return regions(walls(rgba, w, h), w, h);
+		const wall = walls(canvas!.drawingRgba(drawing), w, h);
+		for (const t of tones) {
+			const more = walls(canvas!.drawingRgba(t), w, h);
+			for (let i = 0; i < wall.length; i++) wall[i] |= more[i];
+		}
+		return regions(wall, w, h);
+	}
+
+	/**
+	 * The tone-line layers a fill on `layer` also stops at: a shading layer's fills stop
+	 * at the tone lines right above their lines; flats fill whole shapes.
+	 */
+	function toneLayersFor(layer: number, reference: number): number[] {
+		if (!status || !reference || timeline.stages?.[layer] !== 'shade') return [];
+		return toneLinesAbove(status.layers, reference, (id) => timeline.stages?.[id]);
 	}
 
 	/**
@@ -709,18 +723,25 @@
 			if (!toolOpts.fillAcross) return;
 			const d0 = drawingAt(line, f0);
 			if (!d0) return;
-			const first = await shapesOf(d0);
+			// a shadow's shapes are cut by the tone lines too (each frame's own)
+			const toneTracks = toneLayersFor(C, ref)
+				.map((id) => cut.tracks[id])
+				.filter(Boolean);
+			const tonesAt = (s: number) =>
+				toneTracks.map((t) => drawingAt(t, s)).filter((d): d is number => !!d);
+			const first = await shapesOf(d0, tonesAt(f0));
 			const w = canvasSize.width;
 			const at = first.labels[f.y * w + f.x];
 			if (!at) return;
 			let prev = pixelsOf(first.labels, at);
 			const last =
 				playRange && f0 <= playRange.to ? playRange.to : cutLength(cut, timeline.statics) - 1;
+			// (each line drawing's frames: the colour and shadow drawings are timed as it)
 			const starts = lineStartsAfter(line, f0, last);
 			let skipped = 0;
 			for (const s of starts) {
 				note(`Carrying the fill… frame ${s + 1}`, 4000);
-				const shapes = await shapesOf(drawingAt(line, s));
+				const shapes = await shapesOf(drawingAt(line, s), tonesAt(s));
 				const m = bestMatch(shapes.labels, shapes.sizes, prev);
 				const seed = m.score >= 0.25 ? seedIn(shapes.labels, m.label, prev, w) : null;
 				if (!seed) {
@@ -757,7 +778,10 @@
 		}
 	}
 
-	/** A Colour layer under the line layer picked (fills take its lines), a Shadow clipped to it. */
+	/**
+	 * A Colour layer under the line layer picked (fills take its lines), a Shadow clipped to
+	 * it, and Tone lines above the lines (shadow fills stop at them too).
+	 */
 	async function setupColour() {
 		if (!canvas || !status) return;
 		const lineLayer = status.layers.find((l) => l.id === status!.active);
@@ -779,9 +803,19 @@
 		await tick();
 		const shadow = await newLayer(`Shadow (${lineLayer.name})`);
 		if (shadow) c.setLayer(shadow, { clip: true, blend: 'multiply' });
+		// tone lines right above the lines: shadow fills stop at them, Final leaves them out
+		const tone = await newLayer(`Tone lines (${lineLayer.name})`);
+		if (tone) {
+			const at = (id: number) => status!.layers.findIndex((l) => l.id === id);
+			const [t, l] = [at(tone), at(lineLayer.id)];
+			const to = t < l ? l : l + 1;
+			if (t !== to) c.moveLayer(tone, to);
+			await tick();
+		}
 		// in their stages (the lines in clean-up, unless they're in one already)
 		setStage(timeline, colour, 'flats');
 		if (shadow) setStage(timeline, shadow, 'shade');
+		if (tone) setStage(timeline, tone, 'tone');
 		if (!timeline.stages?.[lineLayer.id]) setStage(timeline, lineLayer.id, 'clean');
 		tlJoin = true;
 		tlLabel = 'Set up colour layers';
@@ -789,7 +823,10 @@
 		c.selectLayer(colour);
 		toolOpts.fillRefLayer = lineLayer.id;
 		tool = 'fill';
-		note('Fill on the Colour layer; the Shadow layer stays inside the colour.', 3500);
+		note(
+			'Fill on the Colour layer. Draw tone lines (red for shadow, blue for highlight) on Tone lines: fills on the Shadow layer stop at them, and Final leaves them out.',
+			6000
+		);
 	}
 
 	// ---- lip-sync (S3-T02): Rhubarb in src-tauri/src/lipsync.rs ----
@@ -1285,6 +1322,7 @@
 		rough: 'Rough',
 		tiedown: 'Tie-down',
 		clean: 'Clean',
+		tone: 'Tone',
 		flats: 'Colour',
 		shade: 'Shade',
 		comp: 'Comp'
@@ -1814,6 +1852,8 @@
 			return target;
 		}
 	});
+	/** a shading fill's tone lines (see toneLayersFor) */
+	const fillTones = $derived(status ? toneLayersFor(status.active, toolOpts.fillReference) : []);
 	function keepLocal(key: string, value: unknown) {
 		try {
 			localStorage.setItem(key, JSON.stringify(value));
@@ -4432,6 +4472,7 @@
 						fillTolerance={toolOpts.fillTolerance}
 						fillAllLayers={toolOpts.fillAllLayers}
 						fillReference={toolOpts.fillReference}
+						fillAlso={fillTones}
 						distort={toolOpts.distort}
 						warp={toolOpts.warp}
 						quickShape={toolOpts.quickShape}

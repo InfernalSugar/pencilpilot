@@ -265,6 +265,7 @@
 		fillTolerance = 0.12,
 		fillAllLayers = true,
 		fillReference = 0,
+		fillAlso = [],
 		grayView = $bindable(false),
 		distort = false,
 		warp = false,
@@ -411,6 +412,8 @@
 		fillAllLayers?: boolean;
 		/** fill: find the shape on this layer instead (a line-art "reference" layer; 0 = off) */
 		fillReference?: number;
+		/** fill: more layers whose lines stop it, with the reference (a shading fill's tone lines) */
+		fillAlso?: number[];
 		/** show the canvas in grey (values only); the drawing itself keeps its colours */
 		grayView?: boolean;
 		/** transform: dragging a corner moves just that corner (distort / perspective) */
@@ -1569,7 +1572,7 @@
 			fillAllLayers,
 			2,
 			3,
-			fillReference
+			Uint32Array.from([fillReference, ...(fillReference ? fillAlso : [])])
 		);
 		return changed(done, undefined, 'Fill');
 	}
@@ -1625,7 +1628,7 @@
 			false,
 			2,
 			3,
-			line.id
+			Uint32Array.of(line.id)
 		);
 		paint.setActiveLayer(line.id);
 		if (done) {

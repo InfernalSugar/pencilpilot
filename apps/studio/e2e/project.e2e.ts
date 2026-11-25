@@ -2146,6 +2146,88 @@ test('stages: colour layers set up for the lines go in their stages', async ({ p
 	await expect(layerRow(page, 'Colour (Layer 1)').getByTitle('Stage: Colour')).toBeVisible();
 	await expect(layerRow(page, 'Shadow (Layer 1)').getByTitle('Stage: Shading')).toBeVisible();
 	await expect(layerRow(page, 'Layer 1').getByTitle('Stage: Clean-up')).toBeVisible();
+	await expect(
+		layerRow(page, 'Tone lines (Layer 1)').getByTitle('Stage: Tone lines')
+	).toBeVisible();
+});
+
+test('tone lines: shadow fills stop at them, flats fill the whole shape, Final leaves them out', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	const tl = page.getByRole('region', { name: 'Timeline' });
+	const k = await strokeKit(page);
+	const pick = (name: string) =>
+		layerRow(page, name).getByTitle('Select · double-click to rename').click();
+	const px = (x: number, y: number) =>
+		canvas(page).evaluate(
+			(el: HTMLCanvasElement, [x, y]) => [
+				...el
+					.getContext('2d')!
+					.getImageData(Math.round(el.width * x), Math.round(el.height * y), 1, 1).data
+			],
+			[x, y]
+		);
+	/** reddish tone-line pixels (a pencil's are pale) in a strip down the middle of the box */
+	const redLine = () =>
+		canvas(page).evaluate((el: HTMLCanvasElement) => {
+			const [x0, y0] = [Math.round(el.width * 0.47), Math.round(el.height * 0.4)];
+			const d = el
+				.getContext('2d')!
+				.getImageData(x0, y0, Math.round(el.width * 0.06), Math.round(el.height * 0.2)).data;
+			let n = 0;
+			for (let i = 0; i < d.length; i += 4) if (d[i] - d[i + 1] > 40 && d[i] - d[i + 2] > 40) n++;
+			return n;
+		});
+	// a closed box of lines
+	await k.line(0.3, 0.3, 0.7, 0.3);
+	await k.line(0.7, 0.3, 0.7, 0.7);
+	await k.line(0.7, 0.7, 0.3, 0.7);
+	await k.line(0.3, 0.7, 0.3, 0.3);
+	await page.getByRole('button', { name: 'Fill (G)' }).click();
+	await page.getByRole('button', { name: 'Set up colour layers' }).click();
+	await expect(page.getByText('Fill on the Colour layer')).toBeVisible();
+
+	// a tone line down the middle of the box, on Tone lines
+	await pick('Tone lines (Layer 1)');
+	await page.keyboard.press('b');
+	await page.getByRole('radio', { name: 'Colour #e8492f' }).click();
+	await k.fresh();
+	await k.line(0.5, 0.25, 0.5, 0.75);
+	await expect.poll(redLine).toBeGreaterThan(20);
+
+	// the flat colour fills the whole box: the tone line doesn't cut it
+	await pick('Colour (Layer 1)');
+	await page.getByRole('button', { name: 'Fill (G)' }).click();
+	await page.getByRole('radio', { name: 'Colour #b9b6ae' }).click();
+	await page.mouse.click(...k.at(0.4, 0.5));
+	await expect.poll(async () => (await px(0.6, 0.5))[1]).toBeGreaterThan(140);
+	expect((await px(0.4, 0.5))[1]).toBeGreaterThan(140);
+
+	// the shadow stops at the tone line: the side clicked only
+	await pick('Shadow (Layer 1)');
+	await page.getByRole('radio', { name: 'Colour #6b6a70' }).click();
+	await page.mouse.click(...k.at(0.4, 0.5));
+	await expect.poll(async () => (await px(0.4, 0.5))[0]).toBeLessThan(150);
+	expect((await px(0.6, 0.5))[0], 'past the tone line: still the flat colour').toBeGreaterThan(160);
+
+	// Final: the tone line is gone; colour and shadow meet where it was
+	await tl.getByRole('button', { name: /^Show: / }).click();
+	await tl
+		.getByRole('group', { name: 'Show stages' })
+		.getByRole('radio', { name: 'Final' })
+		.click();
+	await expect.poll(redLine).toBe(0);
+	expect((await px(0.4, 0.5))[0]).toBeLessThan(150);
+	expect((await px(0.6, 0.5))[0]).toBeGreaterThan(160);
+	// Shading shows it again
+	await tl.getByRole('button', { name: /^Show: / }).click();
+	await tl
+		.getByRole('group', { name: 'Show stages' })
+		.getByRole('radio', { name: 'Shading' })
+		.click();
+	await expect.poll(redLine).toBeGreaterThan(20);
 });
 
 test('stages: Show one stage on the canvas, in playback and the onion skin; kept with the project', async ({

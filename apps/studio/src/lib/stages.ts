@@ -18,6 +18,7 @@ const BY_NAME: [Stage, RegExp][] = [
 	['board', /\b(story ?)?boards?\b/i],
 	['rough', /\b(roughs?|sketch(es)?|guides?|pictures?)\b/i],
 	['tiedown', /\btie[ -]?(downs?)?\b/i],
+	['tone', /\btone ?lines?\b/i],
 	['shade', /\b(shadows?|shades?|shading|highlights?|rim|tones?)\b/i],
 	['flats', /\b(colou?rs?|flats?)\b/i],
 	['comp', /\b(bg|backgrounds?|comp(ositing)?)\b/i],
@@ -57,8 +58,9 @@ export const VIEW_PRESETS: {
 	{ id: 'rough', label: 'Rough', stages: ['rough'] },
 	{ id: 'tiedown', label: 'Tie-down', stages: ['tiedown'] },
 	{ id: 'clean', label: 'Clean-up', stages: ['clean'] },
-	{ id: 'colour', label: 'Colour', stages: ['clean', 'flats'] },
-	{ id: 'shading', label: 'Shading', stages: ['clean', 'flats', 'shade'] },
+	// (tone lines show while colouring and shading, and never in the final picture)
+	{ id: 'colour', label: 'Colour', stages: ['clean', 'tone', 'flats'] },
+	{ id: 'shading', label: 'Shading', stages: ['clean', 'tone', 'flats', 'shade'] },
 	{ id: 'final', label: 'Final', stages: ['clean', 'flats', 'shade', 'comp'] }
 ];
 
@@ -251,4 +253,22 @@ export function exportPasses(
 		if (each.length) return each;
 	}
 	return [{ label: null, view: VIEW_ALL }];
+}
+
+/**
+ * The tone-line layers a shading fill also stops at: those in the Tone lines stage right
+ * above its reference layer (`layers` bottom first). Flats fill the whole shape (tone
+ * lines left out), so hiding the tone lines never leaves paper showing.
+ */
+export function toneLinesAbove(
+	layers: { id: number }[],
+	reference: number,
+	stageOf: (id: number) => Stage | null | undefined
+): number[] {
+	const at = layers.findIndex((l) => l.id === reference);
+	if (at < 0) return [];
+	const out: number[] = [];
+	for (let i = at + 1; i < layers.length && stageOf(layers[i].id) === 'tone'; i++)
+		out.push(layers[i].id);
+	return out;
 }
