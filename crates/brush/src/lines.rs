@@ -2772,4 +2772,114 @@ mod tests {
         assert!((60..180).all(|y| alpha(160, y) == 0), "the cut moved along");
         assert!(!moved.is_empty());
     }
+
+    // ---- big soft pencil strokes (drawing together's "white blocks") ----
+
+    /// the shipped 2B pencil at `scale` times its size, as the app's setSizeScale makes it
+    fn pencil_2b(scale: f32) -> Brush {
+        let mut b = shipped("deevad-2b-pencil");
+        let r = b.get(BrushSetting::Radius).base_value;
+        b.get_mut(BrushSetting::Radius).base_value = r + scale.log2();
+        set_brush_rgb(&mut b, 22, 22, 26);
+        b
+    }
+
+    /// a hand-drawn-like stroke: many points a few px apart, pressure varying
+    fn scribble(x0: f32, y0: f32, n: usize) -> Vec<f32> {
+        (0..n)
+            .flat_map(|i| {
+                let t = i as f32 / (n - 1) as f32;
+                [
+                    x0 + 700.0 * t,
+                    y0 + 120.0 * (t * 7.0).sin(),
+                    0.3 + 0.6 * (t * 3.0).sin().abs(),
+                    0.0,
+                    0.0,
+                    0.008,
+                ]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn big_soft_pencil_strokes_redraw_from_the_base_without_holes() {
+        for scale in [1.0f32, 6.0, 16.0] {
+            let b = pencil_2b(scale);
+            let (w, h) = (1200, 900);
+            let mut p = Painter::new(w, h);
+            let layer = p.active_layer();
+            let a = scribble(150.0, 300.0, 400);
+            let c = scribble(250.0, 500.0, 400);
+            live(&mut p, &b, 1, &a);
+            let only_a = painted(&p, layer);
+            live(&mut p, &b, 2, &c);
+            let both = painted(&p, layer);
+            let d = p.layer_drawing(layer);
+            let reach = reach_of(&b);
+            eprintln!(
+                "scale {scale}: radius {:.1}px, paint_reach {:.2}, reach {:.0}px, tiles {}, base {}",
+                b.get(BrushSetting::Radius).base_value.exp(),
+                paint_reach(&b),
+                reach,
+                both.len(),
+                p.base_tiles(d)
+            );
+            // the app's bounds take in every tile each stroke painted
+            let within = |pts: &[f32]| -> HashSet<TileKey> {
+                let ts = TILE_SIZE as f32;
+                let mut k = HashSet::new();
+                for q in pts.as_chunks::<6>().0 {
+                    for y in
+                        ((q[1] - reach) / ts).floor() as i32..=((q[1] + reach) / ts).floor() as i32
+                    {
+                        for x in ((q[0] - reach) / ts).floor() as i32
+                            ..=((q[0] + reach) / ts).floor() as i32
+                        {
+                            k.insert((x, y));
+                        }
+                    }
+                }
+                k
+            };
+            let wa = within(&a);
+            let out: Vec<_> = only_a.keys().filter(|k| !wa.contains(k)).collect();
+            assert!(
+                out.is_empty(),
+                "scale {scale}: tiles painted past the bounds: {out:?}"
+            );
+            // every tile redrawn from the base and both strokes: as painted
+            redraw(&mut p, layer, &keys(&both), &b, &[(1, &a), (2, &c)]);
+            assert!(p.lines_push());
+            let again = painted(&p, layer);
+            let diff: Vec<_> = both
+                .keys()
+                .filter(|k| again.get(k) != both.get(k))
+                .collect();
+            assert!(
+                diff.is_empty(),
+                "scale {scale}: {} of {} tiles differ",
+                diff.len(),
+                both.len()
+            );
+            // a few tiles only
+            let some: Vec<i32> = keys(&both).into_iter().take(10).collect();
+            redraw(&mut p, layer, &some, &b, &[(1, &a), (2, &c)]);
+            assert!(p.lines_push());
+            assert_eq!(
+                painted(&p, layer),
+                both,
+                "scale {scale}: some tiles redrawn"
+            );
+            // the second deleted: as if only the first was drawn
+            redraw(&mut p, layer, &keys(&both), &b, &[(1, &a)]);
+            assert!(p.lines_push());
+            let left = painted(&p, layer);
+            let diff = left.len().abs_diff(only_a.len())
+                + only_a
+                    .keys()
+                    .filter(|k| left.get(k) != only_a.get(k))
+                    .count();
+            assert_eq!(diff, 0, "scale {scale}: deleting the second stroke");
+        }
+    }
 }

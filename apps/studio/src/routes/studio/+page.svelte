@@ -294,6 +294,9 @@
 		if (canvas) Object.assign(strokeMemory, canvas.strokeMemory());
 		togetherChanged();
 		if (quiet) return;
+		// a frame the canvas couldn't show when it was busy (someone's timeline came in
+		// mid-stroke): shown now (after this change has gone on the timeline)
+		if (showAgain) void showFrame();
 		docVersion++;
 		// what changed: the drawings showing, or one undo / redo just changed
 		const touched = [
@@ -377,6 +380,12 @@
 
 	/** frame changes, one after another (fetching drawings takes a moment) */
 	let showQueue: Promise<void> = Promise.resolve();
+	/**
+	 * the canvas was busy when it was to show the timeline's frame: shown at its next
+	 * change (else it keeps a drawing the timeline doesn't have, e.g. after a timeline
+	 * from drawing together came in mid-stroke)
+	 */
+	let showAgain = false;
 	/** waiting for the store: the canvas takes no strokes meanwhile */
 	let switching = $state(false);
 
@@ -413,6 +422,7 @@
 		const ok = c.showDrawings(now);
 		quiet = false;
 		if (ok) {
+			showAgain = false;
 			onCanvas = { scene, cut: cutIndex, frame };
 			for (const [l, d] of now) lastShown.set(l, d);
 			cache.shown(now.map(([, d]) => d));
@@ -422,9 +432,11 @@
 			const gone = leaving.filter((d) => d && !now.some(([, n]) => n === d));
 			void cache.push(gone).then(() => cache.trim());
 		} else {
-			// stay where the canvas is
+			// stay where the canvas is, and show the timeline there once it can
 			[scene, cutIndex, frame] = [onCanvas.scene, onCanvas.cut, onCanvas.frame];
-			note('Finish what you’re doing first (a transform, an adjustment or a mask).');
+			if (!showAgain)
+				note('Finish what you’re doing first (a transform, an adjustment or a mask).');
+			showAgain = true;
 		}
 	}
 

@@ -1678,7 +1678,7 @@ export class Together {
 				break;
 			case 'timeline':
 				// everyone's, this app's too, in the session's order: all end the same
-				this.canvas.setTimeline(this.#fromShared(e.tl));
+				this.canvas.setTimeline(this.#fromShared(e.tl, from));
 				break;
 			case 'grant':
 			case 'revoke':
@@ -1752,14 +1752,20 @@ export class Together {
 		this.onchange();
 	}
 
-	#fromShared(tl: SharedTimeline): Timeline {
+	#fromShared(tl: SharedTimeline, from?: string): Timeline {
 		const known = new Set(this.ids.values());
+		// (a layer's tracks come from those who may draw on it: a timeline sent before the
+		// sender heard of someone's new drawing doesn't take it off their layer)
+		const theirs = (l: number) => {
+			const lid = this.lidOf(l);
+			return !from || (!!lid && this.shared.canDraw(lid, from));
+		};
 		return fromShared(
 			tl,
 			(lid) => this.ids.get(lid),
 			(did) => this.localOf(did),
 			this.canvas.timeline(),
-			(l) => known.has(l)
+			(l) => known.has(l) && theirs(l)
 		);
 	}
 
