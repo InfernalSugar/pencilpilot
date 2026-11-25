@@ -6,8 +6,12 @@ import {
 	LIGHT_TABLE_OFF,
 	NON_PHOTO_BLUE,
 	readLightTable,
+	oneStageView,
 	readView,
 	singleStage,
+	traceName,
+	traceSource,
+	traceStages,
 	VIEW_PRESETS,
 	viewLabel,
 	type StageView
@@ -180,5 +184,41 @@ describe('the light table', () => {
 			opacity: 1
 		});
 		expect(readLightTable({ stage: 'tiedown', tint: '#FF0000', opacity: 0 }).opacity).toBe(0.05);
+	});
+});
+
+describe('a new layer to trace another on', () => {
+	it('goes in a later stage', () => {
+		expect(traceStages('rough')).toEqual(['tiedown', 'clean']);
+		expect(traceStages(null)).toEqual(['tiedown', 'clean']);
+		expect(traceStages('tiedown')).toEqual(['clean']);
+		expect(traceStages('board')).toEqual(['rough', 'tiedown', 'clean']);
+		expect(traceStages('clean')).toEqual([]);
+		expect(traceStages('flats')).toEqual([]);
+	});
+
+	it('is named after the layer it traces', () => {
+		expect(traceName('Rough (Bob)', 'clean')).toBe('Clean-up (Bob)');
+		expect(traceName('Tie-down (Bob)', 'clean')).toBe('Clean-up (Bob)');
+		expect(traceName('Sketch  (Bob walk)', 'tiedown')).toBe('Tie-down (Bob walk)');
+		expect(traceName('Bob', 'clean')).toBe('Clean-up (Bob)');
+		expect(traceName('Rough', 'tiedown')).toBe('Tie-down');
+		expect(traceName('Bob (left)', 'clean')).toBe('Clean-up (Bob (left))');
+		expect(traceName('  ', 'clean')).toBe('Clean-up');
+	});
+
+	it('knows the stage it is traced from (the nearest earlier one with layers)', () => {
+		expect(traceSource('clean', ['rough', 'tiedown', 'clean'])).toBe('tiedown');
+		expect(traceSource('clean', ['rough', 'clean'])).toBe('rough');
+		expect(traceSource('tiedown', ['clean'])).toBe(null);
+		expect(traceSource('rough', ['board', 'rough'])).toBe(null);
+	});
+
+	it('a stage’s own view shows it', () => {
+		expect(oneStageView('clean')).toEqual({ id: 'clean' });
+		expect(oneStageView('tiedown')).toEqual({ id: 'tiedown' });
+		expect(oneStageView('flats')).toEqual({ id: 'custom', stages: ['flats'] });
+		const v = layersInView([{ id: 1, clip: false }], { 1: 'tiedown' }, oneStageView('tiedown'));
+		expect(v.shown).toEqual([1]);
 	});
 });

@@ -181,6 +181,54 @@ export function lightTableLayers(
 		.map((l) => l.id);
 }
 
+// ---- a layer to trace another on (the next stage's) ----
+
+/** the stages drawn over the one before, in order */
+const TRACED: Stage[] = ['rough', 'tiedown', 'clean'];
+
+/**
+ * The stages a new layer traced over a layer can go in: those after its stage (one with
+ * none counts as a rough; a storyboard's are all of them).
+ */
+export function traceStages(stage: Stage | null): Stage[] {
+	const at = STAGES.indexOf(stage ?? 'rough');
+	return TRACED.filter((s) => STAGES.indexOf(s) > at);
+}
+
+/** stage words a layer's name may be ("Rough", "Tie-down", "Clean-up"…) */
+const STAGE_WORD =
+	/^(story ?boards?|boards?|roughs?|sketch(es)?|tie[ -]?downs?|clean(-? ?up)?|lines?|inks?)$/i;
+
+/**
+ * A traced layer's name: its stage's, with what the layer traced over is of ("Rough
+ * (Bob)" → "Clean-up (Bob)"; "Bob" → "Clean-up (Bob)"; "Rough" → "Clean-up").
+ */
+export function traceName(name: string, stage: Stage): string {
+	const label = STAGE_LABELS[stage];
+	const n = name.trim();
+	const m = /^(.*?)\s*\((.+)\)$/.exec(n);
+	if (m && STAGE_WORD.test(m[1])) return `${label} (${m[2]})`;
+	if (!n || STAGE_WORD.test(n)) return label;
+	return `${label} (${n})`;
+}
+
+/**
+ * The stage a layer in `stage` is traced from: the nearest earlier one that has layers
+ * (`used`), e.g. what to show under a clean-up on a light table. Null: none.
+ */
+export function traceSource(stage: Stage, used: Iterable<Stage>): Stage | null {
+	const have = new Set(used);
+	const before = TRACED.filter((s) => STAGES.indexOf(s) < STAGES.indexOf(stage));
+	return before.reverse().find((s) => have.has(s)) ?? null;
+}
+
+/** The view showing just one stage. */
+export function oneStageView(stage: Stage): StageView {
+	return VIEW_PRESETS.some((p) => p.id === stage)
+		? { id: stage as ViewId }
+		: { id: 'custom', stages: [stage] };
+}
+
 // ---- exporting by stage ----
 
 /**

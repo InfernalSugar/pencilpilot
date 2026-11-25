@@ -62,7 +62,9 @@
 		stages,
 		stageOf,
 		onstage,
-		onsortstages
+		onsortstages,
+		traceStagesOf,
+		ontrace
 	}: {
 		status: CanvasStatus;
 		controls: LayerControls | undefined;
@@ -81,7 +83,12 @@
 		onstage?: (id: number, stage: string | null) => void;
 		/** put the layers with no stage in one, guessed from their names */
 		onsortstages?: () => void;
+		/** the stages a new layer traced over a layer can go in (none: not offered) */
+		traceStagesOf?: (id: number) => string[];
+		/** a new layer in `stage` above a layer, timed as it is, to trace it on */
+		ontrace?: (id: number, stage: string) => void;
 	} = $props();
+	let traceOpen = $state(false);
 	const stageInfo = (id: number) => {
 		const st = stageOf?.(id);
 		return st ? (stages?.find((x) => x.id === st) ?? null) : null;
@@ -460,6 +467,34 @@
 					>
 						Sort layers into stages
 					</button>
+				{/if}
+				{#if ontrace && traceStagesOf}
+					{@const next = (stages ?? []).filter((st) => traceStagesOf(active.id).includes(st.id))}
+					{#if next.length}
+						<details class="trace" bind:open={traceOpen}>
+							<summary
+								title="A new layer above this one in a later stage, with an empty drawing wherever this one has a drawing, held as long: trace them in turn"
+							>
+								New layer from this
+							</summary>
+							<div class="toggles">
+								{#each next as st (st.id)}
+									<button
+										type="button"
+										class="chip"
+										aria-label="New {st.label} layer from this"
+										title="A new {st.label} layer above this one, timed as this one is"
+										onclick={() => {
+											traceOpen = false;
+											ontrace(active.id, st.id);
+										}}
+									>
+										{st.label}
+									</button>
+								{/each}
+							</div>
+						</details>
+					{/if}
 				{/if}
 			{/if}
 			<div class="toggles">
@@ -1228,6 +1263,10 @@
 	.style {
 		flex: 1 1 100%;
 	}
+	.trace {
+		flex: 1 1 100%;
+	}
+	.trace summary,
 	.style summary {
 		min-height: 32px;
 		font-size: 13px;
