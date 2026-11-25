@@ -779,8 +779,9 @@
 	}
 
 	/**
-	 * A Colour layer under the line layer picked (fills take its lines), a Shadow clipped to
-	 * it, and Tone lines above the lines (shadow fills stop at them too).
+	 * A Colour layer under the line layer picked (fills take its lines), a Shadow and a
+	 * Highlight clipped to it, and Tone lines above the lines (shadow and highlight fills
+	 * stop at them too).
 	 */
 	async function setupColour() {
 		if (!canvas || !status) return;
@@ -803,6 +804,9 @@
 		await tick();
 		const shadow = await newLayer(`Shadow (${lineLayer.name})`);
 		if (shadow) c.setLayer(shadow, { clip: true, blend: 'multiply' });
+		// highlights over the shadows, inside the colour too (fills stop at tone lines as theirs do)
+		const highlight = await newLayer(`Highlight (${lineLayer.name})`);
+		if (highlight) c.setLayer(highlight, { clip: true, blend: 'screen' });
 		// tone lines right above the lines: shadow fills stop at them, Final leaves them out
 		const tone = await newLayer(`Tone lines (${lineLayer.name})`);
 		if (tone) {
@@ -815,6 +819,7 @@
 		// in their stages (the lines in clean-up, unless they're in one already)
 		setStage(timeline, colour, 'flats');
 		if (shadow) setStage(timeline, shadow, 'shade');
+		if (highlight) setStage(timeline, highlight, 'shade');
 		if (tone) setStage(timeline, tone, 'tone');
 		if (!timeline.stages?.[lineLayer.id]) setStage(timeline, lineLayer.id, 'clean');
 		tlJoin = true;
@@ -824,7 +829,7 @@
 		toolOpts.fillRefLayer = lineLayer.id;
 		tool = 'fill';
 		note(
-			'Fill on the Colour layer. Draw tone lines (red for shadow, blue for highlight) on Tone lines: fills on the Shadow layer stop at them, and Final leaves them out.',
+			'Fill on the Colour layer. Draw tone lines (red for shadow, blue for highlight) on Tone lines: fills on Shadow and Highlight stop at them, and Final leaves them out.',
 			6000
 		);
 	}

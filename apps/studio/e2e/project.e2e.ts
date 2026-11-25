@@ -2145,13 +2145,28 @@ test('stages: colour layers set up for the lines go in their stages', async ({ p
 	await expect(page.getByText('Fill on the Colour layer')).toBeVisible();
 	await expect(layerRow(page, 'Colour (Layer 1)').getByTitle('Stage: Colour')).toBeVisible();
 	await expect(layerRow(page, 'Shadow (Layer 1)').getByTitle('Stage: Shading')).toBeVisible();
+	await expect(layerRow(page, 'Highlight (Layer 1)').getByTitle('Stage: Shading')).toBeVisible();
 	await expect(layerRow(page, 'Layer 1').getByTitle('Stage: Clean-up')).toBeVisible();
+	// top to bottom: tone lines over the lines, highlight over shadow over colour under them
+	const rows = await page
+		.getByRole('list', { name: 'Layers, top to bottom' })
+		.getByTitle('Select · double-click to rename')
+		.allInnerTexts();
+	expect(rows.map((r) => r.split('\n')[0].trim())).toEqual([
+		'Tone lines (Layer 1)',
+		'Layer 1',
+		'Highlight (Layer 1)',
+		'Shadow (Layer 1)',
+		'Colour (Layer 1)'
+	]);
+	expect(rows[2]).toContain('Screen');
+	expect(rows[3]).toContain('Multiply');
 	await expect(
 		layerRow(page, 'Tone lines (Layer 1)').getByTitle('Stage: Tone lines')
 	).toBeVisible();
 });
 
-test('tone lines: shadow fills stop at them, flats fill the whole shape, Final leaves them out', async ({
+test('tone lines: shadow and highlight fills stop at them, flats fill the whole shape, Final leaves them out', async ({
 	page
 }) => {
 	await stubTauri(page);
@@ -2211,6 +2226,13 @@ test('tone lines: shadow fills stop at them, flats fill the whole shape, Final l
 	await page.mouse.click(...k.at(0.4, 0.5));
 	await expect.poll(async () => (await px(0.4, 0.5))[0]).toBeLessThan(150);
 	expect((await px(0.6, 0.5))[0], 'past the tone line: still the flat colour').toBeGreaterThan(160);
+
+	// a highlight on the other side: lighter there, stopping at the tone line too
+	await pick('Highlight (Layer 1)');
+	await page.getByRole('radio', { name: 'Colour #b9b6ae' }).click();
+	await page.mouse.click(...k.at(0.6, 0.5));
+	await expect.poll(async () => (await px(0.6, 0.5))[0]).toBeGreaterThan(215);
+	expect((await px(0.4, 0.5))[0], 'the shadow side: no highlight').toBeLessThan(150);
 
 	// Final: the tone line is gone; colour and shadow meet where it was
 	await tl.getByRole('button', { name: /^Show: / }).click();
