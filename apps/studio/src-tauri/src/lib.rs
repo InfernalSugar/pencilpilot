@@ -22,7 +22,8 @@ use tauri::ipc::{InvokeBody, Request, Response};
 use tauri::{AppHandle, Manager, State};
 
 /// The animation's drawings (crates/anim): the window keeps only the frames it's working
-/// on; the rest live here, in memory up to [`FRAMES_IN_MEMORY`] and on disk past it.
+/// on; the rest live here, in memory up to the `frameMemoryMb` setting and on disk past it
+/// (in the `framesFolder` setting's folder, or the app's cache).
 struct Frames(Mutex<FrameStore>);
 
 /// The export being written, if any (one at a time), and the sound for the next one.
@@ -36,9 +37,6 @@ struct VideoIn(Mutex<Option<video_in::Reader>>);
 /// Lip-sync: the recording to listen to next, and the run going.
 #[derive(Default)]
 struct LipSync(Mutex<Option<PathBuf>>, lipsync::Running);
-
-/// Bytes of drawing tiles kept in memory before the oldest go to disk.
-const FRAMES_IN_MEMORY: usize = 1 << 30;
 
 fn frames<'a>(state: &'a State<'_, Frames>) -> MutexGuard<'a, FrameStore> {
     // a panic mid-change can't leave the store half-done in a way that matters more
@@ -130,8 +128,27 @@ fn settings_get(app: AppHandle) -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
-fn settings_set(app: AppHandle, settings: serde_json::Value) -> Result<(), String> {
-    store::settings_set(&data_dir(&app)?, &settings)
+fn settings_set(
+    app: AppHandle,
+    settings: serde_json::Value,
+    store: State<'_, Frames>,
+) -> Result<(), String> {
+    let data = data_dir(&app)?;
+    store::settings_set(&data, &settings)?;
+    // the frames' memory limit and folder take effect straight away
+    let mut s = frames(&store);
+    s.set_budget(store::frames_budget(&data))
+        .map_err(|e| format!("couldn't put frames away: {e}"))?;
+    if let Some(dir) = store::frames_folder(&data, frames_cache(&app)) {
+        s.set_dir(dir)
+            .map_err(|e| format!("couldn't use that folder for frames: {e}"))?;
+    }
+    Ok(())
+}
+
+/// The app's own folder for frames past the memory limit.
+fn frames_cache(app: &AppHandle) -> Option<PathBuf> {
+    app.path().app_cache_dir().ok().map(|d| d.join("frames"))
 }
 
 /// Where the app keeps its own files (shown in Settings).
@@ -254,6 +271,8 @@ fn frames_stats(store: State<'_, Frames>) -> serde_json::Value {
         "placed": st.placed,
         "bytesInMemory": st.bytes_in_memory,
         "bytesOnDisk": st.bytes_on_disk,
+        "budget": st.budget,
+        "peakInMemory": st.peak_in_memory,
     })
 }
 
@@ -511,15 +530,25 @@ async fn account_sign_out(
 }
 
 /// Host a drawing-together session: the invite to share, who's here. Needs a sign-in.
+/// `net`: our own relay and cloud (Settings); `about`: the project, for the cloud's list.
 #[tauri::command]
 async fn share_host(
     app: AppHandle,
     state: State<'_, share::Sharing>,
     account: State<'_, account::Account>,
-    relay: Option<String>,
+    net: Option<share::Net>,
+    about: Option<share::About>,
 ) -> Result<share::Info, String> {
     let data = data_dir(&app)?;
-    state.host(app, &data, &account, relay.as_deref()).await
+    state
+        .host(
+            app,
+            &data,
+            &account,
+            &net.unwrap_or_default(),
+            &about.unwrap_or_default(),
+        )
+        .await
 }
 
 /// Join a session from an invite code. Needs a sign-in.
@@ -529,15 +558,24 @@ async fn share_join(
     state: State<'_, share::Sharing>,
     account: State<'_, account::Account>,
     code: String,
-    relay: Option<String>,
+    net: Option<share::Net>,
+    about: Option<share::About>,
 ) -> Result<share::Info, String> {
     let data = data_dir(&app)?;
     state
-        .join(app, &data, &code, &account, relay.as_deref())
+        .join(
+            app,
+            &data,
+            &code,
+            &account,
+            &net.unwrap_or_default(),
+            &about.unwrap_or_default(),
+        )
         .await
 }
 
-/// Come back to a shared project: join a member who's online, or host it again.
+/// Come back to a shared project: join a member who's online (directly or through the
+/// cloud), or catch up from the cloud and host it again.
 #[tauri::command]
 async fn share_rejoin(
     app: AppHandle,
@@ -545,12 +583,75 @@ async fn share_rejoin(
     account: State<'_, account::Account>,
     code: String,
     addrs: Vec<serde_json::Value>,
-    relay: Option<String>,
+    net: Option<share::Net>,
+    about: Option<share::About>,
 ) -> Result<share::Info, String> {
     let data = data_dir(&app)?;
     state
-        .rejoin(app, &data, &code, addrs, &account, relay.as_deref())
+        .rejoin(
+            app,
+            &data,
+            &code,
+            addrs,
+            &account,
+            &net.unwrap_or_default(),
+            &about.unwrap_or_default(),
+        )
         .await
+}
+
+/// The cloud's copy of the project after coming back when no one was online (once).
+#[tauri::command]
+async fn share_catch_up(
+    state: State<'_, share::Sharing>,
+) -> Result<Option<pencilpilot_share::cloud::CatchUp>, String> {
+    Ok(state.take_catch_up().await)
+}
+
+/// The shared projects in the cloud this account is in (the home screen's Cloud tab).
+#[tauri::command]
+async fn cloud_list(
+    app: AppHandle,
+    account: State<'_, account::Account>,
+    net: Option<share::Net>,
+) -> Result<share::CloudList, String> {
+    let data = data_dir(&app)?;
+    Ok(share::cloud_list(&data, &account, &net.unwrap_or_default()).await)
+}
+
+/// How to open a project from the cloud: its invite and canvas size.
+#[tauri::command]
+async fn cloud_open(
+    app: AppHandle,
+    account: State<'_, account::Account>,
+    project: String,
+    net: Option<share::Net>,
+) -> Result<pencilpilot_share::cloud::Opened, String> {
+    let data = data_dir(&app)?;
+    share::cloud_open(&data, &account, &net.unwrap_or_default(), &project).await
+}
+
+/// A shared project's name and picture changed (saved): the cloud's list shows them.
+/// `code`: its invite (the project is known by it).
+#[tauri::command]
+async fn cloud_touch(
+    app: AppHandle,
+    account: State<'_, account::Account>,
+    code: String,
+    name: Option<String>,
+    thumb: Option<String>,
+    net: Option<share::Net>,
+) -> Result<(), String> {
+    let data = data_dir(&app)?;
+    share::cloud_touch(
+        &data,
+        &account,
+        &net.unwrap_or_default(),
+        &code,
+        name,
+        thumb,
+    )
+    .await
 }
 
 /// The session in progress, if any.
@@ -630,13 +731,23 @@ pub fn run() {
             {
                 w.eval("location.replace('/dev/bench')")?;
             }
-            // the frame store spills to this run's own folder in the app's cache
-            let dir = app
-                .path()
-                .app_cache_dir()
-                .ok()
-                .map(|d| d.join("frames").join(std::process::id().to_string()));
-            app.manage(Frames(Mutex::new(FrameStore::new(FRAMES_IN_MEMORY, dir)?)));
+            // the frame store: up to the memory limit set, then to this run's own folder
+            // (the one chosen, or the app's cache)
+            let handle = app.handle();
+            let data = data_dir(handle).unwrap_or_default();
+            let budget = store::frames_budget(&data);
+            let cache = frames_cache(handle);
+            let store = store::frames_folder(&data, cache.clone())
+                .and_then(|d| FrameStore::new(budget, Some(d)).ok())
+                .map_or_else(
+                    // the chosen folder can't be used (a disk unplugged): the cache
+                    || {
+                        let d = cache.map(|d| d.join(std::process::id().to_string()));
+                        FrameStore::new(budget, d)
+                    },
+                    Ok,
+                )?;
+            app.manage(Frames(Mutex::new(store)));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -681,6 +792,10 @@ pub fn run() {
             share_host,
             share_join,
             share_rejoin,
+            share_catch_up,
+            cloud_list,
+            cloud_open,
+            cloud_touch,
             share_status,
             share_edit,
             share_direct,

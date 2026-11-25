@@ -93,6 +93,9 @@ pub struct LayerProps {
     pub adjust_spec: String,
     /// stroke, drop shadow and outer glow (see [`crate::style`])
     pub style: crate::style::LayerStyle,
+    /// a text layer: the app's description of its text (font, size…), kept as given;
+    /// empty for other layers. Painting on the layer clears it (rasterizes the text).
+    pub text: String,
 }
 
 impl LayerProps {
@@ -109,6 +112,7 @@ impl LayerProps {
             adjust: None,
             adjust_spec: String::new(),
             style: Default::default(),
+            text: String::new(),
         }
     }
 }

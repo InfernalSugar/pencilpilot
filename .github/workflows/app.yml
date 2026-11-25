@@ -106,6 +106,8 @@ jobs:
           # (repository variables; without them the build can't draw together)
           PENCILPILOT_SITE_URL: ${{ vars.PENCILPILOT_SITE_URL }}
           PENCILPILOT_PASS_KEY: ${{ vars.PENCILPILOT_PASS_KEY }}
+          # the cloud that keeps shared projects (deploy/keeper): <id>@host:port; optional
+          PENCILPILOT_CLOUD_ADDR: ${{ vars.PENCILPILOT_CLOUD_ADDR }}
       # the lip-sync program and its speech models made it into the package, runnable
       - if: runner.os == 'Linux'
         run: |

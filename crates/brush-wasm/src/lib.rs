@@ -970,6 +970,60 @@ impl PaintCanvas {
         self.inner.has_drawing(drawing)
     }
 
+    // ---- text layers ----
+
+    /// Start typing on text layer `id`, or (0) on a new layer above the active one.
+    /// Returns the layer's id (0 = can't: busy, locked, hidden or no room).
+    #[wasm_bindgen(js_name = textBegin)]
+    pub fn text_begin(&mut self, id: u32, name: &str) -> u32 {
+        self.inner.text_begin(id, name)
+    }
+
+    /// The text layer being typed on (0 = none).
+    #[wasm_bindgen(js_name = textLayer)]
+    pub fn text_layer(&self) -> u32 {
+        self.inner.text_layer()
+    }
+
+    /// Show the text: the layer becomes `rgba` (straight-alpha, `w`×`h`) at (`x`, `y`).
+    /// `spec` is the app's description of it. Not an undo step yet.
+    #[wasm_bindgen(js_name = textPreview)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn text_preview(
+        &mut self,
+        spec: &str,
+        x: i32,
+        y: i32,
+        w: u32,
+        h: u32,
+        rgba: &[u8],
+    ) -> bool {
+        self.inner.text_preview(spec, x, y, w, h, rgba)
+    }
+
+    /// Keep the text typed (one undo step).
+    #[wasm_bindgen(js_name = textCommit)]
+    pub fn text_commit(&mut self) -> bool {
+        self.inner.text_commit()
+    }
+
+    #[wasm_bindgen(js_name = textCancel)]
+    pub fn text_cancel(&mut self) {
+        self.inner.text_cancel();
+    }
+
+    /// Turn a text layer into a plain one (one undo step).
+    #[wasm_bindgen(js_name = rasterizeText)]
+    pub fn rasterize_text(&mut self, id: u32) -> bool {
+        self.inner.rasterize_text(id)
+    }
+
+    /// Set a layer's text description, not an undo step (opening a project).
+    #[wasm_bindgen(js_name = setTextSilent)]
+    pub fn set_text_silent(&mut self, id: u32, spec: &str) -> bool {
+        self.inner.set_text_silent(id, spec)
+    }
+
     /// Drawings kept here that aren't showing.
     #[wasm_bindgen(js_name = keptDrawings)]
     pub fn kept_drawings(&self) -> Vec<u32> {
@@ -1035,6 +1089,12 @@ impl PaintCanvas {
         self.inner.remove_layer_silent(id)
     }
 
+    /// How many undo steps are kept (10–500); fewer drops the oldest now.
+    #[wasm_bindgen(js_name = setUndoLimit)]
+    pub fn set_undo_limit(&mut self, n: u32) {
+        self.inner.set_undo_limit(n as usize);
+    }
+
     #[wasm_bindgen(js_name = clearHistory)]
     pub fn clear_history(&mut self) {
         self.inner.clear_history();
@@ -1095,6 +1155,7 @@ fn layer_props(
         adjust: None,
         adjust_spec: String::new(),
         style: brush::style::LayerStyle::from_numbers(style).unwrap_or_default(),
+        text: String::new(),
     }
 }
 

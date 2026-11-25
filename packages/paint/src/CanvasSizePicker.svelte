@@ -342,7 +342,7 @@
 	}
 	.go {
 		background: var(--pp-ink);
-		color: #fff;
+		color: var(--pp-on-ink);
 	}
 	.go:disabled {
 		opacity: 0.4;

@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 exclude = ["apps/studio/src-tauri"]
-members = ["crates/grader", "crates/grader-wasm", "crates/feedback", "crates/brush", "crates/brush-wasm", "crates/ppstudio", "crates/ppstudio-cli", "crates/share", "crates/anim", "tools/ref-importer", "crates/ref-service", "crates/ref-filters", "tools/calibrate"]
+members = ["crates/grader", "crates/grader-wasm", "crates/feedback", "crates/brush", "crates/brush-wasm", "crates/ppstudio", "crates/ppstudio-cli", "crates/share", "crates/keeper", "crates/anim", "tools/ref-importer", "crates/ref-service", "crates/ref-filters", "tools/calibrate"]
 
 [workspace.package]
 edition = "2024"

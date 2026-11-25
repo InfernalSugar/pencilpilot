@@ -10,6 +10,7 @@ This crate (`pencilpilot-ppstudio`) reads and writes it.
 | `thumbnail.png` | stored | optional; at most 512 px on its long side, for the project browser |
 | `tiles/<hash>` | deflate | one tile of pixels (below) |
 | `audio/<hash>.<ext>` | stored | a sound file a scene plays, as imported (below) |
+| `fonts/<hash>.<ext>` | stored | a font file text layers use, as imported (below) |
 | `timelapse/<n>.jpg` | stored | optional; the timelapse, a JPEG after each change (`000000.jpg` first) |
 
 ## manifest.json
@@ -33,7 +34,8 @@ This crate (`pencilpilot-ppstudio`) reads and writes it.
       "style": {                 // optional: its layer style (each effect keeps its settings while off)
         "stroke": { "on": true, "size": 4, "colour": "#000000", "position": "outside", "opacity": 1 },
         "shadow": { "on": false, "colour": "#000000", "opacity": 0.5, "angle": 120, "distance": 10, "blur": 8 },
-        "glow": { "on": false, "colour": "#ffed87", "size": 12, "opacity": 0.75 } }
+        "glow": { "on": false, "colour": "#ffed87", "size": 12, "opacity": 0.75 } },
+      "text": null               // optional: a text layer's text (the app's JSON string)
     }
   ],
   "groups": [ { "id": 1, "name": "Character", "visible": true, "opacity": 1.0 } ],
@@ -69,7 +71,8 @@ This crate (`pencilpilot-ppstudio`) reads and writes it.
     }
   },
   "extra": { },                  // the app's own settings (brush, colour…), kept as given
-  "timelapse": [ 1795279000000, 1795279004200 ]  // optional: when each timelapse picture was taken (ms since 1970)
+  "timelapse": [ 1795279000000, 1795279004200 ], // optional: when each timelapse picture was taken (ms since 1970)
+  "fonts": [ { "family": "My Hand", "file": "5e0c….ttf" } ]  // optional: font files text layers use
 }
 ```
 
@@ -128,6 +131,17 @@ This crate (`pencilpilot-ppstudio`) reads and writes it.
 - Without `scenes`, `frames` is the whole timeline (a single picture has one frame).
 - The app names drawings `D<number>`; a drawing belongs to one layer. Every drawing a
   frame or exposure names must be in `drawings`.
+
+## Text layers
+
+- A layer with `text` is a **text layer**: its drawings hold the text as pixels (so any
+  reader shows it), and `text` is the app's description of it (`{ "text", "font",
+  "size", "color", "bold", "italic", "align", "lineHeight", "letterSpacing", "x", "y",
+  "width", "rotate" }`, see the app's `text.ts`), to set it again. A reader that doesn't
+  know text layers treats it as a plain layer.
+- `fonts` are the font files the user imported for text layers: `fonts/<file>` (named
+  by the BLAKE3 hash of its bytes and its extension), known to `text` by `family`. Only
+  fonts the user imported are kept, never the system's.
 
 ## Rules for readers
 - Check `format` and `version` first. A newer version means "update the app".

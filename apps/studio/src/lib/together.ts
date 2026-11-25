@@ -717,6 +717,30 @@ export interface SavedShare {
 	/** shared drawing → its id in this document */
 	dids: [string, number][];
 	n: number;
+	/** others' drawings as the session had them ("lid|did" → each tile's checksum): the tiles
+	 * changed here since (drawn while offline) are asked for on coming back */
+	sums?: [string, Record<string, number>][];
+	/** others' tiles drawn on here while away, waiting for their owners' yes: (layer,
+	 * drawing, tiles "x,y" → RGBA base64, tiles rubbed out) */
+	held?: [string, string, [string, string][], string[]][];
+}
+
+/** A tile's checksum (FNV-1a over its pixels). */
+export function tileSum(px: Uint8Array): number {
+	let h = 0x811c9dc5;
+	const words =
+		px.byteOffset % 4 === 0
+			? new Uint32Array(px.buffer, px.byteOffset, px.length >> 2)
+			: new Uint32Array(px.slice().buffer);
+	for (let i = 0; i < words.length; i++) h = Math.imul(h ^ words[i], 0x01000193);
+	return h >>> 0;
+}
+
+/** Each tile's checksum ("x,y" → sum). */
+export function tileSums(t: TileMap): Record<string, number> {
+	const out: Record<string, number> = {};
+	for (const [k, px] of t) out[k] = tileSum(px);
+	return out;
 }
 
 /** A saved session from a file, checked (null if it isn't one). */
@@ -746,7 +770,35 @@ export function readSavedShare(raw: unknown): SavedShare | null {
 		ids: pairs(s.ids, LID),
 		gids: pairs(s.gids, LID),
 		dids: pairs(s.dids, DID),
-		n: Number.isInteger(s.n) ? s.n : 0
+		n: Number.isInteger(s.n) ? s.n : 0,
+		sums: Array.isArray(s.sums)
+			? s.sums.filter(
+					(p): p is [string, Record<string, number>] =>
+						Array.isArray(p) &&
+						typeof p[0] === 'string' &&
+						!!p[1] &&
+						typeof p[1] === 'object' &&
+						!Array.isArray(p[1])
+				)
+			: [],
+		held: Array.isArray(s.held)
+			? s.held.filter(
+					(h): h is [string, string, [string, string][], string[]] =>
+						Array.isArray(h) &&
+						LID.test(String(h[0])) &&
+						typeof h[1] === 'string' &&
+						Array.isArray(h[2]) &&
+						h[2].every(
+							(t) =>
+								Array.isArray(t) &&
+								typeof t[0] === 'string' &&
+								typeof t[1] === 'string' &&
+								t[1].length < 32_000
+						) &&
+						Array.isArray(h[3]) &&
+						h[3].every((t) => typeof t === 'string')
+				)
+			: []
 	};
 }
 
@@ -807,6 +859,17 @@ export class Together {
 	#waiting: { needs: { lid: string; own: boolean }[]; run: () => Promise<void> | void }[] = [];
 	/** edits to send once this app's changed tiles have gone (a merged layer's removal) */
 	#afterSend: (() => void)[] = [];
+	/** others' drawings as the session had them when this app left ("lid|did" → each
+	 * tile's checksum) */
+	#sums = new Map<string, Record<string, number>>();
+	/** others' layers drawn on here while offline: per drawing, the tiles changed here
+	 * (and cleared), kept aside until the owner lets this app draw on them (then they're
+	 * put over the session's and sent) */
+	#held = new Map<string, Map<string, { set: TileMap; clear: string[] }>>();
+	/** members who asked for the project before this app had it */
+	#snapAsks: string[] = [];
+	/** catching up from the cloud: the session's numbering starts again after it */
+	#fromCloud = false;
 
 	constructor(
 		readonly me: string,
@@ -898,6 +961,7 @@ export class Together {
 		this.#shareSounds(tl);
 		this.net.edit({ k: 'timeline', tl });
 		this.#synced = true;
+		await this.#answerAsks();
 	}
 
 	/** This app's groups, shared (hosting): each with its layers, then its settings. */
@@ -930,7 +994,25 @@ export class Together {
 			ids: [...this.ids],
 			gids: [...this.gids],
 			dids: [...this.#dids],
-			n: this.#n
+			n: this.#n,
+			// (others' layers only: this app's own merge on their own when it comes back)
+			sums: [...this.cache]
+				.filter(([k]) => {
+					const [lid, did] = k.split('|');
+					return did !== 'mask' && !this.shared.canDraw(lid, this.me);
+				})
+				.map(([k, t]) => [k, tileSums(t)]),
+			held: [...this.#held].flatMap(([lid, m]) =>
+				[...m].map(
+					([did, c]) =>
+						[lid, did, [...c.set].map(([tk, px]) => [tk, toBase64(px)]), c.clear] as [
+							string,
+							string,
+							[string, string][],
+							string[]
+						]
+				)
+			)
 		};
 	}
 
@@ -951,18 +1033,148 @@ export class Together {
 			this.#didOf.set(d, did);
 		}
 		this.#n = Math.max(this.#n, saved.n + 1);
+		this.#sums = new Map(saved.sums ?? []);
+		for (const [lid, did, set, clear] of saved.held ?? []) {
+			const m = this.#held.get(lid) ?? new Map();
+			m.set(did, {
+				set: new Map(
+					set
+						.map(([tk, b]) => [tk, fromBase64(b)] as [string, Uint8Array])
+						.filter(([, px]) => px.length === TILE_BYTES)
+				),
+				clear
+			});
+			this.#held.set(lid, m);
+		}
 		// layers here that aren't shared (from before joining) stay out of it
 		const shared = new Set(this.ids.values());
 		for (const l of this.canvas.layers()) if (!shared.has(l.id)) this.#local.add(l.id);
 	}
 
+	/**
+	 * After `restore`: others' drawings changed here since the session (drawn on while
+	 * offline). They're kept aside; once the session's project is in, their owners are
+	 * asked, and what was drawn goes to everyone when they say yes. How many layers.
+	 */
+	async findOffline(): Promise<number> {
+		for (const [k, sums] of this.#sums) {
+			const [lid, did] = k.split('|');
+			const d = this.#dids.get(did);
+			if (!d || !this.ids.has(lid) || this.shared.canDraw(lid, this.me)) continue;
+			const t = unpack(await this.canvas.packed(d));
+			// the tiles drawn (or rubbed out) here since
+			const set: TileMap = new Map();
+			for (const [tk, px] of t) if (sums[tk] !== tileSum(px)) set.set(tk, px);
+			const clear = Object.keys(sums).filter((tk) => !t.has(tk));
+			if (!set.size && !clear.length) continue;
+			const m = this.#held.get(lid) ?? new Map();
+			// (with what was kept aside before, still waiting)
+			const was = m.get(did);
+			m.set(did, {
+				set: new Map([...(was?.set ?? []), ...set]),
+				clear: [...new Set([...(was?.clear ?? []), ...clear])].filter((tk) => !set.has(tk))
+			});
+			this.#held.set(lid, m);
+		}
+		return this.#held.size;
+	}
+
+	/** The project is in: ask for the layers drawn on while offline (see findOffline). They
+	 * stay kept aside (in the file too) until the owner answers. */
+	#askHeld() {
+		for (const [lid, drawings] of [...this.#held]) {
+			const l = this.shared.layers.get(lid);
+			// (deleted meanwhile: nothing to ask for)
+			if (!l) {
+				this.#held.delete(lid);
+				continue;
+			}
+			const owners = this.request('draw', [{ lid, own: false }], async () => {
+				if (this.#held.get(lid) !== drawings) return;
+				this.#held.delete(lid);
+				// this app's tiles over the session's (what others drew meanwhile elsewhere stays)
+				for (const [did, change] of drawings) {
+					const d = this.localOf(did);
+					const now = unpack(await this.canvas.packed(d));
+					for (const tk of change.clear) now.delete(tk);
+					for (const [tk, px] of change.set) now.set(tk, px);
+					this.#later(() => this.canvas.put(d, pack(now)));
+					this.touch([d]);
+				}
+				await this.localChanged();
+			});
+			if (owners.length)
+				this.onnote(`You drew on “${l.name}” while away: its owner was asked to keep it.`);
+		}
+	}
+
+	/** Answer those who asked for the project before this app had it. */
+	async #answerAsks() {
+		for (const to of this.#snapAsks.splice(0)) await this.#sendSnapshot(to);
+	}
+
+	/** Joining: this app's own layers are put aside (hidden, locked, not shared). */
+	#putAside() {
+		for (const l of this.canvas.layers()) {
+			this.#local.add(l.id);
+			this.canvas.setLayer(l.id, { visible: false, locked: true });
+		}
+	}
+
+	/**
+	 * Catch up from the cloud (ADR-0014): no one else was online, so the cloud's copy (the
+	 * last snapshot a member sent it, then every edit since, `from` author) stands in for a
+	 * host's, from the cloud's member `keeper`. After `restore` (`restored`), this app's own
+	 * layers keep what was drawn here meanwhile and what it drew on others' is asked for;
+	 * otherwise (opened from the cloud on this computer) the canvas's layers are put aside,
+	 * as when joining. This app hosts the session from here.
+	 */
+	async catchUp(keeper: string, snap: unknown[], edits: [string, unknown][], restored: boolean) {
+		const kind = (m: unknown) => (m && typeof m === 'object' ? (m as { k?: unknown }).k : null);
+		this.#fromCloud = true;
+		if (restored) this.#rejoining = true;
+		else this.#putAside();
+		const begin = snap.find((m) => kind(m) === 'snap.begin');
+		if (begin && snap.some((m) => kind(m) === 'snap.end')) {
+			// the snapshot, then the edits after it (numbered after it)
+			await this.onDirect(keeper, { ...(begin as object), seq: 0 });
+			for (const m of snap)
+				if (m !== begin && kind(m) !== 'snap.end') await this.onDirect(keeper, m);
+			edits.forEach(([from, body], i) => this.#buffer.push({ seq: i + 1, from, body }));
+			await this.onDirect(keeper, { k: 'snap.end' });
+		} else {
+			// no snapshot yet: every edit from the start, over what's here
+			if (restored)
+				for (const [lid, id] of this.ids)
+					for (const d of new Set([this.canvas.drawingOf(id), ...this.canvas.drawingsOfLayer(id)]))
+						this.cache.set(key(lid, this.didOf(d)), unpack(await this.canvas.packed(d)));
+			this.#synced = true;
+			for (const [from, body] of edits) await this.onEdit(0, from, body);
+			this.#lastSeq = 0;
+			if (restored) {
+				for (const [lid, id] of this.ids)
+					if (this.shared.layers.get(lid)?.owner === this.me)
+						this.touch([this.canvas.drawingOf(id), ...this.canvas.drawingsOfLayer(id)]);
+				this.#rejoining = false;
+				await this.localChanged();
+				this.#askHeld();
+			} else this.addOwnLayer();
+			await this.#answerAsks();
+		}
+		this.#fromCloud = false;
+		this.onchange();
+	}
+
 	/** After `restore`, alone: the copy here is the project (others coming back get it). */
 	async resumeHost() {
+		// (what was drawn on others' layers here is in this copy: nothing to ask for)
+		this.#held.clear();
 		for (const [lid, id] of this.ids)
 			for (const d of new Set([this.canvas.drawingOf(id), ...this.canvas.drawingsOfLayer(id)]))
 				this.cache.set(key(lid, this.didOf(d)), unpack(await this.canvas.packed(d)));
 		for (const lid of this.ids.keys()) this.#refreshLock(lid);
 		this.#synced = true;
+		await this.#answerAsks();
 		this.onchange();
 	}
 
@@ -975,10 +1187,7 @@ export class Together {
 
 	/** Joining: ask the host for the project; this app's own layers are put aside. */
 	startJoin(host: string) {
-		for (const l of this.canvas.layers()) {
-			this.#local.add(l.id);
-			this.canvas.setLayer(l.id, { visible: false, locked: true });
-		}
+		this.#putAside();
 		this.net.direct(host, { k: 'snap.req' });
 	}
 
@@ -1363,6 +1572,8 @@ export class Together {
 				if (e.to === this.me) {
 					const was = this.#waiting.length;
 					this.#waiting = this.#waiting.filter((w) => !w.needs.some((n) => n.lid === e.lid));
+					// (what was drawn on it while away goes too)
+					this.#held.delete(e.lid);
 					if (this.#waiting.length < was) this.onnote('They said no: nothing was changed.');
 				}
 				break;
@@ -1441,8 +1652,10 @@ export class Together {
 	async onDirect(from: string, body: unknown) {
 		const m = body as Snap;
 		if (!m || typeof m !== 'object') return;
-		if (m.k === 'snap.req' && this.#synced) {
-			await this.#sendSnapshot(from);
+		if (m.k === 'snap.req') {
+			// (asked before this app has the project: answered once it has)
+			if (this.#synced) await this.#sendSnapshot(from);
+			else if (!this.#snapAsks.includes(from)) this.#snapAsks.push(from);
 		} else if (m.k === 'snap.begin' && !this.#synced) {
 			this.shared.load(m);
 			this.#snapSeq = m.seq;
@@ -1465,9 +1678,17 @@ export class Together {
 			const p = parseEdit({ ...(m as object), k: 'sound' });
 			if (p?.k === 'sound') await this.#takeSound(p.file, p.name, p.i, p.n, p.data);
 		} else if (m.k === 'snap.end' && !this.#synced) {
-			// back from a break: layers deleted meanwhile go
+			// back from a break: layers deleted meanwhile go (not those the edits after the
+			// snapshot make: they're kept, with what's drawn on them here)
+			const coming = new Set(
+				this.#buffer
+					.filter((b) => b.seq > this.#snapSeq)
+					.map((b) => b.body as { k?: unknown; lid?: unknown })
+					.filter((b) => b && b.k === 'layer' && typeof b.lid === 'string')
+					.map((b) => b.lid as string)
+			);
 			for (const [lid, id] of [...this.ids])
-				if (!this.shared.layers.has(lid)) {
+				if (!this.shared.layers.has(lid) && !coming.has(lid)) {
 					this.ids.delete(lid);
 					this.#later(() => this.canvas.removeLayer(id));
 				}
@@ -1494,6 +1715,8 @@ export class Together {
 			const later = this.#buffer.filter((b) => b.seq > this.#snapSeq);
 			this.#buffer = [];
 			for (const b of later) await this.onEdit(b.seq, b.from, b.body);
+			// (the cloud's edits were numbered by sessions before this one)
+			if (this.#fromCloud) this.#lastSeq = 0;
 			if (this.#rejoining) {
 				// this app's own drawings, as drawn here (compared with the session's): sent
 				for (const [lid, id] of this.ids)
@@ -1501,7 +1724,10 @@ export class Together {
 						this.touch([this.canvas.drawingOf(id), ...this.canvas.drawingsOfLayer(id)]);
 				this.#rejoining = false;
 				await this.localChanged();
+				// what it drew on others' layers: asked for
+				this.#askHeld();
 			} else this.addOwnLayer();
+			await this.#answerAsks();
 			this.onchange();
 		}
 	}

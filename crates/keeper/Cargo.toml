@@ -1,0 +1,16 @@
+[package]
+name = "pencilpilot-keeper"
+version = "0.1.0"
+edition.workspace = true
+description = "The cloud's always-on member: keeps shared projects so members can catch up when no one else is online (ADR-0014)"
+license.workspace = true
+
+[dependencies]
+pencilpilot-share = { path = "../share" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "signal"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = { version = "0.9", default-features = false, features = ["parse", "serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+data-encoding = "2"

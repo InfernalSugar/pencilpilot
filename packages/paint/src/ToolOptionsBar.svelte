@@ -6,6 +6,7 @@
 	 */
 	import ToneEditor from './ToneEditor.svelte';
 	import FilterEditor from './FilterEditor.svelte';
+	import TextOptions from './TextOptions.svelte';
 	import type PaintCanvas from './PaintCanvas.svelte';
 	import type { CanvasStatus } from './PaintCanvas.svelte';
 	import { SYMMETRY_MODES, symmetryOn } from './guides';
@@ -660,6 +661,7 @@
 		</span>
 	</div>
 {/if}
+<TextOptions text={opts.text} {tool} {status} />
 {#if tool === 'lasso-fill'}
 	<div class="fill-opts" role="group" aria-label="Lasso fill">
 		<span class="adjust-msg plain">

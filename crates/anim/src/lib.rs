@@ -4,7 +4,9 @@
 //! Tiles are the project file's colour tiles (straight-alpha sRGB RGBA8, 16 384 bytes,
 //! named by the first 128 bits of their BLAKE3 hash; see `crates/ppstudio/FORMAT.md`), so
 //! saving copies hashes, not pixels. Tiles stay in memory up to a budget; past it, the
-//! least recently used go to a folder on disk and come back when asked for.
+//! least recently used go to a folder on disk and come back when asked for. Room is
+//! made before tiles come in, so the tiles held never pass the budget (only a single
+//! drawing bigger than the whole budget can, until it's put away).
 //!
 //! Drawings cross between the window and here packed ([`pack`] / [`unpack`]):
 //!
@@ -15,7 +17,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ppstudio::{Drawing, Project, TileRef};
@@ -79,6 +81,10 @@ pub struct Stats {
     pub placed: usize,
     pub bytes_in_memory: usize,
     pub bytes_on_disk: usize,
+    /// the most tile bytes kept in memory
+    pub budget: usize,
+    /// the most tile bytes ever held in memory at once
+    pub peak_in_memory: usize,
 }
 
 #[derive(Debug)]
@@ -113,6 +119,8 @@ pub struct FrameStore {
     /// bytes of tiles kept in memory before the oldest go to disk
     budget: usize,
     in_memory: usize,
+    /// the most `in_memory` has been
+    peak: usize,
     on_disk: usize,
     clock: u64,
     /// where tiles go past the budget (none: everything stays in memory)
@@ -131,6 +139,7 @@ impl FrameStore {
             tiles: HashMap::new(),
             budget,
             in_memory: 0,
+            peak: 0,
             on_disk: 0,
             clock: 0,
             dir,
@@ -144,7 +153,46 @@ impl FrameStore {
             placed: self.drawings.values().map(Vec::len).sum(),
             bytes_in_memory: self.in_memory,
             bytes_on_disk: self.on_disk,
+            budget: self.budget,
+            peak_in_memory: self.peak,
         }
+    }
+
+    /// Keep up to `budget` bytes of tiles in memory from now on (less than is held now:
+    /// the oldest go to disk straight away).
+    pub fn set_budget(&mut self, budget: usize) -> Result<()> {
+        self.budget = budget;
+        self.spill()
+    }
+
+    /// Tiles past the budget go to `dir` from now on; the ones already on disk move
+    /// there (the old folder is removed).
+    pub fn set_dir(&mut self, dir: PathBuf) -> Result<()> {
+        if self.dir.as_deref() == Some(dir.as_path()) {
+            return Ok(());
+        }
+        std::fs::create_dir_all(&dir)?;
+        if let Some(old) = self.dir.take() {
+            let mut result = Ok(());
+            for (h, e) in &self.tiles {
+                if e.on_disk && result.is_ok() {
+                    result = move_file(&old.join(hex(h)), &dir.join(hex(h)));
+                }
+            }
+            if let Err(e) = result {
+                // stay where the tiles are
+                self.dir = Some(old);
+                return Err(e.into());
+            }
+            let _ = std::fs::remove_dir(&old);
+        }
+        self.dir = Some(dir);
+        self.spill()
+    }
+
+    /// Where tiles past the budget go.
+    pub fn dir(&self) -> Option<&Path> {
+        self.dir.as_deref()
     }
 
     pub fn contains(&self, id: u32) -> bool {
@@ -179,6 +227,13 @@ impl FrameStore {
             placed.push(Placed { x, y, hash: h });
             new_tiles.push((h, bytes));
         }
+        // room first, so the tiles held never pass the budget
+        let fresh: HashSet<Hash> = new_tiles
+            .iter()
+            .map(|(h, _)| *h)
+            .filter(|h| !self.tiles.contains_key(h))
+            .collect();
+        self.make_room(fresh.len() * TILE_BYTES)?;
         // count the new references before dropping the old ones (shared tiles stay)
         for (h, bytes) in new_tiles {
             self.add_ref(h, || Arc::from(bytes));
@@ -199,6 +254,7 @@ impl FrameStore {
             }
             None => {
                 self.in_memory += TILE_BYTES;
+                self.peak = self.peak.max(self.in_memory);
                 self.tiles.insert(
                     h,
                     Entry {
@@ -239,10 +295,25 @@ impl FrameStore {
 
     /// Past the budget: the least recently used tiles go to disk until it's 90% full.
     fn spill(&mut self) -> Result<()> {
-        if self.in_memory <= self.budget || self.dir.is_none() {
+        if self.in_memory <= self.budget {
             return Ok(());
         }
-        let target = self.budget / 10 * 9;
+        self.spill_to(self.budget / 10 * 9)
+    }
+
+    /// Make room for `bytes` more without passing the budget.
+    fn make_room(&mut self, bytes: usize) -> Result<()> {
+        if self.in_memory + bytes <= self.budget {
+            return Ok(());
+        }
+        self.spill_to((self.budget / 10 * 9).saturating_sub(bytes))
+    }
+
+    /// The least recently used tiles go to disk until `target` bytes are left in memory.
+    fn spill_to(&mut self, target: usize) -> Result<()> {
+        if self.in_memory <= target || self.dir.is_none() {
+            return Ok(());
+        }
         let mut held: Vec<(u64, Hash)> = self
             .tiles
             .iter()
@@ -291,7 +362,24 @@ impl FrameStore {
         let data: Arc<[u8]> = Arc::from(bytes);
         e.data = Some(data.clone());
         self.in_memory += TILE_BYTES;
+        self.peak = self.peak.max(self.in_memory);
         Ok(data)
+    }
+
+    /// These tiles are wanted now: they go to disk last, and room is made for the ones
+    /// coming back from disk.
+    fn wanted(&mut self, placed: &[Placed]) -> Result<()> {
+        self.clock += 1;
+        let mut away = HashSet::new();
+        for p in placed {
+            if let Some(e) = self.tiles.get_mut(&p.hash) {
+                e.used = self.clock;
+                if e.data.is_none() {
+                    away.insert(p.hash);
+                }
+            }
+        }
+        self.make_room(away.len() * TILE_BYTES)
     }
 
     /// A drawing's tiles (none: no such drawing). Tiles on disk come back to memory.
@@ -299,6 +387,7 @@ impl FrameStore {
         let Some(placed) = self.drawings.get(&id).cloned() else {
             return Ok(None);
         };
+        self.wanted(&placed)?;
         let mut out = Vec::with_capacity(placed.len());
         for p in placed {
             out.push((p.x, p.y, self.tile(&p.hash)?));
@@ -354,6 +443,7 @@ impl FrameStore {
             .get(&id)
             .cloned()
             .ok_or_else(|| Error::Invalid(format!("no drawing {id}")))?;
+        self.wanted(&placed)?;
         let mut refs = Vec::with_capacity(placed.len());
         for t in placed {
             if t.x < 0 || t.y < 0 {
@@ -395,6 +485,15 @@ impl FrameStore {
         }
         self.put(id, tiles)
     }
+}
+
+/// Move a file, copying it when the new place is on another disk.
+fn move_file(from: &Path, to: &Path) -> io::Result<()> {
+    if std::fs::rename(from, to).is_ok() {
+        return Ok(());
+    }
+    std::fs::copy(from, to)?;
+    std::fs::remove_file(from)
 }
 
 impl Drop for FrameStore {

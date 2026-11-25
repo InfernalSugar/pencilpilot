@@ -65,6 +65,14 @@ pub struct Member {
     pub pass: Pass,
 }
 
+impl Member {
+    /// The cloud's member (it keeps a copy of the project; it never hosts, draws or takes
+    /// over). Its pass says so, signed by the website like everyone's.
+    pub fn is_keeper(&self) -> bool {
+        self.user == crate::cloud::KEEPER_USER
+    }
+}
+
 /// What happens in the session, in the order the app should apply it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
@@ -116,6 +124,10 @@ struct Core {
     project: String,
     events: UnboundedSender<Event>,
     st: Mutex<St>,
+    /// the cloud's member (crate::cloud): it keeps a copy and never hosts
+    never_host: bool,
+    /// the endpoint is this session's alone (closed with it); a [`Hub`]'s is shared
+    own_endpoint: bool,
 }
 
 #[derive(Default)]
@@ -144,6 +156,8 @@ struct Peer {
     n: u64,
     conn: Connection,
     out: UnboundedSender<Frame>,
+    /// the cloud's member: no cursors for it
+    keeper: bool,
 }
 
 struct Link {
@@ -290,7 +304,7 @@ impl Session {
         };
         let st = self.core.st.lock().unwrap();
         if st.hosting {
-            for peer in st.peers.values() {
+            for peer in st.peers.values().filter(|p| !p.keeper) {
                 send_datagram(&peer.conn, &p);
             }
         } else if let Some(l) = &st.link {
@@ -308,10 +322,36 @@ impl Session {
         self.events.try_recv().ok()
     }
 
+    /// How to reach the session's host (none while hosting, or while it changes hands).
+    pub fn host_addr(&self) -> Option<EndpointAddr> {
+        self.core.st.lock().unwrap().host.clone()
+    }
+
+    /// Whether the session has ended (the host left and no one carried it on, or closed).
+    pub fn is_closed(&self) -> bool {
+        self.core.st.lock().unwrap().closed
+    }
+
     /// Leave (closes every connection of this app's session).
     pub async fn close(self) {
-        self.core.st.lock().unwrap().closed = true;
-        self.core.endpoint.close().await;
+        let conns: Vec<Connection> = {
+            let mut st = self.core.st.lock().unwrap();
+            st.closed = true;
+            st.link
+                .take()
+                .map(|l| l.conn)
+                .into_iter()
+                .chain(st.peers.drain().map(|(_, p)| p.conn))
+                .collect()
+        };
+        if self.core.own_endpoint {
+            self.core.endpoint.close().await;
+        } else {
+            // a hub's endpoint carries other sessions: only this one's connections go
+            for c in conns {
+                c.close(0u32.into(), b"left");
+            }
+        }
     }
 }
 
@@ -342,6 +382,23 @@ impl Core {
                 full.relay_urls().cloned().map(iroh::TransportAddr::Relay),
             )
         };
+        let (core, rx) = Core::make(endpoint, who, pass, site, key, addr, false, true);
+        tokio::spawn(accept_loop(core.clone()));
+        Ok((core, rx))
+    }
+
+    /// A session's core on an endpoint (its own, or a hub's).
+    #[allow(clippy::too_many_arguments)]
+    fn make(
+        endpoint: Endpoint,
+        who: PassInfo,
+        pass: &Pass,
+        site: &SiteKey,
+        key: [u8; 32],
+        addr: EndpointAddr,
+        never_host: bool,
+        own_endpoint: bool,
+    ) -> (Arc<Self>, UnboundedReceiver<Event>) {
         let me = Member {
             id: endpoint.id().to_string(),
             user: who.user,
@@ -351,17 +408,18 @@ impl Core {
         };
         let (events, rx) = unbounded_channel();
         let core = Arc::new(Core {
-            endpoint: endpoint.clone(),
-            secret: id.secret(),
+            secret: endpoint.secret_key().clone(),
+            endpoint,
             site: *site,
             me,
             key,
             project: invite::project_of(&key),
             events,
             st: Mutex::new(St::default()),
+            never_host,
+            own_endpoint,
         });
-        tokio::spawn(accept_loop(core.clone()));
-        Ok((core, rx))
+        (core, rx)
     }
 
     fn emit(&self, e: Event) {
@@ -416,7 +474,7 @@ impl Core {
     fn take_over(&self) {
         let members = {
             let mut st = self.st.lock().unwrap();
-            if st.hosting || st.closed {
+            if st.hosting || st.closed || self.never_host {
                 return;
             }
             st.hosting = true;
@@ -572,14 +630,20 @@ impl Core {
         // the host is gone: hand over
         let (old, candidates, seen) = {
             let mut st = self.st.lock().unwrap();
+            if st.closed {
+                return;
+            }
             let Some(old) = st.link.take().map(|l| l.host) else {
                 return;
             };
             let old_id = old.to_string();
+            // (the cloud's member never hosts: it isn't asked)
             let candidates: Vec<Member> = st
                 .members
                 .iter()
-                .filter(|m| m.id != old_id)
+                .filter(|m| {
+                    m.id != old_id && !m.is_keeper() && !(self.never_host && m.id == self.me.id)
+                })
                 .cloned()
                 .collect();
             (old_id, candidates, st.seen.clone())
@@ -627,7 +691,161 @@ impl Core {
     }
 }
 
+/// One endpoint for many sessions: the cloud's member ([`crate::cloud`]) is in every shared
+/// project it keeps at once, under one id and one address. Joiners reaching it are passed on
+/// to their session's host; connections for other protocols (the cloud's own) come out of
+/// the receiver [`Hub::bind`] returns.
+pub struct Hub {
+    endpoint: Endpoint,
+    cores: Mutex<HashMap<String, Arc<Core>>>,
+}
+
+impl Hub {
+    /// Listen on UDP `port` (0: any free one) for the sessions' protocol and `alpns`.
+    pub async fn bind(
+        id: &Identity,
+        relays: Relays,
+        port: u16,
+        alpns: Vec<Vec<u8>>,
+    ) -> Result<(Arc<Self>, UnboundedReceiver<Connection>)> {
+        let endpoint = bind_with(id, &relays, port, alpns).await?;
+        if relays != Relays::Off {
+            let _ = tokio::time::timeout(Duration::from_secs(10), endpoint.online()).await;
+        }
+        let hub = Arc::new(Self {
+            endpoint,
+            cores: Mutex::new(HashMap::new()),
+        });
+        let (tx, rx) = unbounded_channel();
+        tokio::spawn(hub_accept(hub.clone(), tx));
+        Ok((hub, rx))
+    }
+
+    /// How to reach it (its id, its addresses, its relay).
+    pub fn addr(&self) -> EndpointAddr {
+        self.endpoint.addr()
+    }
+
+    pub fn id(&self) -> EndpointId {
+        self.endpoint.id()
+    }
+
+    pub fn endpoint(&self) -> &Endpoint {
+        &self.endpoint
+    }
+
+    /// Join the session an invite points to as a member that never hosts: it gets every
+    /// edit in order and passes joiners on to the host, and when the host leaves it follows
+    /// whoever takes over (or the session ends for it: [`Event::Closed`]).
+    pub async fn keep(&self, invite: &Invite, pass: &Pass, site: &SiteKey) -> Result<Session> {
+        let who = pass.check(site, &self.endpoint.id().to_string(), pass::now())?;
+        let (core, events) = Core::make(
+            self.endpoint.clone(),
+            who,
+            pass,
+            site,
+            invite.key,
+            self.endpoint.addr(),
+            true,
+            false,
+        );
+        let project = core.project.clone();
+        self.cores
+            .lock()
+            .unwrap()
+            .insert(project.clone(), core.clone());
+        let mut last = Error("The invite has no one to ask.".into());
+        for addr in invite.addrs.iter().filter(|a| a.id != self.endpoint.id()) {
+            match core.clone().enter(addr.clone(), None).await {
+                Ok(()) => return Ok(Session { core, events }),
+                Err(e) => last = e,
+            }
+        }
+        core.st.lock().unwrap().closed = true;
+        let mut cores = self.cores.lock().unwrap();
+        if cores.get(&project).is_some_and(|c| Arc::ptr_eq(c, &core)) {
+            cores.remove(&project);
+        }
+        Err(last)
+    }
+
+    pub async fn close(&self) {
+        self.endpoint.close().await;
+    }
+}
+
+async fn hub_accept(hub: Arc<Hub>, others: UnboundedSender<Connection>) {
+    while let Some(incoming) = hub.endpoint.accept().await {
+        let hub = hub.clone();
+        let others = others.clone();
+        tokio::spawn(async move {
+            let Ok(conn) = incoming.await else {
+                return;
+            };
+            if conn.alpn() == ALPN || conn.alpn() == ALPN_V1 {
+                let _ = hub_serve(conn, hub).await;
+            } else {
+                let _ = others.send(conn);
+            }
+        });
+    }
+}
+
+/// Someone knocking on the hub: to the session they name, if it's in one.
+async fn hub_serve(conn: Connection, hub: Arc<Hub>) -> Result<()> {
+    let (mut send, mut recv) = tokio::time::timeout(HANDSHAKE, conn.accept_bi())
+        .await
+        .map_err(err)?
+        .map_err(err)?;
+    let hello = tokio::time::timeout(HANDSHAKE, wire::read(&mut recv))
+        .await
+        .map_err(err)??;
+    let Some(hello @ Frame::Hello { .. }) = hello else {
+        conn.close(1u32.into(), b"hello first");
+        return Ok(());
+    };
+    let Frame::Hello { project, .. } = &hello else {
+        return Ok(());
+    };
+    let core = hub
+        .cores
+        .lock()
+        .unwrap()
+        .get(project)
+        .filter(|c| !c.st.lock().unwrap().closed)
+        .cloned();
+    match core {
+        Some(core) => serve_hello(conn, core, send, recv, hello).await,
+        None => {
+            let _ = wire::write(
+                &mut send,
+                &Frame::Refused {
+                    reason: "No one is drawing in that project right now.".into(),
+                },
+            )
+            .await;
+            let _ = send.finish();
+            let _ = tokio::time::timeout(Duration::from_secs(2), conn.closed()).await;
+            Ok(())
+        }
+    }
+}
+
 async fn bind(id: &Identity, relays: &Relays) -> Result<Endpoint> {
+    bind_with(id, relays, 0, Vec::new()).await
+}
+
+/// An endpoint with a throwaway key, for asking a server something.
+pub(crate) async fn bind_client(relays: &Relays) -> Result<Endpoint> {
+    bind(&Identity::generate(), relays).await
+}
+
+async fn bind_with(
+    id: &Identity,
+    relays: &Relays,
+    port: u16,
+    alpns: Vec<Vec<u8>>,
+) -> Result<Endpoint> {
     let builder = match relays {
         Relays::Iroh => Endpoint::builder(presets::N0),
         Relays::Custom(urls) => {
@@ -653,12 +871,30 @@ async fn bind(id: &Identity, relays: &Relays) -> Result<Endpoint> {
                 .expect("10 s is a valid idle timeout"),
         ))
         .build();
-    builder
+    let mut builder = builder
         .transport_config(quic)
         .dns_resolver(resolver())
         .secret_key(id.secret())
         // the old protocol too, only to tell an older app to update
-        .alpns(vec![ALPN.to_vec(), ALPN_V1.to_vec()])
+        .alpns(
+            [ALPN.to_vec(), ALPN_V1.to_vec()]
+                .into_iter()
+                .chain(alpns)
+                .collect(),
+        );
+    if port != 0 {
+        // a server's fixed port (the cloud's), on every address
+        builder = builder
+            .clear_ip_transports()
+            .bind_addr(std::net::SocketAddr::from(([0, 0, 0, 0], port)))
+            .map_err(err)?
+            .bind_addr(std::net::SocketAddr::from((
+                std::net::Ipv6Addr::UNSPECIFIED,
+                port,
+            )))
+            .map_err(err)?;
+    }
+    builder
         .bind()
         .await
         .map_err(|e| err(format!("Couldn't start the connection: {e}")))
@@ -771,21 +1007,36 @@ async fn accept_loop(core: Arc<Core>) {
 
 /// Someone asking to join this app (or, after a hand-over, to rejoin it as host).
 async fn serve(conn: Connection, core: Arc<Core>) -> Result<()> {
-    let remote = conn.remote_id();
-    let (mut send, mut recv) = tokio::time::timeout(HANDSHAKE, conn.accept_bi())
+    let (send, mut recv) = tokio::time::timeout(HANDSHAKE, conn.accept_bi())
         .await
         .map_err(err)?
         .map_err(err)?;
     let hello = tokio::time::timeout(HANDSHAKE, wire::read(&mut recv))
         .await
         .map_err(err)??;
-    let Some(Frame::Hello {
+    let Some(hello) = hello else {
+        conn.close(1u32.into(), b"hello first");
+        return Ok(());
+    };
+    serve_hello(conn, core, send, recv, hello).await
+}
+
+/// After the joiner's first frame (a hub reads it to find the session).
+async fn serve_hello(
+    conn: Connection,
+    core: Arc<Core>,
+    mut send: iroh::endpoint::SendStream,
+    mut recv: iroh::endpoint::RecvStream,
+    hello: Frame,
+) -> Result<()> {
+    let remote = conn.remote_id();
+    let Frame::Hello {
         project,
         proof,
         pass,
         addr,
         resume,
-    }) = hello
+    } = hello
     else {
         conn.close(1u32.into(), b"hello first");
         return Ok(());
@@ -830,7 +1081,10 @@ async fn serve(conn: Connection, core: Arc<Core>) -> Result<()> {
         if st.closed {
             Some(refuse("This session has ended."))
         } else if !st.hosting {
-            st.host.clone().map(|host| Frame::Redirect { host })
+            Some(match st.host.clone() {
+                Some(host) => Frame::Redirect { host },
+                None => refuse("The session is changing hands: try again in a moment."),
+            })
         } else {
             None
         }
@@ -892,6 +1146,7 @@ async fn serve(conn: Connection, core: Arc<Core>) -> Result<()> {
                 n,
                 conn: conn.clone(),
                 out,
+                keeper: member.is_keeper(),
             },
         );
         n
@@ -950,7 +1205,7 @@ async fn host_datagrams(conn: Connection, core: Arc<Core>, remote: EndpointId) {
         {
             let st = core.st.lock().unwrap();
             for (id, peer) in &st.peers {
-                if *id != remote {
+                if *id != remote && !peer.keeper {
                     send_datagram(&peer.conn, &p);
                 }
             }

@@ -295,6 +295,30 @@ pub fn versions_kept(data: &Path) -> usize {
         .map_or(VERSIONS_KEPT, |n| (n as usize).min(VERSIONS_MAX))
 }
 
+/// The frame store's share of the memory the animation's frames may take (the
+/// `frameMemoryMb` setting: 256 MB to 256 GB, 1 GB unless set), in bytes: three
+/// quarters; the window keeps its recent drawings in the last quarter
+/// (`memoryPlan` in src/lib/frames.ts).
+pub fn frames_budget(data: &Path) -> usize {
+    let mb = settings_get(data)
+        .get("frameMemoryMb")
+        .and_then(serde_json::Value::as_u64)
+        .map_or(1024, |n| n.clamp(256, 262_144));
+    (mb as usize).saturating_mul(1 << 20) / 4 * 3
+}
+
+/// Where frames past that go (the `framesFolder` setting): a folder of this run's own
+/// inside the one chosen (none chosen: `fallback`).
+pub fn frames_folder(data: &Path, fallback: Option<PathBuf>) -> Option<PathBuf> {
+    let run = format!("PencilPilot frames {}", std::process::id());
+    settings_get(data)
+        .get("framesFolder")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty() && Path::new(s).is_absolute())
+        .map(|s| Path::new(s).join(&run))
+        .or(fallback.map(|d| d.join(std::process::id().to_string())))
+}
+
 // ---- recent projects ----
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -310,6 +334,43 @@ pub struct RecentItem {
     /// when it was last saved (RFC 3339)
     pub modified: String,
     pub thumbnail: Option<String>,
+    /// a project drawn together: who it was with (its invite code stays in the file)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shared: Option<Shared>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Shared {
+    /// the names of the people in its session
+    pub with: Vec<String>,
+    /// the project's id (from its invite; the cloud lists it by this)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+}
+
+/// A project's shared session (`extra.share`), if it has one: only the names leave.
+fn shared_of(extra: &serde_json::Value) -> Option<Shared> {
+    let share = extra.get("share")?;
+    let code = share.get("code")?.as_str()?;
+    if !code.starts_with("pp1-") {
+        return None;
+    }
+    let with = share
+        .get("members")
+        .and_then(|m| m.as_array())
+        .map(|m| {
+            m.iter()
+                .filter_map(|p| p.get("name")?.as_str())
+                .filter(|n| !n.is_empty())
+                .map(|n| n.chars().take(24).collect())
+                .take(12)
+                .collect()
+        })
+        .unwrap_or_default();
+    let project = pencilpilot_share::Invite::decode(code)
+        .ok()
+        .map(|i| i.project());
+    Some(Shared { with, project })
 }
 
 fn recent_file(data: &Path) -> PathBuf {
@@ -361,6 +422,7 @@ pub fn recent_list(data: &Path) -> Vec<RecentItem> {
                 layers: m.layers.len(),
                 modified: m.modified,
                 thumbnail: thumb.as_deref().map(base64),
+                shared: shared_of(&m.extra),
                 path,
             },
             Err(_) => RecentItem {
@@ -372,6 +434,7 @@ pub fn recent_list(data: &Path) -> Vec<RecentItem> {
                 layers: 0,
                 modified: String::new(),
                 thumbnail: None,
+                shared: None,
             },
         })
         .collect()
@@ -415,6 +478,7 @@ mod tests {
                     group: 0,
                     adjust: None,
                     style: None,
+                    text: None,
                 },
                 rgba: [0, rgba.len()],
                 mask: None,
@@ -432,6 +496,7 @@ mod tests {
             mouth_charts: vec![],
             drawing_kinds: Default::default(),
             timelapse: vec![],
+            fonts: vec![],
         };
         encode(&header, &rgba).unwrap()
     }
@@ -539,6 +604,53 @@ mod tests {
         }
         assert_eq!(recent_paths(&data).len(), RECENT_KEPT);
         fs::remove_dir_all(&data).unwrap();
+    }
+
+    #[test]
+    fn a_shared_project_shows_who_it_was_with_but_not_its_code() {
+        let extra = serde_json::json!({ "share": {
+            "code": "pp1-secret",
+            "members": [{ "id": "a", "name": "Sam" }, { "id": "b", "name": "" }, { "id": "c", "name": "Ana" }]
+        }});
+        let s = shared_of(&extra).unwrap();
+        assert_eq!(s.with, vec!["Sam".to_string(), "Ana".to_string()]);
+        assert!(!serde_json::to_string(&s).unwrap().contains("secret"));
+        assert_eq!(s.project, None, "(not a real code)");
+        assert_eq!(shared_of(&serde_json::json!({})), None);
+        assert_eq!(
+            shared_of(&serde_json::json!({ "share": { "code": "nope" } })),
+            None
+        );
+    }
+
+    #[test]
+    fn the_frame_memory_limit_and_folder_come_from_the_settings() {
+        let data = temp("frames-settings");
+        assert_eq!(frames_budget(&data), 768 << 20);
+        assert_eq!(frames_folder(&data, None), None);
+        let pid = std::process::id().to_string();
+        assert_eq!(
+            frames_folder(&data, Some(PathBuf::from("/cache/frames"))),
+            Some(PathBuf::from("/cache/frames").join(&pid))
+        );
+        settings_set(
+            &data,
+            &serde_json::json!({ "frameMemoryMb": 16384, "framesFolder": "/big/disk" }),
+        )
+        .unwrap();
+        assert_eq!(frames_budget(&data), 12 << 30);
+        assert_eq!(
+            frames_folder(&data, None),
+            Some(PathBuf::from(format!("/big/disk/PencilPilot frames {pid}")))
+        );
+        // too little, and a folder that isn't a whole path: the safe choice
+        settings_set(
+            &data,
+            &serde_json::json!({ "frameMemoryMb": 3, "framesFolder": "relative" }),
+        )
+        .unwrap();
+        assert_eq!(frames_budget(&data), 192 << 20);
+        assert_eq!(frames_folder(&data, None), None);
     }
 
     #[test]

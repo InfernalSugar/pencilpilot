@@ -26,6 +26,7 @@ pub mod filters;
 pub mod layers;
 mod select;
 pub mod style;
+mod text;
 pub mod texture;
 
 pub use layers::{Blend, LayerProps};
@@ -38,8 +39,10 @@ pub(crate) type TileMap = HashMap<TileKey, Box<TilePixels>>;
 /// Tiles as they were before an edit. `None` = the tile did not exist.
 type Snapshot = HashMap<TileKey, Option<Box<TilePixels>>>;
 
-/// Maximum number of undo steps kept.
+/// Undo steps kept unless the app asks for another number (see [`Painter::set_undo_limit`]).
 pub const UNDO_LIMIT: usize = 60;
+/// The fewest and most undo steps the app may ask for.
+pub const UNDO_LIMIT_RANGE: std::ops::RangeInclusive<usize> = 10..=500;
 
 /// Tile surface that can snapshot the tiles a stroke touches.
 #[derive(Default)]
@@ -443,6 +446,8 @@ pub struct Painter {
     rgba: Vec<u8>,
     undo: Vec<Edit>,
     redo: Vec<Edit>,
+    /// undo steps kept (the oldest go past it)
+    undo_limit: usize,
     /// counts changes to the history (new edits, undo, redo)
     edits: u64,
     /// the last selection fill, while it's still the latest edit (`edits` then)
@@ -475,6 +480,8 @@ pub struct Painter {
     style: Option<std::sync::Arc<texture::DabStyle>>,
     /// an adjustment layer being changed live: (layer, its settings before)
     adjust_layer_before: Option<(u32, LayerProps)>,
+    /// text being typed on a text layer (see `text_begin`)
+    text_editing: Option<text::TextEdit>,
 }
 
 impl Painter {
@@ -492,6 +499,7 @@ impl Painter {
             rgba: vec![255; (width * height * 4) as usize],
             undo: Vec::new(),
             redo: Vec::new(),
+            undo_limit: UNDO_LIMIT,
             edits: 0,
             sel_fill_at: None,
             cels: HashMap::new(),
@@ -509,6 +517,7 @@ impl Painter {
             textures: HashMap::new(),
             style: None,
             adjust_layer_before: None,
+            text_editing: None,
         }
     }
 
@@ -1050,6 +1059,7 @@ impl Painter {
             && self.transform.is_none()
             && self.liquify.is_none()
             && self.adjusting.is_none()
+            && self.text_editing.is_none()
     }
 
     fn stop_mask_editing(&mut self) {
@@ -1384,6 +1394,7 @@ impl Painter {
         if props.adjust.is_some() {
             props.style = Default::default();
         }
+        props.text = self.layers[idx].props.text.clone();
         props.opacity = props.opacity.clamp(0.0, 1.0);
         props.name = props.name.chars().take(60).collect();
         if props.name.trim().is_empty() {
@@ -1411,6 +1422,7 @@ impl Painter {
         if before.adjust.is_some() {
             before.style = Default::default();
         }
+        before.text = self.layers[idx].props.text.clone();
         if self.layers[idx].props == before {
             return false;
         }
@@ -1692,10 +1704,17 @@ impl Painter {
     }
 
     fn push_undo(&mut self, mut e: Edit) {
+        // paint on a text layer makes it a plain one (undo brings the text back)
+        self.rasterize_painted(&mut e);
+        self.push_step(e);
+    }
+
+    /// [`Self::push_undo`] without that (the text tool's own steps).
+    fn push_step(&mut self, mut e: Edit) {
         self.edits += 1;
         self.tag_drawings(&mut e);
         self.undo.push(e);
-        if self.undo.len() > UNDO_LIMIT {
+        if self.undo.len() > self.undo_limit {
             self.undo.remove(0);
         }
         self.redo.clear();
@@ -3251,6 +3270,18 @@ impl Painter {
         }
     }
 
+    /// How many undo steps are kept (clamped to [`UNDO_LIMIT_RANGE`]); fewer than the
+    /// history holds now drops the oldest.
+    pub fn set_undo_limit(&mut self, n: usize) {
+        self.undo_limit = n.clamp(*UNDO_LIMIT_RANGE.start(), *UNDO_LIMIT_RANGE.end());
+        let over = self.undo.len().saturating_sub(self.undo_limit);
+        self.undo.drain(..over);
+    }
+
+    pub fn undo_limit(&self) -> usize {
+        self.undo_limit
+    }
+
     /// Forget the undo/redo history (e.g. after setting up starter layers,
     /// so the first undo doesn't take the setup apart).
     pub fn clear_history(&mut self) {
@@ -3735,6 +3766,11 @@ impl Painter {
 
     pub fn undo(&mut self) -> bool {
         self.adjust_cancel();
+        if self.text_editing.is_some() {
+            // undo while typing drops the change
+            self.text_cancel();
+            return false;
+        }
         if self.stroking.is_some() {
             return false;
         }
@@ -3754,6 +3790,9 @@ impl Painter {
 
     pub fn redo(&mut self) -> bool {
         self.adjust_cancel();
+        if self.text_editing.is_some() {
+            return false;
+        }
         if self.stroking.is_some() {
             return false;
         }
@@ -4305,7 +4344,7 @@ impl Painter {
             .map(|l| {
                 let p = &l.props;
                 format!(
-                    r#"{{"id":{},"name":{},"visible":{},"opacity":{},"blend":"{}","locked":{},"alphaLock":{},"clip":{},"mask":{},"editingMask":{},"group":{},"imported":{},"empty":{},"drawing":{},"adjust":{},"style":{}}}"#,
+                    r#"{{"id":{},"name":{},"visible":{},"opacity":{},"blend":"{}","locked":{},"alphaLock":{},"clip":{},"mask":{},"editingMask":{},"group":{},"imported":{},"empty":{},"drawing":{},"adjust":{},"style":{},"text":{}}}"#,
                     l.id,
                     json_str(&p.name),
                     p.visible,
@@ -4329,6 +4368,11 @@ impl Painter {
                         "null".into()
                     } else {
                         p.style.json()
+                    },
+                    if p.text.is_empty() {
+                        "null".into()
+                    } else {
+                        json_str(&p.text)
                     }
                 )
             })
@@ -5162,6 +5206,28 @@ mod tests {
             n += 1;
         }
         assert_eq!(n, UNDO_LIMIT);
+    }
+
+    #[test]
+    fn undo_limit_can_be_changed() {
+        let mut p = Painter::new(128, 64);
+        let b = pen();
+        p.set_undo_limit(12);
+        for i in 0..20 {
+            line(&mut p, &b, i as f32 + 5.0);
+        }
+        // fewer: the oldest go now
+        p.set_undo_limit(10);
+        let mut n = 0;
+        while p.undo() {
+            n += 1;
+        }
+        assert_eq!(n, 10);
+        // out of range: clamped
+        p.set_undo_limit(1);
+        assert_eq!(p.undo_limit(), 10);
+        p.set_undo_limit(100_000);
+        assert_eq!(p.undo_limit(), 500);
     }
 
     // ---- drawings (animation cels) ----

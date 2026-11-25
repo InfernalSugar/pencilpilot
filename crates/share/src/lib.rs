@@ -18,6 +18,11 @@
 //! The session carries edits as JSON values; what they mean (strokes, tile changes,
 //! timeline edits) is up to the app.
 
+//! - [`cloud`]: the always-on member that keeps shared projects so members can catch up
+//!   when no one else is online (ADR-0014), and the apps' side of talking to it. [`Hub`]
+//!   lets it be in many sessions on one endpoint.
+
+pub mod cloud;
 mod identity;
 mod invite;
 mod pass;
@@ -26,10 +31,11 @@ mod wire;
 
 pub use identity::Identity;
 pub use invite::Invite;
-pub use iroh::{EndpointAddr, SecretKey};
+pub use iroh::endpoint::Connection;
+pub use iroh::{EndpointAddr, EndpointId, SecretKey};
 pub use pass::{Pass, PassInfo, SiteKey, now, site_key};
-pub use session::{Event, Member, Relays, Session};
-pub use wire::Signed;
+pub use session::{Event, Hub, Member, Relays, Session};
+pub use wire::{Signed, read_json, write};
 
 /// The protocol's name in the connection handshake. Apps with another version don't connect.
 /// (2: joining carries a sign-in pass.)

@@ -1,0 +1,28 @@
+# PencilPilot's cloud keeper, for drawing together (ADR-0014). See README.md.
+#
+# An always-on member of every shared project kept here: it keeps the latest project and
+# the edits since, so members can catch up when no one else is online. Solo projects never
+# come here.
+
+# where projects are kept (one folder each)
+data = "/var/lib/pencilpilot-keeper"
+# the keeper's computer key (made on the first start; `pencilpilot-keeper --id` prints its id)
+key = "/var/lib/pencilpilot-keeper/key"
+# its sign-in pass from the website (apps/web/scripts/keeper-pass.mjs)
+pass = "/etc/pencilpilot-keeper/pass.json"
+# the website's public key for passes: the apps' PENCILPILOT_PASS_KEY
+site_key = "0000000000000000000000000000000000000000000000000000000000000000"
+# UDP; apps reach the keeper at <id>@<this server>:<port>
+port = 7843
+# our own relay (deploy/relay), for apps that can't reach it directly
+relays = ["https://relay.example.com"]
+
+[limits]
+# what one account's projects may take in the cloud, in MB
+account_mb = 1024
+# projects one account may have kept
+projects_per_account = 200
+# ask the session's host for a snapshot once the edits since the last pass this (MB)…
+compact_after_mb = 32
+# …and at least this often while people draw (minutes)
+compact_every_minutes = 30

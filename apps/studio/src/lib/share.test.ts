@@ -1,11 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
 	aiAllowed,
+	cleanCloud,
 	cleanInvite,
 	cleanRelay,
 	Cursors,
 	isCursor,
 	memberColour,
+	people,
 	shareChoices,
 	Throttle
 } from './share';
@@ -99,5 +101,26 @@ describe('drawing together', () => {
 		expect(sent).toEqual([1, 3, 4]);
 		th.stop();
 		vi.useRealTimers();
+	});
+});
+
+describe('the cloud', () => {
+	it('reads its address as typed (id@host:port, the id alone, or off)', () => {
+		const id = 'AB'.repeat(32);
+		expect(cleanCloud(` ${id}@cloud.example.com:7843 `)).toBe(
+			`${id.toLowerCase()}@cloud.example.com:7843`
+		);
+		expect(cleanCloud(id)).toBe(id.toLowerCase());
+		expect(cleanCloud('Off')).toBe('off');
+		expect(cleanCloud('cloud.example.com')).toBe('');
+		expect(cleanCloud(`${id}@nowhere`)).toBe('');
+	});
+
+	it('leaves the cloud’s member out of who is drawing', () => {
+		const m = [
+			{ id: 'a', name: 'Ana', user: 'u_ana' },
+			{ id: 'k', name: 'Cloud', user: 'pp:cloud' }
+		];
+		expect(people(m).map((x) => x.name)).toEqual(['Ana']);
 	});
 });

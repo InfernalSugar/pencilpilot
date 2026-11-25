@@ -6,7 +6,7 @@
 	 * Ctrl+S saves (.ppstudio), Ctrl+Shift+S saves as, Ctrl+O opens.
 	 */
 	import Studio from '@pencilpilot/paint/Studio.svelte';
-	import ToolRail, { type ToolId } from '@pencilpilot/paint/ToolRail.svelte';
+	import ToolRail, { ALL_TOOLS, type ToolId } from '@pencilpilot/paint/ToolRail.svelte';
 	import ToolOptionsBar from '@pencilpilot/paint/ToolOptionsBar.svelte';
 	import QuickMenu, { type QuickAction } from '@pencilpilot/paint/QuickMenu.svelte';
 	import TimelapsePlayer from '@pencilpilot/paint/TimelapsePlayer.svelte';
@@ -27,6 +27,7 @@
 	import HistoryPanel from '@pencilpilot/paint/HistoryPanel.svelte';
 	import Swatches from '@pencilpilot/paint/Swatches.svelte';
 	import { brushTexture, onTextures, textureOn } from '@pencilpilot/paint/brush-textures';
+	import { addFont, fontsUsed, parseText } from '@pencilpilot/paint/text';
 	import {
 		brushLabel,
 		DEFAULT_BRUSH,
@@ -54,6 +55,9 @@
 	} from '#lib/project.js';
 	import { beforeNavigate, goto } from '$app/navigation';
 	import { loadSettings, saveSettings, settings } from '#lib/settings.svelte.js';
+	import { account } from '#lib/account.svelte.js';
+	import { exportText, tagPng } from '#lib/png-meta.js';
+	import type { ViewPrefs } from '@pencilpilot/paint/view-prefs';
 	import { actionFor, comboOf, showKey, type ActionId } from '#lib/shortcuts.js';
 	import { page } from '$app/state';
 	import VersionsMenu from '#lib/VersionsMenu.svelte';
@@ -64,6 +68,8 @@
 	import FilmDialog from '#lib/FilmDialog.svelte';
 	import ShareDialog from '#lib/ShareDialog.svelte';
 	import SaveChangesDialog from '#lib/SaveChangesDialog.svelte';
+	import SettingsPanel from '#lib/SettingsPanel.svelte';
+	import { takeTogether } from '#lib/together-start.js';
 	import {
 		readSavedShare,
 		Together,
@@ -74,18 +80,23 @@
 		type SharedLayer
 	} from '#lib/together.js';
 	import {
+		cleanCloud,
 		cleanRelay,
+		cloudTouch,
 		Cursors,
 		hostSession,
 		isCursor,
+		isKeeper,
 		joinSession,
 		leaveSession,
+		people,
 		rejoinSession,
 		onShareEvent,
 		sendDirect,
 		sendEdit,
 		sendPresence,
 		sessionStatus,
+		takeCatchUp,
 		Throttle,
 		type ShareInfo
 	} from '#lib/share.js';
@@ -137,7 +148,7 @@
 		walls
 	} from '#lib/colour.js';
 	import { FrameCache } from '#lib/frames.js';
-	import { cleanOnion, onionEntries, type OnionSettings } from '#lib/onion.js';
+	import { onionEntries, type OnionSettings } from '#lib/onion.js';
 	import {
 		clampRange,
 		frameAt,
@@ -378,7 +389,7 @@
 	let scrubbedAt = -1;
 	/** Moving between frames: a snippet of the sound there (to find a word or a beat). */
 	function scrubSound() {
-		if (playing || !sceneClips().length) return;
+		if (playing || !settings.scrubSound || !sceneClips().length) return;
 		const f = sceneFrameOf(frame);
 		if (f === scrubbedAt) return;
 		scrubbedAt = f;
@@ -832,8 +843,8 @@
 	}
 
 	// ---- onion skin and light table: other drawings, tinted, over the canvas ----
-	let onion = $state<OnionSettings>(cleanOnion(readLocal('pp.app.onion', null)));
-	$effect(() => keepLocal('pp.app.onion', $state.snapshot(onion)));
+	// (kept with the settings, where Settings changes its colours and counts too)
+	const onion: OnionSettings = $derived(settings.onion);
 	/** frames pinned to the light table (in this cut) */
 	let pinned = $state<number[]>([]);
 	let onionImage = $state.raw<ImageBitmap | null>(null);
@@ -1529,6 +1540,31 @@
 	// ---- drawing together (S12-T03): peer to peer, in the app's Rust side ----
 	let sharing = $state<ShareInfo | null>(null);
 	let shareOpen = $state(false);
+	/** Settings, as a window over the canvas */
+	let settingsOpen = $state(false);
+	/** from home: join with this code once the canvas is ready */
+	let joinOnReady = $state<string | null>(null);
+	/** from home: offer this project's session again once it's open */
+	let rejoinOnOpen = $state(false);
+	$effect(() => {
+		if (!joinOnReady || !canvas || !status) return;
+		const code = joinOnReady;
+		joinOnReady = null;
+		void shareStart(code);
+	});
+	/** from home's Cloud tab: open this shared project (its invite) once the canvas is ready */
+	let cloudOnReady = $state<string | null>(null);
+	$effect(() => {
+		if (!cloudOnReady || !canvas || !status) return;
+		const code = cloudOnReady;
+		cloudOnReady = null;
+		void shareFromCloud(code);
+	});
+	$effect(() => {
+		if (!rejoinOnOpen || !savedShare) return;
+		rejoinOnOpen = false;
+		shareOpen = true;
+	});
 	let shareBusy = $state(false);
 	let shareError = $state('');
 	const cursorsOf = new Cursors();
@@ -1598,27 +1634,78 @@
 		};
 	}
 
-	function startTogether(info: ShareInfo, joining: boolean) {
-		if (!canvas) return;
-		together = new Together(
+	/** this app's side of a session (the drawing side: lib/together.ts) */
+	function newTogether(info: ShareInfo, c: PaintCanvas) {
+		const t = new Together(
 			info.me.id,
 			info.me.name,
-			canvasPort(canvas),
+			canvasPort(c),
 			{
 				edit: (body) => void sendEdit(body).catch(() => {}),
 				direct: (to, body) => void sendDirect(to, body).catch(() => {})
 			},
 			() => togetherTick++
 		);
-		together.onnote = (text) => note(text, 4000);
-		together.ontiles = (from) => {
+		t.onnote = (text) => note(text, 4000);
+		t.ontiles = (from) => {
 			// their real pixels arrived: the live preview can go (unless they're mid-stroke)
 			if (!liveStrokes.get(from)) canvas?.remoteClear(`live:${from}`);
 		};
+		return t;
+	}
+
+	function startTogether(info: ShareInfo, joining: boolean) {
+		if (!canvas) return;
+		together = newTogether(info, canvas);
 		const host = info.members[0]?.id;
 		if (joining && host) together.startJoin(host);
 		else void together.startHost();
 		togetherTick++;
+	}
+
+	/** where to connect (Settings): our own relay, the cloud */
+	const netOf = () => ({
+		relay: cleanRelay(settings.shareRelay),
+		cloud: cleanCloud(settings.shareCloud)
+	});
+	/** what the cloud lists this project as */
+	const aboutOf = () => ({
+		name: path ? projectName(path) : '',
+		width: canvasSize.width,
+		height: canvasSize.height
+	});
+
+	/** No one else was online: the cloud's copy, as a host's (`restored`: this file's
+	 * session was put back first). False when there was none. */
+	async function catchUpFromCloud(info: ShareInfo, t: Together, restored: boolean) {
+		if (info.cloud !== 'caught_up') return false;
+		const got = await takeCatchUp().catch(() => null);
+		if (!got) return false;
+		const keeper = info.members.find(isKeeper)?.id ?? 'cloud';
+		await t.catchUp(keeper, got.snap, got.edits, restored);
+		return true;
+	}
+
+	/** Opened from home's Cloud tab (a new canvas): join who's in, or catch up from the
+	 * cloud and host it. */
+	async function shareFromCloud(code: string) {
+		if (!canvas) return;
+		shareBusy = true;
+		shareError = '';
+		try {
+			const info = await rejoinSession(code, [], netOf(), aboutOf());
+			sharing = info;
+			together = newTogether(info, canvas);
+			const host = info.members[0]?.id;
+			if (!info.host && host) together.startJoin(host);
+			else if (!(await catchUpFromCloud(info, together, false))) await together.startHost();
+			togetherTick++;
+		} catch (e) {
+			shareError = String(e);
+			shareOpen = true;
+		} finally {
+			shareBusy = false;
+		}
 	}
 
 	// ---- live strokes: others' strokes drawn as they draw them, until the real pixels come
@@ -1677,7 +1764,7 @@
 
 	/** everyone who's been in the project (newest addresses first), to find one later */
 	const everyone = (now: ShareInfo['members']) => [
-		...now,
+		...people(now),
 		...(savedShare?.members ?? []).filter((m) => !now.some((x) => x.id === m.id))
 	];
 
@@ -1699,7 +1786,8 @@
 		togetherTimer = setTimeout(() => void together?.localChanged(), 120);
 	}
 
-	/** Back to this project's shared session: join who's online, or host it again. */
+	/** Back to this project's shared session: join who's online (found directly or through
+	 * the cloud), or catch up from the cloud and host it, or (no cloud) host this copy. */
 	async function shareRejoin() {
 		const saved = savedShare;
 		if (!saved || !canvas) return;
@@ -1710,27 +1798,18 @@
 			const info = await rejoinSession(
 				saved.code,
 				saved.members.map((m) => m.addr).filter(Boolean),
-				cleanRelay(settings.shareRelay)
+				netOf(),
+				aboutOf()
 			);
 			sharing = info;
-			together = new Together(
-				info.me.id,
-				info.me.name,
-				canvasPort(canvas),
-				{
-					edit: (body) => void sendEdit(body).catch(() => {}),
-					direct: (to, body) => void sendDirect(to, body).catch(() => {})
-				},
-				() => togetherTick++
-			);
-			together.onnote = (text) => note(text, 4000);
-			together.ontiles = (from) => {
-				if (!liveStrokes.get(from)) canvas?.remoteClear(`live:${from}`);
-			};
+			together = newTogether(info, canvas);
 			together.restore(saved);
+			// what was drawn on others' layers meanwhile: kept aside, then asked for
+			await together.findOffline();
 			const host = info.members[0]?.id;
-			if (info.host || !host) await together.resumeHost();
-			else together.rejoin(host);
+			if (info.host || !host) {
+				if (!(await catchUpFromCloud(info, together, true))) await together.resumeHost();
+			} else together.rejoin(host);
 			togetherTick++;
 		} catch (e) {
 			shareError = String(e);
@@ -1744,8 +1823,9 @@
 		shareError = '';
 		try {
 			void saveSettings().catch(() => {});
-			const relay = cleanRelay(settings.shareRelay);
-			sharing = join ? await joinSession(join, relay) : await hostSession(relay);
+			sharing = join
+				? await joinSession(join, netOf(), aboutOf())
+				: await hostSession(netOf(), aboutOf());
 			startTogether(sharing, !!join);
 		} catch (e) {
 			shareError = String(e);
@@ -2033,6 +2113,7 @@
 				return snd ? [{ file, bytes: snd.bytes }] : [];
 			}),
 			...(timelapse ? { timelapse: await c.timelapse().saved() } : {}),
+			fonts: fontsUsed(snap.layers.map((l) => parseText(l.text))),
 			drawings
 		};
 	}
@@ -2046,7 +2127,12 @@
 		fileNote = '';
 		try {
 			const versionAtSave = docVersion;
-			path = await saveProject(target, await currentDoc(true));
+			const doc = await currentDoc(true);
+			path = await saveProject(target, doc);
+			// a shared project: the cloud lists it by this name and picture
+			const code = (doc.extra.share as SavedShare | undefined)?.code;
+			if (code && cleanCloud(settings.shareCloud) !== 'off')
+				void cloudTouch(code, projectName(path), doc.thumbnail ?? null, netOf()).catch(() => {});
 			created ??= new Date().toISOString();
 			savedVersion = versionAtSave;
 			// saved for real: the recovery copy has done its job
@@ -2061,6 +2147,12 @@
 			busy = '';
 		}
 	}
+
+	/** the recovery copy kept when "Save before…?" wasn't asked (it stays for home to offer) */
+	let keptCopy = '';
+	/** Let go of a document's recovery copy, unless it was kept on purpose. */
+	const dropRecovery = (id: string) =>
+		id === keptCopy ? Promise.resolve() : discardRecovery(id).catch(() => {});
 
 	/** "Save before…?": the question showing, and how to answer it */
 	let saveAsk = $state<{
@@ -2080,6 +2172,16 @@
 	 */
 	async function okToDrop(why: keyof typeof SAVE_BEFORE = 'leave'): Promise<boolean> {
 		if (!unsaved) return true;
+		if (!settings.askToSave) {
+			// not asking (Settings): go ahead, keeping a recovery copy so nothing is lost
+			try {
+				await writeRecovery(docId, path, await currentDoc());
+				keptCopy = docId;
+			} catch {
+				return false;
+			}
+			return true;
+		}
 		const choice = await new Promise<'yes' | 'no' | 'cancel'>(
 			(answer) => (saveAsk = { title: SAVE_BEFORE[why], answer })
 		);
@@ -2131,7 +2233,7 @@
 		const old = docId;
 		await run('opening', async () => {
 			load(await openProject(target), { path: target, unsaved: false });
-			await discardRecovery(old).catch(() => {});
+			await dropRecovery(old);
 		});
 	}
 
@@ -2154,7 +2256,7 @@
 			if (kind === 'png') {
 				const d = canvas.exportDrawing();
 				if (!d) throw new Error('nothing to export');
-				bytes = new Uint8Array(await (await fetch(d.png)).arrayBuffer());
+				bytes = tagPng(new Uint8Array(await (await fetch(d.png)).arrayBuffer()), exportMeta());
 			} else {
 				const doc = canvas.exportLayered();
 				if (!doc) throw new Error('nothing to export');
@@ -2275,7 +2377,9 @@
 						transparent: false,
 						frames: plan.length,
 						total,
-						once: false
+						once: false,
+						quality: settings.exportQuality,
+						meta: exportMeta()
 					}
 				});
 				for (const [i, repeat] of plan) {
@@ -2347,7 +2451,9 @@
 						transparent: false,
 						frames: total,
 						total,
-						once: false
+						once: false,
+						quality: settings.exportQuality,
+						meta: exportMeta()
 					}
 				});
 				for (let i = 0; i < drawFrames; i++) {
@@ -2413,9 +2519,20 @@
 	$effect(() => keepLocal('pp.app.export', $state.snapshot(exportSettings)));
 	let exportStop = false;
 
+	/** What exports say about the work (Settings can switch it off): see png-meta.ts. */
+	function exportMeta() {
+		return exportText({
+			on: settings.exportCredits,
+			author: account.me?.name ?? '',
+			with: (sharing?.members ?? []).map((m) => m.name)
+		});
+	}
+
 	async function openAnimExport() {
 		exportOpen = false;
 		if (playing) stopPlay();
+		// it starts on the format Settings names
+		exportSettings.format = settings.exportFormat;
 		const { invoke } = await import('@tauri-apps/api/core');
 		const tools = await invoke<{ ffmpeg: string | null; video: string[] }>('export_tools').catch(
 			() => ({ ffmpeg: null, video: [] })
@@ -2480,7 +2597,9 @@
 						)
 					).length,
 					total: runs.reduce((n, r) => n + r.repeat, 0),
-					once: s.once
+					once: s.once,
+					quality: settings.exportQuality,
+					meta: exportMeta()
 				}
 			});
 			const off = new OffscreenCanvas(out.width, out.height);
@@ -2611,8 +2730,12 @@
 			bmp.close();
 			return g.getImageData(0, 0, out.width, out.height).data;
 		};
+		const text = exportMeta();
 		const png = async () =>
-			new Uint8Array(await (await off.convertToBlob({ type: 'image/png' })).arrayBuffer());
+			tagPng(
+				new Uint8Array(await (await off.convertToBlob({ type: 'image/png' })).arrayBuffer()),
+				text
+			);
 		const { writePsd } = await import('@pencilpilot/paint/psd');
 		let n = 0;
 		let last = '';
@@ -2687,6 +2810,11 @@
 		const doc = p.doc;
 		const anim = !!doc.scenes?.length;
 		const c = canvas;
+		// its text layers' fonts (their pixels are there already: needed to change them)
+		if (doc.fonts?.length)
+			void Promise.all(doc.fonts.map((f) => addFont(f.family, f.file, f.bytes))).then(() =>
+				toolOpts.text.listFonts()
+			);
 		untrack(() => {
 			// an animation's layers start empty: their drawings come next
 			c.restoreLayers(
@@ -2761,7 +2889,7 @@
 		void okToDrop().then(async (ok) => {
 			if (!ok) return;
 			leaving = true;
-			await discardRecovery(docId).catch(() => {});
+			await dropRecovery(docId);
 			// the navigation that was held back (its link was already resolved)
 			// eslint-disable-next-line svelte/no-navigation-without-resolve
 			await goto(to);
@@ -2787,9 +2915,94 @@
 		return () => clearInterval(timer);
 	});
 
+	// ---- preferences (Settings) the studio follows ----
+
+	/** how the canvas shows and handles things (cursor, zoom, rulers, selection, guides) */
+	const viewPrefs: ViewPrefs = $derived({
+		cursor: settings.cursor,
+		cursorWhilePainting: settings.cursorWhilePainting,
+		crosshairWhenSmall: settings.crosshairWhenSmall,
+		zoomToPointer: settings.zoomToPointer,
+		wheel: settings.wheel,
+		zoomSpeed: settings.zoomSpeed,
+		smoothZoom: settings.smoothZoom,
+		brushFollowsZoom: settings.brushFollowsZoom,
+		maxBrushSize: settings.maxBrushSize,
+		rulers: settings.rulers,
+		units: settings.units,
+		ppi: settings.ppi,
+		selectionTint: settings.selectionTint,
+		marchingAnts: settings.marchingAnts,
+		gridColour: settings.gridColour,
+		guideColour: settings.guideColour
+	});
+
+	// a new canvas starts as Settings says: its brush, its grid, and (the studio opened on
+	// its own, not from a template) its size and frame rate
+	onMount(() => {
+		void loadSettings().then(() => {
+			if (start.kind !== 'new') return;
+			if (settings.defaultBrush) brushId = settings.defaultBrush;
+			if (settings.gridSize && !readLocal('pp.app.guides', null))
+				toolOpts.guides = {
+					...toolOpts.guides,
+					grid: { ...toolOpts.guides.grid, size: settings.gridSize }
+				};
+			if (page.url.searchParams.get('new')) return;
+			fps = settings.newFps;
+			const { newWidth: width, newHeight: height } = settings;
+			if (width !== canvasSize.width || height !== canvasSize.height) {
+				status = null;
+				canvasSize = { width, height };
+				canvasKey++;
+			}
+		});
+	});
+
+	// the largest brush size: the slider stops there, and a bigger size comes down to it
+	$effect(() => {
+		if (size > settings.maxBrushSize) size = settings.maxBrushSize;
+	});
+
+	// each brush remembers its own size and opacity (when Settings says so)
+	let brushWas = untrack(() => brushId);
+	$effect(() => {
+		const id = brushId;
+		untrack(() => {
+			if (id === brushWas) return;
+			if (settings.perBrushSize) {
+				const kept = readLocal<Record<string, { size: number; opacity: number }>>(
+					'pp.app.brushSizes',
+					{}
+				);
+				kept[brushWas] = { size, opacity };
+				const mine = kept[id];
+				if (mine) [size, opacity] = [mine.size, mine.opacity];
+				keepLocal('pp.app.brushSizes', kept);
+			}
+			brushWas = id;
+		});
+	});
+
+	// the memory limit for frames: how many recent drawings the engine keeps (the app's
+	// store takes the rest of the limit; see memoryPlan)
+	$effect(() => {
+		cache.limit(settings.frameMemoryMb * 2 ** 20, canvasSize.width, canvasSize.height);
+	});
+
 	onMount(() => {
 		void loadSettings();
 		if (!isTauri()) return;
+		// home's Draw together: host, join or rejoin (the dialog shows how it goes)
+		const ask = takeTogether();
+		if (ask) shareOpen = true;
+		if (ask?.what === 'join') joinOnReady = ask.code;
+		if (ask?.what === 'cloud') cloudOnReady = ask.code;
+		if (ask?.what === 'rejoin') {
+			// (it opens once the project's session is read from its file)
+			shareOpen = false;
+			rejoinOnOpen = true;
+		}
 		// what home asked for
 		if (start.kind === 'open') {
 			const file = start.path;
@@ -2809,7 +3022,7 @@
 			getCurrentWindow()
 				.onCloseRequested(async (e) => {
 					if (unsaved && !(await okToDrop('quit'))) return e.preventDefault();
-					await discardRecovery(docId).catch(() => {});
+					await dropRecovery(docId);
 				})
 				.then((un) => (stop = un))
 		);
@@ -2861,10 +3074,13 @@
 		'select-rect': 'select-rect',
 		'select-lasso': 'select-lasso',
 		'select-wand': 'select-wand',
-		gradient: 'gradient'
+		gradient: 'gradient',
+		text: 'text'
 	};
 
 	function onkey(e: KeyboardEvent) {
+		// Settings over the canvas has the keys (it may be choosing a new one)
+		if (settingsOpen) return;
 		if ((e.target as HTMLElement).closest('input, textarea, select')) return;
 		// keys that belong to the tool in use
 		if (tool === 'transform' && e.key === 'Enter') return canvas?.transformCommit();
@@ -2874,6 +3090,7 @@
 			return;
 		}
 		if (tool === 'pen' && e.key === 'Escape') return canvas?.penClear();
+		if (tool === 'text' && e.key === 'Escape') return toolOpts.text.cancel();
 		if (tool === 'pen' && e.key === 'Backspace') {
 			e.preventDefault();
 			return canvas?.penBack();
@@ -2949,7 +3166,14 @@
 />
 
 <div class="app">
-	<Studio backHref={resolve('/')} tabs={TABS} bind:tab bind:dockOpen>
+	<Studio
+		backHref={resolve('/')}
+		tabs={TABS}
+		bind:tab
+		bind:dockOpen
+		bind:layout={settings.layout}
+		leftHanded={settings.leftHanded}
+	>
 		{#snippet title()}
 			<div class="brand">
 				<Logo /><span data-testid="project-name">{projectName(path)}</span>
@@ -2958,6 +3182,8 @@
 		{/snippet}
 		{#snippet actions()}
 			{#if fileNote}<span class="note" role="alert">{fileNote}</span>{/if}
+		{/snippet}
+		{#snippet menu()}
 			<div class="export">
 				<button
 					type="button"
@@ -3107,7 +3333,7 @@
 					title="Draw with others, live"
 				>
 					{sharing
-						? `Together (${sharing.members.length})${asksForMe ? ' • asks' : ''}`
+						? `Together (${people(sharing.members).length})${asksForMe ? ' • asks' : ''}`
 						: 'Draw together'}
 				</button>
 			{/if}
@@ -3168,15 +3394,27 @@
 			>
 				Redo
 			</button>
-			<a class="act" href={resolve('/settings')}>Settings</a>
+			<button
+				type="button"
+				class="act"
+				aria-haspopup="dialog"
+				onclick={() => {
+					fileOpen = exportOpen = importOpen = false;
+					settingsOpen = true;
+				}}
+			>
+				Settings
+			</button>
 		{/snippet}
 		{#snippet rail()}
 			<ToolRail
+				tools={[...ALL_TOOLS, 'text']}
 				bind:tool
 				bind:eraser
 				bind:size
 				bind:opacity
 				keys={railKeys}
+				maxSize={settings.maxBrushSize}
 				adjustOpen={toolOpts.adjustOpen}
 				onadjust={() => toolOpts.openAdjust()}
 			/>
@@ -3267,6 +3505,8 @@
 					penPressure={settings.penPressure}
 					fingers={settings.fingers}
 					tapGestures={settings.tapGestures}
+					view={viewPrefs}
+					undoLimit={settings.undoSteps}
 					brushTexture={texture}
 					allowImport
 					onpick={(c) => (color = c)}
@@ -3312,6 +3552,9 @@
 									: 'This layer is locked. Unlock it or pick another layer to draw.'
 						);
 					}}
+					ontext={toolOpts.text.ontext}
+					textFrame={toolOpts.text.frame}
+					onrasterize={toolOpts.text.onrasterize}
 					onquickmenu={(x, y) => (quickMenu = { x, y })}
 					onchange={canvasChanged}
 					locked={switching}
@@ -3381,10 +3624,14 @@
 					controls={layerControls}
 					aspect={canvasSize.width / canvasSize.height}
 					onadjustment={(id) => toolOpts.adjustmentLayer(id)}
+					ontext={(id) => {
+						tool = 'text';
+						toolOpts.text.open(id);
+					}}
 				/>
 			{:else if t === 'brushes'}
 				{#if manifest}
-					<BrushPicker {manifest} bind:selected={brushId} />
+					<BrushPicker {manifest} bind:selected={brushId} askToDelete={settings.askToDelete} />
 					<BrushTexturePanel {brushId} onpick={(id) => (brushId = id)} />
 				{:else}
 					<p>Loading brushes…</p>
@@ -3440,6 +3687,9 @@
 					name={projectName(path)}
 					onanswer={(c) => saveAsk?.answer(c)}
 				/>
+			{/if}
+			{#if settingsOpen}
+				<SettingsPanel onclose={() => (settingsOpen = false)} />
 			{/if}
 			{#if shareOpen}
 				<ShareDialog
@@ -3585,7 +3835,7 @@
 		position: absolute;
 		z-index: 30;
 		top: calc(100% + 8px);
-		right: 0;
+		left: 0;
 		display: grid;
 		gap: 4px;
 		width: 260px;

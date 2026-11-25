@@ -41,6 +41,8 @@ export interface ProjectDoc {
 	audio?: { file: string; bytes: Uint8Array }[];
 	/** the timelapse: JPEG pictures and when each was taken (ms since 1970) */
 	timelapse?: { jpeg: Uint8Array; t: number }[];
+	/** font files text layers use: the family they know it by, the file as imported */
+	fonts?: { family: string; file: string; bytes: Uint8Array }[];
 }
 
 export interface ProjectDrawing {
@@ -63,6 +65,7 @@ interface PacketLayer {
 	group: number;
 	adjust?: string | null;
 	style?: LayerStyle | null;
+	text?: string | null;
 	rgba: [number, number];
 	mask?: [number, number] | null;
 }
@@ -84,6 +87,7 @@ interface Header {
 	audio?: { file: string; bytes: [number, number] }[];
 	drawings?: { id: number; layer: number; rgba?: [number, number] | null }[];
 	timelapse?: { t: number; bytes: [number, number] }[];
+	fonts?: { family: string; file: string; bytes: [number, number] }[];
 }
 
 const MAGIC = [0x50, 0x50, 0x53, 0x31]; // "PPS1"
@@ -115,6 +119,7 @@ export function pack(doc: ProjectDoc): Uint8Array {
 			group: l.group,
 			adjust: l.adjust ?? null,
 			...(l.style ? { style: l.style } : {}),
+			...(l.text ? { text: l.text } : {}),
 			rgba: put(l.rgba),
 			mask: l.mask ? put(l.mask) : null
 		})),
@@ -127,6 +132,9 @@ export function pack(doc: ProjectDoc): Uint8Array {
 		thumbnail: doc.thumbnail ? put(doc.thumbnail) : null,
 		...(doc.timelapse?.length
 			? { timelapse: doc.timelapse.map((f) => ({ t: Math.round(f.t), bytes: put(f.jpeg) })) }
+			: {}),
+		...(doc.fonts?.length
+			? { fonts: doc.fonts.map((f) => ({ family: f.family, file: f.file, bytes: put(f.bytes) })) }
 			: {}),
 		...(doc.scenes?.length
 			? {
@@ -188,6 +196,7 @@ export function unpack(packet: ArrayBuffer | Uint8Array): ProjectDoc {
 			group: l.group,
 			adjust: l.adjust ?? null,
 			...(readStyle(l.style) ? { style: readStyle(l.style) } : {}),
+			...(l.text ? { text: l.text } : {}),
 			rgba: get(l.rgba),
 			mask: l.mask ? get(l.mask) : undefined,
 			...(assisted.includes(l.id) ? { assist: true } : {})
@@ -207,6 +216,9 @@ export function unpack(packet: ArrayBuffer | Uint8Array): ProjectDoc {
 			: {}),
 		...(h.timelapse?.length
 			? { timelapse: h.timelapse.map((f) => ({ t: f.t, jpeg: get(f.bytes) })) }
+			: {}),
+		...(h.fonts?.length
+			? { fonts: h.fonts.map((f) => ({ family: f.family, file: f.file, bytes: get(f.bytes) })) }
 			: {}),
 		drawings: (h.drawings ?? []).map((d) => ({
 			id: d.id,
@@ -369,6 +381,8 @@ export interface RecentItem {
 	layers: number;
 	modified: string;
 	thumbnail: string | null;
+	/** drawn together: who with (the invite code stays in the file) */
+	shared?: { with: string[]; project?: string };
 }
 
 export const listRecent = () => call<RecentItem[]>('recent_list');

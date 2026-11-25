@@ -109,7 +109,7 @@
 	}
 	.presets button[aria-checked='true'] {
 		background: var(--pp-ink);
-		color: #fff;
+		color: var(--pp-on-ink);
 	}
 	.ends {
 		display: flex;

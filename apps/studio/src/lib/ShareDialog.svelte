@@ -6,7 +6,14 @@
 	 */
 	import { onMount } from 'svelte';
 	import { account, endAccount, loadAccount, startSignIn, stopSignIn } from './account.svelte';
-	import { cleanInvite, inviteQr, memberColour, shareChoices, type ShareInfo } from './share';
+	import {
+		cleanInvite,
+		inviteQr,
+		memberColour,
+		people,
+		shareChoices,
+		type ShareInfo
+	} from './share';
 
 	interface LayerRow {
 		lid: string;
@@ -125,15 +132,24 @@
 		{#if qr}
 			<img class="qr" src={qr} alt="The invite code as a QR code" width="140" height="140" />
 		{/if}
-		<h3>Here now ({info.members.length})</h3>
+		<h3>Here now ({people(info.members).length})</h3>
 		<ul class="members">
-			{#each info.members as m (m.id)}
+			{#each people(info.members) as m (m.id)}
 				<li>
 					<i style="background: {memberColour(m.id)}"></i>
 					{m.name}{m.id === info.me.id ? ' (you)' : ''}
 				</li>
 			{/each}
 		</ul>
+		{#if info.cloud && info.cloud !== 'off'}
+			<p class="status" data-testid="cloud-status">
+				{info.cloud === 'unreachable'
+					? 'The cloud can’t be reached right now: this session isn’t kept there.'
+					: info.cloud === 'caught_up'
+						? 'No one else was online: you caught up from the cloud. It keeps what you draw.'
+						: 'The cloud keeps a copy, so anyone in it can carry on when you’re offline.'}
+			</p>
+		{/if}
 		{#if !synced}
 			<p class="status" role="status">Getting the drawing from the others…</p>
 		{:else if layers.length}
@@ -232,8 +248,9 @@
 			<section class="rejoin">
 				<h3>This project is shared</h3>
 				<p>
-					Rejoin it: you’ll join whoever of its members is online, or, if no one is, open it for
-					them. What you drew on your own layers meanwhile is kept.
+					Rejoin it: you’ll join whoever of its members is online, or, if no one is, catch up from
+					the cloud and open it for them. What you drew on your own layers meanwhile is kept; what
+					you drew on others’ is asked for.
 				</p>
 				<button type="button" class="go" disabled={!can.rejoin} onclick={onrejoin}>Rejoin</button>
 			</section>
@@ -294,9 +311,9 @@
 		width: 100%;
 		box-sizing: border-box;
 		padding: 8px 10px;
-		border: 1px solid #d9d2c3;
+		border: 1px solid var(--pp-surface-sunk);
 		border-radius: 10px;
-		background: #fff;
+		background: var(--pp-surface);
 		font: inherit;
 	}
 	.account {
@@ -321,7 +338,7 @@
 		margin-top: 12px;
 		padding: 12px;
 		border-radius: 12px;
-		background: #e3f2ef;
+		background: var(--pp-good-bg);
 	}
 	.rejoin h3,
 	.rejoin p {
@@ -339,7 +356,7 @@
 		align-content: start;
 		padding: 12px;
 		border-radius: 12px;
-		background: #f1ecdf;
+		background: var(--pp-surface-sunk);
 	}
 	.ways h3,
 	.ways p {
@@ -357,7 +374,7 @@
 		display: block;
 		margin: 10px auto 0;
 		border-radius: 8px;
-		background: #fff;
+		background: var(--pp-surface);
 	}
 	.members {
 		margin: 0;
@@ -385,7 +402,7 @@
 	.layers li {
 		padding: 6px 8px;
 		border-radius: 10px;
-		background: #f1ecdf;
+		background: var(--pp-surface-sunk);
 	}
 	.lrow,
 	.ask {
@@ -402,7 +419,7 @@
 		font-weight: 600;
 	}
 	.owner {
-		color: #6b6559;
+		color: var(--pp-muted);
 		font-size: 13px;
 		flex: 1;
 	}
@@ -413,18 +430,18 @@
 	button.small {
 		padding: 4px 10px;
 		font-size: 13px;
-		background: #fff;
+		background: var(--pp-surface);
 	}
 	button.small.go {
 		background: var(--pp-ink, #16161a);
-		color: #fff;
+		color: var(--pp-on-ink);
 	}
 	.about,
 	.note {
 		margin: 10px 0 0;
 	}
 	.note {
-		color: #6b6559;
+		color: var(--pp-muted);
 		font-size: 13px;
 	}
 	.status {
@@ -432,7 +449,7 @@
 	}
 	.error {
 		margin: 10px 0 0;
-		color: #b3261e;
+		color: var(--pp-error);
 	}
 	.actions {
 		display: flex;
@@ -444,14 +461,14 @@
 		padding: 8px 14px;
 		border: 0;
 		border-radius: 10px;
-		background: #f1ecdf;
+		background: var(--pp-surface-sunk);
 		color: inherit;
 		font: inherit;
 		cursor: pointer;
 	}
 	button.go {
 		background: var(--pp-ink, #16161a);
-		color: #fff;
+		color: var(--pp-on-ink);
 	}
 	button:disabled {
 		opacity: 0.5;

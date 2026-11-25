@@ -24,7 +24,20 @@ export interface ShareInfo {
 	me: Member;
 	members: Member[];
 	host: boolean;
+	/** the cloud (ADR-0014): none set, keeping this project, its copy waiting to be caught
+	 * up on (no one else was online), or out of reach */
+	cloud?: 'off' | 'on' | 'caught_up' | 'unreachable';
 }
+
+/** The cloud's account on its pass (crates/share: KEEPER_USER). */
+export const KEEPER_USER = 'pp:cloud';
+
+/** The cloud's member: it keeps a copy, never draws or hosts. */
+export const isKeeper = (m: Pick<Member, 'user'>) => m.user === KEEPER_USER;
+
+/** The people in a session (the cloud's member left out). */
+export const people = <M extends Pick<Member, 'user'>>(members: M[]) =>
+	members.filter((m) => !isKeeper(m));
 
 export type ShareEvent =
 	| { kind: 'edit'; seq: number; from: string; body: unknown }
@@ -185,10 +198,23 @@ export function shareChoices(account: Account | null, busy: boolean) {
 	return { signIn: !account, host: ready, join: ready, rejoin: ready };
 }
 
-/** `relay`: our own relay's URL (Settings), or empty for the default */
-export const hostSession = (relay = '') => call<ShareInfo>('share_host', { relay: relay || null });
-export const joinSession = (code: string, relay = '') =>
-	call<ShareInfo>('share_join', { code, relay: relay || null });
+/** Where to connect (Settings): our own relay's URL and the cloud's address ('' = defaults). */
+export interface Net {
+	relay?: string;
+	cloud?: string;
+}
+/** What the cloud lists a shared project as. */
+export interface About {
+	name?: string;
+	width?: number;
+	height?: number;
+}
+const net = (n: Net) => ({ relay: n.relay || null, cloud: n.cloud || null });
+
+export const hostSession = (n: Net = {}, about: About = {}) =>
+	call<ShareInfo>('share_host', { net: net(n), about });
+export const joinSession = (code: string, n: Net = {}, about: About = {}) =>
+	call<ShareInfo>('share_join', { code, net: net(n), about });
 
 /** A relay URL as typed: https only, no spaces; '' when empty or not a URL. */
 export function cleanRelay(text: string): string {
@@ -201,9 +227,77 @@ export function cleanRelay(text: string): string {
 		return '';
 	}
 }
-/** Back to a shared project: join a member who's online, or host it again. */
-export const rejoinSession = (code: string, addrs: unknown[], relay = '') =>
-	call<ShareInfo>('share_rejoin', { code, addrs, relay: relay || null });
+/** The cloud's address as typed: its id (64 hex characters), optionally `@host:port`, or
+ * `off`; '' when empty or not one. */
+export function cleanCloud(text: string): string {
+	const t = text.trim();
+	if (t.toLowerCase() === 'off') return 'off';
+	return /^[0-9a-f]{64}(@[a-z0-9.[\]:-]+:\d{1,5})?$/i.test(t) ? t.toLowerCase() : '';
+}
+
+/** Back to a shared project: join a member who's online (directly, or found through the
+ * cloud), or, when no one is, catch up from the cloud and host it again. */
+export const rejoinSession = (code: string, addrs: unknown[], n: Net = {}, about: About = {}) =>
+	call<ShareInfo>('share_rejoin', { code, addrs, net: net(n), about });
+
+/** The cloud's copy after rejoining when no one else was online (`cloud: 'caught_up'`):
+ * the last snapshot a member sent it, then each edit since (author, edit). Once. */
+export const takeCatchUp = () =>
+	call<{ snap: unknown[]; edits: [string, unknown][] } | null>('share_catch_up');
+
+/** A shared project as the cloud has it (the home screen's Cloud tab). */
+export interface CloudProject {
+	project: string;
+	name: string;
+	width: number;
+	height: number;
+	members: { user: string; name: string }[];
+	/** seconds since 1970 */
+	changed: number;
+	/** who's drawing in it now */
+	online: string[];
+	/** PNG, base64 */
+	thumb?: string | null;
+	bytes: number;
+	/** its account's cloud space ran out: newer changes aren't kept */
+	full?: boolean;
+}
+
+export interface CloudList {
+	status: 'ok' | 'off' | 'signed_out' | 'unreachable';
+	projects: CloudProject[];
+	/** when the list was last fetched (seconds since 1970; 0: never) */
+	fetched: number;
+	error?: string;
+}
+
+/** The shared projects in the cloud this account is in (the last list when it can't be
+ * reached). */
+export const cloudList = (n: Net = {}) => call<CloudList>('cloud_list', { net: net(n) });
+
+/** How to open a project from the cloud: an invite to its session, and its canvas size. */
+export const cloudOpen = (project: string, n: Net = {}) =>
+	call<{
+		project: string;
+		name: string;
+		width: number;
+		height: number;
+		code: string;
+		state: 'live' | 'starting' | 'idle';
+	}>('cloud_open', { project, net: net(n) });
+
+/** A shared project's name and picture, for the cloud's list (after a save; `code`: its invite). */
+export function cloudTouch(code: string, name: string, png: Uint8Array | null, n: Net = {}) {
+	let thumb: string | null = null;
+	// (a small picture only: the cloud refuses big ones)
+	if (png && png.length < 160_000) {
+		let s = '';
+		for (let i = 0; i < png.length; i += 0x8000)
+			s += String.fromCharCode(...png.subarray(i, i + 0x8000));
+		thumb = btoa(s);
+	}
+	return call<void>('cloud_touch', { code, name, thumb, net: net(n) });
+}
 export const sessionStatus = () => call<ShareInfo | null>('share_status');
 export const sendEdit = (body: unknown) => call<void>('share_edit', { body });
 export const sendPresence = (body: unknown) => call<void>('share_presence', { body });
