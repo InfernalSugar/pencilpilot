@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { gridOnPicture, mimeOf, REF_MAX_BYTES, RefShelf, skippedNote } from './references.svelte';
+import {
+	canvasFromPicture,
+	gridOnPicture,
+	mimeOf,
+	pictureOnCanvas,
+	REF_MAX_BYTES,
+	RefShelf,
+	skippedNote
+} from './references.svelte';
 
 const bytes = (...v: number[]) => Uint8Array.from(v);
 
@@ -99,5 +107,21 @@ describe('reference pictures', () => {
 		expect(
 			gridOnPicture([[0, 0, 1, 1]], { width: 1, height: 1 }, { width: 0, height: 0 })
 		).toBeNull();
+	});
+
+	it('a point drawn on the picture lands where the grid puts it on the canvas', () => {
+		// a square picture on a wide canvas: centred, the canvas's height
+		const at = pictureOnCanvas({ width: 200, height: 100 }, { width: 400, height: 400 });
+		expect(at).toEqual([50, 0, 100, 100]);
+		expect(canvasFromPicture(at!, [0, 0])).toEqual([50, 0]);
+		expect(canvasFromPicture(at!, [0.5, 0.5])).toEqual([100, 50]);
+		expect(canvasFromPicture(at!, [1, 1])).toEqual([150, 100]);
+		// past the picture's edge: past it on the canvas too (not squashed onto the edge)
+		expect(canvasFromPicture(at!, [-0.25, 1.25])).toEqual([25, 125]);
+		// and the grid agrees: the canvas's middle line is the picture's middle
+		expect(
+			gridOnPicture([[100, 0, 100, 100]], { width: 200, height: 100 }, { width: 400, height: 400 })
+		).toEqual([[0.5, 0, 0.5, 1]]);
+		expect(pictureOnCanvas({ width: 100, height: 100 }, { width: 0, height: 5 })).toBeNull();
 	});
 });

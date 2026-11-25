@@ -187,10 +187,31 @@ export function gridOnPicture(
 	canvas: { width: number; height: number },
 	pic: { width: number; height: number }
 ): [number, number, number, number][] | null {
-	if (!lines.length || !pic.width || !pic.height) return null;
+	const at = lines.length ? pictureOnCanvas(canvas, pic) : null;
+	if (!at) return null;
+	const [x0, y0, w, h] = at;
+	return lines.map(([a, b, c, d]) => [(a - x0) / w, (b - y0) / h, (c - x0) / w, (d - y0) / h]);
+}
+
+/**
+ * Where a reference sits on the canvas: fitted inside it and centred, as the grid method
+ * lays it. [x, y, width, height] in canvas pixels, or null before its size is known.
+ */
+export function pictureOnCanvas(
+	canvas: { width: number; height: number },
+	pic: { width: number; height: number }
+): [number, number, number, number] | null {
+	if (!pic.width || !pic.height || !canvas.width || !canvas.height) return null;
 	const { width: W, height: H } = canvas;
 	const k = Math.min(W / pic.width, H / pic.height);
 	const [w, h] = [pic.width * k, pic.height * k];
-	const [x0, y0] = [(W - w) / 2, (H - h) / 2];
-	return lines.map(([a, b, c, d]) => [(a - x0) / w, (b - y0) / h, (c - x0) / w, (d - y0) / h]);
+	return [(W - w) / 2, (H - h) / 2, w, h];
+}
+
+/** A point on a reference (fractions of it, past 0–1 off it) → canvas pixels. */
+export function canvasFromPicture(
+	at: [number, number, number, number],
+	[fx, fy]: [number, number]
+): [number, number] {
+	return [at[0] + fx * at[2], at[1] + fy * at[3]];
 }
