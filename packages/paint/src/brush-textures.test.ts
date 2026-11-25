@@ -5,6 +5,7 @@ import {
 	NO_TEXTURE,
 	STRANDS_MAX,
 	brushTexture,
+	readPictureList,
 	readStrands,
 	setBrushTexture,
 	strandStrokes,
@@ -99,5 +100,57 @@ describe('strands', () => {
 		// nothing on: nothing kept
 		setBrushTexture(id, { ...t, strands: null });
 		expect(brushTexture(id)).toEqual(NO_TEXTURE);
+	});
+});
+
+describe('picture textures that come with the app', () => {
+	it('are read from their list, anything unusable left out', () => {
+		const good = {
+			id: 'pic-kr-tip-rake',
+			name: 'Rake',
+			kind: 'tip',
+			file: 'kr-tip-rake.png',
+			w: 64,
+			h: 128
+		};
+		expect(
+			readPictureList([
+				good,
+				{ ...good, id: 'kr-tip-rake' },
+				{ ...good, kind: 'stamp' },
+				{ ...good, file: '../secret.png' },
+				{ ...good, w: 0 },
+				{ ...good, h: 5000 },
+				null
+			])
+		).toEqual([good]);
+		expect(readPictureList({})).toEqual([]);
+	});
+
+	it('the list the tool made is all usable, its files there and the sizes they say', async () => {
+		const { readFileSync } = await import('node:fs');
+		const dir = new URL('../../../apps/web/static/brushes/textures/', import.meta.url);
+		const raw = JSON.parse(readFileSync(new URL('manifest.json', dir), 'utf8'));
+		const list = readPictureList(raw);
+		expect(list).toHaveLength(raw.length);
+		expect(list.length).toBeGreaterThan(30);
+		for (const e of list) {
+			const png = readFileSync(new URL(e.file, dir));
+			expect([png.readUInt32BE(16), png.readUInt32BE(20)], e.file).toEqual([e.w, e.h]);
+		}
+		// names unique, and not the drawn textures'
+		const names = list.map((e) => e.name);
+		expect(new Set(names).size).toBe(names.length);
+		for (const n of [
+			'Paper',
+			'Canvas',
+			'Grit',
+			'Hatching',
+			'Sponge',
+			'Chalk',
+			'Flat nib',
+			'Speckles'
+		])
+			expect(names).not.toContain(n);
 	});
 });

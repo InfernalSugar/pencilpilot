@@ -1,0 +1,326 @@
+[
+	{
+		"id": "pic-acg-paper-1",
+		"name": "Smooth sketch paper",
+		"kind": "grain",
+		"file": "acg-paper-1.png",
+		"w": 256,
+		"h": 256,
+		"credit": "ambientcg"
+	},
+	{
+		"id": "pic-acg-paper-2",
+		"name": "Laid paper",
+		"kind": "grain",
+		"file": "acg-paper-2.png",
+		"w": 256,
+		"h": 256,
+		"credit": "ambientcg"
+	},
+	{
+		"id": "pic-acg-paper-3",
+		"name": "Crumpled paper",
+		"kind": "grain",
+		"file": "acg-paper-3.png",
+		"w": 256,
+		"h": 256,
+		"credit": "ambientcg"
+	},
+	{
+		"id": "pic-acg-paper-4",
+		"name": "Fibre paper",
+		"kind": "grain",
+		"file": "acg-paper-4.png",
+		"w": 256,
+		"h": 256,
+		"credit": "ambientcg"
+	},
+	{
+		"id": "pic-acg-paper-5",
+		"name": "Watercolour paper",
+		"kind": "grain",
+		"file": "acg-paper-5.png",
+		"w": 256,
+		"h": 256,
+		"credit": "ambientcg"
+	},
+	{
+		"id": "pic-acg-paper-6",
+		"name": "Pastel paper",
+		"kind": "grain",
+		"file": "acg-paper-6.png",
+		"w": 256,
+		"h": 256,
+		"credit": "ambientcg"
+	},
+	{
+		"id": "pic-oga-paper-1",
+		"name": "Rag paper",
+		"kind": "grain",
+		"file": "oga-paper-1.png",
+		"w": 256,
+		"h": 256,
+		"credit": "leschge"
+	},
+	{
+		"id": "pic-oga-paper-2",
+		"name": "Toothy paper",
+		"kind": "grain",
+		"file": "oga-paper-2.png",
+		"w": 256,
+		"h": 256,
+		"credit": "leschge"
+	},
+	{
+		"id": "pic-oga-paper-3",
+		"name": "Mottled paper",
+		"kind": "grain",
+		"file": "oga-paper-3.png",
+		"w": 256,
+		"h": 256,
+		"credit": "leschge"
+	},
+	{
+		"id": "pic-oga-paper-4",
+		"name": "Coarse paper",
+		"kind": "grain",
+		"file": "oga-paper-4.png",
+		"w": 256,
+		"h": 256,
+		"credit": "leschge"
+	},
+	{
+		"id": "pic-kr-paper-default",
+		"name": "Drawing paper",
+		"kind": "grain",
+		"file": "kr-paper-default.png",
+		"w": 256,
+		"h": 256,
+		"credit": "krita"
+	},
+	{
+		"id": "pic-kr-paper-c-grain",
+		"name": "C-grain paper",
+		"kind": "grain",
+		"file": "kr-paper-c-grain.png",
+		"w": 256,
+		"h": 256,
+		"credit": "krita"
+	},
+	{
+		"id": "pic-kr-paper-torchon",
+		"name": "Torchon paper",
+		"kind": "grain",
+		"file": "kr-paper-torchon.png",
+		"w": 256,
+		"h": 256,
+		"credit": "krita"
+	},
+	{
+		"id": "pic-kr-hard-grain",
+		"name": "Hard grain",
+		"kind": "grain",
+		"file": "kr-hard-grain.png",
+		"w": 256,
+		"h": 256,
+		"credit": "krita"
+	},
+	{
+		"id": "pic-kr-rough-paper",
+		"name": "Rough paper",
+		"kind": "grain",
+		"file": "kr-rough-paper.png",
+		"w": 256,
+		"h": 256,
+		"credit": "krita"
+	},
+	{
+		"id": "pic-kr-canvas",
+		"name": "Fine canvas",
+		"kind": "grain",
+		"file": "kr-canvas.png",
+		"w": 256,
+		"h": 256,
+		"credit": "krita"
+	},
+	{
+		"id": "pic-kr-rough-canvas",
+		"name": "Rough canvas",
+		"kind": "grain",
+		"file": "kr-rough-canvas.png",
+		"w": 256,
+		"h": 256,
+		"credit": "krita"
+	},
+	{
+		"id": "pic-kr-sand",
+		"name": "Fine sand",
+		"kind": "grain",
+		"file": "kr-sand.png",
+		"w": 256,
+		"h": 256,
+		"credit": "krita"
+	},
+	{
+		"id": "pic-kr-crosshatch",
+		"name": "Drawn crosshatch",
+		"kind": "grain",
+		"file": "kr-crosshatch.png",
+		"w": 256,
+		"h": 256,
+		"credit": "krita"
+	},
+	{
+		"id": "pic-kr-tone-a",
+		"name": "Halftone dots",
+		"kind": "grain",
+		"file": "kr-tone-a.png",
+		"w": 256,
+		"h": 256,
+		"credit": "krita"
+	},
+	{
+		"id": "pic-kr-tone-b",
+		"name": "Halftone grid",
+		"kind": "grain",
+		"file": "kr-tone-b.png",
+		"w": 256,
+		"h": 256,
+		"credit": "krita"
+	},
+	{
+		"id": "pic-kr-tone-c",
+		"name": "Halftone diamonds",
+		"kind": "grain",
+		"file": "kr-tone-c.png",
+		"w": 256,
+		"h": 256,
+		"credit": "krita"
+	},
+	{
+		"id": "pic-kr-tip-chalk",
+		"name": "Chalk lump",
+		"kind": "tip",
+		"file": "kr-tip-chalk.png",
+		"w": 128,
+		"h": 128,
+		"credit": "krita"
+	},
+	{
+		"id": "pic-kr-tip-chalk-hard",
+		"name": "Hard chalk",
+		"kind": "tip",
+		"file": "kr-tip-chalk-hard.png",
+		"w": 128,
+		"h": 128,
+		"credit": "krita"
+	},
+	{
+		"id": "pic-kr-tip-chalk-sparse",
+		"name": "Sparse chalk",
+		"kind": "tip",
+		"file": "kr-tip-chalk-sparse.png",
+		"w": 128,
+		"h": 128,
+		"credit": "krita"
+	},
+	{
+		"id": "pic-kr-tip-bristles",
+		"name": "Round bristles",
+		"kind": "tip",
+		"file": "kr-tip-bristles.png",
+		"w": 128,
+		"h": 128,
+		"credit": "krita"
+	},
+	{
+		"id": "pic-kr-tip-chisel",
+		"name": "Chisel bristles",
+		"kind": "tip",
+		"file": "kr-tip-chisel.png",
+		"w": 128,
+		"h": 128,
+		"credit": "krita"
+	},
+	{
+		"id": "pic-kr-tip-oil",
+		"name": "Oil bristle",
+		"kind": "tip",
+		"file": "kr-tip-oil.png",
+		"w": 128,
+		"h": 128,
+		"credit": "krita"
+	},
+	{
+		"id": "pic-kr-tip-rake",
+		"name": "Rake",
+		"kind": "tip",
+		"file": "kr-tip-rake.png",
+		"w": 128,
+		"h": 128,
+		"credit": "krita"
+	},
+	{
+		"id": "pic-kr-tip-rake-dense",
+		"name": "Dense rake",
+		"kind": "tip",
+		"file": "kr-tip-rake-dense.png",
+		"w": 128,
+		"h": 128,
+		"credit": "krita"
+	},
+	{
+		"id": "pic-kr-tip-square",
+		"name": "Rough square",
+		"kind": "tip",
+		"file": "kr-tip-square.png",
+		"w": 128,
+		"h": 126,
+		"credit": "krita"
+	},
+	{
+		"id": "pic-kr-tip-spike",
+		"name": "Eroded spike",
+		"kind": "tip",
+		"file": "kr-tip-spike.png",
+		"w": 128,
+		"h": 128,
+		"credit": "krita"
+	},
+	{
+		"id": "pic-kr-tip-splat",
+		"name": "Splat dots",
+		"kind": "tip",
+		"file": "kr-tip-splat.png",
+		"w": 112,
+		"h": 111,
+		"credit": "krita"
+	},
+	{
+		"id": "pic-kr-tip-smoke",
+		"name": "Smoke puff",
+		"kind": "tip",
+		"file": "kr-tip-smoke.png",
+		"w": 128,
+		"h": 128,
+		"credit": "krita"
+	},
+	{
+		"id": "pic-kr-tip-freckles",
+		"name": "Freckles",
+		"kind": "tip",
+		"file": "kr-tip-freckles.png",
+		"w": 105,
+		"h": 108,
+		"credit": "krita"
+	},
+	{
+		"id": "pic-kr-tip-scribbles",
+		"name": "Scribbles",
+		"kind": "tip",
+		"file": "kr-tip-scribbles.png",
+		"w": 128,
+		"h": 128,
+		"credit": "krita"
+	}
+]

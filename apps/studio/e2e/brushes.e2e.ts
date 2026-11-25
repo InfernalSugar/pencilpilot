@@ -294,8 +294,44 @@ test('settings: the brush credit is under About', async ({ page }) => {
 		['Concept Design', 'Ramón Miranda']
 	]) {
 		await expect(dialog.getByRole('link', { name: pack, exact: true })).toBeVisible();
-		await expect(dialog.getByText(who)).toBeVisible();
+		await expect(dialog.getByText(who).first()).toBeVisible();
 	}
+	// the textures': Krita's under CC BY 3.0, attributed as it asks
+	await expect(dialog.getByRole('link', { name: 'ambientCG' })).toBeVisible();
+	await expect(dialog.getByRole('link', { name: 'Paper textures' })).toBeVisible();
+	await expect(
+		dialog.getByRole('link', { name: 'Creative Commons Attribution 3.0' })
+	).toHaveAttribute('href', 'https://creativecommons.org/licenses/by/3.0/');
+	await expect(dialog.getByRole('link', { name: 'David Revoy' })).toBeVisible();
+	await expect(dialog.getByRole('link', { name: 'Blender Foundation' })).toBeVisible();
+});
+
+test('picture textures: papers and tips from the texture packs, and they texture the stroke', async ({
+	page
+}) => {
+	await studio(page);
+	await page.getByRole('button', { name: 'New brush' }).click();
+	const win = page.getByRole('dialog', { name: 'New brush' });
+	const preview = win.getByRole('figure', { name: /Sample stroke/ }).locator('canvas');
+	await win.getByRole('slider', { name: 'Size', exact: true }).fill(String(Math.log(30)));
+	await expect.poll(() => inked(preview)).toBeGreaterThan(300);
+	const plain = await pixels(preview);
+	await win.getByRole('tab', { name: 'Grain and tip picture' }).click();
+	for (const n of [
+		'Grain: Torchon paper',
+		'Grain: Watercolour paper',
+		'Grain: Rag paper',
+		'Grain: Halftone dots',
+		'Tip: Rake',
+		'Tip: Chalk lump'
+	])
+		await expect(win.getByRole('radio', { name: n, exact: true })).toBeVisible();
+	// a paper's grain changes the stroke, and a tip changes it again
+	await win.getByRole('radio', { name: 'Grain: Torchon paper', exact: true }).click();
+	await expect.poll(() => pixels(preview)).not.toBe(plain);
+	const grained = await pixels(preview);
+	await win.getByRole('radio', { name: 'Tip: Rake', exact: true }).click();
+	await expect.poll(() => pixels(preview)).not.toBe(grained);
 });
 
 test('more brushes: the packs’ brushes under their own names, in their categories, and they draw', async ({
