@@ -399,3 +399,69 @@ test('brush creator: strands for any brush, with a live preview, kept with the b
 	);
 	expect(settings[kept[0].id].strands).toEqual({ count: 3, spread: 20, wobble: 1, taper: 0 });
 });
+
+test('Animation brushes: their own tab first, each one draws, the tone line keeps one width', async ({
+	page
+}) => {
+	await studio(page);
+	// the first category, after Favourites and My brushes
+	const tabs = page.getByRole('tablist', { name: 'Brush categories' }).getByRole('tab');
+	await expect(tabs.nth(2)).toHaveText('Animation');
+	await page.getByRole('tab', { name: 'Animation' }).click();
+	const list = page.getByRole('list', { name: 'Brushes' });
+	const names = [
+		'Rough pencil',
+		'Tie-down pencil',
+		'Clean-up pen',
+		'Mapping pen',
+		'Tone line',
+		'Cel marker',
+		'Soft shade'
+	];
+	for (const n of names)
+		await expect(list.getByRole('button', { name: n, exact: true })).toBeVisible();
+
+	const c = page.getByLabel(/Drawing canvas/);
+	const b = (await c.boundingBox())!;
+	// each draws (a short stroke, one under another)
+	for (const [i, n] of names.entries()) {
+		await list.getByRole('button', { name: n, exact: true }).click();
+		const y = b.y + b.height * (0.12 + i * 0.11);
+		await page.mouse.move(b.x + b.width * 0.1, y);
+		await page.mouse.down();
+		await page.mouse.move(b.x + b.width * 0.3, y, { steps: 20 });
+		await page.mouse.up();
+	}
+	const inked = (fy: number) =>
+		c.evaluate((el: HTMLCanvasElement, fy) => {
+			const h = Math.round(el.height * 0.06);
+			const y0 = Math.round(el.height * fy - h / 2);
+			const d = el.getContext('2d')!.getImageData(0, y0, Math.round(el.width * 0.4), h).data;
+			let n = 0;
+			for (let i = 0; i < d.length; i += 4)
+				if (d[i + 3] && Math.min(d[i], d[i + 1], d[i + 2]) < 235) n++;
+			return n;
+		}, fy);
+	for (const [i, n] of names.entries())
+		await expect.poll(() => inked(0.12 + i * 0.11), { message: n }).toBeGreaterThan(20);
+
+	// the tone line: the same width at the start, middle and end of a long stroke
+	await list.getByRole('button', { name: 'Tone line', exact: true }).click();
+	await page.mouse.move(b.x + b.width * 0.5, b.y + b.height * 0.2);
+	await page.mouse.down();
+	await page.mouse.move(b.x + b.width * 0.5, b.y + b.height * 0.9, { steps: 40 });
+	await page.mouse.up();
+	const width = (fy: number) =>
+		c.evaluate((el: HTMLCanvasElement, fy) => {
+			const y = Math.round(el.height * fy);
+			const x0 = Math.round(el.width * 0.45);
+			const d = el.getContext('2d')!.getImageData(x0, y, Math.round(el.width * 0.1), 1).data;
+			let n = 0;
+			for (let i = 0; i < d.length; i += 4)
+				if (d[i + 3] && Math.min(d[i], d[i + 1], d[i + 2]) < 200) n++;
+			return n;
+		}, fy);
+	await expect.poll(() => width(0.55)).toBeGreaterThan(0);
+	const ws = [await width(0.3), await width(0.55), await width(0.8)];
+	expect(Math.max(...ws) - Math.min(...ws), `widths ${ws}`).toBeLessThanOrEqual(1);
+});

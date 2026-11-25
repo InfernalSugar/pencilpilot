@@ -3,6 +3,10 @@
 	"license": "CC0-1.0",
 	"categories": [
 		{
+			"id": "animation",
+			"name": "Animation"
+		},
+		{
 			"id": "pencils",
 			"name": "Pencils"
 		},
@@ -45,6 +49,55 @@
 	],
 	"brushes": [
 		{
+			"id": "pencilpilot-rough-pencil",
+			"name": "Rough pencil",
+			"author": "PencilPilot",
+			"category": "animation",
+			"preview": true
+		},
+		{
+			"id": "pencilpilot-tie-down-pencil",
+			"name": "Tie-down pencil",
+			"author": "PencilPilot",
+			"category": "animation",
+			"preview": true
+		},
+		{
+			"id": "pencilpilot-clean-up-pen",
+			"name": "Clean-up pen",
+			"author": "PencilPilot",
+			"category": "animation",
+			"preview": true
+		},
+		{
+			"id": "pencilpilot-mapping-pen",
+			"name": "Mapping pen",
+			"author": "PencilPilot",
+			"category": "animation",
+			"preview": true
+		},
+		{
+			"id": "pencilpilot-tone-line",
+			"name": "Tone line",
+			"author": "PencilPilot",
+			"category": "animation",
+			"preview": true
+		},
+		{
+			"id": "pencilpilot-cel-marker",
+			"name": "Cel marker",
+			"author": "PencilPilot",
+			"category": "animation",
+			"preview": true
+		},
+		{
+			"id": "pencilpilot-soft-shade",
+			"name": "Soft shade",
+			"author": "PencilPilot",
+			"category": "animation",
+			"preview": true
+		},
+		{
 			"id": "classic-blend-paint",
 			"name": "Blend+paint",
 			"author": "MyPaint Classic",
@@ -67,7 +120,7 @@
 		},
 		{
 			"id": "classic-brush",
-			"name": "Brush",
+			"name": "Brush (Classic)",
 			"author": "MyPaint Classic",
 			"category": "paint",
 			"preview": true
@@ -165,7 +218,7 @@
 		},
 		{
 			"id": "classic-knife",
-			"name": "Knife",
+			"name": "Knife (Classic)",
 			"author": "MyPaint Classic",
 			"category": "paint",
 			"preview": true
@@ -200,14 +253,14 @@
 		},
 		{
 			"id": "classic-modelling2",
-			"name": "Modelling2",
+			"name": "Modelling 2",
 			"author": "MyPaint Classic",
 			"category": "paint",
 			"preview": true
 		},
 		{
 			"id": "classic-pen",
-			"name": "Pen",
+			"name": "Pen (Classic)",
 			"author": "MyPaint Classic",
 			"category": "inks",
 			"preview": true
@@ -228,14 +281,14 @@
 		},
 		{
 			"id": "classic-puantilism",
-			"name": "Puantilism",
+			"name": "Pointillism",
 			"author": "MyPaint Classic",
 			"category": "paint",
 			"preview": true
 		},
 		{
 			"id": "classic-puantilism2",
-			"name": "Puantilism2",
+			"name": "Pointillism 2",
 			"author": "MyPaint Classic",
 			"category": "paint",
 			"preview": true
@@ -305,7 +358,7 @@
 		},
 		{
 			"id": "deevad-airbrush",
-			"name": "Airbrush",
+			"name": "Airbrush (Revoy)",
 			"author": "David Revoy",
 			"category": "airbrush",
 			"preview": true
@@ -354,7 +407,7 @@
 		},
 		{
 			"id": "deevad-brush",
-			"name": "Brush",
+			"name": "Brush (Revoy)",
 			"author": "David Revoy",
 			"category": "paint",
 			"preview": true
@@ -396,7 +449,7 @@
 		},
 		{
 			"id": "deevad-fill",
-			"name": "Fill",
+			"name": "Fill (Revoy)",
 			"author": "David Revoy",
 			"category": "markers",
 			"preview": true
@@ -508,7 +561,7 @@
 		},
 		{
 			"id": "deevad-spray2",
-			"name": "Spray2",
+			"name": "Spray 2",
 			"author": "David Revoy",
 			"category": "airbrush",
 			"preview": true
@@ -543,7 +596,7 @@
 		},
 		{
 			"id": "dieterle-8b-pencil-1",
-			"name": "8B Pencil",
+			"name": "8B pencil",
 			"author": "Brien Dieterle",
 			"category": "pencils",
 			"preview": true
@@ -578,7 +631,7 @@
 		},
 		{
 			"id": "dieterle-flat2-1",
-			"name": "Flat2",
+			"name": "Flat 2",
 			"author": "Brien Dieterle",
 			"category": "paint",
 			"preview": true
@@ -606,14 +659,14 @@
 		},
 		{
 			"id": "dieterle-halftone-1",
-			"name": "HalfTone",
+			"name": "Halftone",
 			"author": "Brien Dieterle",
 			"category": "fx",
 			"preview": true
 		},
 		{
 			"id": "dieterle-halftonecmy-1",
-			"name": "HalfToneCMY",
+			"name": "Halftone CMY",
 			"author": "Brien Dieterle",
 			"category": "fx",
 			"preview": true
@@ -634,7 +687,7 @@
 		},
 		{
 			"id": "dieterle-round-1",
-			"name": "Round",
+			"name": "Round (Dieterle)",
 			"author": "Brien Dieterle",
 			"category": "paint",
 			"preview": true
@@ -655,7 +708,7 @@
 		},
 		{
 			"id": "dieterle-tail-feathers2",
-			"name": "Tail Feathers2",
+			"name": "Tail feathers 2",
 			"author": "Brien Dieterle",
 			"category": "fx",
 			"preview": true
@@ -746,14 +799,14 @@
 		},
 		{
 			"id": "experimental-particules-3",
-			"name": "Particules 3",
+			"name": "Particles 3",
 			"author": "MyPaint Experimental",
 			"category": "fx",
 			"preview": true
 		},
 		{
 			"id": "experimental-particules-eraser",
-			"name": "Particules eraser",
+			"name": "Particles eraser",
 			"author": "MyPaint Experimental",
 			"category": "erasers",
 			"preview": true
@@ -837,7 +890,7 @@
 		},
 		{
 			"id": "kaerhon-v1-airbrush-a",
-			"name": "Airbrush",
+			"name": "Airbrush (Kaerhon)",
 			"author": "Guillaume Loussarévian",
 			"category": "airbrush",
 			"preview": true
@@ -851,14 +904,14 @@
 		},
 		{
 			"id": "kaerhon-v1-sketcher2-sk",
-			"name": "Sketcher2",
+			"name": "Sketcher 2",
 			"author": "Guillaume Loussarévian",
 			"category": "pencils",
 			"preview": true
 		},
 		{
 			"id": "kaerhon-v1-smear-sm",
-			"name": "Smear",
+			"name": "Smear (Kaerhon)",
 			"author": "Guillaume Loussarévian",
 			"category": "blend",
 			"preview": true
@@ -872,14 +925,14 @@
 		},
 		{
 			"id": "kaerhon-v1-airsmudge-a",
-			"name": "Airsmudge",
+			"name": "Air smudge",
 			"author": "Guillaume Loussarévian",
 			"category": "blend",
 			"preview": true
 		},
 		{
 			"id": "kaerhon-v1-airsmudgeultimate-sk",
-			"name": "Airsmudgeultimate",
+			"name": "Air smudge ultimate",
 			"author": "Guillaume Loussarévian",
 			"category": "blend",
 			"preview": true
@@ -893,7 +946,7 @@
 		},
 		{
 			"id": "kaerhon-v1-classicroundblock-static-c",
-			"name": "Classicroundblock static",
+			"name": "Round block (static)",
 			"author": "Guillaume Loussarévian",
 			"category": "markers",
 			"preview": true
@@ -907,7 +960,7 @@
 		},
 		{
 			"id": "kaerhon-v1-fill-c",
-			"name": "Fill",
+			"name": "Fill (Kaerhon)",
 			"author": "Guillaume Loussarévian",
 			"category": "markers",
 			"preview": true
@@ -942,7 +995,7 @@
 		},
 		{
 			"id": "kaerhon-v1-paint-barrr-sm",
-			"name": "Paint barrr",
+			"name": "Paint bar",
 			"author": "Guillaume Loussarévian",
 			"category": "paint",
 			"preview": true
@@ -963,7 +1016,7 @@
 		},
 		{
 			"id": "kaerhon-v1-smudge-ink-0-7-sm",
-			"name": "Smudge ink(0.7)",
+			"name": "Smudge ink",
 			"author": "Guillaume Loussarévian",
 			"category": "blend",
 			"preview": true
@@ -984,7 +1037,7 @@
 		},
 		{
 			"id": "ramon-2b-pencil",
-			"name": "2B pencil",
+			"name": "2B pencil (Ramón)",
 			"author": "Ramón Miranda",
 			"category": "pencils",
 			"preview": true
@@ -1005,7 +1058,7 @@
 		},
 		{
 			"id": "ramon-bigairbrush",
-			"name": "BigAirbrush",
+			"name": "Big airbrush",
 			"author": "Ramón Miranda",
 			"category": "airbrush",
 			"preview": true
@@ -1068,7 +1121,7 @@
 		},
 		{
 			"id": "ramon-knife",
-			"name": "Knife",
+			"name": "Knife (Ramón)",
 			"author": "Ramón Miranda",
 			"category": "paint",
 			"preview": true
@@ -1096,7 +1149,7 @@
 		},
 		{
 			"id": "ramon-pen",
-			"name": "Pen",
+			"name": "Pen (Ramón)",
 			"author": "Ramón Miranda",
 			"category": "inks",
 			"preview": true
@@ -1117,14 +1170,14 @@
 		},
 		{
 			"id": "ramon-round",
-			"name": "Round",
+			"name": "Round (Ramón)",
 			"author": "Ramón Miranda",
 			"category": "paint",
 			"preview": true
 		},
 		{
 			"id": "ramon-round-bl",
-			"name": "Round Bl",
+			"name": "Round block",
 			"author": "Ramón Miranda",
 			"category": "markers",
 			"preview": true
@@ -1138,7 +1191,7 @@
 		},
 		{
 			"id": "ramon-smear",
-			"name": "Smear",
+			"name": "Smear (Ramón)",
 			"author": "Ramón Miranda",
 			"category": "blend",
 			"preview": true
@@ -1166,7 +1219,7 @@
 		},
 		{
 			"id": "ramon-wet-direction",
-			"name": "Wet Direction",
+			"name": "Wet direction",
 			"author": "Ramón Miranda",
 			"category": "paint",
 			"preview": true
@@ -1264,7 +1317,7 @@
 		},
 		{
 			"id": "tanda-charcoal-blur1",
-			"name": "Charcoal blur1",
+			"name": "Charcoal blur",
 			"author": "Marcelo “Tanda” Cerviño",
 			"category": "blend",
 			"preview": true
@@ -1334,14 +1387,14 @@
 		},
 		{
 			"id": "tanda-pencil-2b",
-			"name": "Pencil 2b",
+			"name": "Pencil 2B",
 			"author": "Marcelo “Tanda” Cerviño",
 			"category": "pencils",
 			"preview": true
 		},
 		{
 			"id": "tanda-pencil-8b",
-			"name": "Pencil 8b",
+			"name": "Pencil 8B",
 			"author": "Marcelo “Tanda” Cerviño",
 			"category": "pencils",
 			"preview": true
