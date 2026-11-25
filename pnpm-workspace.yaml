@@ -1,7 +1,6 @@
 packages:
   - apps/*
   - packages/*
-  - plugins/*/server
   - crates/grader-wasm/pkg
   - crates/brush-wasm/pkg
 onlyBuiltDependencies:

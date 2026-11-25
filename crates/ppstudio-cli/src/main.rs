@@ -8,9 +8,6 @@
 //!   white (normal blending, their opacity; hidden layers left out). With `--every`, one
 //!   PNG per frame. Prints what it wrote as JSON.
 //! - `ppstudio info <project.ppstudio>`: the timeline as JSON (scenes, cuts, lengths).
-//!
-//! The director plugin (`plugins/pencilpilot-director`) uses it to put generated
-//! frames into a project and to look at what the artist drew.
 
 mod build;
 mod render;
