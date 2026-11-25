@@ -3964,7 +3964,7 @@
 			eraser = action === 'eraser';
 			tool = 'brush';
 		} else if (action === 'smaller') size = Math.max(0.25, +(size / 1.25).toFixed(2));
-		else if (action === 'bigger') size = Math.min(6, +(size * 1.25).toFixed(2));
+		else if (action === 'bigger') size = Math.min(settings.maxBrushSize, +(size * 1.25).toFixed(2));
 		else if (action === 'undo') undo();
 		else if (action === 'redo') redo();
 		else if (action === 'prev-frame') timelinePanel?.step(-1);
