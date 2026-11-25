@@ -30,6 +30,7 @@ pub mod strands;
 pub mod style;
 mod text;
 pub mod texture;
+pub mod vectorise;
 
 pub use layers::{Blend, LayerProps};
 use layers::{

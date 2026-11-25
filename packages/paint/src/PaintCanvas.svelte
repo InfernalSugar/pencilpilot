@@ -753,7 +753,11 @@
 				if (dead) return;
 				memory = mem;
 				paint = new PaintCanvas(width, height);
-				ctx = el.getContext('2d', { willReadFrequently: true });
+				// (not willReadFrequently: that keeps the canvas on the CPU, and where the page is
+				// drawn on the GPU (Chromium, WebView2 on Windows) every frame then copies and
+				// uploads the whole canvas: 4x slower at 1080p, 9x at 4K, and input drops. Reads
+				// are rare (exports); the colour picker reads the engine's memory instead.)
+				ctx = el.getContext('2d');
 				if (ctx) {
 					ctx.fillStyle = '#fff';
 					ctx.fillRect(0, 0, width, height);

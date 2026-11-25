@@ -23,6 +23,7 @@
  *   dropped on arrival. AI is solo only.
  */
 
+import { readPalettes, type Palette } from './palettes';
 import { readStyle, sameStyle, type LayerStyle } from '@pencilpilot/paint/layer-style';
 import {
 	decodeLines,
@@ -2160,6 +2161,8 @@ export interface SharedTimeline {
 	kinds: Record<string, DrawingKind>;
 	/** layer stages, by lid (older apps send none) */
 	stages?: Record<string, Stage>;
+	/** character palettes (older apps send none) */
+	palettes?: Palette[];
 }
 
 const DID = /^[0-9a-f]{12}:[0-9]{1,12}$/;
@@ -2225,7 +2228,8 @@ export function toShared(
 				const lid = lidOf(+l);
 				return lid ? [[lid, st]] : [];
 			})
-		)
+		),
+		palettes: tl.palettes ?? []
 	};
 }
 
@@ -2339,11 +2343,14 @@ export function fromShared(
 	// doesn't send any)
 	for (const [l, st] of Object.entries(local.stages ?? {}))
 		if (!isShared(+l) || !s.stages) stages[+l] = st;
+	// (an app that sends no palettes leaves this one's as they are)
+	const palettes = s.palettes === undefined ? (local.palettes ?? []) : readPalettes(s.palettes);
 	return {
 		scenes: scenes.length ? scenes : local.scenes,
 		statics,
 		...(mouths.length ? { mouths } : {}),
 		...(Object.keys(kinds).length ? { kinds } : {}),
-		...(Object.keys(stages).length ? { stages } : {})
+		...(Object.keys(stages).length ? { stages } : {}),
+		...(palettes.length ? { palettes } : {})
 	};
 }
