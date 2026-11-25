@@ -41,8 +41,8 @@ fn every_brush_in_the_pack_loads_and_paints() {
         count += 1;
     }
     assert_eq!(
-        count, 197,
-        "expected the full mypaint-brushes v2.0.2 pack and Hair strands"
+        count, 204,
+        "expected the full mypaint-brushes v2.0.2 pack, Hair strands and the Animation set (7)"
     );
     // Smudge/blend/eraser brushes leave nothing on a blank canvas; the rest must paint.
     assert!(
