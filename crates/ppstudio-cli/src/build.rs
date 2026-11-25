@@ -172,7 +172,7 @@ pub fn build(spec: &Spec, base: &Path, out: &Path) -> Result<serde_json::Value, 
             base.join(p)
         }
     };
-    let mut p = Project::new("PencilPilot director", &now(), w, h, spec.fps);
+    let mut p = Project::new("PencilPilot", &now(), w, h, spec.fps);
     let ids: HashMap<&str, u32> = spec
         .layers
         .iter()
