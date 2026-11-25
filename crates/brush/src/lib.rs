@@ -5390,8 +5390,12 @@ fn grow_mask(m: &[bool], w: usize, h: usize, r: usize) -> Vec<bool> {
 }
 
 /// Set a brush's base colour from sRGB 0–255 (converted to HSV, as MyPaint stores it).
+///
+/// Layers hold linear light and show it as sRGB, so the colour goes in linear: what
+/// is painted shows as the colour picked (not lighter).
 pub fn set_brush_rgb(brush: &mut Brush, r: u8, g: u8, b: u8) {
-    let (h, s, v) = rgb_to_hsv(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
+    let lin = |c: u8| hokusai::color::srgb_to_linear(c as f32 / 255.0);
+    let (h, s, v) = rgb_to_hsv(lin(r), lin(g), lin(b));
     brush.get_mut(BrushSetting::ColorH).base_value = h;
     brush.get_mut(BrushSetting::ColorS).base_value = s;
     brush.get_mut(BrushSetting::ColorV).base_value = v;
@@ -6534,6 +6538,28 @@ mod tests {
         p.flush();
         assert_eq!(p.layers().len(), 2);
         assert_eq!(dark_pixels(&p), both);
+    }
+
+    #[test]
+    fn a_brush_paints_the_colour_picked() {
+        // (it painted them lighter: the sRGB colour went into the linear layer as is)
+        for rgb in [[22u8, 22, 26], [128, 128, 128], [30, 90, 200], [220, 0, 0]] {
+            let mut p = Painter::new(200, 64);
+            let mut b = pen();
+            set_brush_rgb(&mut b, rgb[0], rgb[1], rgb[2]);
+            b.get_mut(BrushSetting::Radius).base_value = 2.5;
+            for _ in 0..4 {
+                line(&mut p, &b, 32.0);
+            }
+            p.flush();
+            let got = px(&p, 100, 32);
+            for c in 0..3 {
+                assert!(
+                    (got[c] as i32 - rgb[c] as i32).abs() <= 2,
+                    "{rgb:?} painted as {got:?}"
+                );
+            }
+        }
     }
 
     #[test]
