@@ -146,44 +146,85 @@ function makeMyb(b) {
 
 // ---- previews: an S stroke, light → firm → light, as the brush picker draws one ----
 
-async function engine() {
+export async function engine() {
 	const pkg = join(ROOT, 'crates/brush-wasm/pkg');
 	const mod = await import(join(pkg, 'brush.js'));
 	const out = await mod.default({ module_or_path: readFileSync(join(pkg, 'brush_bg.wasm')) });
 	return { ...mod, memory: out.memory };
 }
 
-function preview(e, src, W = 128, H = 128) {
-	const brush = new e.PaintBrush(src);
-	brush.setColor(22, 22, 26);
-	brush.setOpacity(1);
-	brush.setSizeScale(1);
-	brush.setSizeScale(Math.min(1, (H * 0.1) / brush.radius()));
-	const paint = new e.PaintCanvas(W, H);
+/** paint a stroke with `brush` along `at(t)` (t 0–1), pressure light → firm → light */
+function strokeAlong(paint, brush, at, steps = 90) {
+	paint.beginStroke();
+	for (let i = 0; i <= steps; i++) {
+		const t = i / steps;
+		const [x, y] = at(t);
+		paint.strokeTo(brush, x, y, 0.08 + 0.92 * Math.sin(t * Math.PI), 0, 0, 0.012);
+	}
+	paint.endStroke(brush);
+}
+
+/** three coloured bands, for a brush that only moves or takes away paint to work on */
+function underlay(e, paint, W, H) {
+	const band = new e.PaintBrush(readFileSync(join(OUT, 'deevad-liner.myb'), 'utf8'));
 	try {
-		paint.beginStroke();
-		const steps = 90;
-		const r = Math.min(H * 0.25, brush.radius() * 1.5);
-		const m = 14 + r;
-		for (let i = 0; i <= steps; i++) {
-			const t = i / steps;
-			// a diagonal S, bottom left to top right
-			const x = m + t * (W - 2 * m) + Math.sin(t * Math.PI * 2) * W * 0.12;
-			const y = H - m - t * (H - 2 * m);
-			paint.strokeTo(brush, x, y, 0.08 + 0.92 * Math.sin(t * Math.PI), 0, 0, 0.012);
+		band.setOpacity(1);
+		band.setSizeScale(1);
+		// (the engine's size scale goes in as log2 onto a natural-log radius: a factor
+		// f takes a scale of 2^ln f)
+		band.setSizeScale(2 ** Math.log((H * 0.09) / band.radius()));
+		for (const [k, c] of [
+			[0.25, [216, 96, 74]],
+			[0.5, [74, 127, 216]],
+			[0.75, [232, 192, 74]]
+		]) {
+			band.setColor(...c);
+			strokeAlong(paint, band, (t) => [-10 + t * (W + 20), H * k], 40);
 		}
-		paint.endStroke(brush);
-		paint.flush();
-		const px = new Uint8Array(e.memory.buffer, paint.rgbaPtr(), W * H * 4).slice();
-		return png(px, W, H);
 	} finally {
-		paint.free();
-		brush.free();
+		band.free();
 	}
 }
 
+/**
+ * A brush's picture: an S stroke, as the brush picker draws one. A brush that leaves
+ * nothing on blank paper (a blender, an eraser) is drawn over coloured bands instead.
+ */
+export function preview(e, src, W = 128, H = 128) {
+	const draw = (under) => {
+		const brush = new e.PaintBrush(src);
+		brush.setColor(22, 22, 26);
+		brush.setOpacity(1);
+		brush.setSizeScale(1);
+		brush.setSizeScale(Math.min(1, (H * 0.1) / brush.radius()));
+		const paint = new e.PaintCanvas(W, H);
+		try {
+			if (under) underlay(e, paint, W, H);
+			const r = Math.min(H * 0.25, brush.radius() * 1.5);
+			const m = 14 + r;
+			// a diagonal S, bottom left to top right
+			strokeAlong(paint, brush, (t) => [
+				m + t * (W - 2 * m) + Math.sin(t * Math.PI * 2) * W * 0.12,
+				H - m - t * (H - 2 * m)
+			]);
+			paint.flush();
+			return new Uint8Array(e.memory.buffer, paint.rgbaPtr(), W * H * 4).slice();
+		} finally {
+			paint.free();
+			brush.free();
+		}
+	};
+	let px = draw(false);
+	// (the canvas starts as white paper: ink is what isn't)
+	let ink = 0;
+	for (let i = 0; i < px.length; i += 4)
+		if (px[i + 3] > 24 && Math.min(px[i], px[i + 1], px[i + 2]) < 235) ink++;
+	if (ink < 40) px = draw(true);
+	return png(px, W, H);
+}
+
 /** RGBA (straight alpha) over white paper → an RGB PNG */
-function png(rgba, W, H) {
+export function png(rgba, W, H) {
 	const raw = Buffer.alloc((W * 3 + 1) * H);
 	for (let y = 0; y < H; y++) {
 		raw[y * (W * 3 + 1)] = 0;

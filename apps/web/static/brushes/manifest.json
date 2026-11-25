@@ -1475,6 +1475,762 @@
 			"author": "Marcelo “Tanda” Cerviño",
 			"category": "watercolour",
 			"preview": true
+		},
+		{
+			"id": "aotz-001-sketch",
+			"name": "Sketch pencil",
+			"author": "Anderson Prado",
+			"category": "pencils",
+			"preview": true
+		},
+		{
+			"id": "aotz-002-sketch-b",
+			"name": "Sketch pencil B",
+			"author": "Anderson Prado",
+			"category": "pencils",
+			"preview": true
+		},
+		{
+			"id": "aotz-003-sketch-6b",
+			"name": "Soft sketch pencil 6B",
+			"author": "Anderson Prado",
+			"category": "pencils",
+			"preview": true
+		},
+		{
+			"id": "aotz-004-sketch-f",
+			"name": "Fine sketch pencil F",
+			"author": "Anderson Prado",
+			"category": "pencils",
+			"preview": true
+		},
+		{
+			"id": "aotz-005-ink",
+			"name": "Brush pen",
+			"author": "Anderson Prado",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "aotz-006-ink-maru",
+			"name": "Round nib",
+			"author": "Anderson Prado",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "aotz-007-ink-gpen",
+			"name": "G nib",
+			"author": "Anderson Prado",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "aotz-008-ink-pen-rough",
+			"name": "Rough nib",
+			"author": "Anderson Prado",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "aotz-009-fill",
+			"name": "Flat fill",
+			"author": "Anderson Prado",
+			"category": "markers",
+			"preview": true
+		},
+		{
+			"id": "aotz-010-paint",
+			"name": "Concept brush",
+			"author": "Anderson Prado",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "aotz-011-oilbrush",
+			"name": "Oil brush",
+			"author": "Anderson Prado",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "aotz-014-impasto",
+			"name": "Impasto",
+			"author": "Anderson Prado",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "aotz-016-gouache",
+			"name": "Gouache",
+			"author": "Anderson Prado",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "aotz-018-airbrush",
+			"name": "Soft airbrush",
+			"author": "Anderson Prado",
+			"category": "airbrush",
+			"preview": true
+		},
+		{
+			"id": "aotz-020-water",
+			"name": "Water diffuser",
+			"author": "Anderson Prado",
+			"category": "watercolour",
+			"preview": true
+		},
+		{
+			"id": "aotz-028-splatter",
+			"name": "Splatter",
+			"author": "Anderson Prado",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "aotz-038-crayon",
+			"name": "Crayon",
+			"author": "Anderson Prado",
+			"category": "charcoal",
+			"preview": true
+		},
+		{
+			"id": "aotz-039-chalk",
+			"name": "Chalk stick",
+			"author": "Anderson Prado",
+			"category": "charcoal",
+			"preview": true
+		},
+		{
+			"id": "aotz-040-marker",
+			"name": "Quick marker",
+			"author": "Anderson Prado",
+			"category": "markers",
+			"preview": true
+		},
+		{
+			"id": "aotz-041-hatch",
+			"name": "Hatching",
+			"author": "Anderson Prado",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "aotz-042-hatch-rough",
+			"name": "Rough hatching",
+			"author": "Anderson Prado",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "aotz-043-hatch-mesh",
+			"name": "Cross-hatching mesh",
+			"author": "Anderson Prado",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "aotz-044-hatch-sparse",
+			"name": "Sparse hatching",
+			"author": "Anderson Prado",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "aotz-045-stipple",
+			"name": "Stipple",
+			"author": "Anderson Prado",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "aotz-046-rake",
+			"name": "Rake",
+			"author": "Anderson Prado",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "aotz-050-clouds",
+			"name": "Cloud puffs",
+			"author": "Anderson Prado",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "aotz-051-grass",
+			"name": "Grass tufts",
+			"author": "Anderson Prado",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "aotz-052-leaves",
+			"name": "Foliage",
+			"author": "Anderson Prado",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "aotz-053-meadown",
+			"name": "Meadow",
+			"author": "Anderson Prado",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "aotz-054-blossom",
+			"name": "Blossom",
+			"author": "Anderson Prado",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "aotz-058-fur",
+			"name": "Fur strokes",
+			"author": "Anderson Prado",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "aotz-059-fur2",
+			"name": "Fur strokes 2",
+			"author": "Anderson Prado",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "aotz-060-texture-ground",
+			"name": "Ground texture",
+			"author": "Anderson Prado",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "aotz-061-texture-stone",
+			"name": "Stone texture",
+			"author": "Anderson Prado",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "aotz-063-texture-sand",
+			"name": "Sand texture",
+			"author": "Anderson Prado",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "aotz-065-texture-water",
+			"name": "Water texture",
+			"author": "Anderson Prado",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "aotz-070-surface-broad",
+			"name": "Broad surface",
+			"author": "Anderson Prado",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "aotz-073-surface-sketch",
+			"name": "Surface sketch",
+			"author": "Anderson Prado",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "aotz-074-surface-sketch2",
+			"name": "Surface sketch 2",
+			"author": "Anderson Prado",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "aotz-090-smear",
+			"name": "Smear blender",
+			"author": "Anderson Prado",
+			"category": "blend",
+			"preview": true
+		},
+		{
+			"id": "aotz-095-grainy-blend",
+			"name": "Grainy blender",
+			"author": "Anderson Prado",
+			"category": "blend",
+			"preview": true
+		},
+		{
+			"id": "aotz-098-kneaded-eraser",
+			"name": "Soft kneaded eraser",
+			"author": "Anderson Prado",
+			"category": "erasers",
+			"preview": true
+		},
+		{
+			"id": "aotz-099-eraser",
+			"name": "Clean eraser",
+			"author": "Anderson Prado",
+			"category": "erasers",
+			"preview": true
+		},
+		{
+			"id": "dirty-bleeding-ink",
+			"name": "Bleeding ink",
+			"author": "Anna Timm",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "dirty-blocky-eraser",
+			"name": "Blocky eraser",
+			"author": "Anna Timm",
+			"category": "erasers",
+			"preview": true
+		},
+		{
+			"id": "dirty-blotchy-airbrush-1",
+			"name": "Blotchy airbrush 1",
+			"author": "Anna Timm",
+			"category": "airbrush",
+			"preview": true
+		},
+		{
+			"id": "dirty-blotchy-airbrush-2",
+			"name": "Blotchy airbrush 2",
+			"author": "Anna Timm",
+			"category": "airbrush",
+			"preview": true
+		},
+		{
+			"id": "dirty-blotchy-airbrush-3",
+			"name": "Blotchy airbrush 3",
+			"author": "Anna Timm",
+			"category": "airbrush",
+			"preview": true
+		},
+		{
+			"id": "dirty-broken-line",
+			"name": "Broken line",
+			"author": "Anna Timm",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "dirty-calligraphy-sketch",
+			"name": "Calligraphic sketch",
+			"author": "Anna Timm",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "dirty-calligraphy-sketch-2",
+			"name": "Calligraphic sketch 2",
+			"author": "Anna Timm",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "dirty-censored",
+			"name": "Mosaic",
+			"author": "Anna Timm",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "dirty-chalk-chunks",
+			"name": "Chalk chunks",
+			"author": "Anna Timm",
+			"category": "charcoal",
+			"preview": true
+		},
+		{
+			"id": "dirty-chosshatch-layers",
+			"name": "Layered crosshatch",
+			"author": "Anna Timm",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "dirty-crosshatch-blender",
+			"name": "Crosshatch blender",
+			"author": "Anna Timm",
+			"category": "blend",
+			"preview": true
+		},
+		{
+			"id": "dirty-dirty-brush",
+			"name": "Dirty brush",
+			"author": "Anna Timm",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "dirty-dirty-knife",
+			"name": "Dirty knife",
+			"author": "Anna Timm",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "dirty-dirty-pencil",
+			"name": "Dirty pencil",
+			"author": "Anna Timm",
+			"category": "pencils",
+			"preview": true
+		},
+		{
+			"id": "dirty-dry-bristles",
+			"name": "Dry bristles",
+			"author": "Anna Timm",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "dirty-dry-brush-blender",
+			"name": "Dry brush blender",
+			"author": "Anna Timm",
+			"category": "blend",
+			"preview": true
+		},
+		{
+			"id": "dirty-finesketch",
+			"name": "Fine sketch",
+			"author": "Anna Timm",
+			"category": "pencils",
+			"preview": true
+		},
+		{
+			"id": "dirty-fx-4-liner",
+			"name": "Four-line liner",
+			"author": "Anna Timm",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "dirty-fx-crossline",
+			"name": "Cross line",
+			"author": "Anna Timm",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "dirty-fx-dashes",
+			"name": "Dashes",
+			"author": "Anna Timm",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "dirty-fx-wet-line",
+			"name": "Wet line",
+			"author": "Anna Timm",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "dirty-fx-zigzag",
+			"name": "Zigzag",
+			"author": "Anna Timm",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "dirty-hairline",
+			"name": "Hairline",
+			"author": "Anna Timm",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "dirty-hairy-brush",
+			"name": "Hairy brush",
+			"author": "Anna Timm",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "dirty-inker-01",
+			"name": "Inker 1",
+			"author": "Anna Timm",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "dirty-inker-02",
+			"name": "Inker 2",
+			"author": "Anna Timm",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "dirty-nervous-crosshatch",
+			"name": "Nervous crosshatch",
+			"author": "Anna Timm",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "dirty-noisy-ballpoint",
+			"name": "Noisy ballpoint",
+			"author": "Anna Timm",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "dirty-noisy-colorize",
+			"name": "Noisy tint",
+			"author": "Anna Timm",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "dirty-pigment-pusher",
+			"name": "Pigment pusher",
+			"author": "Anna Timm",
+			"category": "blend",
+			"preview": true
+		},
+		{
+			"id": "dirty-pixlpointl",
+			"name": "Pixel pointillism",
+			"author": "Anna Timm",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "dirty-pointiline",
+			"name": "Dotted line",
+			"author": "Anna Timm",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "dirty-pointilism",
+			"name": "Dot pointillism",
+			"author": "Anna Timm",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "dirty-rough-blender",
+			"name": "Rough blender",
+			"author": "Anna Timm",
+			"category": "blend",
+			"preview": true
+		},
+		{
+			"id": "dirty-rough-coal",
+			"name": "Rough charcoal",
+			"author": "Anna Timm",
+			"category": "charcoal",
+			"preview": true
+		},
+		{
+			"id": "dirty-rough-pencil",
+			"name": "Rough graphite",
+			"author": "Anna Timm",
+			"category": "pencils",
+			"preview": true
+		},
+		{
+			"id": "dirty-silverpoint",
+			"name": "Silverpoint",
+			"author": "Anna Timm",
+			"category": "pencils",
+			"preview": true
+		},
+		{
+			"id": "dirty-slowpointilism",
+			"name": "Slow pointillism",
+			"author": "Anna Timm",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "dirty-smearaser",
+			"name": "Smear eraser",
+			"author": "Anna Timm",
+			"category": "erasers",
+			"preview": true
+		},
+		{
+			"id": "dirty-smudgy-fingers",
+			"name": "Smudgy fingers",
+			"author": "Anna Timm",
+			"category": "blend",
+			"preview": true
+		},
+		{
+			"id": "dirty-softfine",
+			"name": "Soft fine pencil",
+			"author": "Anna Timm",
+			"category": "pencils",
+			"preview": true
+		},
+		{
+			"id": "dirty-solid-eraser",
+			"name": "Solid eraser",
+			"author": "Anna Timm",
+			"category": "erasers",
+			"preview": true
+		},
+		{
+			"id": "dirty-spit",
+			"name": "Spatter",
+			"author": "Anna Timm",
+			"category": "fx",
+			"preview": true
+		},
+		{
+			"id": "dirty-thinbrush",
+			"name": "Thin brush",
+			"author": "Anna Timm",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "dirty-water-dabs",
+			"name": "Water dabs",
+			"author": "Anna Timm",
+			"category": "watercolour",
+			"preview": true
+		},
+		{
+			"id": "dirty-water-line",
+			"name": "Water line",
+			"author": "Anna Timm",
+			"category": "watercolour",
+			"preview": true
+		},
+		{
+			"id": "dirty-wet-blops",
+			"name": "Wet blobs",
+			"author": "Anna Timm",
+			"category": "watercolour",
+			"preview": true
+		},
+		{
+			"id": "dirty-wet-crosshatch",
+			"name": "Wet crosshatch",
+			"author": "Anna Timm",
+			"category": "watercolour",
+			"preview": true
+		},
+		{
+			"id": "cd-draw-1",
+			"name": "Concept pencil 1",
+			"author": "Ramón Miranda",
+			"category": "pencils",
+			"preview": true
+		},
+		{
+			"id": "cd-draw-2",
+			"name": "Concept pencil 2",
+			"author": "Ramón Miranda",
+			"category": "pencils",
+			"preview": true
+		},
+		{
+			"id": "cd-04-pen",
+			"name": "Fineliner 0.4",
+			"author": "Ramón Miranda",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "cd-08-pen",
+			"name": "Fineliner 0.8",
+			"author": "Ramón Miranda",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "cd-inkbrush-and-eraser",
+			"name": "Ink brush",
+			"author": "Ramón Miranda",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "cd-penbrush",
+			"name": "Pen brush",
+			"author": "Ramón Miranda",
+			"category": "inks",
+			"preview": true
+		},
+		{
+			"id": "cd-light-marker",
+			"name": "Light marker",
+			"author": "Ramón Miranda",
+			"category": "markers",
+			"preview": true
+		},
+		{
+			"id": "cd-medium-marker",
+			"name": "Medium marker",
+			"author": "Ramón Miranda",
+			"category": "markers",
+			"preview": true
+		},
+		{
+			"id": "cd-dark-marker",
+			"name": "Dark marker",
+			"author": "Ramón Miranda",
+			"category": "markers",
+			"preview": true
+		},
+		{
+			"id": "cd-blender-marker",
+			"name": "Marker blender",
+			"author": "Ramón Miranda",
+			"category": "markers",
+			"preview": true
+		},
+		{
+			"id": "cd-permanent-black",
+			"name": "Permanent marker",
+			"author": "Ramón Miranda",
+			"category": "markers",
+			"preview": true
+		},
+		{
+			"id": "cd-text-marker",
+			"name": "Highlighter",
+			"author": "Ramón Miranda",
+			"category": "markers",
+			"preview": true
+		},
+		{
+			"id": "cd-wide-small",
+			"name": "Wide marker small",
+			"author": "Ramón Miranda",
+			"category": "markers",
+			"preview": true
+		},
+		{
+			"id": "cd-wide-big",
+			"name": "Wide marker large",
+			"author": "Ramón Miranda",
+			"category": "markers",
+			"preview": true
+		},
+		{
+			"id": "cd-big-bg",
+			"name": "Big background brush",
+			"author": "Ramón Miranda",
+			"category": "paint",
+			"preview": true
+		},
+		{
+			"id": "cd-eraser",
+			"name": "Concept eraser",
+			"author": "Ramón Miranda",
+			"category": "erasers",
+			"preview": true
 		}
 	]
 }
