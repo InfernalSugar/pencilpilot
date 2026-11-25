@@ -4,7 +4,7 @@
 	 * back. It draws as the canvas does (designed size, full opacity, its texture).
 	 */
 	import { brushFromSource, loadEngine, PaintCanvas } from './brushes';
-	import { styleStrokes, type BrushTexture } from './brush-textures';
+	import { strandsOn, styleStrokes, type BrushTexture } from './brush-textures';
 
 	let {
 		myb,
@@ -42,7 +42,12 @@
 		const n = parseInt(hex.slice(1), 16) || 0;
 		brush.setColor((n >> 16) & 255, (n >> 8) & 255, n & 255);
 		brush.setSizeScale(1);
-		if (small) brush.setSizeScale(Math.min(1, (H * 0.12) / brush.radius()));
+		// (strands paint a bundle: half its width each side, as a multiple of the radius)
+		const s = strandsOn(tex) ? tex!.strands! : null;
+		const wide = s ? 1 + s.spread * (0.5 + 0.3 * s.wobble) : 1;
+		if (small) brush.setSizeScale(Math.min(1, (H * 0.12) / (brush.radius() * wide)));
+		// (a wide bundle smaller, to show all of it)
+		else if (s) brush.setSizeScale(Math.min(1, (H * 0.28) / (brush.radius() * wide)));
 		brush.setOpacity(1);
 		const paint = new PaintCanvas(W, H);
 		try {
@@ -50,7 +55,7 @@
 			paint.beginStroke();
 			const steps = Math.round(W / 3.5);
 			// keep big brushes inside the picture
-			const r = Math.min(H * 0.3, brush.radius() * 1.5);
+			const r = Math.min(H * 0.3, brush.radius() * 1.5 * wide);
 			const amp = Math.max(4, H / 2 - r - 6);
 			const m = Math.min(20, W * 0.1) + r;
 			for (let i = 0; i <= steps; i++) {

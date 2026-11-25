@@ -448,6 +448,15 @@ impl PaintCanvas {
         );
     }
 
+    /// Paint the next strokes as `count` strands (fewer than 2: plain strokes; at most
+    /// 24): `spread` is the bundle's width as a multiple of the brush's radius,
+    /// `wobble` and `taper` 0–1. Line strokes replay with the strands set when they're
+    /// given (`linesStroke`, `linesClip`, `linesDabs`).
+    #[wasm_bindgen(js_name = setStrands)]
+    pub fn set_strands(&mut self, count: u32, spread: f32, wobble: f32, taper: f32) {
+        self.inner.set_strands(count, spread, wobble, taper);
+    }
+
     /// Preview a gradient from (x0, y0) to (x1, y1), colours sRGB 0–1 with alpha.
     #[allow(clippy::too_many_arguments)]
     #[wasm_bindgen(js_name = gradientPreview)]

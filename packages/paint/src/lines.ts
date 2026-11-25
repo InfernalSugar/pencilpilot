@@ -9,7 +9,7 @@
  * shared in. Strokes are never changed in place: an edit makes a new stroke (with the
  * same id), so a drawing's list can be kept for undo as it is.
  */
-import type { BrushTexture } from './brush-textures';
+import { readStrands, type BrushTexture } from './brush-textures';
 import type { EditShape, Pt } from './shape-edit';
 
 /** numbers per point: x, y (canvas px), pressure (0–1), x and y tilt (−1–1), dtime (s) */
@@ -1111,6 +1111,7 @@ function readTexture(v: unknown): BrushTexture | undefined {
 	if (!t || typeof t !== 'object') return undefined;
 	const id = (x: unknown) => (typeof x === 'string' && x.length <= 120 ? x : null);
 	const n = (x: unknown, d: number) => (typeof x === 'number' && Number.isFinite(x) ? x : d);
+	const strands = readStrands(t.strands);
 	return {
 		grain: id(t.grain),
 		grainScale: n(t.grainScale, 1),
@@ -1119,7 +1120,8 @@ function readTexture(v: unknown): BrushTexture | undefined {
 		dual: id(t.dual),
 		dualSize: n(t.dualSize, 0.35),
 		dualScatter: n(t.dualScatter, 0),
-		dualCount: n(t.dualCount, 1)
+		dualCount: n(t.dualCount, 1),
+		...(strands ? { strands } : {})
 	};
 }
 

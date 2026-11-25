@@ -288,3 +288,114 @@ test('settings: the brush credit is under About', async ({ page }) => {
 		'https://github.com/mypaint/mypaint-brushes'
 	);
 });
+
+/** in column `fx` (a fraction of the width) of a canvas: the dark runs down it, top to bottom */
+const bands = (c: Locator, fx: number) =>
+	c.evaluate((el: HTMLCanvasElement, fx) => {
+		const x = Math.round(el.width * fx);
+		const d = el.getContext('2d')!.getImageData(x, 0, 1, el.height).data;
+		const out: [number, number][] = [];
+		let start = -1;
+		for (let y = 0; y <= el.height; y++) {
+			const i = y * 4;
+			const dark = y < el.height && Math.min(d[i], d[i + 1], d[i + 2]) < 150;
+			if (dark && start < 0) start = y;
+			if (!dark && start >= 0) {
+				out.push([start, y]);
+				start = -1;
+			}
+		}
+		return out;
+	}, fx);
+
+test('Hair strands: one stroke draws several separate, parallel strands', async ({ page }) => {
+	await studio(page);
+	await page.getByRole('tab', { name: 'Inks & pens' }).click();
+	const hair = page
+		.getByRole('list', { name: 'Brushes' })
+		.getByRole('button', { name: 'Hair strands', exact: true });
+	await hair.click();
+	await expect(hair).toHaveAttribute('aria-pressed', 'true');
+
+	// one straight stroke across the middle
+	const c = page.getByLabel(/Drawing canvas/);
+	const b = (await c.boundingBox())!;
+	await page.mouse.move(b.x + b.width * 0.15, b.y + b.height * 0.5);
+	await page.mouse.down();
+	await page.mouse.move(b.x + b.width * 0.85, b.y + b.height * 0.5, { steps: 60 });
+	await page.mouse.up();
+
+	// across it, all along: several thin bands of ink with paper between them
+	await expect.poll(async () => (await bands(c, 0.5)).length).toBeGreaterThanOrEqual(4);
+	const mid = (await c.evaluate((el: HTMLCanvasElement) => el.height)) / 2;
+	for (const fx of [0.35, 0.5, 0.65]) {
+		const runs = await bands(c, fx);
+		expect(runs.length, `strands at ${fx}`).toBeGreaterThanOrEqual(4);
+		// each thin, the bundle together a good deal wider than one
+		const widest = Math.max(...runs.map(([a, z]) => z - a));
+		const span = runs[runs.length - 1][1] - runs[0][0];
+		expect(widest).toBeLessThan(span / 3);
+		// around where the stroke went
+		expect(Math.abs((runs[0][0] + runs[runs.length - 1][1]) / 2 - mid)).toBeLessThan(span);
+	}
+	if (SHOTS) {
+		await c.screenshot({ path: `${SHOTS}/hair-strands.png` });
+		// the stroke's end, close up
+		await page.getByRole('button', { name: 'Zoom in' }).click();
+		await page.getByRole('button', { name: 'Zoom in' }).click();
+		await c.screenshot({ path: `${SHOTS}/hair-strands-close.png` });
+	}
+});
+
+test('brush creator: strands for any brush, with a live preview, kept with the brush', async ({
+	page
+}) => {
+	await studio(page);
+	await page.getByRole('button', { name: 'New brush' }).click();
+	const win = page.getByRole('dialog', { name: 'New brush' });
+	const preview = win.getByRole('figure', { name: /Sample stroke/ });
+	const canvas = preview.locator('canvas');
+	await expect.poll(() => inked(canvas)).toBeGreaterThan(300);
+	await win.getByRole('tab', { name: 'Strands' }).click();
+	const count = win.getByRole('slider', { name: 'Strand strands' });
+	await expect(count).toBeDisabled();
+	const redrawn = async () => Number(await preview.getAttribute('data-drawn'));
+
+	// on: the sample stroke redraws as a bundle
+	let drawn = await redrawn();
+	let before = await pixels(canvas);
+	await win.getByLabel('Draw in strands').check();
+	await expect(count).toBeEnabled();
+	await expect.poll(redrawn).toBeGreaterThan(drawn);
+	await expect.poll(() => pixels(canvas)).not.toBe(before);
+
+	// every strand setting changes it
+	for (const [name, value] of [
+		['Strand strands', '3'],
+		['Strand spread', '20'],
+		['Strand wobble', '1'],
+		['Strand taper', '0']
+	]) {
+		drawn = await redrawn();
+		before = await pixels(canvas);
+		await win.getByRole('slider', { name }).fill(value);
+		await expect.poll(redrawn).toBeGreaterThan(drawn);
+		await expect.poll(() => pixels(canvas), name).not.toBe(before);
+	}
+	if (SHOTS) await win.screenshot({ path: `${SHOTS}/brush-creator-strands.png` });
+
+	// the try-out canvas draws in strands too
+	const pad = win.getByLabel('Try the brush here');
+	await drag(page, pad);
+	await expect.poll(() => inked(pad)).toBeGreaterThan(300);
+
+	// saved with the brush
+	await win.getByLabel('Brush name').fill('Fur');
+	await win.getByRole('button', { name: 'Save to My brushes' }).click();
+	await expect(win).toHaveCount(0);
+	const kept = await page.evaluate(() => JSON.parse(localStorage.getItem('pp.myBrushes')!));
+	const settings = await page.evaluate(() =>
+		JSON.parse(localStorage.getItem('pp.brushTextureSettings')!)
+	);
+	expect(settings[kept[0].id].strands).toEqual({ count: 3, spread: 20, wobble: 1, taper: 0 });
+});

@@ -205,7 +205,13 @@
 	import { Stabilizer, stringLength } from './stabilizer';
 	import { cloneBrushSource, cloneOffset } from './clone';
 	import { hardEdges, lassoBack, lassoOutline, type LassoPoint } from './lasso-path';
-	import { textureById, type BrushTexture } from './brush-textures';
+	import {
+		strandsOn,
+		strandsReach,
+		strandStrokes,
+		textureById,
+		type BrushTexture
+	} from './brush-textures';
 	import { Timelapse } from './timelapse';
 	import Rulers from './Rulers.svelte';
 	import CompositionShapes from './CompositionShapes.svelte';
@@ -687,7 +693,10 @@
 
 	/** What a stroke keeps of its brush's reach: how far it paints, and whether it smudges. */
 	function brushReach(b: PaintBrush): Pick<LineStroke, 'reach' | 'smudge'> {
-		const reach = Math.round(b.paintReach() * 100) / 100;
+		// (a stroke in strands paints its bundle's width around its path)
+		const own = b.paintReach();
+		const all = strandsOn(brushTexture) ? strandsReach(brushTexture!.strands!, own) : own;
+		const reach = Math.round(all * 100) / 100;
 		return {
 			...(reach > 2.5 ? { reach } : {}),
 			...(b.smudgeReach() > 0 ? { smudge: true } : {})
@@ -1251,6 +1260,7 @@
 	/** how the engine's next strokes are textured (null: plain) */
 	function setDabStyle(t: BrushTexture | null) {
 		if (!paint) return;
+		strandStrokes(paint, t);
 		if (!t) return paint.setDabStyle(0, 1, 0, 0, 0, 0, 0, 1);
 		paint.setDabStyle(
 			engineTexture(t.grain),
