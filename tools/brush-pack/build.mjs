@@ -4,8 +4,17 @@
 //
 // Usage: node tools/brush-pack/build.mjs <path-to-extracted-mypaint-brushes>
 //   (get it with: curl -sL https://api.github.com/repos/mypaint/mypaint-brushes/tarball/v2.0.2 | tar xz)
-import { copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+	copyFileSync,
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	readdirSync,
+	rmSync,
+	writeFileSync
+} from 'node:fs';
 import { join, resolve } from 'node:path';
+import { nameOf, OWN_CATEGORIES } from './names.mjs';
 
 const src = resolve(process.argv[2] ?? '');
 const brushes = join(src, 'brushes');
@@ -68,8 +77,14 @@ const pretty = (s) =>
 		.trim()
 		.replace(/^./, (c) => c.toUpperCase());
 
-rmSync(out, { recursive: true, force: true });
+// PencilPilot's own brushes (pencilpilot-*, made by pencilpilot.mjs) stay as they are
+const own = existsSync(join(out, 'manifest.json'))
+	? JSON.parse(readFileSync(join(out, 'manifest.json'), 'utf8')).brushes.filter((b) =>
+			b.id.startsWith('pencilpilot-')
+		)
+	: [];
 mkdirSync(out, { recursive: true });
+for (const f of readdirSync(out)) if (!f.startsWith('pencilpilot-')) rmSync(join(out, f));
 
 const list = [];
 for (const [set, author] of Object.entries(SETS)) {
@@ -80,7 +95,7 @@ for (const [set, author] of Object.entries(SETS)) {
 		const prev = join(brushes, set, `${name}_prev.png`);
 		const hasPreview = existsSync(prev);
 		if (hasPreview) copyFileSync(prev, join(out, `${id}.png`));
-		list.push({ id, name: pretty(name), author, category: categorise(name), preview: hasPreview });
+		list.push({ id, name: nameOf(id, pretty(name)), author, category: categorise(name), preview: hasPreview });
 	}
 }
 
@@ -90,8 +105,8 @@ if (ids.size !== list.length) throw new Error('duplicate brush ids');
 const manifest = {
 	source: 'mypaint-brushes v2.0.2 (https://github.com/mypaint/mypaint-brushes)',
 	license: 'CC0-1.0',
-	categories: CATEGORIES.map(([id, name]) => ({ id, name })),
-	brushes: list
+	categories: [...OWN_CATEGORIES, ...CATEGORIES].map(([id, name]) => ({ id, name })),
+	brushes: [...own, ...list]
 };
 writeFileSync(join(out, 'manifest.json'), JSON.stringify(manifest, null, '\t') + '\n');
 const counts = Object.fromEntries(CATEGORIES.map(([c]) => [c, list.filter((b) => b.category === c).length]));
