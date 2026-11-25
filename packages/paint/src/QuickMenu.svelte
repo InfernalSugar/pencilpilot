@@ -11,8 +11,10 @@
 
 <script lang="ts">
 	/**
-	 * Procreate's QuickMenu: a ring of everyday actions where you right-click
-	 * (or long-press) the canvas. Escape, or a click outside, closes it.
+	 * A quick menu: a ring of everyday actions where you right-click (or long-press) the
+	 * canvas. Escape, or a click outside, closes it. The action under the pointer (or
+	 * focused) is named in the middle, the same with a mouse, a pen, keys or a finger
+	 * (a native tooltip shows only for a resting mouse, and not on every system).
 	 */
 	import { onMount } from 'svelte';
 
@@ -33,6 +35,8 @@
 	const cx = $derived(Math.min(window.innerWidth - R - 34, Math.max(R + 34, x)));
 	const cy = $derived(Math.min(window.innerHeight - R - 34, Math.max(R + 34, y)));
 	let ring = $state<HTMLDivElement>();
+	/** the action named in the middle */
+	let named = $state<number>(-1);
 
 	onMount(() => {
 		ring?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus();
@@ -67,7 +71,11 @@
 			style="transform: translate({Math.cos(ang) * R}px, {Math.sin(ang) * R}px)"
 			disabled={a.disabled}
 			aria-label={a.label}
-			title={a.label}
+			onpointerenter={() => (named = i)}
+			onfocus={() => (named = i)}
+			onpointerleave={() => {
+				if (named === i) named = -1;
+			}}
 			onclick={() => {
 				a.run();
 				onclose();
@@ -77,6 +85,9 @@
 		</button>
 	{/each}
 	<span class="hub" aria-hidden="true"></span>
+	{#if actions[named]}
+		<span class="name" aria-hidden="true">{actions[named].label}</span>
+	{/if}
 </div>
 
 <style>
@@ -111,6 +122,19 @@
 	.item:focus-visible {
 		background: var(--pp-accent, #2f6bff);
 		outline: none;
+	}
+	.name {
+		position: absolute;
+		left: 0;
+		top: 0;
+		transform: translate(-50%, -50%);
+		padding: 4px 10px;
+		border-radius: 999px;
+		background: rgba(22, 22, 26, 0.88);
+		color: #fff;
+		font: 600 12px var(--pp-font-body, system-ui);
+		white-space: nowrap;
+		pointer-events: none;
 	}
 	.item:disabled {
 		opacity: 0.4;

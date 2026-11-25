@@ -901,6 +901,14 @@ test('studio layout: each tool shows its options, as on the website', async ({ p
 	// right-click: the quick menu
 	const b = (await canvas(page).boundingBox())!;
 	await page.mouse.click(b.x + b.width / 2, b.y + b.height / 2, { button: 'right' });
+	// each action is named in the middle as the pointer reaches it (no native tooltip,
+	// which a pen, a finger or some systems never show)
+	const menu = page.getByRole('menu', { name: 'Quick menu' });
+	await menu.getByRole('menuitem', { name: 'Eyedropper' }).hover();
+	await expect(menu.locator('.name')).toHaveText('Eyedropper');
+	await menu.getByRole('menuitem', { name: 'Eraser' }).hover();
+	await expect(menu.locator('.name')).toHaveText('Eraser');
+	await expect(menu.locator('[title]')).toHaveCount(0);
 	await page.getByRole('menuitem', { name: 'Eraser' }).click();
 	await expect(page.getByRole('button', { name: 'Eraser (E)' })).toHaveAttribute(
 		'aria-pressed',
