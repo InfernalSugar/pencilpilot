@@ -920,7 +920,7 @@
 				<button
 					type="button"
 					class="tool"
-					title="A Colour layer under this line layer (fills take its lines), a Shadow layer clipped to it, and Tone lines above the lines (shadow fills stop at them; Final leaves them out)"
+					title="A Colour layer under this line layer (fills take its lines), Shadow and Highlight layers clipped to it, and Tone lines above the lines (shadow and highlight fills stop at them; Final leaves them out)"
 					onclick={() => opts.setupColour?.()}
 				>
 					Set up colour layers
