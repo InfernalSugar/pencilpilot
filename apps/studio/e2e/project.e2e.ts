@@ -4676,6 +4676,85 @@ test('open a Photoshop file: its layers, groups and masks become a new project',
 	).toBeVisible();
 });
 
+test('character palettes: from a model sheet, named, painted with, undone, kept in the file', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	// a model sheet: paper, black outlines round three flat colours (skin the biggest)
+	const sheet = await page.evaluate(() => {
+		const c = document.createElement('canvas');
+		[c.width, c.height] = [240, 160];
+		const g = c.getContext('2d')!;
+		g.fillStyle = '#ffffff';
+		g.fillRect(0, 0, 240, 160);
+		for (const [x, y, w, h, col] of [
+			[10, 10, 130, 130, '#f2c9a8'],
+			[150, 10, 80, 70, '#5a3a2a'],
+			[150, 90, 60, 50, '#466ec8']
+		] as const) {
+			g.fillStyle = col;
+			g.fillRect(x, y, w, h);
+			g.strokeStyle = '#101014';
+			g.lineWidth = 4;
+			g.strokeRect(x, y, w, h);
+		}
+		return c.toDataURL('image/png').split(',')[1];
+	});
+	await page.getByTestId('reference-toggle').click();
+	await page
+		.getByTestId('reference-side')
+		.getByLabel('Reference picture files')
+		.setInputFiles({
+			name: 'mina-sheet.png',
+			mimeType: 'image/png',
+			buffer: Buffer.from(sheet, 'base64')
+		});
+	await expect(page.getByRole('img', { name: 'Reference: mina-sheet.png' })).toBeVisible();
+
+	// its colours, as a palette named after it: skin first, then hair, then the shirt
+	await page.getByRole('tab', { name: /^Colour/ }).click();
+	const pal = page.getByRole('region', { name: 'Character palettes' });
+	await pal.getByRole('button', { name: 'From the reference' }).click();
+	await expect(pal.getByText(/^3 colours/)).toBeVisible();
+	const names = pal.getByRole('textbox', { name: /^Name of #/ });
+	await expect(names).toHaveCount(3);
+	await expect(names.nth(0)).toHaveAccessibleName('Name of #f2c9a8');
+	await expect(names.nth(1)).toHaveAccessibleName('Name of #5a3a2a');
+	await expect(names.nth(2)).toHaveAccessibleName('Name of #466ec8');
+	await names.nth(0).fill('Skin');
+	await names.nth(0).press('Tab');
+	await pal.getByRole('button', { name: 'Done' }).click();
+
+	// a click paints with it: a fill on the empty canvas is exactly that colour
+	await pal.getByRole('button', { name: 'mina-sheet: Skin' }).click();
+	await page.getByRole('button', { name: 'Fill (G)' }).click();
+	const b = (await canvas(page).boundingBox())!;
+	await page.mouse.click(b.x + b.width / 2, b.y + b.height / 2);
+	const mid = () =>
+		canvas(page).evaluate((el: HTMLCanvasElement) => [
+			...el.getContext('2d')!.getImageData(el.width >> 1, el.height >> 1, 1, 1).data
+		]);
+	await expect.poll(mid).toEqual([242, 201, 168, 255]);
+
+	// undone and redone like any change (the fill, then the name)
+	await page.keyboard.press('Control+z');
+	await page.keyboard.press('Control+z');
+	await expect(pal.getByRole('button', { name: 'mina-sheet: Colour 1' })).toBeVisible();
+	await page.keyboard.press('Control+Shift+z');
+	await expect(pal.getByRole('button', { name: 'mina-sheet: Skin' })).toBeVisible();
+
+	// saved and opened again: the palette comes back from the file
+	await page.keyboard.press('Control+s');
+	await expect(page.getByTestId('project-name')).toHaveText('Walk cycle', { timeout: 20_000 });
+	await page.keyboard.press('Control+o');
+	await expect(
+		page
+			.getByRole('region', { name: 'Character palettes' })
+			.getByRole('button', { name: 'mina-sheet: Skin' })
+	).toBeVisible({ timeout: 20_000 });
+});
+
 test('reference pictures: your own, in the corner, at the side or popped out, kept in the file', async ({
 	page
 }) => {

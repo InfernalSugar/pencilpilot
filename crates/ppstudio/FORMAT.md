@@ -65,6 +65,8 @@ This crate (`pencilpilot-ppstudio`) reads and writes it.
     "staticLayers": [ 2 ],       // optional: layers that show one drawing all cut long
     "drawingKinds": { "D1": "key", "D3": "breakdown" },  // optional: key / breakdown / inbetween
     "layerStages": { "1": "rough", "2": "clean" },  // optional: each layer's production stage
+    "palettes": [                // optional: character palettes
+      { "name": "Mina", "colours": [ { "name": "Skin", "hex": "#f2c9a8" } ] } ],
     "mouthCharts": [             // optional: lip-sync, which drawing is each mouth shape
       { "layer": 3, "shapes": { "A": "D7", "B": "D8", "X": "D9" } } ]
   },
@@ -133,6 +135,10 @@ This crate (`pencilpilot-ppstudio`) reads and writes it.
   (colour), `shade` (shading) or `comp` (compositing). Apps use them to show or export one stage at a time;
   a layer with none belongs to every stage. They don't change what a frame is. A reader
   may drop stages for layers that aren't there or that it doesn't know.
+- **Palettes** (`palettes`) are the project's character palettes: each a `name` and its
+  `colours`, each a `name` ("Skin shadow") and a `hex` colour (`#rrggbb`). At most 32
+  palettes of 64 colours, names up to 40 characters. They don't change what a frame is. A
+  reader may drop colours that aren't `#rrggbb` and anything past the limits.
 - The **timelapse** is a small picture of the canvas (at most 540 px on its long side)
   taken after each change, across every session: `timelapse/000000.jpg`, `000001.jpg`…
   in order, with `timelapse` in the manifest saying when each was taken. A reader may

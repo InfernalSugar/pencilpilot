@@ -88,6 +88,9 @@ pub struct Header {
     /// layer stages: layer id → "board", "rough", "tiedown", "clean", "tone", "flats", "shade" or "comp"
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub layer_stages: std::collections::BTreeMap<String, String>,
+    /// character palettes: named colours
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub palettes: Vec<ppstudio::Palette>,
     /// the timelapse: JPEG pictures and when each was taken (ms since 1970)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub timelapse: Vec<PacketTimelapse>,
@@ -287,6 +290,7 @@ pub fn to_project(
                 && ppstudio::STAGES.contains(&st.as_str())
         })
         .collect();
+    p.manifest.timeline.palettes = h.palettes;
     p.manifest.groups = h.groups;
     p.manifest.active_layer = h.active_layer;
     p.manifest.extra = h.extra;
@@ -444,6 +448,7 @@ pub fn from_project(p: &Project, mut frames: Option<&mut FrameStore>) -> Result<
         mouth_charts: m.timeline.mouth_charts.clone(),
         drawing_kinds: m.timeline.drawing_kinds.clone(),
         layer_stages: m.timeline.layer_stages.clone(),
+        palettes: m.timeline.palettes.clone(),
         timelapse,
         fonts,
         references,
@@ -579,6 +584,7 @@ mod tests {
             mouth_charts: vec![],
             drawing_kinds: Default::default(),
             layer_stages: Default::default(),
+            palettes: vec![],
             timelapse: vec![],
             fonts: vec![],
             references: vec![],
@@ -779,9 +785,17 @@ mod tests {
         hst.layer_stages = [("3".to_string(), "clean".to_string())]
             .into_iter()
             .collect();
+        hst.palettes = vec![ppstudio::Palette {
+            name: "Mina".into(),
+            colours: vec![ppstudio::PaletteColour {
+                name: "Skin".into(),
+                hex: "#f2c9a8".into(),
+            }],
+        }];
         let pst = to_project(&encode(&hst, &blobs).unwrap(), "test", "now", None).unwrap();
         let (hst2, _) = decode(&from_project(&pst, None).unwrap()).unwrap();
         assert_eq!(hst2.layer_stages, hst.layer_stages);
+        assert_eq!(hst2.palettes, hst.palettes);
         let d11 = hm2.drawings.iter().find(|d| d.id == 11).unwrap();
 
         // a timelapse: its pictures and times through the file and back
