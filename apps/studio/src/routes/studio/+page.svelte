@@ -63,7 +63,14 @@
 		type ProjectDoc
 	} from '#lib/project.js';
 	import { beforeNavigate, goto } from '$app/navigation';
-	import { loadSettings, saveSettings, settings, strokeMemory } from '#lib/settings.svelte.js';
+	import {
+		loadSettings,
+		saveSettings,
+		settings,
+		settingsLoaded,
+		strokeMemory
+	} from '#lib/settings.svelte.js';
+	import WorkspaceDialog from '#lib/WorkspaceDialog.svelte';
 	import { exportText, tagPng } from '#lib/png-meta.js';
 	import type { ViewPrefs } from '@pencilpilot/paint/view-prefs';
 	import { actionFor, comboOf, showKey, type ActionId } from '#lib/shortcuts.js';
@@ -3788,6 +3795,40 @@
 		});
 	});
 
+	// ---- workspaces: layouts of this one studio (see lib/workspaces.ts) ----
+	const workspace = $derived(
+		settings.workspaces.find((w) => w.id === settings.workspace) ?? settings.workspaces[0]
+	);
+	let workspacesOpen = $state(false);
+	/** the side panel opened on the workspace's tab once the settings were read */
+	let workspaceTab = false;
+	// the layout and the tab in use go to the workspace in use, so it comes back as it was left
+	$effect(() => {
+		const w = workspace;
+		const layout = $state.snapshot(settings.layout);
+		const t = tab;
+		if (!w || !settingsLoaded()) return;
+		untrack(() => {
+			if (!workspaceTab) {
+				workspaceTab = true;
+				tab = w.tab;
+				return;
+			}
+			if (JSON.stringify($state.snapshot(w.layout)) !== JSON.stringify(layout)) w.layout = layout;
+			if (w.tab !== t) w.tab = t;
+		});
+	});
+	/** Switch workspace: its bars, panels, tab and tools (the canvas stays as it is). */
+	function useWorkspace(id: string) {
+		const w = settings.workspaces.find((x) => x.id === id);
+		if (!w) return;
+		settings.workspace = id;
+		settings.layout = $state.snapshot(w.layout);
+		tab = w.tab;
+		// a tool the strip no longer shows: back to the brush (its key still picks it)
+		if (!(w.tools as string[]).includes(tool) && tool !== 'eraser') tool = 'brush';
+	}
+
 	// the largest brush size: the slider stops there, and a bigger size comes down to it
 	$effect(() => {
 		if (size > settings.maxBrushSize) size = settings.maxBrushSize;
@@ -4064,6 +4105,31 @@
 		{/snippet}
 		{#snippet actions()}
 			{#if fileNote}<span class="note" role="alert">{fileNote}</span>{/if}
+			<div class="workspace">
+				<label>
+					<span class="visually-hidden">Workspace</span>
+					<select
+						value={workspace?.id}
+						title="Workspace: a layout of the studio, with its own panels and tools"
+						onchange={(e) => useWorkspace(e.currentTarget.value)}
+					>
+						{#each settings.workspaces as w (w.id)}
+							<option value={w.id}>{w.name}</option>
+						{/each}
+					</select>
+				</label>
+				<button
+					type="button"
+					class="ws-edit"
+					aria-label="Customise workspaces"
+					title="Customise workspaces"
+					onclick={() => (workspacesOpen = true)}
+				>
+					<svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+						<path d="M3 3h8v8H3ZM13 3h8v5h-8ZM13 10h8v11h-8ZM3 13h8v8H3Z" />
+					</svg>
+				</button>
+			</div>
 		{/snippet}
 		{#snippet menu()}
 			<div class="export">
@@ -4365,7 +4431,7 @@
 		{/snippet}
 		{#snippet rail()}
 			<ToolRail
-				tools={[...ALL_TOOLS, 'text', 'lines']}
+				tools={workspace?.tools ?? [...ALL_TOOLS, 'text', 'lines']}
 				bind:tool
 				bind:eraser
 				bind:size
@@ -4728,6 +4794,9 @@
 			{#if settingsOpen}
 				<SettingsPanel onclose={() => (settingsOpen = false)} />
 			{/if}
+			{#if workspacesOpen}
+				<WorkspaceDialog bind:tab onuse={useWorkspace} onclose={() => (workspacesOpen = false)} />
+			{/if}
 			{#if canvasSizeOpen}
 				<CanvasSizeDialog
 					size={canvasSize}
@@ -4950,6 +5019,53 @@
 	.dot {
 		color: var(--pp-accent);
 		font-size: 12px;
+	}
+	.workspace {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+	}
+	.workspace select {
+		height: 32px;
+		max-width: 160px;
+		padding: 0 8px;
+		border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+		border-radius: 10px;
+		background: transparent;
+		color: inherit;
+		font: 600 13px var(--pp-font-body);
+		cursor: pointer;
+	}
+	.workspace select option {
+		color: #16161a;
+	}
+	.ws-edit {
+		display: grid;
+		place-items: center;
+		width: 32px;
+		height: 32px;
+		border: 0;
+		border-radius: 10px;
+		background: transparent;
+		color: inherit;
+		cursor: pointer;
+	}
+	.ws-edit:hover {
+		background: color-mix(in srgb, currentColor 12%, transparent);
+	}
+	.ws-edit svg {
+		fill: none;
+		stroke: currentColor;
+		stroke-width: 2;
+		stroke-linejoin: round;
+	}
+	.workspace .visually-hidden {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		overflow: hidden;
+		clip: rect(0 0 0 0);
+		white-space: nowrap;
 	}
 	.note {
 		max-width: 320px;
