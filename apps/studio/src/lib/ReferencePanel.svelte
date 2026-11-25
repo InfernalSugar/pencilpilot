@@ -18,7 +18,9 @@
 		gridLines = null,
 		canvasSize,
 		onpick,
-		onchange
+		onchange,
+		onpen,
+		mirror
 	}: {
 		shelf: RefShelf;
 		/** the place this one shows in */
@@ -32,6 +34,13 @@
 		onpick?: (hex: string) => void;
 		/** pictures were added or taken away (the project changed) */
 		onchange?: () => void;
+		/** a pen on the picture ("Draw on it"): draw on the canvas at the same place */
+		onpen?: (
+			e: PointerEvent,
+			frac: (clientX: number, clientY: number) => [number, number] | null
+		) => void;
+		/** paints the drawing over the picture ("Show drawing") */
+		mirror?: (g: CanvasRenderingContext2D, w: number, h: number) => void;
 	} = $props();
 
 	const PLACE_LABEL: Record<RefPlace, [string, string]> = {
@@ -46,6 +55,9 @@
 	/** how the picture's values show: as it is, grey, or 2 / 3 flat tones; blurred (squint) */
 	let values = $state<'colour' | 'grey' | 2 | 3>('colour');
 	let squint = $state(false);
+	/** a pen on the picture draws on the canvas; the drawing shows on the picture */
+	let drawOn = $state(false);
+	let showDrawing = $state(false);
 
 	const pic = $derived(shelf.pic);
 	const grid = $derived(pic && gridLines ? gridOnPicture(gridLines, canvasSize, pic) : null);
@@ -186,6 +198,9 @@
 				{squint}
 				{grid}
 				{onpick}
+				pen={drawOn}
+				{onpen}
+				mirror={showDrawing ? mirror : null}
 			/>
 		{/key}
 		<div class="row">
@@ -207,6 +222,31 @@
 			>
 				Squint
 			</button>
+			{#if onpen}
+				<button
+					type="button"
+					class="chip"
+					aria-pressed={drawOn}
+					title="Draw on the picture: each line lands on the canvas at the same place, for proportions that match exactly (a finger still moves the picture)"
+					onclick={() => {
+						drawOn = !drawOn;
+						if (drawOn && mirror) showDrawing = true;
+					}}
+				>
+					Draw on it
+				</button>
+			{/if}
+			{#if mirror}
+				<button
+					type="button"
+					class="chip"
+					aria-pressed={showDrawing}
+					title="Lay your drawing over the picture, to check it against the picture"
+					onclick={() => (showDrawing = !showDrawing)}
+				>
+					Show drawing
+				</button>
+			{/if}
 			<button
 				type="button"
 				class="chip quiet"

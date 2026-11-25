@@ -73,7 +73,12 @@
 	import { psdStem, psdToDoc, tooBig } from '#lib/psd-open.js';
 	import ReferencePanel from '#lib/ReferencePanel.svelte';
 	import RefSplit from '#lib/RefSplit.svelte';
-	import { RefShelf, skippedNote } from '#lib/references.svelte.js';
+	import {
+		canvasFromPicture,
+		pictureOnCanvas,
+		RefShelf,
+		skippedNote
+	} from '#lib/references.svelte.js';
 	import { AudioBank, wav } from '#lib/audio.js';
 	import ExportDialog from '#lib/ExportDialog.svelte';
 	import LipSyncDialog from '#lib/LipSyncDialog.svelte';
@@ -514,6 +519,27 @@
 		} catch (e) {
 			note(`Couldn’t import the pictures: ${e}`, 5000);
 		}
+	}
+	/**
+	 * A pen on the reference ("Draw on it"): it draws on the canvas where that point of the
+	 * picture sits (fitted inside the canvas, as the grid lays it), with whatever tool is on.
+	 */
+	function refPen(e: PointerEvent, frac: (x: number, y: number) => [number, number] | null) {
+		const pic = refShelf.pic;
+		const at = pic && pictureOnCanvas(canvasSize, pic);
+		if (!canvas || !at) return;
+		canvas.forwardPointer(e, (x, y) => {
+			const f = frac(x, y);
+			// (the picture isn't read yet: far off the canvas, so nothing lands)
+			return f ? canvasFromPicture(at, f) : [-1e6, -1e6];
+		});
+	}
+	/** the drawing, over the reference: the part of the canvas the picture covers */
+	function refMirror(g: CanvasRenderingContext2D, w: number, h: number) {
+		const src = canvas?.shownCanvas();
+		const pic = refShelf.pic;
+		const at = src && pic && pictureOnCanvas({ width: src.width, height: src.height }, pic);
+		if (at) g.drawImage(src, at[0], at[1], at[2], at[3], 0, 0, w, h);
 	}
 	/** a colour picked from the reference: paint with it */
 	function refPicked(c: string) {
@@ -3936,6 +3962,8 @@
 		{canvasSize}
 		onpick={refPicked}
 		onchange={() => docVersion++}
+		onpen={refPen}
+		mirror={refMirror}
 	/>
 {/snippet}
 {#snippet refPane()}
