@@ -85,7 +85,7 @@ pub struct Header {
     /// drawing marks: drawing name → "key", "breakdown" or "inbetween"
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub drawing_kinds: std::collections::BTreeMap<String, String>,
-    /// layer stages: layer id → "board", "rough", "tiedown", "clean", "flats", "shade" or "comp"
+    /// layer stages: layer id → "board", "rough", "tiedown", "clean", "tone", "flats", "shade" or "comp"
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub layer_stages: std::collections::BTreeMap<String, String>,
     /// the timelapse: JPEG pictures and when each was taken (ms since 1970)

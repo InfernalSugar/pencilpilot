@@ -612,7 +612,8 @@ impl PaintCanvas {
         self.inner.redo()
     }
 
-    /// Flood-fill the active layer from (x, y); see `Painter::fill`. One undo step.
+    /// Flood-fill the active layer from (x, y); see `Painter::fill_from`. The shape is
+    /// found on the reference layers (none: what you see, or the active layer). One undo step.
     #[allow(clippy::too_many_arguments)]
     pub fn fill(
         &mut self,
@@ -626,10 +627,10 @@ impl PaintCanvas {
         all_layers: bool,
         grow: u32,
         gap: u32,
-        reference_layer: u32,
+        reference: &[u32],
     ) -> bool {
-        // 0 = no reference layer (layer ids start at 1)
-        let reference = (reference_layer != 0).then_some(reference_layer);
+        // (layer ids start at 1: 0 is none)
+        let refs: Vec<u32> = reference.iter().copied().filter(|&id| id != 0).collect();
         self.inner.fill_from(
             x,
             y,
@@ -639,7 +640,7 @@ impl PaintCanvas {
             all_layers,
             grow,
             gap,
-            reference,
+            &refs,
         )
     }
 

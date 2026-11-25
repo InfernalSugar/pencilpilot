@@ -2113,12 +2113,13 @@ impl Painter {
         grow: u32,
         gap: u32,
     ) -> bool {
-        self.fill_from(x, y, rgb, opacity, tolerance, all_layers, grow, gap, None)
+        self.fill_from(x, y, rgb, opacity, tolerance, all_layers, grow, gap, &[])
     }
 
-    /// `fill`, but the region comes from `reference`'s own pixels (a line-art
-    /// layer, as in Procreate's reference layer) while the paint still goes on
-    /// the active layer. `None`, or a missing layer, falls back to `fill`.
+    /// `fill`, but the region comes from the `reference` layers' own pixels (a
+    /// line-art layer, as a reference layer; with its tone lines, several, seen
+    /// together as stacked) while the paint still goes on the active layer. None,
+    /// or only missing layers, falls back to `fill`.
     #[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
     pub fn fill_from(
         &mut self,
@@ -2130,7 +2131,7 @@ impl Painter {
         all_layers: bool,
         grow: u32,
         gap: u32,
-        reference: Option<u32>,
+        reference: &[u32],
     ) -> bool {
         let (w, h) = (self.width as usize, self.height as usize);
         if self.stroking.is_some() || x as usize >= w || y as usize >= h {
@@ -2143,9 +2144,26 @@ impl Painter {
         if self.layers[li].props.locked || !self.shown(li) {
             return false;
         }
-        let source = match reference.and_then(|id| self.index_of(id)) {
-            Some(ri) => self.sample_source(ri, false),
-            None => self.sample_source(li, all_layers),
+        let mut refs: Vec<usize> = reference
+            .iter()
+            .filter_map(|&id| self.index_of(id))
+            .collect();
+        refs.sort_unstable();
+        refs.dedup();
+        let source = match refs.as_slice() {
+            [] => self.sample_source(li, all_layers),
+            [ri] => self.sample_source(*ri, false),
+            many => {
+                // bottom to top, each over what's under it
+                let mut out = self.sample_source(many[0], false);
+                for &ri in &many[1..] {
+                    let top = self.sample_source(ri, false);
+                    for (o, t) in out.iter_mut().zip(&top) {
+                        *o = over_rgba8(*t, *o);
+                    }
+                }
+                out
+            }
         };
         let tol = (tolerance.clamp(0.0, 1.0) * 255.0) as i32;
         let mask = flood_closed(&source, w, h, x as usize, y as usize, tol, gap as usize);
@@ -5476,6 +5494,22 @@ pub fn set_brush_rgb(brush: &mut Brush, r: u8, g: u8, b: u8) {
     brush.get_mut(BrushSetting::ColorV).base_value = v;
 }
 
+/// Straight-alpha RGBA8 `top` over `under` (the fill's view of stacked reference layers).
+fn over_rgba8(top: [u8; 4], under: [u8; 4]) -> [u8; 4] {
+    let (ta, ua) = (top[3] as f32 / 255.0, under[3] as f32 / 255.0);
+    let a = ta + ua * (1.0 - ta);
+    if a <= 0.0 {
+        return [0; 4];
+    }
+    let mix = |t: u8, u: u8| ((t as f32 * ta + u as f32 * ua * (1.0 - ta)) / a).round() as u8;
+    [
+        mix(top[0], under[0]),
+        mix(top[1], under[1]),
+        mix(top[2], under[2]),
+        (a * 255.0).round() as u8,
+    ]
+}
+
 fn rgb_to_hsv(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
     let max = r.max(g).max(b);
     let min = r.min(g).min(b);
@@ -6951,6 +6985,49 @@ mod tests {
     }
 
     #[test]
+    fn fill_from_lines_and_tone_lines_stops_at_both() {
+        let mut p = Painter::new(256, 128);
+        dense_square(&mut p);
+        let lines = p.active_layer();
+        // a tone line across the square's middle, on a layer of its own
+        let tone = p.add_layer("Tone lines");
+        let mut b = pen();
+        b.get_mut(BrushSetting::Radius).base_value = 1.0;
+        set_brush_rgb(&mut b, 220, 0, 0);
+        p.begin_stroke();
+        for i in 0..=60 {
+            p.stroke_to(&b, 80.0, i as f32 * 2.0, 1.0, 0.0, 0.0, 0.01);
+        }
+        p.end_stroke(&b);
+        // (drawn, as the app has it by the time anyone fills)
+        p.flush();
+        let shadow = p.add_layer("Shadow");
+        // the lines alone: the whole square
+        assert!(p.fill_from(60, 60, [0, 0, 200], 1.0, 0.1, false, 0, 0, &[lines]));
+        p.flush();
+        assert!(
+            px(&p, 100, 60)[0] < 60,
+            "both halves: {:?}",
+            px(&p, 100, 60)
+        );
+        p.undo();
+        // the lines and the tone lines: only the side clicked (blue there, paper past it)
+        assert!(p.fill_from(60, 60, [0, 0, 200], 1.0, 0.1, false, 0, 0, &[tone, lines]));
+        assert_eq!(p.active_layer(), shadow, "painted on the active layer");
+        p.flush();
+        assert!(
+            px(&p, 60, 60)[0] < 60,
+            "the side clicked: {:?}",
+            px(&p, 60, 60)
+        );
+        assert!(
+            px(&p, 100, 60)[0] > 200,
+            "not past the tone line: {:?}",
+            px(&p, 100, 60)
+        );
+    }
+
+    #[test]
     fn fill_respects_lock_and_layer_sampling() {
         let mut p = Painter::new(256, 128);
         dense_square(&mut p);
@@ -6976,7 +7053,7 @@ mod tests {
         let mut hidden = props(&p, lines);
         hidden.visible = false;
         p.set_layer_props(lines, hidden, true);
-        assert!(p.fill_from(80, 60, [0, 200, 0], 1.0, 0.1, true, 0, 0, Some(lines)));
+        assert!(p.fill_from(80, 60, [0, 200, 0], 1.0, 0.1, true, 0, 0, &[lines]));
         assert_eq!(p.active_layer(), colour, "painted on the active layer");
         let mut shown = props(&p, lines);
         shown.visible = true;
@@ -6988,7 +7065,7 @@ mod tests {
         );
         assert!(px(&p, 200, 60)[0] > 240, "outside it is not");
         // a reference that doesn't exist falls back to the usual sampling (what you see)
-        assert!(p.fill_from(200, 60, [200, 0, 0], 1.0, 0.1, true, 0, 0, Some(999)));
+        assert!(p.fill_from(200, 60, [200, 0, 0], 1.0, 0.1, true, 0, 0, &[999]));
         p.flush();
         assert!(
             px(&p, 200, 60)[1] < 60,
