@@ -9,7 +9,9 @@ import {
 	oneStageView,
 	readView,
 	singleStage,
+	toneLinesAbove,
 	traceName,
+	viewStages,
 	traceSource,
 	traceStages,
 	VIEW_PRESETS,
@@ -220,5 +222,27 @@ describe('a new layer to trace another on', () => {
 		expect(oneStageView('flats')).toEqual({ id: 'custom', stages: ['flats'] });
 		const v = layersInView([{ id: 1, clip: false }], { 1: 'tiedown' }, oneStageView('tiedown'));
 		expect(v.shown).toEqual([1]);
+	});
+});
+
+describe('tone lines', () => {
+	it('are their own stage: guessed from the name, shown while colouring and shading, never in Final', () => {
+		expect(guessStage({ name: 'Tone lines (Lines)' })).toBe('tone');
+		expect(guessStage({ name: 'Tones' })).toBe('shade');
+		expect(viewStages({ id: 'colour' })).toContain('tone');
+		expect(viewStages({ id: 'shading' })).toContain('tone');
+		expect(viewStages({ id: 'final' })).not.toContain('tone');
+	});
+
+	it('a shading fill stops at the tone lines right above its lines', () => {
+		const layers = [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }, { id: 5 }];
+		const st: Record<number, string> = { 2: 'clean', 3: 'tone', 4: 'tone', 5: 'tone' };
+		const stageOf = (id: number) => (st[id] ?? null) as never;
+		expect(toneLinesAbove(layers, 2, stageOf)).toEqual([3, 4, 5]);
+		// another layer in between ends the run
+		st[4] = 'shade';
+		expect(toneLinesAbove(layers, 2, stageOf)).toEqual([3]);
+		expect(toneLinesAbove(layers, 5, stageOf)).toEqual([]);
+		expect(toneLinesAbove(layers, 99, stageOf)).toEqual([]);
 	});
 });

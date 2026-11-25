@@ -110,13 +110,23 @@ export interface Timeline {
 }
 
 /** A layer's production stage, in the order the work goes. */
-export type Stage = 'board' | 'rough' | 'tiedown' | 'clean' | 'flats' | 'shade' | 'comp';
-export const STAGES: Stage[] = ['board', 'rough', 'tiedown', 'clean', 'flats', 'shade', 'comp'];
+export type Stage = 'board' | 'rough' | 'tiedown' | 'clean' | 'tone' | 'flats' | 'shade' | 'comp';
+export const STAGES: Stage[] = [
+	'board',
+	'rough',
+	'tiedown',
+	'clean',
+	'tone',
+	'flats',
+	'shade',
+	'comp'
+];
 export const STAGE_LABELS: Record<Stage, string> = {
 	board: 'Storyboard',
 	rough: 'Rough',
 	tiedown: 'Tie-down',
 	clean: 'Clean-up',
+	tone: 'Tone lines',
 	flats: 'Colour',
 	shade: 'Shading',
 	comp: 'Compositing'

@@ -37,7 +37,7 @@ export interface ProjectDoc {
 	mouths?: FileMouthChart[];
 	/** drawing marks: "D<id>" → key / breakdown / inbetween */
 	kinds?: Record<string, string>;
-	/** layer stages: layer id → board / rough / tiedown / clean / flats / shade / comp */
+	/** layer stages: layer id → board / rough / tiedown / clean / tone / flats / shade / comp */
 	stages?: Record<string, string>;
 	/** the sound files the scenes play (the key they use, the file as imported) */
 	audio?: { file: string; bytes: Uint8Array }[];

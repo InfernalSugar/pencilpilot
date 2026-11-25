@@ -128,8 +128,9 @@ This crate (`pencilpilot-ppstudio`) reads and writes it.
   `breakdown` or `inbetween`. Apps show them on the timeline and the exposure sheet (keys
   circled, breakdowns boxed) and use them for flipping and a keys-only onion skin.
 - **Layer stages** (`layerStages`) put layers in production stages: layer id →
-  `board` (storyboard), `rough`, `tiedown`, `clean` (clean-up), `flats` (colour), `shade`
-  (shading) or `comp` (compositing). Apps use them to show or export one stage at a time;
+  `board` (storyboard), `rough`, `tiedown`, `clean` (clean-up), `tone` (tone lines: coloured
+  lines that mark shadow and highlight shapes, left out of the final picture), `flats`
+  (colour), `shade` (shading) or `comp` (compositing). Apps use them to show or export one stage at a time;
   a layer with none belongs to every stage. They don't change what a frame is. A reader
   may drop stages for layers that aren't there or that it doesn't know.
 - The **timelapse** is a small picture of the canvas (at most 540 px on its long side)

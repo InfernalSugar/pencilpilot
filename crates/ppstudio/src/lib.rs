@@ -191,8 +191,8 @@ pub struct Timeline {
 pub const DRAWING_KINDS: [&str; 3] = ["key", "breakdown", "inbetween"];
 
 /// The production stages a layer can be in, in the order the work goes.
-pub const STAGES: [&str; 7] = [
-    "board", "rough", "tiedown", "clean", "flats", "shade", "comp",
+pub const STAGES: [&str; 8] = [
+    "board", "rough", "tiedown", "clean", "tone", "flats", "shade", "comp",
 ];
 
 /// The mouth shapes lip-sync uses (Rhubarb's: A–F, and the extended G, H and X).
