@@ -185,6 +185,46 @@ pub struct Timeline {
         skip_serializing_if = "BTreeMap::is_empty"
     )]
     pub layer_stages: BTreeMap<String, String>,
+    /// character palettes: named colours (a character's skin, hair…), most often from
+    /// its model sheet
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub palettes: Vec<Palette>,
+}
+
+/// A character palette: a name and its named colours.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct Palette {
+    pub name: String,
+    #[serde(default)]
+    pub colours: Vec<PaletteColour>,
+}
+
+/// A palette colour: its name ("Skin shadow") and `#rrggbb`.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct PaletteColour {
+    pub name: String,
+    pub hex: String,
+}
+
+/// The most palettes a project keeps, colours a palette has, and characters a name has.
+pub const PALETTES_MAX: usize = 32;
+pub const PALETTE_COLOURS_MAX: usize = 64;
+pub const PALETTE_NAME_MAX: usize = 40;
+
+fn is_hex_colour(s: &str) -> bool {
+    s.len() == 7 && s.starts_with('#') && s[1..].chars().all(|c| c.is_ascii_hexdigit())
+}
+
+impl Palette {
+    /// Within the limits, every colour `#rrggbb`.
+    fn is_valid(&self) -> bool {
+        self.name.chars().count() <= PALETTE_NAME_MAX
+            && self.colours.len() <= PALETTE_COLOURS_MAX
+            && self
+                .colours
+                .iter()
+                .all(|c| is_hex_colour(&c.hex) && c.name.chars().count() <= PALETTE_NAME_MAX)
+    }
 }
 
 /// What a drawing can be marked as.
@@ -482,6 +522,7 @@ impl Project {
                     mouth_charts: Vec::new(),
                     drawing_kinds: BTreeMap::new(),
                     layer_stages: BTreeMap::new(),
+                    palettes: Vec::new(),
                 },
                 drawings: BTreeMap::new(),
                 extra: serde_json::Value::Null,
@@ -776,6 +817,11 @@ impl Project {
                 return Err(Error::Invalid(format!("layer stage {layer}: {stage}")));
             }
         }
+        if m.timeline.palettes.len() > PALETTES_MAX
+            || m.timeline.palettes.iter().any(|p| !p.is_valid())
+        {
+            return Err(Error::Invalid("the palettes".into()));
+        }
         for (d, kind) in &m.timeline.drawing_kinds {
             if !m.drawings.contains_key(d) || !DRAWING_KINDS.contains(&kind.as_str()) {
                 return Err(Error::Invalid(format!("drawing mark {d}: {kind}")));
@@ -1063,6 +1109,17 @@ impl Project {
             layer.parse::<u32>().is_ok_and(|id| layer_ids.contains(&id))
                 && STAGES.contains(&stage.as_str())
         });
+        // (palettes too: colours that aren't #rrggbb go, and anything past the limits)
+        let pals = &mut manifest.timeline.palettes;
+        pals.truncate(PALETTES_MAX);
+        for p in pals.iter_mut() {
+            p.name = p.name.chars().take(PALETTE_NAME_MAX).collect();
+            p.colours.retain(|c| is_hex_colour(&c.hex));
+            p.colours.truncate(PALETTE_COLOURS_MAX);
+            for c in &mut p.colours {
+                c.name = c.name.chars().take(PALETTE_NAME_MAX).collect();
+            }
+        }
         let p = Project {
             manifest,
             tiles,
@@ -1532,6 +1589,42 @@ mod tests {
         q.write(&mut buf).unwrap();
         let back = Project::read(std::io::Cursor::new(buf.into_inner())).unwrap();
         assert!(back.manifest.timeline.layer_stages.is_empty());
+
+        // palettes: kept as they are; a colour that isn't #rrggbb is damage to a writer,
+        // and a reader drops it (the rest of the palette stays)
+        let mut q = p.clone();
+        q.manifest.timeline.palettes = vec![Palette {
+            name: "Mina".into(),
+            colours: vec![
+                PaletteColour {
+                    name: "Skin".into(),
+                    hex: "#f2c9a8".into(),
+                },
+                PaletteColour {
+                    name: "Hair".into(),
+                    hex: "#5a3a2a".into(),
+                },
+            ],
+        }];
+        assert!(q.validate().is_ok());
+        let mut buf = std::io::Cursor::new(Vec::new());
+        q.write(&mut buf).unwrap();
+        let back = Project::read(std::io::Cursor::new(buf.into_inner())).unwrap();
+        assert_eq!(
+            back.manifest.timeline.palettes,
+            q.manifest.timeline.palettes
+        );
+        q.manifest.timeline.palettes[0].colours[1].hex = "brown".into();
+        assert!(q.validate().is_err());
+        let mut buf = std::io::Cursor::new(Vec::new());
+        q.write(&mut buf).unwrap();
+        let back = Project::read(std::io::Cursor::new(buf.into_inner())).unwrap();
+        let names: Vec<_> = back.manifest.timeline.palettes[0]
+            .colours
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(names, ["Skin"]);
 
         // a static layer that isn't there, a camera with no size, a sound file that isn't
         // in the archive, or a mouth chart naming an unknown shape, layer or drawing is

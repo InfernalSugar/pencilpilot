@@ -9,6 +9,7 @@ import type { GroupInfo, LayerSnapshot } from '@pencilpilot/paint/PaintCanvas.sv
 import type { Stroke } from '@pencilpilot/paint/strokes';
 import { readStyle, type LayerStyle } from '@pencilpilot/paint/layer-style';
 import type { FileMouthChart, FileScene } from './timeline';
+import { readPalettes, type Palette } from './palettes';
 
 export const EXTENSION = 'ppstudio';
 
@@ -39,6 +40,8 @@ export interface ProjectDoc {
 	kinds?: Record<string, string>;
 	/** layer stages: layer id → board / rough / tiedown / clean / tone / flats / shade / comp */
 	stages?: Record<string, string>;
+	/** character palettes: named colours */
+	palettes?: Palette[];
 	/** the sound files the scenes play (the key they use, the file as imported) */
 	audio?: { file: string; bytes: Uint8Array }[];
 	/** the timelapse: JPEG pictures and when each was taken (ms since 1970) */
@@ -100,6 +103,7 @@ interface Header {
 	mouthCharts?: FileMouthChart[];
 	drawingKinds?: Record<string, string>;
 	layerStages?: Record<string, string>;
+	palettes?: Palette[];
 	audio?: { file: string; bytes: [number, number] }[];
 	drawings?: {
 		id: number;
@@ -169,6 +173,7 @@ export function pack(doc: ProjectDoc): Uint8Array {
 				}
 			: {}),
 		...(doc.stages && Object.keys(doc.stages).length ? { layerStages: doc.stages } : {}),
+		...(doc.palettes?.length ? { palettes: doc.palettes } : {}),
 		...(doc.scenes?.length
 			? {
 					scenes: doc.scenes,
@@ -247,6 +252,7 @@ export function unpack(packet: ArrayBuffer | Uint8Array): ProjectDoc {
 		...(h.mouthCharts?.length ? { mouths: h.mouthCharts } : {}),
 		...(h.drawingKinds ? { kinds: h.drawingKinds } : {}),
 		...(h.layerStages ? { stages: h.layerStages } : {}),
+		...(h.palettes?.length ? { palettes: readPalettes(h.palettes) } : {}),
 		...(h.audio?.length
 			? { audio: h.audio.map((a) => ({ file: a.file, bytes: get(a.bytes) })) }
 			: {}),

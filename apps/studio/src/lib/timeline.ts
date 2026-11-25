@@ -12,6 +12,7 @@
  * These functions change a track or cut in place (so they work on `$state`) and are
  * pure otherwise. Frames count from 0.
  */
+import type { Palette } from './palettes';
 
 export interface Exposure {
 	/** the drawing shown (0 = an empty cel) */
@@ -107,6 +108,8 @@ export interface Timeline {
 	kinds?: Record<number, DrawingKind>;
 	/** each layer's production stage (layers with none show in every view) */
 	stages?: Record<number, Stage>;
+	/** character palettes: named colours (from model sheets) */
+	palettes?: Palette[];
 }
 
 /** A layer's production stage, in the order the work goes. */
