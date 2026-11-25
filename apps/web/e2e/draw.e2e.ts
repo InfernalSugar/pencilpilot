@@ -52,7 +52,7 @@ test('draw, undo, redo, switch brush, submit', async ({ page }) => {
 	await expect.poll(() => inkPixels(page)).toBe(after);
 
 	await page.getByRole('tab', { name: /^Brushes/ }).click();
-	await page.getByRole('tab', { name: 'Markers' }).click();
+	await page.getByLabel('Brush category').selectOption({ label: 'Markers' });
 	await page.getByRole('button', { name: /^Marker fat/ }).click();
 	await scribble(page, 0.7);
 	await expect.poll(() => inkPixels(page)).toBeGreaterThan(after);

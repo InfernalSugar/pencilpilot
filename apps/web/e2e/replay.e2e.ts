@@ -34,7 +34,7 @@ test('replay redraws the drawing with its colours and layers', async ({ page }) 
 	});
 	// a solid marker: a thin pencil drawn fast (the canvas is shown smaller than its pixels) is faint
 	await page.getByRole('tab', { name: /^Brushes/ }).click();
-	await page.getByRole('tab', { name: 'Markers' }).click();
+	await page.getByLabel('Brush category').selectOption({ label: 'Markers' });
 	await page.getByRole('button', { name: /^Marker fat/ }).click();
 	await page.getByRole('tab', { name: /^Layers/ }).click();
 	await line(page, 0.3);

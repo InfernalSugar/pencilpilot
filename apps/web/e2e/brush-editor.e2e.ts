@@ -36,10 +36,7 @@ test('brush editor: adjust a brush, save it to My brushes, draw with it, keep it
 	await editor.getByRole('textbox', { name: 'Brush name' }).fill('Crisp pencil');
 	await editor.getByRole('button', { name: 'Save to My brushes' }).click();
 
-	await expect(page.getByRole('tab', { name: 'My brushes (1)' })).toHaveAttribute(
-		'aria-selected',
-		'true'
-	);
+	await expect(page.getByLabel('Brush category').locator('option:checked')).toHaveText('My brushes (1)');
 	const mine = page.getByRole('list', { name: 'My brushes' });
 	await expect(mine.getByRole('button', { name: 'Crisp pencil', exact: true })).toHaveAttribute(
 		'aria-pressed',
@@ -62,7 +59,7 @@ test('brush editor: adjust a brush, save it to My brushes, draw with it, keep it
 	await page.reload();
 	await expect(canvas(page)).toHaveAttribute('data-ready', 'true', { timeout: 15_000 });
 	await page.getByRole('tab', { name: /^Brushes/ }).click();
-	await page.getByRole('tab', { name: 'My brushes (1)' }).click();
+	await page.getByLabel('Brush category').selectOption({ label: 'My brushes (1)' });
 	await mine.getByRole('button', { name: 'Crisp pencil', exact: true }).click();
 	await expect(page.locator('.brush-name')).toHaveText('Crisp pencil');
 	await expect(page.getByRole('radio', { name: 'Heavy hand' })).toHaveAttribute(
@@ -76,5 +73,5 @@ test('brush editor: adjust a brush, save it to My brushes, draw with it, keep it
 	await expect(edit.getByRole('slider', { name: 'Edge' })).toHaveValue('1');
 	await edit.getByRole('button', { name: 'Delete brush' }).click();
 	await edit.getByRole('button', { name: 'Delete', exact: true }).click();
-	await expect(page.getByRole('tab', { name: 'My brushes', exact: true })).toBeVisible();
+	await expect(page.getByLabel('Brush category').locator('option', { hasText: /^My brushes$/ })).toHaveCount(1);
 });
