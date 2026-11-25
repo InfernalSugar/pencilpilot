@@ -246,6 +246,8 @@ test('the quick menu opens on right-click and its actions work', async ({ page }
 	await page.mouse.click(...(await at(page, 0.5, 0.3)), { button: 'right' });
 	const menu = page.getByRole('menu', { name: 'Quick menu' });
 	await expect(menu).toBeVisible();
+	// the first action is focused, so named in the middle straight away
+	await expect(menu.locator('.name')).toHaveText('Undo');
 	await menu.getByRole('menuitem', { name: 'Undo' }).click();
 	await expect(menu).toBeHidden();
 	await expect.poll(() => ink(page, 0.3, 0.45, 0.7, 0.55)).toBe(0);
