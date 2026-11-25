@@ -2383,6 +2383,75 @@ test('stages: the light table shows the rough faintly in blue under the clean-up
 	await expect.poll(async () => (await underInk(0, 0.45)).n).toBeGreaterThan(20);
 });
 
+test('stages: a clean-up layer from the rough, above it, timed as it, in one undo step', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	const tl = page.getByRole('region', { name: 'Timeline' });
+	const cel = (name: string) => tl.getByRole('button', { name, exact: true });
+	// a rough: drawing 1 held two frames, drawing 2 on frame 3; a layer above it
+	await scribble(page, 0.3);
+	await renameLayer(page, 'Layer 1', 'Rough (Bob)');
+	await tl.getByRole('button', { name: 'Hold longer' }).click();
+	await tl.getByRole('button', { name: 'Frame 3', exact: true }).click();
+	await scribble(page, 0.6);
+	await expect(cel('Rough (Bob): drawing 2, frame 3')).toBeVisible();
+	await page.getByRole('button', { name: 'New layer' }).click();
+	await renameLayer(page, 'Layer 2', 'Sky');
+	await layerRow(page, 'Rough (Bob)').locator('canvas').first().click();
+	await page.getByRole('button', { name: 'Sort layers into stages' }).click();
+	await expect(layerRow(page, 'Rough (Bob)').getByTitle('Stage: Rough')).toBeVisible();
+	// showing the rough only
+	await tl.getByRole('button', { name: 'Show: All' }).click();
+	await tl
+		.getByRole('group', { name: 'Show stages' })
+		.getByRole('radio', { name: 'Rough' })
+		.click();
+	await expect(tl.getByRole('button', { name: 'Show: Rough' })).toBeVisible();
+	await page.keyboard.press('Escape');
+
+	// from the rough: tie-down or clean-up
+	await page.getByText('New layer from this').click();
+	await expect(page.getByRole('button', { name: 'New Tie-down layer from this' })).toBeVisible();
+	await page.getByRole('button', { name: 'New Clean-up layer from this' }).click();
+	const clean = layerRow(page, 'Clean-up (Bob)');
+	await expect(clean.getByTitle('Stage: Clean-up')).toBeVisible();
+	// just above the rough, under the layer that was above it
+	const rows = page.getByRole('list', { name: 'Layers, top to bottom' }).getByRole('listitem');
+	await expect(rows.nth(0)).toContainText('Sky');
+	await expect(rows.nth(1)).toContainText('Clean-up (Bob)');
+	await expect(rows.nth(2)).toContainText('Rough (Bob)');
+	// an empty drawing wherever the rough has one, held as long
+	await expect(cel('Clean-up (Bob): drawing 1, frame 1–2')).toBeVisible();
+	await expect(cel('Clean-up (Bob): drawing 2, frame 3')).toBeVisible();
+	// the view moved on to the clean-up: the new layer shows, the rough doesn't
+	await expect(tl.getByRole('button', { name: 'Show: Clean-up' })).toBeVisible();
+	await expect(page.getByRole('button', { name: 'Rename Clean-up (Bob)' })).toBeVisible();
+	await expect.poll(() => ink(page)).toBe(0);
+
+	// one undo step takes it all; redo puts it back
+	await page.keyboard.press('Control+z');
+	await expect(clean).toHaveCount(0);
+	await expect(cel('Clean-up (Bob): drawing 1, frame 1–2')).toHaveCount(0);
+	await expect(cel('Rough (Bob): drawing 1, frame 1–2')).toBeVisible();
+	await page.keyboard.press('Control+Shift+z');
+	await expect(clean.getByTitle('Stage: Clean-up')).toBeVisible();
+	await expect(cel('Clean-up (Bob): drawing 2, frame 3')).toBeVisible();
+
+	// traced on frame 1: held on frame 2, and frame 3 has its own (empty) drawing
+	await tl.getByRole('button', { name: 'Frame 1', exact: true }).click();
+	await layerRow(page, 'Clean-up (Bob)').locator('canvas').first().click();
+	await expect(page.getByRole('button', { name: 'Rename Clean-up (Bob)' })).toBeVisible();
+	await scribble(page, 0.4);
+	await expect.poll(() => ink(page)).toBeGreaterThan(50);
+	await tl.getByRole('button', { name: 'Frame 2', exact: true }).click();
+	await expect.poll(() => ink(page)).toBeGreaterThan(50);
+	await tl.getByRole('button', { name: 'Frame 3', exact: true }).click();
+	await expect.poll(() => ink(page)).toBe(0);
+	await expect(cel('Clean-up (Bob): drawing 1, frame 1–2')).toBeVisible();
+});
+
 test('stages: the export leaves the rough out of the final film, or makes a file a stage', async ({
 	page
 }) => {
