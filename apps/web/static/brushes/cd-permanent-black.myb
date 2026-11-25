@@ -1,0 +1,251 @@
+{
+    "comment": "MyPaint brush file",
+    "description": "Permanent marker",
+    "group": "",
+    "notes": "From Concept Design by Ramón Miranda (CC0), \"Permanent_Black\" there.",
+    "parent_brush_name": "",
+    "settings": {
+        "tracking_noise": {
+            "base_value": 0,
+            "inputs": {}
+        },
+        "speed2_gamma": {
+            "base_value": 4,
+            "inputs": {}
+        },
+        "speed2_slowness": {
+            "base_value": 0.8,
+            "inputs": {}
+        },
+        "stroke_holdtime": {
+            "base_value": 0,
+            "inputs": {}
+        },
+        "stroke_duration_logarithmic": {
+            "base_value": 4,
+            "inputs": {}
+        },
+        "slow_tracking": {
+            "base_value": 0,
+            "inputs": {}
+        },
+        "change_color_v": {
+            "base_value": 0,
+            "inputs": {}
+        },
+        "elliptical_dab_ratio": {
+            "base_value": 5.46,
+            "inputs": {}
+        },
+        "change_color_h": {
+            "base_value": 0,
+            "inputs": {}
+        },
+        "change_color_l": {
+            "base_value": 0,
+            "inputs": {}
+        },
+        "offset_by_speed_slowness": {
+            "base_value": 1,
+            "inputs": {}
+        },
+        "speed1_gamma": {
+            "base_value": 4,
+            "inputs": {}
+        },
+        "slow_tracking_per_dab": {
+            "base_value": 0,
+            "inputs": {}
+        },
+        "dabs_per_basic_radius": {
+            "base_value": 5.09,
+            "inputs": {}
+        },
+        "opaque": {
+            "base_value": 1,
+            "inputs": {
+                "speed1": [
+                    [
+                        0,
+                        0
+                    ],
+                    [
+                        1.637255,
+                        -0.09375
+                    ],
+                    [
+                        2.696078,
+                        -0.208333
+                    ],
+                    [
+                        4,
+                        -0.5
+                    ]
+                ]
+            }
+        },
+        "color_s": {
+            "base_value": 0.467661691542,
+            "inputs": {}
+        },
+        "opaque_multiply": {
+            "base_value": 0,
+            "inputs": {
+                "pressure": [
+                    [
+                        0,
+                        0
+                    ],
+                    [
+                        0.015,
+                        0
+                    ],
+                    [
+                        0.015,
+                        1
+                    ],
+                    [
+                        1,
+                        1
+                    ]
+                ]
+            }
+        },
+        "elliptical_dab_angle": {
+            "base_value": 90,
+            "inputs": {
+                "direction": [
+                    [
+                        0,
+                        0
+                    ],
+                    [
+                        180,
+                        180
+                    ]
+                ]
+            }
+        },
+        "lock_alpha": {
+            "base_value": 0,
+            "inputs": {}
+        },
+        "eraser": {
+            "base_value": 0,
+            "inputs": {}
+        },
+        "stroke_threshold": {
+            "base_value": 0,
+            "inputs": {}
+        },
+        "color_h": {
+            "base_value": 0.66865505681,
+            "inputs": {}
+        },
+        "smudge_radius_log": {
+            "base_value": 0,
+            "inputs": {}
+        },
+        "speed1_slowness": {
+            "base_value": 0.04,
+            "inputs": {}
+        },
+        "smudge": {
+            "base_value": 0,
+            "inputs": {}
+        },
+        "change_color_hsv_s": {
+            "base_value": 0,
+            "inputs": {}
+        },
+        "radius_by_random": {
+            "base_value": 0,
+            "inputs": {}
+        },
+        "dabs_per_second": {
+            "base_value": 0,
+            "inputs": {}
+        },
+        "color_v": {
+            "base_value": 0.080125284738,
+            "inputs": {}
+        },
+        "custom_input": {
+            "base_value": 0,
+            "inputs": {}
+        },
+        "hardness": {
+            "base_value": 0.5,
+            "inputs": {
+                "pressure": [
+                    [
+                        0,
+                        0
+                    ],
+                    [
+                        1,
+                        0.05
+                    ]
+                ],
+                "speed1": [
+                    [
+                        0,
+                        0
+                    ],
+                    [
+                        1,
+                        -0.09
+                    ]
+                ]
+            }
+        },
+        "opaque_linearize": {
+            "base_value": 0.9,
+            "inputs": {}
+        },
+        "smudge_length": {
+            "base_value": 0.5,
+            "inputs": {}
+        },
+        "radius_logarithmic": {
+            "base_value": 2.6,
+            "inputs": {
+                "pressure": [
+                    [
+                        0,
+                        -0.398646
+                    ],
+                    [
+                        1,
+                        0.43
+                    ]
+                ]
+            }
+        },
+        "change_color_hsl_s": {
+            "base_value": 0,
+            "inputs": {}
+        },
+        "custom_input_slowness": {
+            "base_value": 0,
+            "inputs": {}
+        },
+        "offset_by_speed": {
+            "base_value": 0,
+            "inputs": {}
+        },
+        "dabs_per_actual_radius": {
+            "base_value": 0,
+            "inputs": {}
+        },
+        "offset_by_random": {
+            "base_value": 0,
+            "inputs": {}
+        },
+        "direction_filter": {
+            "base_value": 2,
+            "inputs": {}
+        }
+    },
+    "version": 3
+}
