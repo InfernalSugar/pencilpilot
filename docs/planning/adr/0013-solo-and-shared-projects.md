@@ -93,8 +93,6 @@ The owner's rule: AI is for solo work only. Shared projects are drawn by people.
 - **Nothing AI travels through a session:** the session's edits are a closed list:
   strokes, tiles, layers and timeline edits. An edit of any other kind is dropped on
   arrival.
-- **The director plugin** (Claude Code) only builds and works on solo projects. It never
-  generates into a shared project.
 - **Share a copy** of a solo project leaves its AI layers behind (the guides from S6,
   marked with their provenance per ADR-0011) in the private original.
 

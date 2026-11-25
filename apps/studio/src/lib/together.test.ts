@@ -1376,3 +1376,129 @@ describe('drawing together: line edits', () => {
 		]);
 	});
 });
+
+function rng(seed: number) {
+	return () => {
+		seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+		return seed / 0x7fffffff;
+	};
+}
+function same(a: FakeCanvas, b: FakeCanvas, name: string) {
+	const by = (c: FakeCanvas) => c.layerList.filter((l) => l.name === name).at(-1)!;
+	const da = a.drawings.get(by(a).drawing) ?? new Map();
+	const db = b.drawings.get(by(b).drawing) ?? new Map();
+	const bad: string[] = [];
+	for (const k of new Set([...da.keys(), ...db.keys()]))
+		if (da.get(k)?.[0] !== db.get(k)?.[0]) bad.push(`${k}:${da.get(k)?.[0]}/${db.get(k)?.[0]}`);
+	return bad;
+}
+describe('drawing together: both drawing at once', () => {
+	for (const seed of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
+		it('ends the same everywhere, seed ' + seed, async () => {
+			const r = rng(seed);
+			const session = new FakeSession();
+			const hc = new FakeCanvas(['Layer 1']);
+			const host = new Together(A, 'Nova', hc, session.net(A));
+			session.apps.set(A, host);
+			hc.paint(hc.byName('Layer 1').id, 0, 0, 9);
+			await host.startHost();
+			await session.settle();
+			const bc = new FakeCanvas(['Layer 1']);
+			const bo = new Together(B, 'Bo', bc, session.net(B));
+			session.apps.set(B, bo);
+			bo.startJoin(A);
+			await session.settle();
+			const nl = hc.byName('Layer 1').id;
+			const bl = bc.byName('Bo’s layer').id;
+			bc.paint(bl, 30, 30, 9);
+			bo.timelineChanged();
+			await bo.localChanged();
+			await session.settle();
+			let v = 1;
+			const work: Promise<unknown>[] = [];
+			for (let step = 0; step < 300; step++) {
+				const x = r();
+				if (x < 0.2) {
+					// a big soft stroke: a block of tiles
+					const x0 = Math.floor(r() * 20),
+						y0 = Math.floor(r() * 20);
+					hc.busy = true;
+					for (let i = 0; i < 8; i++)
+						for (let j = 0; j < 8; j++) hc.paint(nl, x0 + i, y0 + j, (v++ % 250) + 1);
+				} else if (x < 0.3) {
+					const x0 = Math.floor(r() * 20);
+					bc.busy = true;
+					for (let j = 0; j < 6; j++) bc.paint(bl, x0, j, (v++ % 250) + 1);
+				} else if (x < 0.45) {
+					hc.busy = false;
+					work.push(host.localChanged());
+				} else if (x < 0.6) {
+					bc.busy = false;
+					work.push(bo.localChanged());
+				} else {
+					const n = Math.floor(r() * 5);
+					for (let i = 0; i < n && session.queue.length; i++) work.push(session.queue.shift()!());
+				}
+				if (r() < 0.3) await Promise.resolve();
+			}
+			await Promise.all(work);
+			hc.busy = bc.busy = false;
+			await host.localChanged();
+			await bo.localChanged();
+			await session.settle();
+			await host.localChanged();
+			await bo.localChanged();
+			await session.settle();
+			expect(same(hc, bc, 'Layer 1')).toEqual([]);
+			expect(same(hc, bc, 'Bo’s layer')).toEqual([]);
+		});
+});
+describe('drawing together: timelines crossing', () => {
+	it('two new drawings started at once both stay on the timeline', async () => {
+		const session = new FakeSession();
+		const hc = new FakeCanvas(['Layer 1']);
+		const host = new Together(A, 'Nova', hc, session.net(A));
+		session.apps.set(A, host);
+		await host.startHost();
+		await session.settle();
+		const bc = new FakeCanvas(['Layer 1']);
+		const bo = new Together(B, 'Bo', bc, session.net(B));
+		session.apps.set(B, bo);
+		bo.startJoin(A);
+		await session.settle();
+		const nl = hc.layerList.at(-2)!.id; // Nova's Layer 1 (Bo's layer is on top)
+		const bl = bc.byName('Bo’s layer').id;
+		// both draw their first stroke on an empty cel at the same time: each app's
+		// timeline gets its own new drawing, and each sends its whole timeline
+		// (first a stroke each, synced: both layers have a drawing everyone knows)
+		hc.paint(nl, 0, 0, 1);
+		bc.paint(bl, 0, 0, 2);
+		host.timelineChanged();
+		await host.localChanged();
+		await session.settle();
+		bo.timelineChanged();
+		await bo.localChanged();
+		await session.settle();
+		// then each starts a new drawing on the frame (as the page does on an empty cel:
+		// a new drawing, put on the timeline here) at about the same time
+		const fresh = (c: FakeCanvas, id: number) => {
+			const d = c.newDrawing();
+			c.layerList.find((l) => l.id === id)!.drawing = d;
+			c.tl.scenes[0].cuts[0].tracks[id] = [{ drawing: d, length: 1 }];
+		};
+		fresh(hc, nl);
+		fresh(bc, bl);
+		hc.paint(nl, 1, 1, 11);
+		bc.paint(bl, 5, 5, 55);
+		host.timelineChanged();
+		bo.timelineChanged();
+		await host.localChanged();
+		await bo.localChanged();
+		await session.settle();
+		const bNova = bc.layerList.filter((l) => l.name === 'Layer 1').at(-1)!.id;
+		expect(hc.pixel(nl, 1, 1)).toBe(11);
+		expect(bc.pixel(bl, 5, 5)).toBe(55);
+		expect(bc.pixel(bNova, 1, 1)).toBe(11);
+		expect(hc.pixel(hc.byName('Bo’s layer').id, 5, 5)).toBe(55);
+	});
+});
