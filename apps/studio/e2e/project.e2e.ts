@@ -3750,18 +3750,19 @@ test('Ctrl + drag moves the view (no ink)', async ({ page }) => {
 // ---- editable strokes on plain layers ----
 
 /** dark pixels in a box of the canvas (fractions) */
-async function inkIn(page: Page, x0: number, y0: number, x1: number, y1: number) {
+/** pixels darker than `dark` (out of 255) in a part of the canvas (fractions of it) */
+async function inkIn(page: Page, x0: number, y0: number, x1: number, y1: number, dark = 200) {
 	return canvas(page).evaluate(
-		(el: HTMLCanvasElement, [x0, y0, x1, y1]) => {
+		(el: HTMLCanvasElement, [x0, y0, x1, y1, dark]) => {
 			const [l, t] = [Math.round(el.width * x0), Math.round(el.height * y0)];
 			const w = Math.max(1, Math.round(el.width * (x1 - x0)));
 			const h = Math.max(1, Math.round(el.height * (y1 - y0)));
 			const d = el.getContext('2d')!.getImageData(l, t, w, h).data;
 			let n = 0;
-			for (let i = 0; i < d.length; i += 4) if (d[i] < 200) n++;
+			for (let i = 0; i < d.length; i += 4) if (d[i] < dark) n++;
 			return n;
 		},
-		[x0, y0, x1, y1]
+		[x0, y0, x1, y1, dark]
 	);
 }
 
@@ -4255,7 +4256,8 @@ test('the eraser cuts editable strokes exactly: pieces stay editable, redrawn to
 		// two lines across, then the eraser down through both
 		await k.line(0.2, y, 0.8, y);
 		await k.line(0.2, y + 0.07, 0.8, y + 0.07);
-		const gap = () => inkIn(page, 0.495, y - 0.03, 0.505, y + 0.1);
+		// (ink a third there or more: the soft eraser's faint edge doesn't count as a line)
+		const gap = () => inkIn(page, 0.495, y - 0.03, 0.505, y + 0.1, 180);
 		const whole = await gap();
 		expect(whole).toBeGreaterThan(50);
 		await page.keyboard.press('e');
