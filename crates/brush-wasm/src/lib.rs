@@ -75,6 +75,22 @@ impl PaintBrush {
     }
 }
 
+/// Line art as strokes (see `brush::vectorise`): `alpha` is one byte a pixel, `w` × `h`,
+/// ink above `threshold`. Flat, for JS: the number of strokes, then for each its number
+/// of points and their x, y, width (canvas px).
+#[wasm_bindgen]
+pub fn vectorise(alpha: &[u8], w: u32, h: u32, threshold: u8) -> Vec<f32> {
+    let strokes = brush::vectorise::vectorise(alpha, w as usize, h as usize, threshold);
+    let mut out = vec![strokes.len() as f32];
+    for s in &strokes {
+        out.push(s.len() as f32);
+        for p in s {
+            out.extend([p.x, p.y, p.width]);
+        }
+    }
+    out
+}
+
 /// The drawing surface.
 #[wasm_bindgen]
 pub struct PaintCanvas {
