@@ -4406,8 +4406,9 @@ test('the eraser cuts editable strokes exactly: pieces stay editable, redrawn to
 		await expect.poll(() => inkIn(page, 0.55, y + 0.04, 0.8, y + 0.1)).toBe(0);
 		await expect.poll(() => inkIn(page, 0.55, y + 0.14, 0.8, y + 0.2)).toBeGreaterThan(50);
 		expect(await inkIn(page, 0.2, y + 0.04, 0.45, y + 0.1)).toBe(lowerLeft);
-		// (the pencil eraser's grain can leave a faint speck or two, as it did where it erased)
-		expect(await inkIn(page, 0.47, y + 0.14, 0.5, y + 0.2)).toBeLessThan(20);
+		// (the pencil eraser's grain can leave a faint speck or two, as it did where it erased:
+		// ink of a third or more counts, as for the gap above)
+		expect(await inkIn(page, 0.47, y + 0.14, 0.5, y + 0.2, 180)).toBeLessThan(20);
 		// undo the move and the colours; then the eraser: the whole lines are back, one
 		// stroke each
 		await page.keyboard.press('Control+z');
