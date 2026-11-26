@@ -1581,8 +1581,23 @@ export class Together {
 		return null;
 	}
 
-	/** A numbered edit from the session. */
-	async onEdit(seq: number, from: string, body: unknown) {
+	/** edits being put, one at a time (each waits for the one before) */
+	#edits: Promise<void> = Promise.resolve();
+
+	/**
+	 * A numbered edit from the session. Edits are put one at a time, in the order they
+	 * came: putting one waits (for tiles to unpack, or this app's own tiles to go out
+	 * first), and another started meanwhile could finish first, so an older copy of a
+	 * tile would land over a newer one, different on each app.
+	 */
+	onEdit(seq: number, from: string, body: unknown): Promise<void> {
+		this.#edits = this.#edits
+			.then(() => this.#onEdit(seq, from, body))
+			.catch((err) => console.error('drawing together: an edit failed', err));
+		return this.#edits;
+	}
+
+	async #onEdit(seq: number, from: string, body: unknown) {
 		if (!this.#synced) {
 			this.#buffer.push({ seq, from, body });
 			return;
@@ -1830,7 +1845,9 @@ export class Together {
 			this.#synced = true;
 			const later = this.#buffer.filter((b) => b.seq > this.#snapSeq);
 			this.#buffer = [];
-			for (const b of later) await this.onEdit(b.seq, b.from, b.body);
+			// (all queued at once, so edits arriving meanwhile go after them)
+			for (const b of later) void this.onEdit(b.seq, b.from, b.body);
+			await this.#edits;
 			if (this.#rejoining) {
 				// this app's own drawings, as drawn here (compared with the session's): sent
 				for (const [lid, id] of this.ids)
