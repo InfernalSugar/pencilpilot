@@ -508,10 +508,6 @@
 	function setTab(t: string) {
 		dockTab = t;
 	}
-	function openDock(t: string) {
-		setTab(t);
-		dockOpen = true;
-	}
 	/**
 	 * Where the reference shows: in the side panel, beside the canvas (its own pane,
 	 * resized with the divider) or in a floating window.
