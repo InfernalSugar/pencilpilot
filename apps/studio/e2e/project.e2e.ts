@@ -192,6 +192,7 @@ async function stubTauri(page: Page, stub: Stub = {}) {
 						return listening.length;
 					}
 					case 'share_host':
+					case 'share_rejoin':
 						return {
 							invite: 'pp1-abc',
 							me: { id: 'me1', name: 'Me' },
@@ -850,6 +851,43 @@ test('draw together: the chat shows only in a session, sends, receives and count
 	// someone leaves
 	await emit('share-event', { kind: 'left', id: 'sam1' });
 	await expect(chat).toContainText('Sam left');
+});
+
+test('draw together: a dropped session reconnects by itself; Rejoin is one click', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	await page.getByRole('button', { name: 'Draw together' }).click();
+	const dialog = page.getByRole('dialog', { name: 'Draw together' });
+	await dialog.getByRole('textbox', { name: /name/i }).fill('Me');
+	await dialog.getByRole('button', { name: 'Host', exact: true }).click();
+	await dialog.getByRole('button', { name: 'Back to drawing' }).click();
+	const emit = (event: string, payload: unknown) =>
+		page.evaluate(
+			([e, p]) =>
+				(window as unknown as { __emit: (a: string, b: unknown) => void }).__emit(e as string, p),
+			[event, payload]
+		);
+	// the connection drops: it's back in a moment, without the dialog
+	await emit('share-event', { kind: 'closed', reason: 'The connection was lost.' });
+	await expect(page.getByText('Connection lost: reconnecting…')).toBeVisible();
+	await expect
+		.poll(async () => (await calls(page)).filter((c) => c.cmd === 'share_rejoin').length, {
+			timeout: 8000
+		})
+		.toBe(1);
+	await expect(page.getByRole('button', { name: /^Together \(2\)/ })).toBeVisible();
+	await expect(dialog).toHaveCount(0);
+	// left on purpose: Rejoin next to Draw together, one click back in
+	await page.getByRole('button', { name: /^Together/ }).click();
+	await dialog.getByRole('button', { name: 'Leave' }).click();
+	await page.keyboard.press('Escape');
+	const rejoin = page.getByRole('button', { name: 'Rejoin', exact: true });
+	await expect(rejoin).toBeVisible();
+	await rejoin.click();
+	await expect(page.getByRole('button', { name: /^Together \(2\)/ })).toBeVisible();
+	expect((await calls(page)).filter((c) => c.cmd === 'share_rejoin').length).toBe(2);
 });
 
 test('draw together: the others’ name tags stay the same small size at any canvas size or zoom', async ({

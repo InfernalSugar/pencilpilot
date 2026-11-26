@@ -2525,9 +2525,9 @@
 	}
 
 	/** Back to this project's shared session: join who's online, or host it again. */
-	async function shareRejoin() {
+	async function shareRejoin(): Promise<boolean> {
 		const saved = savedShare;
-		if (!saved || !canvas) return;
+		if (!saved || !canvas) return false;
 		shareBusy = true;
 		shareError = '';
 		try {
@@ -2559,11 +2559,34 @@
 			if (info.host || !host) await together.resumeHost();
 			else together.rejoin(host);
 			togetherTick++;
+			return true;
 		} catch (e) {
 			shareError = String(e);
+			return false;
 		} finally {
 			shareBusy = false;
 		}
+	}
+
+	/**
+	 * The session dropped (not by leaving): back in by itself, a few times, then the
+	 * dialog with Rejoin. Not when the host closed it (rejoining would host it again).
+	 */
+	async function reconnect(reason: string) {
+		const can = !!savedShare && !!settings.shareName.trim() && !/host left/i.test(reason);
+		if (can)
+			for (const wait of [2000, 5000, 12000]) {
+				note('Connection lost: reconnecting…', wait + 3000);
+				await new Promise((r) => setTimeout(r, wait));
+				// (rejoined by hand meanwhile, or the project changed)
+				if (sharing || !savedShare) return;
+				if (await shareRejoin()) {
+					note('Reconnected.', 2500);
+					return;
+				}
+			}
+		shareError = can ? `${reason} Couldn’t reconnect by itself: press Rejoin.` : reason;
+		shareOpen = true;
 	}
 
 	async function shareStart(join?: string) {
@@ -2792,8 +2815,7 @@
 				stopTogether(was);
 				cursorsOf.clear();
 				cursorTick++;
-				shareError = e.reason;
-				shareOpen = true;
+				void reconnect(e.reason);
 			}
 		}).then((un) => {
 			if (gone) un();
@@ -3962,6 +3984,39 @@
 		lines: 'lines'
 	};
 
+	/** what's in use: a tool, or 'eraser' (the brush erasing) */
+	const modeNow = () => (tool === 'brush' ? (eraser ? 'eraser' : 'brush') : tool);
+	function useMode(m: string) {
+		if (m === 'brush' || m === 'eraser') {
+			eraser = m === 'eraser';
+			tool = 'brush';
+		} else tool = m;
+	}
+	/** where each tool was come to from (its key pressed again goes back there) */
+	const cameFrom: Record<string, string> = {};
+	let modeIs = 'brush';
+	/** going back: the tool gone back to keeps where it was come to from */
+	let goingBack = false;
+	$effect(() => {
+		const m = modeNow();
+		untrack(() => {
+			if (m === modeIs) return;
+			if (!goingBack) cameFrom[m] = modeIs;
+			goingBack = false;
+			modeIs = m;
+		});
+	});
+	/** a tool's key: that tool; pressed again, back to the one it was come to from (not B) */
+	function toggleMode(m: string) {
+		// (the brush is home, where the others come back to: B is always the brush)
+		if (modeNow() !== m || m === 'brush') return useMode(m);
+		const back = cameFrom[m];
+		const to = back && back !== m ? back : 'brush';
+		if (to === m) return;
+		goingBack = true;
+		useMode(to);
+	}
+
 	function onkey(e: KeyboardEvent) {
 		// Settings over the canvas has the keys (it may be choosing a new one)
 		if (settingsOpen) return;
@@ -4013,12 +4068,11 @@
 			stopPlay();
 		if (!action) return;
 		e.preventDefault();
-		const toolFor = TOOL_ACTIONS[action];
-		if (toolFor) tool = tool === toolFor ? 'brush' : toolFor;
-		else if (action === 'brush' || action === 'eraser') {
-			eraser = action === 'eraser';
-			tool = 'brush';
-		} else if (action === 'smaller') size = Math.max(0.25, +(size / 1.25).toFixed(2));
+		const toolFor =
+			TOOL_ACTIONS[action] ?? (action === 'brush' || action === 'eraser' ? action : undefined);
+		// a tool's key: that tool; pressed again, back to the one it was come to from
+		if (toolFor) toggleMode(toolFor);
+		else if (action === 'smaller') size = Math.max(0.25, +(size / 1.25).toFixed(2));
 		else if (action === 'bigger') size = Math.min(settings.maxBrushSize, +(size * 1.25).toFixed(2));
 		else if (action === 'undo') undo();
 		else if (action === 'redo') redo();
@@ -4373,6 +4427,21 @@
 						? `Together (${sharing.members.length})${asksForMe ? ' • asks' : ''}`
 						: 'Draw together'}
 				</button>
+				{#if !sharing && savedShare}
+					<!-- out of this project's session (dropped, or left): one click back in -->
+					<button
+						type="button"
+						class="act"
+						disabled={shareBusy}
+						title="Back into this project’s Draw together session"
+						onclick={() => {
+							if (!settings.shareName.trim()) shareOpen = true;
+							else void shareRejoin().then((ok) => (shareOpen = !ok));
+						}}
+					>
+						Rejoin
+					</button>
+				{/if}
 			{/if}
 			<div class="export">
 				<button
