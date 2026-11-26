@@ -212,7 +212,7 @@
 		textureById,
 		type BrushTexture
 	} from './brush-textures';
-	import { Timelapse } from './timelapse';
+	import { Timelapse, TimelapseMirror } from './timelapse';
 	import Rulers from './Rulers.svelte';
 	import CompositionShapes from './CompositionShapes.svelte';
 	import {
@@ -756,11 +756,14 @@
 				// (not willReadFrequently: that keeps the canvas on the CPU, and where the page is
 				// drawn on the GPU (Chromium, WebView2 on Windows) every frame then copies and
 				// uploads the whole canvas: 4x slower at 1080p, 9x at 4K, and input drops. Reads
-				// are rare (exports); the colour picker reads the engine's memory instead.)
-				ctx = el.getContext('2d');
+				// are rare (exports); the colour picker reads the engine's memory instead.
+				// Said outright, as false: left unsaid, Chromium moves a canvas to the CPU for
+				// good once it's read back a few times, so an export or two made drawing slow.)
+				ctx = el.getContext('2d', { willReadFrequently: false });
 				if (ctx) {
 					ctx.fillStyle = '#fff';
 					ctx.fillRect(0, 0, width, height);
+					mirror.update(el);
 				}
 				ready = true;
 				notify();
@@ -1197,12 +1200,13 @@
 		if (r.length === 4) {
 			const data = new Uint8ClampedArray(memory.buffer, paint.rgbaPtr(), width * height * 4);
 			ctx.putImageData(new ImageData(data, width, height), 0, 0, r[0], r[1], r[2], r[3]);
+			mirror.update(el, data, r);
 			filmDirty = true;
 		}
 		// a frame once each change has settled (not in the middle of a stroke or a drag)
 		if (filmDirty && !current && !liq && !grad && !paint.isTransforming() && !paint.isAdjusting()) {
 			filmDirty = false;
-			film.capture(el);
+			film.capture(mirror.canvas ?? el);
 		}
 	}
 
@@ -1222,6 +1226,8 @@
 	// ---- timelapse: a frame after every change ----
 
 	const film = new Timelapse();
+	/** the canvas at timelapse size, kept up to date as it changes (frames are taken from it) */
+	const mirror = new TimelapseMirror();
 	/** the canvas changed since the last timelapse frame */
 	let filmDirty = false;
 	/** The timelapse of this drawing so far (frames after each change). */
@@ -1244,6 +1250,7 @@
 			// grow the memory, which leaves earlier views empty)
 			const data = new Uint8ClampedArray(memory!.buffer, paint!.rgbaPtr(), w * h * 4);
 			ctx!.putImageData(new ImageData(data, w, h), 0, 0);
+			mirror.update(el);
 			refreshAnts();
 		});
 	});
@@ -5538,8 +5545,12 @@
 		return new Uint8Array(await blob.arrayBuffer());
 	}
 
-	/** Everything needed to bring this drawing back later (bottom → top). */
-	export function snapshotLayers(): {
+	/**
+	 * Everything needed to bring this drawing back later (bottom → top). Without `pixels`,
+	 * plain layers come without theirs (where a store keeps them: copying every layer out at
+	 * full size, only to drop it, held up autosave by a tenth of a second at 4K).
+	 */
+	export function snapshotLayers({ pixels = true }: { pixels?: boolean } = {}): {
 		layers: LayerSnapshot[];
 		groups: GroupInfo[];
 		strokes: Stroke[];
@@ -5563,7 +5574,7 @@
 				clip: !!l.clip,
 				imported: !!l.imported,
 				group: l.group,
-				rgba: paint!.layerRgba(l.id),
+				rgba: pixels || l.adjust ? paint!.layerRgba(l.id) : new Uint8Array(0),
 				mask,
 				adjust: l.adjust,
 				...(assistLayers.has(l.id) ? { assist: true } : {}),
