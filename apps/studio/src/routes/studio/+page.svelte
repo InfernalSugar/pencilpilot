@@ -4630,7 +4630,9 @@
 									? `This is ${l.owner}’s layer. Ask to draw on it in Draw together, or pick your own.`
 									: why === 'hidden'
 										? 'This layer is hidden. Show it or pick another layer to draw.'
-										: 'This layer is locked. Unlock it or pick another layer to draw.'
+										: why === 'busy'
+											? 'Finish the move or adjustment first (Done or Cancel), then draw.'
+											: 'This layer is locked. Unlock it or pick another layer to draw.'
 							);
 						}}
 						ontext={toolOpts.text.ontext}

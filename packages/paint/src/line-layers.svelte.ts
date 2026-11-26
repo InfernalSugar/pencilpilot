@@ -225,15 +225,21 @@ export class LineLayers {
 			return b;
 		};
 		for (const [i, s] of on.entries()) {
-			const b = use(s);
-			if (!b) continue;
-			e.linesStroke(b, s.seed, s.pts, groups[i]);
-			// a cut piece draws its part of the whole stroke's dabs
-			if (s.dabs) e.linesSpan(s.dabs[0], s.dabs[1]);
-			// and erasers of its own erase only it
-			for (const c of s.clip ?? []) {
-				const cb = use(c);
-				if (cb) e.linesClip(cb, c.seed, c.pts);
+			// (a stroke that fails is left out: the redraw must still finish, or the
+			// engine refuses every stroke after it)
+			try {
+				const b = use(s);
+				if (!b) continue;
+				e.linesStroke(b, s.seed, s.pts, groups[i]);
+				// a cut piece draws its part of the whole stroke's dabs
+				if (s.dabs) e.linesSpan(s.dabs[0], s.dabs[1]);
+				// and erasers of its own erase only it
+				for (const c of s.clip ?? []) {
+					const cb = use(c);
+					if (cb) e.linesClip(cb, c.seed, c.pts);
+				}
+			} catch (err) {
+				console.error('paint: an editable stroke could not be drawn again', err);
 			}
 		}
 		if (style !== undefined) this.host.restoreDabStyle();

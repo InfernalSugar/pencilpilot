@@ -1180,6 +1180,12 @@ impl Painter {
         true
     }
 
+    /// A redraw is open (`lines_begin` … `lines_commit`). Each is begun and finished in
+    /// one go, so one still open when a stroke starts was left by a failure part way.
+    pub fn redrawing(&self) -> bool {
+        self.line_redraw.is_some()
+    }
+
     /// Keep the line edits since the last push without an undo step (someone else's,
     /// drawing together).
     pub fn lines_forget(&mut self) {
@@ -1582,6 +1588,23 @@ mod tests {
 
     fn is_lines(p: &Painter, id: u32) -> bool {
         p.layers[p.index_of(id).unwrap()].props.lines
+    }
+
+    #[test]
+    fn an_open_redraw_refuses_strokes_until_it_is_finished() {
+        let b = pen();
+        let mut p = Painter::new(300, 200);
+        let a = p.add_line_layer("");
+        assert!(!p.redrawing());
+        // a redraw a failure left open: no stroke can start, on any layer
+        assert!(p.lines_begin(a, &[0, 0]));
+        assert!(p.redrawing());
+        assert!(!p.begin_line_stroke(1));
+        // finished: strokes start again
+        p.lines_commit();
+        assert!(!p.redrawing());
+        live(&mut p, &b, 2, &wave(20.0, 280.0, 100.0));
+        assert!(!painted(&p, a).is_empty());
     }
 
     #[test]
