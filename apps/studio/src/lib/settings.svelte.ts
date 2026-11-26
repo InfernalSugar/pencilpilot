@@ -11,6 +11,7 @@ import type { CursorStyle, Unit } from '@pencilpilot/paint/view-prefs';
 import type { ExportFormat } from './exporting';
 import { cleanOnion, ONION_DEFAULTS, type OnionSettings } from './onion';
 import { loadKeymap, type Keymap } from './shortcuts';
+import { BUILT_IN, cleanWorkspaces, copyOf, type Workspace } from './workspaces';
 
 /** light, dark, or as the system is set */
 export type Theme = 'light' | 'dark' | 'system';
@@ -41,7 +42,11 @@ export interface RefLayout {
 export interface Settings {
 	/** the interface's colours (the paper stays white) */
 	theme: Theme;
+	/** the layout in use (the workspace in use keeps a copy) */
 	layout: StudioLayout;
+	/** the named layouts, and the one in use */
+	workspaces: Workspace[];
+	workspace: string;
 	/** the reference pictures' place and size */
 	reference: RefLayout;
 	keys: Keymap;
@@ -182,6 +187,8 @@ export const DEFAULT_LAYOUT: StudioLayout = {
 export const DEFAULTS: Settings = {
 	theme: 'light',
 	layout: DEFAULT_LAYOUT,
+	workspaces: BUILT_IN.map(copyOf),
+	workspace: BUILT_IN[0].id,
 	reference: { shown: false, place: 'side', split: 0.35, float: { x: 80, y: 120, w: 360, h: 420 } },
 	keys: loadKeymap(null),
 	penPressure: true,
@@ -253,6 +260,25 @@ const HEX = /^#[0-9a-f]{6}$/i;
  * `legacy` holds what older versions kept elsewhere (the onion skin was in the
  * window's own storage): it's used when the settings don't have it yet.
  */
+/** A layout within the studio's limits (`d` for anything missing or wrong). */
+export function cleanLayout(v: unknown, d: StudioLayout): StudioLayout {
+	const l = (v && typeof v === 'object' ? v : {}) as Record<string, unknown>;
+	const bool = (x: unknown, f: boolean) => (typeof x === 'boolean' ? x : f);
+	const int = (x: unknown, f: number, lo: number, hi: number) =>
+		typeof x === 'number' && Number.isFinite(x) ? Math.round(Math.min(hi, Math.max(lo, x))) : f;
+	return {
+		options: bool(l.options, d.options),
+		context: bool(l.context, d.context),
+		bottom: bool(l.bottom, d.bottom),
+		dock: bool(l.dock, d.dock),
+		rail: bool(l.rail, d.rail ?? true),
+		// 0 (as tall as it needs) or within the limits
+		bottomHeight:
+			l.bottomHeight === 0 ? 0 : int(l.bottomHeight, d.bottomHeight, BOTTOM_MIN, BOTTOM_MAX),
+		dockWidth: int(l.dockWidth, d.dockWidth, DOCK_MIN, DOCK_MAX)
+	};
+}
+
 export function cleanSettings(raw: unknown, legacy: { onion?: unknown } = {}): Settings {
 	const o = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
 	const D = DEFAULTS;
@@ -265,21 +291,11 @@ export function cleanSettings(raw: unknown, legacy: { onion?: unknown } = {}): S
 	const themed = (v: unknown) => (typeof v === 'string' && HEX.test(v) ? v : '');
 	const one = <T>(v: unknown, list: readonly T[], d: T) => (list.includes(v as T) ? (v as T) : d);
 	const folder = (v: unknown) => (typeof v === 'string' && v && v.length < 4096 ? v : null);
-	const l = (o.layout && typeof o.layout === 'object' ? o.layout : {}) as Record<string, unknown>;
-	const L = DEFAULT_LAYOUT;
+	const layout = cleanLayout(o.layout, DEFAULT_LAYOUT);
 	return {
 		theme: o.theme === 'dark' || o.theme === 'system' ? o.theme : 'light',
-		layout: {
-			options: bool(l.options, L.options),
-			context: bool(l.context, L.context),
-			bottom: bool(l.bottom, L.bottom),
-			dock: bool(l.dock, L.dock),
-			rail: bool(l.rail, L.rail ?? true),
-			// 0 (as tall as it needs) or within the limits
-			bottomHeight:
-				l.bottomHeight === 0 ? 0 : int(l.bottomHeight, L.bottomHeight, BOTTOM_MIN, BOTTOM_MAX),
-			dockWidth: int(l.dockWidth, L.dockWidth, DOCK_MIN, DOCK_MAX)
-		},
+		layout,
+		...cleanWorkspaces(o.workspaces, o.workspace, layout, cleanLayout),
 		reference: cleanRef(o.reference),
 		keys: loadKeymap(o.keys),
 		penPressure: bool(o.penPressure, D.penPressure),

@@ -5351,3 +5351,68 @@ test('big brushes: the size goes to 6400%, and a stroke at the top is hundreds o
 		});
 	await expect.poll(tall).toBeGreaterThan(600);
 });
+
+test('workspaces: layouts of the one canvas, switched from the top bar and customised', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	const pick = page.getByRole('combobox', { name: 'Workspace' }).first();
+	const tl = page.getByRole('region', { name: 'Timeline' });
+	const strip = page.getByRole('toolbar', { name: 'Drawing tools' });
+	await expect(pick).toHaveValue('everything');
+	await expect(tl).toBeVisible();
+
+	// Draw: no timeline, the brushes open
+	await pick.selectOption({ label: 'Draw' });
+	await expect(tl).toBeHidden();
+	await expect(page.getByRole('tab', { name: /^Brushes/ })).toHaveAttribute(
+		'aria-selected',
+		'true'
+	);
+	// Animate: the timeline and the X-sheet, fewer tools
+	await pick.selectOption({ label: 'Animate' });
+	await expect(tl).toBeVisible();
+	await expect(page.getByRole('tab', { name: /^X.sheet/ })).toHaveAttribute(
+		'aria-selected',
+		'true'
+	);
+	await expect(strip.getByRole('button', { name: /^Smudge/ })).toHaveCount(0);
+	await expect(strip.getByRole('button', { name: /^Brush/ })).toBeVisible();
+
+	// a change to the layout stays with the workspace in use
+	await page.getByRole('button', { name: 'Hide the timeline' }).click();
+	await pick.selectOption({ label: 'Everything' });
+	await expect(tl).toBeVisible();
+	await pick.selectOption({ label: 'Animate' });
+	await expect(tl).toBeHidden();
+
+	// customise: a new one, renamed, with the smudge on its strip
+	await page.getByRole('button', { name: 'Customise workspaces' }).click();
+	const dialog = page.getByRole('dialog', { name: 'Customise workspaces' });
+	await dialog.getByRole('button', { name: 'New workspace' }).click();
+	await dialog.getByRole('textbox', { name: 'Name' }).fill('Inking');
+	await dialog.getByRole('textbox', { name: 'Name' }).press('Tab');
+	await dialog.getByRole('checkbox', { name: 'Smudge' }).check();
+	await dialog.getByRole('checkbox', { name: 'Timeline' }).check();
+	await expect(dialog.getByRole('checkbox', { name: 'Brush' })).toBeDisabled();
+	await dialog.getByRole('button', { name: 'Done' }).click();
+	await expect(pick.locator('option:checked')).toHaveText('Inking');
+	await expect(strip.getByRole('button', { name: /^Smudge/ })).toBeVisible();
+	await expect(tl).toBeVisible();
+	await expect
+		.poll(async () => {
+			const s = await keptSettings(page);
+			return s?.workspaces
+				?.find((w: { name: string }) => w.name === 'Inking')
+				?.tools?.includes('smudge');
+		})
+		.toBe(true);
+
+	// reset a built-in one: as it came
+	await pick.selectOption({ label: 'Animate' });
+	await page.getByRole('button', { name: 'Customise workspaces' }).click();
+	await dialog.getByRole('button', { name: 'Reset “Animate”' }).click();
+	await dialog.getByRole('button', { name: 'Done' }).click();
+	await expect(tl).toBeVisible();
+});
