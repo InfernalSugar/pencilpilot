@@ -592,9 +592,9 @@
 	}
 
 	/** "this layer is locked/hidden" notice after a refused stroke */
-	let blocked = $state<'' | 'locked' | 'hidden'>('');
+	let blocked = $state<'' | 'locked' | 'hidden' | 'busy'>('');
 	let blockedTimer: ReturnType<typeof setTimeout> | undefined;
-	function onBlocked(why: 'locked' | 'hidden') {
+	function onBlocked(why: 'locked' | 'hidden' | 'busy') {
 		blocked = why;
 		clearTimeout(blockedTimer);
 		blockedTimer = setTimeout(() => (blocked = ''), 3500);
@@ -1604,7 +1604,9 @@
 			<p class="blocked" role="status">
 				{blocked === 'hidden'
 					? `“${activeLayerName}” is hidden. Show it or pick another layer to draw.`
-					: `“${activeLayerName}” is locked. Unlock it or pick another layer to draw.`}
+					: blocked === 'busy'
+						? 'Finish the move or adjustment first (Done or Cancel), then draw.'
+						: `“${activeLayerName}” is locked. Unlock it or pick another layer to draw.`}
 			</p>
 		{/if}
 		{#if reference && refPlace === 'dock'}

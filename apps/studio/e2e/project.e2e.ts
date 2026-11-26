@@ -890,6 +890,35 @@ test('draw together: a dropped session reconnects by itself; Rejoin is one click
 	expect((await calls(page)).filter((c) => c.cmd === 'share_rejoin').length).toBe(2);
 });
 
+test('draw together: the others’ name tags stay the same small size at any canvas size or zoom', async ({
+	page
+}) => {
+	await stubTauri(page);
+	await ready(page);
+	await page.getByRole('button', { name: 'Draw together' }).click();
+	const dialog = page.getByRole('dialog', { name: 'Draw together' });
+	await dialog.getByRole('textbox', { name: /name/i }).fill('Me');
+	await dialog.getByRole('button', { name: 'Host', exact: true }).click();
+	await dialog.getByRole('button', { name: 'Back to drawing' }).click();
+	await page.evaluate(() =>
+		(window as unknown as { __emit: (a: string, b: unknown) => void }).__emit('share-event', {
+			kind: 'presence',
+			from: 'sam1',
+			body: { x: 200, y: 150 }
+		})
+	);
+	const tag = page.locator('.remote-cursor span', { hasText: 'Sam' });
+	await expect(tag).toBeVisible();
+	// 11 px text: about 17 px tall with its padding, however the canvas is fitted or zoomed
+	const tall = async () => (await tag.boundingBox())!.height;
+	expect(await tall()).toBeGreaterThan(14);
+	expect(await tall()).toBeLessThan(20);
+	await page.getByRole('button', { name: 'Zoom in' }).click();
+	await page.getByRole('button', { name: 'Zoom in' }).click();
+	await expect.poll(tall).toBeLessThan(20);
+	expect(await tall()).toBeGreaterThan(14);
+});
+
 test('studio layout: each tool shows its options, as on the website', async ({ page }) => {
 	await stubTauri(page);
 	await ready(page);

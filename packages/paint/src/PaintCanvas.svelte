@@ -332,7 +332,9 @@
 		color?: string;
 		onchange?: (s: CanvasStatus) => void;
 		/** a stroke was refused because the active layer is locked or hidden */
-		onblocked?: (why: 'locked' | 'hidden') => void;
+		/** a stroke couldn't start: the layer is locked or hidden, or something else is
+		 * still going on (`busy`: a move or an adjustment not finished) */
+		onblocked?: (why: 'locked' | 'hidden' | 'busy') => void;
 		/** a picture shown over the canvas (fitted like the grader fits references); never part of the drawing */
 		overlaySrc?: string | null;
 		overlayOpacity?: number;
@@ -602,6 +604,25 @@
 	 * layer always; on a plain one when the limit allows and what it paints can be drawn
 	 * again exactly (not the eraser, nor clipped by a selection or alpha lock, nor a mask).
 	 */
+	/**
+	 * Start a stroke (`begin`). A redraw of editable strokes still open can only be one
+	 * a failure left part way (each is begun and finished in one go), and it would refuse
+	 * every stroke from then on: it's finished, and the stroke tried again.
+	 */
+	function beginOrRecover(begin: () => boolean): boolean {
+		if (begin()) return true;
+		if (!paint?.redrawing()) return false;
+		console.warn('paint: a redraw of editable strokes was left open; finished it');
+		paint.linesCommit();
+		schedule();
+		return begin();
+	}
+	/** Why a stroke couldn't start on the active layer. */
+	function blockedWhy(): 'locked' | 'hidden' | 'busy' {
+		const l = shownLayers().find((x) => x.id === paint!.activeLayer);
+		return l && !l.visible ? 'hidden' : !l || l.locked ? 'locked' : 'busy';
+	}
+
 	function keepsStroke(): boolean {
 		if (!paint || paint.isEditingMask()) return false;
 		const l = layerList().find((x) => x.id === paint!.activeLayer);
@@ -3018,9 +3039,9 @@
 		const layer = paint.activeLayer;
 		const asLine = keepsStroke();
 		if (asLine) lineSeed = newSeed();
-		if (!(asLine ? paint.beginLineStroke(lineSeed) : paint.beginStroke())) {
-			const l = shownLayers().find((x) => x.id === paint!.activeLayer);
-			onblocked?.(l && !l.visible ? 'hidden' : 'locked');
+		const p = paint;
+		if (!beginOrRecover(() => (asLine ? p.beginLineStroke(lineSeed) : p.beginStroke()))) {
+			onblocked?.(blockedWhy());
 			return false;
 		}
 		linePts = asLine ? [] : null;
@@ -4203,15 +4224,17 @@
 		// (the eraser's brush redraws its mark: loaded before the stroke ends)
 		if (asLine && eraser && !lineBrushes.has(brushId))
 			void lines.ready([{ brush: brushId } as LineStroke]);
-		const began = off
-			? paint.beginCloneStroke(off[0], off[1], cloneAllLayers, cloneHeal)
-			: asLine
-				? paint.beginLineStroke(lineSeed)
-				: paint.beginStroke();
+		const p = paint;
+		const began = beginOrRecover(() =>
+			off
+				? p.beginCloneStroke(off[0], off[1], cloneAllLayers, cloneHeal)
+				: asLine
+					? p.beginLineStroke(lineSeed)
+					: p.beginStroke()
+		);
 		linePts = asLine && began ? [] : null;
 		if (!began) {
-			const l = shownLayers().find((x) => x.id === paint!.activeLayer);
-			onblocked?.(l && !l.visible ? 'hidden' : 'locked');
+			onblocked?.(blockedWhy());
 			return;
 		}
 		capture(e);
@@ -6485,7 +6508,8 @@
 			<div
 				class="remote-cursor"
 				style="left: {(c.x / width) * 100}%; top: {(c.y / height) *
-					100}%; --c: {c.color}; transform: scale({1 / Math.max(0.01, fit * zoom)})"
+					100}%; --c: {c.color}; transform: scale({(flipped ? -1 : 1) / Math.max(0.01, zoom)}, {1 /
+					Math.max(0.01, zoom)})"
 				aria-hidden="true"
 			>
 				<svg viewBox="0 0 16 16" width="16" height="16">

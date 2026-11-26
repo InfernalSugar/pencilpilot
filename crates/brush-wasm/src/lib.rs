@@ -1206,6 +1206,11 @@ impl PaintCanvas {
         self.inner.begin_line_stroke(seed)
     }
 
+    /// A redraw is open (`linesBegin` … `linesCommit`).
+    pub fn redrawing(&self) -> bool {
+        self.inner.redrawing()
+    }
+
     /// Start redrawing tiles of a layer: `tiles` = tx, ty, tx, ty… (64 px tiles).
     #[wasm_bindgen(js_name = linesBegin)]
     pub fn lines_begin(&mut self, layer: u32, tiles: &[i32]) -> bool {

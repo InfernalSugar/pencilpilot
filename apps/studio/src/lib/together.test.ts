@@ -1453,6 +1453,36 @@ describe('drawing together: both drawing at once', () => {
 			expect(same(hc, bc, 'Bo’s layer')).toEqual([]);
 		});
 });
+describe('drawing together: edits arriving together', () => {
+	it('are put in the order the session numbered them, not as each finishes', async () => {
+		const session = new FakeSession();
+		const hc = new FakeCanvas(['Layer 1']);
+		const host = new Together(A, 'Nova', hc, session.net(A));
+		session.apps.set(A, host);
+		await host.startHost();
+		await session.settle();
+		const bc = new FakeCanvas(['Layer 1']);
+		const bo = new Together(B, 'Bo', bc, session.net(B));
+		session.apps.set(B, bo);
+		bo.startJoin(A);
+		await session.settle();
+		const nl = hc.byName('Layer 1').id;
+		// a big stroke (many tiles, slow to unpack) ending on the tile at 30,30...
+		for (let i = 0; i < 40; i++) hc.paint(nl, i % 8, Math.floor(i / 8), i + 1);
+		hc.paint(nl, 30, 30, 100);
+		await host.localChanged();
+		// ...then a small one over that same tile
+		hc.paint(nl, 30, 30, 200);
+		await host.localChanged();
+		// the page hands each edit on as it comes, without waiting for the one before
+		await Promise.all(session.queue.splice(0).map((f) => f()));
+		await session.settle();
+		// (Bo's own "Layer 1" from before joining is kept, hidden: the shared one is last)
+		const shared = bc.layerList.filter((l) => l.name === 'Layer 1').at(-1)!;
+		expect(bc.pixel(shared.id, 30, 30)).toBe(200);
+		expect(same(hc, bc, 'Layer 1')).toEqual([]);
+	});
+});
 describe('drawing together: timelines crossing', () => {
 	it('two new drawings started at once both stay on the timeline', async () => {
 		const session = new FakeSession();
