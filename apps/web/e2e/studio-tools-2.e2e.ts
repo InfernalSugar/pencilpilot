@@ -364,6 +364,46 @@ test('7e. the brush list shows each brush as a stroke drawn with it', async ({ p
 		.toBeGreaterThan(50);
 });
 
+test('7f. the colour wheel opens the picker in a pop-up, right there', async ({ page }) => {
+	await ready(page);
+	const wheel = page.getByRole('button', { name: 'More colours' });
+	await wheel.click();
+	const picker = page.getByRole('dialog', { name: 'Colours' });
+	await expect(picker).toBeVisible();
+	await expect(wheel).toHaveAttribute('aria-expanded', 'true');
+	// (the side panel didn't switch to its colour tab)
+	await expect(page.getByRole('tab', { name: /^Colour/, selected: true })).toHaveCount(0);
+	// a colour picked there is the brush's
+	const hexField = picker.getByRole('textbox', { name: 'Hex colour' });
+	await hexField.fill('#3d6bff');
+	await hexField.press('Enter');
+	await expect(page.getByRole('radio', { name: 'Colour #3d6bff' })).toHaveAttribute(
+		'aria-checked',
+		'true'
+	);
+	// Esc closes it; so does a click outside
+	await page.keyboard.press('Escape');
+	await expect(picker).toHaveCount(0);
+	await wheel.click();
+	await expect(picker).toBeVisible();
+	await page.mouse.click(...(await at(page, 0.5, 0.6)));
+	await expect(picker).toHaveCount(0);
+});
+
+test('7g. brush and eraser sizes read in pixels', async ({ page }) => {
+	await ready(page);
+	const size = page.getByRole('slider', { name: 'Size', exact: true }).first();
+	await expect(size).toHaveAttribute('aria-valuetext', /^\d+(\.\d)? px$/);
+	const px = async () => parseFloat((await size.getAttribute('aria-valuetext'))!);
+	const before = await px();
+	await page.keyboard.press(']');
+	await page.keyboard.press(']');
+	await expect.poll(px).toBeGreaterThan(before);
+	// the eraser shares the size, in pixels too
+	await page.keyboard.press('e');
+	await expect(size).toHaveAttribute('aria-valuetext', /px$/);
+});
+
 test('8. a snapped QuickShape stays editable: drag its end', async ({ page }) => {
 	await ready(page);
 	await page.mouse.move(...(await at(page, 0.2, 0.5)));

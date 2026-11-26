@@ -66,7 +66,8 @@
 		onadjust,
 		showOpacity = true,
 		keys = {},
-		maxSize = 6.06
+		maxSize = 6.06,
+		brushPx = 0
 	}: {
 		tools?: ToolId[];
 		/** the active tool (the canvas's tool name; 'brush' covers the eraser too) */
@@ -82,7 +83,16 @@
 		keys?: Partial<Record<ToolId, string>>;
 		/** the largest size the slider goes to (a multiple of the brush's own size) */
 		maxSize?: number;
+		/** the brush's diameter in pixels at its own size: the size shows in pixels (0: as %) */
+		brushPx?: number;
 	} = $props();
+
+	/** the size as people read it: pixels across the canvas (a percentage until known) */
+	const sizeText = $derived.by(() => {
+		if (!(brushPx > 0)) return `${Math.round(size * 100)}%`;
+		const px = size * brushPx;
+		return `${px < 10 ? +px.toFixed(1) : Math.round(px)} px`;
+	});
 
 	/** a narrow screen: the rail lies across the top and so do the sliders (as the CSS) */
 	let across = $state(false);
@@ -548,7 +558,7 @@
 	<div class="rail-sliders">
 		<FillSlider
 			label="Size"
-			text="{Math.round(size * 100)}%"
+			text={sizeText}
 			min={-2}
 			max={+Math.log2(maxSize).toFixed(2)}
 			step={0.05}

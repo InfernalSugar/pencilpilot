@@ -42,6 +42,7 @@
 	import {
 		ACTIONS,
 		clashes,
+		keptFor,
 		comboOf,
 		DEFAULT_KEYS,
 		showKey,
@@ -83,6 +84,11 @@
 	let capturing = $state<ActionId | null>(null);
 	/** the last change that took another action's key (it got this one's old key) */
 	let swapped = $state('');
+	/** a key that's taken, waiting for a choice: use it here (they swap) or not */
+	let taken = $state<{ id: ActionId; combo: string; others: ActionId[] } | null>(null);
+	/** a key that can't be used, and why (shown on the row being changed) */
+	let refused = $state('');
+	const groupOf = (id: ActionId) => ACTIONS.find((a) => a.id === id)?.group ?? '';
 	const mac = typeof navigator !== 'undefined' && /Mac|iPad/.test(navigator.platform);
 	const label = (id: ActionId) => ACTIONS.find((a) => a.id === id)?.label ?? id;
 	const groups = [...new Set(ACTIONS.map((a) => a.group))];
@@ -116,14 +122,35 @@
 		const combo = comboOf(e);
 		if (!combo) return; // a modifier on its own: wait for the key
 		const id = capturing;
-		const old = settings.keys[id];
-		// a key another action has: they swap
-		for (const other of clashes(settings.keys, id, combo)) {
-			settings.keys[other] = old;
-			swapped = `${label(other)} now uses ${showKey(old, mac)}.`;
+		// a key the app keeps: say what for, and wait for another
+		const kept = keptFor(combo);
+		if (kept) {
+			refused = `${showKey(combo, mac)} is kept for ${kept}. Press another key.`;
+			return;
 		}
-		settings.keys[id] = combo;
+		refused = '';
 		capturing = null;
+		if (combo === settings.keys[id]) return;
+		// a key another action has: say which, and ask before taking it
+		const others = clashes(settings.keys, id, combo);
+		if (others.length) taken = { id, combo, others };
+		else settings.keys[id] = combo;
+	}
+
+	/** Take the waiting key here: the action(s) that had it get this one's old key. */
+	function takeKey() {
+		if (!taken) return;
+		const { id, combo, others } = taken;
+		const old = settings.keys[id];
+		for (const other of others) settings.keys[other] = old;
+		settings.keys[id] = combo;
+		swapped = `${others.map(label).join(' and ')} now ${others.length > 1 ? 'use' : 'uses'} ${showKey(old, mac)}.`;
+		taken = null;
+	}
+	function pickAnother() {
+		if (!taken) return;
+		capturing = taken.id;
+		taken = null;
 	}
 
 	/** up and down (or left and right) move between the sections */
@@ -279,8 +306,8 @@
 			{:else if section === 'keys'}
 				<h2>Keyboard shortcuts</h2>
 				<p class="hint">
-					Click Change, then press the new key (Esc to stop). Taking another action’s key swaps
-					them.
+					Click Change, then press the new key or combo (Shift + S, Ctrl + Alt + U…; Esc to stop). A
+					key another action has is named, and you choose.
 				</p>
 				{#if swapped}<p class="swapped" role="status">{swapped}</p>{/if}
 				{#each groups as g (g)}
@@ -290,7 +317,7 @@
 							<li data-action={a.id}>
 								<span class="what">{a.label}</span>
 								{#if capturing === a.id}
-									<kbd class="waiting" role="status">Press a key…</kbd>
+									<kbd class="waiting" role="status">Press a key or a combo…</kbd>
 								{:else}
 									<kbd>{showKey(settings.keys[a.id], mac)}</kbd>
 								{/if}
@@ -300,6 +327,8 @@
 									aria-label="Change the key for {a.label}"
 									onclick={() => {
 										swapped = '';
+										refused = '';
+										taken = null;
 										capturing = capturing === a.id ? null : a.id;
 									}}
 								>
@@ -314,6 +343,26 @@
 									>
 										Reset
 									</button>
+								{/if}
+								{#if capturing === a.id && refused}
+									<p class="taken" role="alert">{refused}</p>
+								{/if}
+								{#if taken?.id === a.id}
+									<div class="taken" role="alert">
+										<p>
+											<b>{showKey(taken.combo, mac)}</b> is already used by
+											{taken.others.map((o) => `${label(o)} (${groupOf(o)})`).join(' and ')}.
+										</p>
+										<div class="row">
+											<button type="button" class="small" onclick={takeKey}> Use it here </button>
+											<button type="button" class="ghost small" onclick={pickAnother}>
+												Pick another
+											</button>
+											<button type="button" class="ghost small" onclick={() => (taken = null)}>
+												Cancel
+											</button>
+										</div>
+									</div>
 								{/if}
 							</li>
 						{/each}
@@ -622,6 +671,22 @@
 		margin: 0;
 		color: var(--pp-accent-ink);
 	}
+	.taken {
+		flex-basis: 100%;
+		margin: 4px 0 0;
+		padding: 8px 12px;
+		border-radius: 10px;
+		background: var(--pp-yellow);
+		color: #16161a;
+		font-size: 14px;
+	}
+	.taken p {
+		margin: 0 0 6px;
+	}
+	.taken .row {
+		display: flex;
+		gap: 8px;
+	}
 	.swapped {
 		padding: 8px 12px;
 		border-radius: 10px;
@@ -638,6 +703,7 @@
 	}
 	.keys li {
 		display: flex;
+		flex-wrap: wrap;
 		align-items: center;
 		gap: 10px;
 		padding: 4px 6px 4px 12px;

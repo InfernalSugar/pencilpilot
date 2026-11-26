@@ -536,10 +536,18 @@ test('settings: change a key (a taken key swaps), and it works in the studio', a
 	const brush = page.locator('li[data-action="brush"]');
 	const pen = page.locator('li[data-action="pen"]');
 	await expect(brush.locator('kbd')).toHaveText('B');
-	// Pen takes B: Brush gets Pen's old key, P
+	// a key the app keeps is refused, saying what for; it waits for another
 	await page.getByRole('button', { name: 'Change the key for Pen path' }).click();
-	await expect(pen.locator('kbd')).toHaveText('Press a key…');
+	await expect(pen.locator('kbd')).toHaveText('Press a key or a combo…');
+	await page.keyboard.press('Backspace');
+	await expect(pen.getByRole('alert')).toHaveText(/Backspace is kept for the pen path/);
+	// B is Brush's: it says so, and nothing changes until you choose
 	await page.keyboard.press('b');
+	await expect(pen.getByRole('alert')).toContainText('B is already used by Brush (Tools).');
+	await expect(pen.locator('kbd')).toHaveText('P');
+	await expect(brush.locator('kbd')).toHaveText('B');
+	// Pen takes B: Brush gets Pen's old key, P
+	await pen.getByRole('button', { name: 'Use it here' }).click();
 	await expect(pen.locator('kbd')).toHaveText('B');
 	await expect(brush.locator('kbd')).toHaveText('P');
 	await expect(page.getByRole('status').filter({ hasText: 'Brush now uses P.' })).toBeVisible();
@@ -5388,7 +5396,7 @@ test('lasso fill with Vertical symmetry: the fill and the cut both mirror, one u
 	await expect.poll(() => ink(page)).toBe(0);
 });
 
-test('big brushes: the size goes to 6400%, and a stroke at the top is hundreds of pixels wide', async ({
+test('big brushes: the size goes to 64 times the brush, and a stroke at the top is hundreds of pixels wide', async ({
 	page
 }) => {
 	await stubTauri(page);
@@ -5396,7 +5404,9 @@ test('big brushes: the size goes to 6400%, and a stroke at the top is hundreds o
 	const size = page.getByRole('slider', { name: 'Size', exact: true }).first();
 	await size.focus();
 	await page.keyboard.press('End');
-	await expect(size).toHaveAttribute('aria-valuetext', '6400%');
+	// (sizes read in pixels: 64 times the 2B pencil's own size is hundreds of them)
+	await expect(size).toHaveAttribute('aria-valuetext', /^\d+ px$/);
+	expect(parseFloat((await size.getAttribute('aria-valuetext'))!)).toBeGreaterThan(300);
 	// a stroke across the canvas (a brush this big lays a dab every few hundred px):
 	// how tall is the band of ink it leaves
 	const b = (await canvas(page).boundingBox())!;
