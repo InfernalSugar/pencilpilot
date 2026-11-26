@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { filmFps, filmPlan, fitRect, thin, thinIndices } from './timelapse';
+import { filmFps, filmPlan, fitRect, shrinkRect, thin, thinIndices } from './timelapse';
 
 const frame = (n: number) => ({
 	n,
@@ -42,5 +42,29 @@ describe('timelapse', () => {
 		expect(fitRect(1600, 900, 1600, 900)).toEqual({ x: 0, y: 0, width: 1600, height: 900 });
 		// a wider one: paper above and below
 		expect(fitRect(2000, 500, 1000, 1000)).toEqual({ x: 0, y: 375, width: 1000, height: 250 });
+	});
+});
+
+describe('shrinkRect', () => {
+	it('averages the pixels each small one covers', () => {
+		// 4 × 2 → 2 × 1: left half black, right half white
+		const src = new Uint8ClampedArray(4 * 2 * 4);
+		for (let y = 0; y < 2; y++)
+			for (let x = 0; x < 4; x++)
+				src.set(x < 2 ? [0, 0, 0, 255] : [255, 255, 255, 255], (y * 4 + x) * 4);
+		expect(Array.from(shrinkRect(src, 4, 2, 2, 1, 0, 0, 2, 1))).toEqual([
+			0, 0, 0, 255, 255, 255, 255, 255
+		]);
+		// one pixel of the four: half grey where it mixes
+		src.set([255, 255, 255, 255], 1 * 4);
+		src.set([255, 255, 255, 255], (4 + 1) * 4);
+		expect(Array.from(shrinkRect(src, 4, 2, 2, 1, 0, 0, 1, 1))).toEqual([128, 128, 128, 255]);
+	});
+
+	it('shrinks by a factor that isn’t whole, covering every source pixel once', () => {
+		const W = 10;
+		const src = new Uint8ClampedArray(W * 4).fill(200);
+		const out = shrinkRect(src, W, 1, 3, 1, 0, 0, 3, 1);
+		expect(Array.from(out)).toEqual(Array(12).fill(200));
 	});
 });

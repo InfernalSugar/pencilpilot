@@ -24,17 +24,24 @@
 	const canSave = untrack(() => !!onsave) || videoType() !== null;
 	let dialog = $state<HTMLDialogElement>();
 
-	function draw(i: number) {
+	/** the frame asked for last (pictures are decoded as they're shown, and may arrive late) */
+	let wanted = -1;
+	async function draw(i: number) {
+		wanted = i;
 		const f = film.frames[i];
+		if (!f) return;
+		const pic = await f.picture().catch(() => null);
+		// the one after is likely next: decoded meanwhile
+		void film.frames[i + 1]?.picture().catch(() => null);
 		const g = canvas?.getContext('2d');
-		if (!f || !g || !canvas) return;
+		if (!pic || !g || !canvas || wanted !== i) return;
 		if (canvas.width !== f.width || canvas.height !== f.height) {
 			canvas.width = f.width;
 			canvas.height = f.height;
 		}
 		g.fillStyle = '#fff';
 		g.fillRect(0, 0, f.width, f.height);
-		g.drawImage(f, 0, 0);
+		g.drawImage(pic, 0, 0);
 	}
 
 	onMount(() => {
@@ -60,7 +67,7 @@
 		};
 	});
 
-	$effect(() => draw(Math.min(at, count - 1)));
+	$effect(() => void draw(Math.min(at, count - 1)));
 
 	async function save() {
 		playing = false;

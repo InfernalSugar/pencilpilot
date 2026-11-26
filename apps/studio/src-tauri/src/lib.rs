@@ -604,8 +604,24 @@ async fn share_leave(state: State<'_, share::Sharing>) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether WebKitGTK's DMA-BUF renderer should be turned off: on NVIDIA's own driver it
+/// draws the window slowly (drawing lags far behind the pen) or not at all, so WebKit
+/// shares its frames another way there. Left alone if the person set it themselves.
+#[cfg(any(target_os = "linux", test))]
+fn dmabuf_off(nvidia_driver: bool, already_set: bool) -> bool {
+    nvidia_driver && !already_set
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "linux")]
+    if dmabuf_off(
+        std::path::Path::new("/proc/driver/nvidia/version").exists(),
+        std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_some(),
+    ) {
+        // SAFETY: nothing else runs yet (no threads), and WebKit reads it when it starts
+        unsafe { std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1") };
+    }
     // An AppImage starts in its own read-only mount. Stay there: its WebKit finds its
     // helpers (WebKitNetworkProcess, …) by paths relative to that folder, so leaving it
     // stops the window from opening. Nothing is written relative to it: file dialogs
@@ -702,5 +718,12 @@ mod tests {
         let a = app_info();
         assert_eq!(a.version, env!("CARGO_PKG_VERSION"));
         assert!(!a.os.is_empty() && !a.arch.is_empty());
+    }
+
+    #[test]
+    fn dmabuf_renderer_is_turned_off_only_for_nvidia_and_not_over_the_person() {
+        assert!(dmabuf_off(true, false));
+        assert!(!dmabuf_off(false, false));
+        assert!(!dmabuf_off(true, true));
     }
 }

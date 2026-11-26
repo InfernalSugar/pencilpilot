@@ -2798,7 +2798,8 @@
 		canvas.ensureDrawings();
 		// the store gets what changed; then the file is made from it, no pixels sent
 		await cache.push();
-		const snap = canvas.snapshotLayers();
+		// (an animation's layer pixels are its drawings, in the store: not copied out)
+		const snap = canvas.snapshotLayers({ pixels: !cache.native });
 		if (!snap) throw new Error('the canvas isn’t ready');
 		const layerIds = snap.layers.filter((l) => !l.adjust).map((l) => l.id);
 		const c = canvas;
@@ -3161,8 +3162,9 @@
 				for (const [i, repeat] of plan) {
 					const b = pics[i];
 					const at = placeCamera({ x: 0, y: 0, width: b.width, height: b.height }, out);
+					const pic = await b.picture();
 					paper();
-					g.drawImage(b, at.x, at.y, at.width, at.height);
+					g.drawImage(pic, at.x, at.y, at.width, at.height);
 					await send(repeat);
 				}
 			} else {
