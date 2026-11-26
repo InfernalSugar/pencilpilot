@@ -3993,7 +3993,7 @@
 		} else tool = m;
 	}
 	/** where each tool was come to from (its key pressed again goes back there) */
-	const cameFrom = new Map<string, string>();
+	const cameFrom: Record<string, string> = {};
 	let modeIs = 'brush';
 	/** going back: the tool gone back to keeps where it was come to from */
 	let goingBack = false;
@@ -4001,7 +4001,7 @@
 		const m = modeNow();
 		untrack(() => {
 			if (m === modeIs) return;
-			if (!goingBack) cameFrom.set(m, modeIs);
+			if (!goingBack) cameFrom[m] = modeIs;
 			goingBack = false;
 			modeIs = m;
 		});
@@ -4010,7 +4010,7 @@
 	function toggleMode(m: string) {
 		// (the brush is home, where the others come back to: B is always the brush)
 		if (modeNow() !== m || m === 'brush') return useMode(m);
-		const back = cameFrom.get(m);
+		const back = cameFrom[m];
 		const to = back && back !== m ? back : 'brush';
 		if (to === m) return;
 		goingBack = true;
