@@ -237,12 +237,67 @@
 	/** rows are top → bottom; the engine counts from the bottom */
 	const engineIndex = (rowIndex: number) => status.layers.length - 1 - rowIndex;
 
-	function drop(rowIndex: number) {
-		// dropped next to a layer: it joins that layer's group
-		if (dragging !== null)
-			controls?.moveLayerTo(dragging, engineIndex(rowIndex), rows[rowIndex]?.group ?? 0);
+	/** Put the dragged layer in the gap before row `slot` (rows.length: below the last). */
+	function drop(slot: number) {
+		const from = rows.findIndex((r) => r.id === dragging);
+		if (dragging !== null && from >= 0) {
+			// (where it ends up, among the rows without it)
+			const at = slot > from ? slot - 1 : slot;
+			// dropped next to a layer: it joins that layer's group
+			const by = rows[slot] ?? rows[slot - 1];
+			if (at !== from || (by && by.group !== rows[from].group))
+				controls?.moveLayerTo(dragging, engineIndex(at), by?.group ?? 0);
+		}
 		dragging = null;
 		dropAt = null;
+	}
+
+	/**
+	 * Dragging a layer: press it and move (a mouse or a pen). Pointer events, not the
+	 * browser's drag and drop: the desktop app's window takes that for dropping files,
+	 * so it never reached the list there, and a pen's tap started it by mistake.
+	 */
+	let press: { id: number; x: number; y: number; pointer: number } | null = null;
+	/** a drag just ended: the click that follows isn't a click on the row */
+	let swallowClick = false;
+	function rowDown(e: PointerEvent, id: number) {
+		if (e.button !== 0 || e.pointerType === 'touch' || renaming !== null) return;
+		if ((e.target as HTMLElement).closest('input, select, textarea, .eye')) return;
+		press = { id, x: e.clientX, y: e.clientY, pointer: e.pointerId };
+		// (listening only while a layer is pressed: drawing elsewhere isn't touched)
+		window.addEventListener('pointermove', rowMove);
+		window.addEventListener('pointerup', rowUp);
+		window.addEventListener('pointercancel', rowUp);
+	}
+	function stopListening() {
+		window.removeEventListener('pointermove', rowMove);
+		window.removeEventListener('pointerup', rowUp);
+		window.removeEventListener('pointercancel', rowUp);
+	}
+	function rowMove(e: PointerEvent) {
+		if (!press || e.pointerId !== press.pointer) return;
+		if (dragging === null) {
+			if (Math.hypot(e.clientX - press.x, e.clientY - press.y) < 6) return;
+			dragging = press.id;
+		}
+		e.preventDefault();
+		const row = document
+			.elementFromPoint(e.clientX, e.clientY)
+			?.closest<HTMLElement>('[data-layer-row]');
+		// the gap the pointer is nearest: above a row (its top half) or below it
+		if (row) {
+			const r = row.getBoundingClientRect();
+			dropAt = Number(row.dataset.layerRow) + (e.clientY > r.top + r.height / 2 ? 1 : 0);
+		}
+	}
+	function rowUp(e: PointerEvent) {
+		if (!press || e.pointerId !== press.pointer) return;
+		press = null;
+		stopListening();
+		if (dragging === null) return;
+		swallowClick = true;
+		if (e.type === 'pointerup' && dropAt !== null) drop(dropAt);
+		else dragging = dropAt = null;
 	}
 </script>
 
@@ -808,7 +863,17 @@
 		</div>
 	{/if}
 
-	<ul class="list" aria-label="Layers, top to bottom">
+	<ul
+		class="list"
+		class:dragging={dragging !== null}
+		aria-label="Layers, top to bottom"
+		onclickcapture={(e) => {
+			if (!swallowClick) return;
+			swallowClick = false;
+			e.stopPropagation();
+			e.preventDefault();
+		}}
+	>
 		{#each rows as l, i (l.id)}
 			{@const g = l.group ? groupById.get(l.group) : undefined}
 			{#if g && rows[i - 1]?.group !== g.id}
@@ -889,24 +954,10 @@
 					class:member={!!g}
 					class:clipped={l.clip}
 					class:drop={dropAt === i && dragging !== l.id}
-					draggable={renaming === null}
-					ondragstart={(e) => {
-						dragging = l.id;
-						e.dataTransfer?.setData('text/plain', String(l.id));
-					}}
-					ondragover={(e) => {
-						e.preventDefault();
-						dropAt = i;
-					}}
-					ondragleave={() => (dropAt = null)}
-					ondrop={(e) => {
-						e.preventDefault();
-						drop(i);
-					}}
-					ondragend={() => {
-						dragging = null;
-						dropAt = null;
-					}}
+					class:drop-below={dropAt === rows.length && i === rows.length - 1}
+					class:lifted={dragging === l.id}
+					data-layer-row={i}
+					onpointerdown={(e) => rowDown(e, l.id)}
 				>
 					<button
 						type="button"
@@ -1202,6 +1253,18 @@
 	}
 	li.drop {
 		border-top-color: var(--pp-accent);
+	}
+	li.drop-below {
+		border-bottom-color: var(--pp-accent);
+	}
+	/* (a layer being dragged, and no text selected along the way) */
+	.list.dragging {
+		user-select: none;
+		-webkit-user-select: none;
+		cursor: grabbing;
+	}
+	li.lifted {
+		opacity: 0.55;
 	}
 	.eye {
 		flex: none;
