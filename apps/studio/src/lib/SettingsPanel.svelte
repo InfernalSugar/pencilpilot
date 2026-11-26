@@ -37,6 +37,7 @@
 		type Theme
 	} from '#lib/settings.svelte.js';
 	import { cleanRelay } from '#lib/share.js';
+	import { checkForUpdate, updates } from '#lib/updates.svelte.js';
 	import Interface from '#lib/settings/Interface.svelte';
 	import { PREFERENCE_GROUPS } from '#lib/settings/groups.js';
 	import {
@@ -79,6 +80,14 @@
 		lastSection = section;
 	});
 	let dataFolder = $state('');
+	/** this build's version (the app's own) */
+	let version = $state('');
+	/** what "Check now" found */
+	let checked = $state<'' | 'looking' | 'new' | 'latest' | 'error'>('');
+	async function checkNow() {
+		checked = 'looking';
+		checked = await checkForUpdate(true);
+	}
 	/** the action waiting for its new key */
 	let capturing = $state<ActionId | null>(null);
 	/** the last change that took another action's key (it got this one's old key) */
@@ -97,6 +106,12 @@
 			import('@tauri-apps/api/core').then(({ invoke }) =>
 				invoke<string>('data_folder')
 					.then((f) => (dataFolder = f))
+					.catch(() => {})
+			);
+		if (isTauri())
+			import('@tauri-apps/api/app').then(({ getVersion }) =>
+				getVersion()
+					.then((v) => (version = v))
 					.catch(() => {})
 			);
 		if (dialog && !dialog.open) {
@@ -383,6 +398,33 @@
 			{:else if section === 'about'}
 				<h2>About</h2>
 				<p>PencilPilot: a drawing and frame-by-frame animation app.</p>
+				<h3>Updates</h3>
+				{#if version}<p>This is PencilPilot {version}.</p>{/if}
+				<label class="row">
+					<input type="checkbox" bind:checked={settings.checkUpdates} />
+					<span>Tell me when there’s a new version</span>
+				</label>
+				<div class="row">
+					<button
+						type="button"
+						class="ghost small"
+						disabled={checked === 'looking' || !isTauri()}
+						onclick={checkNow}
+					>
+						Check now
+					</button>
+					<span class="hint" aria-live="polite">
+						{#if checked === 'looking'}Looking…
+						{:else if checked === 'latest'}You have the newest version.
+						{:else if checked === 'error'}Couldn’t reach pencilpilot.app. Try again later.
+						{:else if checked === 'new' && updates.now.stage !== 'none'}PencilPilot
+							{updates.now.version} is ready to install (see the corner).{/if}
+					</span>
+				</div>
+				<p class="hint">
+					Updates come from pencilpilot.app, signed, so the app installs only real PencilPilot
+					releases. It asks before installing, and saves your project first.
+				</p>
 				<h3>Credits</h3>
 				<p class="credit">
 					The brushes paint with a port of the MyPaint brush engine. Most come from these packs, all

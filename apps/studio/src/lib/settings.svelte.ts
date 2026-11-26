@@ -156,6 +156,12 @@ export interface Settings {
 	askToDelete: boolean;
 	/** a snippet of the sound plays when stepping through frames */
 	scrubSound: boolean;
+
+	// ---- updates ----
+	/** look for a new version on the website (at start and every few hours) and offer it */
+	checkUpdates: boolean;
+	/** a version the person chose to skip ('' : none) */
+	skipVersion: string;
 }
 
 export const AUTOSAVE_CHOICES = [0, 10, 20, 60, 300];
@@ -243,7 +249,10 @@ export const DEFAULTS: Settings = {
 
 	askToSave: true,
 	askToDelete: true,
-	scrubSound: true
+	scrubSound: true,
+
+	checkUpdates: true,
+	skipVersion: ''
 };
 
 const HEX = /^#[0-9a-f]{6}$/i;
@@ -346,7 +355,10 @@ export function cleanSettings(raw: unknown, legacy: { onion?: unknown } = {}): S
 
 		askToSave: bool(o.askToSave, D.askToSave),
 		askToDelete: bool(o.askToDelete, D.askToDelete),
-		scrubSound: bool(o.scrubSound, D.scrubSound)
+		scrubSound: bool(o.scrubSound, D.scrubSound),
+
+		checkUpdates: bool(o.checkUpdates, D.checkUpdates),
+		skipVersion: typeof o.skipVersion === 'string' ? o.skipVersion.slice(0, 64) : ''
 	};
 }
 
