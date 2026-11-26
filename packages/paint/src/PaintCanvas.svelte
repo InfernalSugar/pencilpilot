@@ -6455,7 +6455,8 @@
 			<div
 				class="remote-cursor"
 				style="left: {(c.x / width) * 100}%; top: {(c.y / height) *
-					100}%; --c: {c.color}; transform: scale({1 / Math.max(0.01, fit * zoom)})"
+					100}%; --c: {c.color}; transform: scale({(flipped ? -1 : 1) / Math.max(0.01, zoom)}, {1 /
+					Math.max(0.01, zoom)})"
 				aria-hidden="true"
 			>
 				<svg viewBox="0 0 16 16" width="16" height="16">
