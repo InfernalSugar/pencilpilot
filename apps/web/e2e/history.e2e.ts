@@ -32,7 +32,7 @@ test('history: hand in, then keep drawing with the same layers, download, delete
 	await page.goto('/draw');
 	await expect(canvas(page)).toHaveAttribute('data-ready', 'true', { timeout: 15_000 });
 	await page.getByRole('tab', { name: /^Brushes/ }).click();
-	await page.getByRole('tab', { name: 'Markers' }).click();
+	await page.getByLabel('Brush category').selectOption({ label: 'Markers' });
 	await page.getByRole('button', { name: /^Marker fat/ }).click();
 	await page.getByRole('tab', { name: /^Layers/ }).click();
 	await line(page, 0.3);

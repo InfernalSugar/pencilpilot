@@ -135,28 +135,28 @@
 	<button type="button" class="adjust" onclick={() => create(selected)}>
 		{isCustom(selected) ? `Edit “${selectedName}”` : `Adjust “${selectedName}” and save as mine`}
 	</button>
-	<label class="search">
-		<span class="visually-hidden">Search brushes</span>
-		<input
-			type="search"
-			placeholder="Search {manifest.brushes.length} brushes…"
-			bind:value={query}
-		/>
-	</label>
-	{#if !query}
-		<div class="tabs" role="tablist" aria-label="Brush categories">
-			{#each tabs as t (t.id)}
-				<button
-					type="button"
-					role="tab"
-					aria-selected={category === t.id}
-					onclick={() => (category = t.id)}
-				>
-					{t.name}
-				</button>
-			{/each}
-		</div>
-	{/if}
+	<div class="find">
+		<label class="category">
+			<span class="visually-hidden">Brush category</span>
+			<select
+				bind:value={category}
+				disabled={!!query}
+				title={query ? 'Searching every category' : 'Brush category'}
+			>
+				{#each tabs as t (t.id)}
+					<option value={t.id}>{t.name}</option>
+				{/each}
+			</select>
+		</label>
+		<label class="search">
+			<span class="visually-hidden">Search brushes</span>
+			<input
+				type="search"
+				placeholder="Search {manifest.brushes.length} brushes…"
+				bind:value={query}
+			/>
+		</label>
+	</div>
 	{#if category === 'mine' && !query}
 		<ul class="grid" aria-label="My brushes">
 			{#each mine as b (b.id)}
@@ -327,22 +327,35 @@
 		border-color: var(--pp-ink);
 		outline: none;
 	}
-	.tabs {
+	/* the category and the search on one row (two in a narrow panel) */
+	.find {
 		display: flex;
 		flex-wrap: wrap;
-		gap: 6px;
+		gap: 8px;
 	}
-	.tabs button {
-		padding: 7px 12px;
-		border: 0;
-		border-radius: 999px;
+	.find .search {
+		flex: 1 1 150px;
+		min-width: 0;
+	}
+	.category select {
+		height: 100%;
+		min-height: 44px;
+		max-width: 100%;
+		padding: 0 12px;
+		border: 2px solid var(--pp-track);
+		border-radius: 14px;
 		background: var(--pp-ground);
-		font: 600 13px var(--pp-font-body);
+		color: var(--pp-ink);
+		font: 600 14px var(--pp-font-body);
 		cursor: pointer;
 	}
-	.tabs button[aria-selected='true'] {
-		background: var(--pp-ink);
-		color: var(--pp-on-ink);
+	.category select:focus {
+		border-color: var(--pp-ink);
+		outline: none;
+	}
+	.category select:disabled {
+		opacity: 0.5;
+		cursor: default;
 	}
 	.grid {
 		list-style: none;

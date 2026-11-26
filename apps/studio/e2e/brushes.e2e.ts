@@ -344,7 +344,7 @@ test('more brushes: the packs’ brushes under their own names, in their categor
 		['Pencils', 'Silverpoint'],
 		['Markers', 'Dark marker']
 	]) {
-		await page.getByRole('tab', { name: tab }).click();
+		await page.getByLabel('Brush category').selectOption({ label: tab });
 		const b = list.getByRole('button', { name, exact: true });
 		await b.click();
 		await expect(b).toHaveAttribute('aria-pressed', 'true');
@@ -389,7 +389,7 @@ const bands = (c: Locator, fx: number) =>
 
 test('Hair strands: one stroke draws several separate, parallel strands', async ({ page }) => {
 	await studio(page);
-	await page.getByRole('tab', { name: 'Inks & pens' }).click();
+	await page.getByLabel('Brush category').selectOption({ label: 'Inks & pens' });
 	const hair = page
 		.getByRole('list', { name: 'Brushes' })
 		.getByRole('button', { name: 'Hair strands', exact: true });
@@ -484,9 +484,9 @@ test('Animation brushes: their own tab first, each one draws, the tone line keep
 }) => {
 	await studio(page);
 	// the first category, after Favourites and My brushes
-	const tabs = page.getByRole('tablist', { name: 'Brush categories' }).getByRole('tab');
+	const tabs = page.getByLabel('Brush category').locator('option');
 	await expect(tabs.nth(2)).toHaveText('Animation');
-	await page.getByRole('tab', { name: 'Animation' }).click();
+	await page.getByLabel('Brush category').selectOption({ label: 'Animation' });
 	const list = page.getByRole('list', { name: 'Brushes' });
 	const names = [
 		'Rough pencil',
@@ -543,4 +543,22 @@ test('Animation brushes: their own tab first, each one draws, the tone line keep
 	await expect.poll(() => width(0.55)).toBeGreaterThan(0);
 	const ws = [await width(0.3), await width(0.55), await width(0.8)];
 	expect(Math.max(...ws) - Math.min(...ws), `widths ${ws}`).toBeLessThanOrEqual(1);
+});
+
+test('brush categories: one dropdown beside the search; the search looks in every category', async ({
+	page
+}) => {
+	await studio(page);
+	const category = page.getByLabel('Brush category');
+	const list = page.getByRole('list', { name: 'Brushes' });
+	await category.selectOption({ label: 'Erasers' });
+	await expect(list.getByRole('button', { name: 'Clean eraser', exact: true })).toBeVisible();
+	// a search finds brushes from any category; the dropdown waits
+	await page.getByRole('searchbox', { name: 'Search brushes' }).fill('nib');
+	await expect(category).toBeDisabled();
+	for (const n of ['G nib', 'Round nib', 'Rough nib'])
+		await expect(list.getByRole('button', { name: n, exact: true })).toBeVisible();
+	await page.getByRole('searchbox', { name: 'Search brushes' }).fill('');
+	await expect(category).toBeEnabled();
+	await expect(list.getByRole('button', { name: 'Clean eraser', exact: true })).toBeVisible();
 });

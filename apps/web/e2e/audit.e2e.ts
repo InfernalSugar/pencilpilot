@@ -126,13 +126,13 @@ test('phone draw page: canvas and tools on screen, panels in a bottom sheet', as
 	await expect(page.getByRole('button', { name: 'Brush (B)' })).toBeInViewport();
 	await expect(page.getByRole('button', { name: /Submit drawing/ })).toBeInViewport();
 	// the side panel is out of the way until asked for
-	await expect(page.getByRole('tab', { name: 'Markers' })).toBeHidden();
+	await expect(page.getByLabel('Brush category')).toBeHidden();
 	await page.getByRole('button', { name: 'Brushes', exact: true }).click();
-	await expect(page.getByRole('tab', { name: 'Markers' })).toBeVisible();
+	await expect(page.getByLabel('Brush category')).toBeVisible();
 	// the sheet's own close button (the backdrop's centre can be under a tall sheet)
 	await page
 		.getByRole('complementary', { name: 'Side panel' })
 		.getByRole('button', { name: 'Close the panel' })
 		.click();
-	await expect(page.getByRole('tab', { name: 'Markers' })).toBeHidden();
+	await expect(page.getByLabel('Brush category')).toBeHidden();
 });
