@@ -252,6 +252,118 @@ test('7. Ctrl+Alt+drag resizes the brush on the canvas', async ({ page }) => {
 	expect(await inkNear(page, 0.55, 0.5)).toBe(0); // it didn't paint
 });
 
+test('7b. Alt + right-drag resizes the brush too, without a menu', async ({ page }) => {
+	await ready(page);
+	await page.mouse.move(...(await at(page, 0.5, 0.5)));
+	const cur = page.getByTestId('brush-cursor');
+	const r0 = Number(await cur.getAttribute('data-r'));
+	await page.keyboard.down('Alt');
+	const [x, y] = await at(page, 0.5, 0.5);
+	await page.mouse.down({ button: 'right' });
+	await page.mouse.move(x + 120, y, { steps: 6 });
+	await page.mouse.up({ button: 'right' });
+	await page.keyboard.up('Alt');
+	await expect.poll(async () => Number(await cur.getAttribute('data-r'))).toBeGreaterThan(r0 * 2);
+	expect(await inkNear(page, 0.55, 0.5)).toBe(0);
+	// back left: smaller again
+	await page.keyboard.down('Alt');
+	await page.mouse.down({ button: 'right' });
+	await page.mouse.move(x - 100, y, { steps: 6 });
+	await page.mouse.up({ button: 'right' });
+	await page.keyboard.up('Alt');
+	await expect.poll(async () => Number(await cur.getAttribute('data-r'))).toBeLessThan(r0 * 2);
+});
+
+test('7c. a tool’s key pressed again goes back to the tool before it', async ({ page }) => {
+	await ready(page);
+	const brush = page.getByRole('button', { name: /^Brush \(B\)/ });
+	const eraser = page.getByRole('button', { name: /^Eraser \(E\)/ });
+	const fill = page.getByRole('button', { name: /^Fill \(G\)/ });
+	await expect(brush).toHaveAttribute('aria-pressed', 'true');
+	await page.keyboard.press('e');
+	await expect(eraser).toHaveAttribute('aria-pressed', 'true');
+	// E again: the brush, as before
+	await page.keyboard.press('e');
+	await expect(brush).toHaveAttribute('aria-pressed', 'true');
+	// from the eraser to fill and back: the eraser
+	await page.keyboard.press('e');
+	await page.keyboard.press('g');
+	await expect(fill).toHaveAttribute('aria-pressed', 'true');
+	await page.keyboard.press('g');
+	await expect(eraser).toHaveAttribute('aria-pressed', 'true');
+	// and the brush draws in its colour after the eraser (not erasing)
+	await page.keyboard.press('e');
+	await expect(brush).toHaveAttribute('aria-pressed', 'true');
+	await stroke(page, [
+		[0.3, 0.3],
+		[0.6, 0.3]
+	]);
+	await expect.poll(() => inkNear(page, 0.45, 0.3)).toBeGreaterThan(0);
+});
+
+test('7d. a pen reported as a mouse still draws with its pressure', async ({ page }) => {
+	await ready(page);
+	await page.keyboard.press(']');
+	await page.keyboard.press(']');
+	// WebKitGTK can report a tablet's pen as a mouse, with its real pressure
+	const line = (y: number, pressure: number) =>
+		canvas(page).evaluate(
+			(el, [fy, p]) => {
+				const r = el.getBoundingClientRect();
+				const ev = (type: string, fx: number) =>
+					el.dispatchEvent(
+						new PointerEvent(type, {
+							bubbles: true,
+							pointerId: 7,
+							pointerType: 'mouse',
+							isPrimary: true,
+							button: type === 'pointermove' ? -1 : 0,
+							buttons: type === 'pointerup' ? 0 : 1,
+							pressure: type === 'pointerup' ? 0 : p,
+							clientX: r.left + r.width * fx,
+							clientY: r.top + r.height * fy
+						})
+					);
+				ev('pointerdown', 0.2);
+				for (let i = 1; i <= 30; i++) ev('pointermove', 0.2 + (0.6 * i) / 30);
+				ev('pointerup', 0.8);
+			},
+			[y, pressure]
+		);
+	const inkAlong = (fy: number) =>
+		canvas(page).evaluate((el, fy) => {
+			const y0 = Math.round(el.height * (fy - 0.08));
+			const h = Math.round(el.height * 0.16);
+			const d = el.getContext('2d')!.getImageData(0, y0, el.width, h).data;
+			let n = 0;
+			for (let i = 0; i < d.length; i += 4) n += 255 - d[i];
+			return n;
+		}, fy);
+	await line(0.3, 0.15);
+	await line(0.7, 0.95);
+	await expect.poll(() => inkAlong(0.7)).toBeGreaterThan(0);
+	expect(await inkAlong(0.7)).toBeGreaterThan((await inkAlong(0.3)) * 1.5);
+});
+
+test('7e. the brush list shows each brush as a stroke drawn with it', async ({ page }) => {
+	await ready(page);
+	await page.getByRole('tab', { name: /^Brushes/ }).click();
+	const list = page.getByRole('list', { name: 'Brushes' });
+	const first = list.getByRole('listitem').first();
+	await expect(first.locator('canvas')).toBeVisible();
+	// drawn: some ink on it
+	await expect
+		.poll(() =>
+			first.locator('canvas').evaluate((el: HTMLCanvasElement) => {
+				const d = el.getContext('2d')!.getImageData(0, 0, el.width, el.height).data;
+				let n = 0;
+				for (let i = 3; i < d.length; i += 4) if (d[i] > 40) n++;
+				return n;
+			})
+		)
+		.toBeGreaterThan(50);
+});
+
 test('8. a snapped QuickShape stays editable: drag its end', async ({ page }) => {
 	await ready(page);
 	await page.mouse.move(...(await at(page, 0.2, 0.5)));

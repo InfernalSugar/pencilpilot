@@ -5,7 +5,7 @@
 	import { ToolOptions } from '@pencilpilot/paint/tool-options.svelte.js';
 	import { smoothTool, type SmoothTool } from '@pencilpilot/paint/stabilizer';
 	import Swatches from '@pencilpilot/paint/Swatches.svelte';
-	import { onMount } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import { warmGrader } from '#lib/grader.js';
 	import { beforeNavigate, goto, replaceState } from '$app/navigation';
 	import { page } from '$app/state';
@@ -749,6 +749,39 @@
 		};
 	});
 
+	/** what's in use: a tool, or 'eraser' (the brush erasing) */
+	const modeNow = (): string => (tool === 'brush' ? (eraser ? 'eraser' : 'brush') : tool);
+	/** where each tool was come to from (its key pressed again goes back there) */
+	const cameFrom = new Map<string, string>();
+	let modeIs = 'brush';
+	/** going back: the tool gone back to keeps where it was come to from */
+	let goingBack = false;
+	$effect(() => {
+		const m = modeNow();
+		untrack(() => {
+			if (m === modeIs) return;
+			if (!goingBack) cameFrom.set(m, modeIs);
+			goingBack = false;
+			modeIs = m;
+		});
+	});
+	function useMode(to: string) {
+		if (to === 'brush' || to === 'eraser') {
+			eraser = to === 'eraser';
+			tool = 'brush';
+		} else tool = to as Tool;
+	}
+	/** a tool's key: that tool; pressed again, back to the one it was come to from (not B) */
+	function toggleMode(m: string) {
+		// (the brush is home, where the others come back to: B is always the brush)
+		if (modeNow() !== m || m === 'brush') return useMode(m);
+		const back = cameFrom.get(m);
+		const to = back && back !== m ? back : 'brush';
+		if (to === m) return;
+		goingBack = true;
+		useMode(to);
+	}
+
 	function onkey(e: KeyboardEvent) {
 		const t = e.target as HTMLElement;
 		if (t.closest('input, textarea, select')) return;
@@ -765,19 +798,15 @@
 			e.preventDefault();
 			if (toolOpts.adjustOpen) toolOpts.closeAdjust(false);
 			canvas?.redo();
-		} else if (!mod && k === 'b') {
-			eraser = false;
-			tool = 'brush';
-		} else if (!mod && k === 'e') {
-			eraser = true;
-			tool = 'brush';
-		} else if (!mod && k === 'i') tool = tool === 'picker' ? 'brush' : 'picker';
-		else if (!mod && k === 'g') tool = tool === 'fill' ? 'brush' : 'fill';
-		else if (!mod && k === 'f') tool = tool === 'lasso-fill' ? 'brush' : 'lasso-fill';
-		else if (!mod && k === 'u') tool = tool === 'measure' ? 'brush' : 'measure';
-		else if (!mod && k === 's') tool = tool === 'smudge' ? 'brush' : 'smudge';
-		else if (!mod && k === 'j') tool = tool === 'clone' ? 'brush' : 'clone';
-		else if (!mod && k === 'p') tool = tool === 'pen' ? 'brush' : 'pen';
+		} else if (!mod && k === 'b') toggleMode('brush');
+		else if (!mod && k === 'e') toggleMode('eraser');
+		else if (!mod && k === 'i') toggleMode('picker');
+		else if (!mod && k === 'g') toggleMode('fill');
+		else if (!mod && k === 'f') toggleMode('lasso-fill');
+		else if (!mod && k === 'u') toggleMode('measure');
+		else if (!mod && k === 's') toggleMode('smudge');
+		else if (!mod && k === 'j') toggleMode('clone');
+		else if (!mod && k === 'p') toggleMode('pen');
 		else if (tool === 'pen' && e.key === 'Enter') {
 			if (canvas?.penStroke(toolOpts.penTaper)) canvas.penClear();
 		} else if (tool === 'pen' && e.key === 'Escape') canvas?.penClear();
@@ -790,13 +819,13 @@
 		} else if (mod && k === 'j') {
 			e.preventDefault();
 			if (canvas?.copySelection(false, false)) toolOpts.pasteCopied();
-		} else if (!mod && k === 'v') tool = tool === 'transform' ? 'brush' : 'transform';
-		else if (!mod && k === 'k') tool = tool === 'liquify' ? 'brush' : 'liquify';
+		} else if (!mod && k === 'v') toggleMode('transform');
+		else if (!mod && k === 'k') toggleMode('liquify');
 		else if (tool === 'transform' && e.key === 'Enter') canvas?.transformCommit();
 		else if (tool === 'transform' && e.key === 'Escape') canvas?.transformCancel();
 		else if (!mod && (k === 'm' || k === 'l' || k === 'w')) {
 			const t = SELECT_TOOLS.find((x) => x.key === k)!.id as Tool;
-			tool = tool === t ? 'brush' : t;
+			toggleMode(t);
 		} else if (mod && k === 'a') {
 			e.preventDefault();
 			canvas?.selectAll();

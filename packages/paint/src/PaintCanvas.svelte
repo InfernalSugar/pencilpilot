@@ -3796,13 +3796,29 @@
 		}
 	}
 
+	/**
+	 * A "mouse" whose pressure changes is a pen: WebKitGTK (the app on Linux) can report
+	 * a tablet's pen as a mouse, with its real pressure. A real mouse always gives 0.5
+	 * (or 0), so it never counts.
+	 */
+	let mouseIsPen = false;
+	/** a point's pressure, 0–1, through the pressure curve (0.5 for a mouse or with it off) */
+	function pressureOf(e: PointerEvent): number {
+		if (!penPressure) return 0.5;
+		if (e.pointerType === 'mouse' && !mouseIsPen) {
+			if (e.pressure > 0 && e.pressure !== 0.5) mouseIsPen = true;
+			else return 0.5;
+		}
+		return applyCurve(e.pressure);
+	}
+
 	/** Draw the straight part of a Shift+click stroke: from the last stroke's end to `e`. */
 	function lineFromLast(e: PointerEvent) {
 		if (!paint || !brush || !current || !lastEnd) return;
 		// (with the grid on, the line ends on a grid crossing)
 		const [bx, by] = snapToGrid(guides, toCanvas(e.clientX, e.clientY));
 		// a pen's first contact is often very light: keep the last stroke's pressure then
-		const raw = e.pointerType === 'mouse' || !penPressure ? 0.5 : applyCurve(e.pressure);
+		const raw = pressureOf(e);
 		const pb = raw < 0.05 ? lastEnd.p : raw;
 		const len = Math.hypot(bx - lastEnd.x, by - lastEnd.y);
 		const n = Math.max(1, Math.ceil(len / 2));
@@ -3839,7 +3855,7 @@
 		const raw: RawPoint = {
 			x: cx,
 			y: cy,
-			p: e.pointerType === 'mouse' || !penPressure ? 0.5 : applyCurve(e.pressure),
+			p: pressureOf(e),
 			tx: penPressure ? (e.tiltX || 0) / 90 : 0,
 			ty: penPressure ? (e.tiltY || 0) / 90 : 0,
 			time: e.timeStamp
@@ -3963,6 +3979,18 @@
 		}
 		if (e.pointerType === 'mouse' && e.button === 1) return startPan(e);
 		if (spaceHeld) return startPan(e);
+		// Alt + right-drag: resize the brush (or the eraser), as Ctrl+Alt + drag does
+		if (e.button === 2 && e.altKey && tool === 'brush' && e.pointerType !== 'touch') {
+			e.preventDefault();
+			capture(e);
+			sizeDrag = {
+				id: e.pointerId,
+				x: e.clientX,
+				size: chosenSize,
+				at: toCanvas(e.clientX, e.clientY)
+			};
+			return;
+		}
 		if (e.pointerType === 'mouse' && e.button !== 0) return;
 		// Ctrl (⌘) + drag moves the view, like Space + drag (Ctrl+Alt still sizes the brush,
 		// and the Transform tool keeps Ctrl + drag for distorting)
@@ -5829,6 +5857,8 @@
 	ondragover={dragOver}
 	ondrop={drop}
 	oncontextmenu={(e) => {
+		// (Alt + right-drag sizes the brush: no menu)
+		if (e.altKey || sizeDrag) return e.preventDefault();
 		if (!onquickmenu) return;
 		e.preventDefault();
 		// a long press with a finger started a stroke: it was for the menu instead

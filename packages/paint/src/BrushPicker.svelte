@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { untrack } from 'svelte';
-	import { previewUrl, type BrushManifest } from './brushes';
+	import { type BrushManifest } from './brushes';
+	import PackBrushThumb from './PackBrushThumb.svelte';
 	import BrushCreator from './BrushCreator.svelte';
 	import MyBrushThumb from './MyBrushThumb.svelte';
 	import PenFeel from './PenFeel.svelte';
@@ -203,9 +204,7 @@
 						title="{b.name} · {b.author}"
 						onclick={() => (selected = b.id)}
 					>
-						{#if b.preview}
-							<img src={previewUrl(b.id)} alt="" loading="lazy" width="64" height="64" />
-						{/if}
+						<PackBrushThumb id={b.id} picture={b.preview} />
 						<span class="name">{b.name}</span>
 					</button>
 					<button
@@ -389,17 +388,6 @@
 		background: var(--pp-surface);
 	}
 	/* dark interface: the previews keep their white paper */
-	:global([data-theme='dark']) .brush img {
-		mix-blend-mode: normal;
-		background: #fff;
-		border-radius: 10px;
-	}
-	.brush img {
-		width: 56px;
-		height: 56px;
-		object-fit: contain;
-		mix-blend-mode: multiply;
-	}
 	.name {
 		text-align: center;
 		overflow: hidden;
