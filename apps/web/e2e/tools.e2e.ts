@@ -1046,6 +1046,47 @@ test('layer mask: black on the mask hides, undo and delete bring it back', async
 	await expect.poll(() => inkCols(page, 0.15, 0.35)).toBeGreaterThan(left * 0.9);
 });
 
+test('layers move by pressing and dragging them; a tap or a small wobble only picks', async ({
+	page
+}) => {
+	await ready(page);
+	const layers = page.getByRole('list', { name: 'Layers, top to bottom' });
+	await page.getByRole('button', { name: 'New layer' }).click();
+	await page.getByRole('button', { name: 'New layer' }).click();
+	const names = async () =>
+		(await layers.getByRole('listitem').allInnerTexts())
+			.map((t) => t.match(/Layer \d/)?.[0])
+			.filter(Boolean);
+	await expect.poll(names).toEqual(['Layer 3', 'Layer 2', 'Layer 1']);
+	const row = (n: string) => layers.getByRole('listitem').filter({ hasText: n });
+	const mid = async (n: string) => {
+		const b = (await row(n).boundingBox())!;
+		return [b.x + b.width * 0.6, b.y + b.height / 2] as const;
+	};
+	// a press that wobbles a little (a pen) picks the layer, nothing moves
+	const [x2, y2] = await mid('Layer 2');
+	await page.mouse.move(x2, y2);
+	await page.mouse.down();
+	await page.mouse.move(x2 + 3, y2 + 2, { steps: 3 });
+	await page.mouse.up();
+	await expect(row('Layer 2')).toHaveClass(/active/);
+	expect(await names()).toEqual(['Layer 3', 'Layer 2', 'Layer 1']);
+	// press Layer 3 and drag it onto Layer 1: it goes just above Layer 1
+	const [x3, y3] = await mid('Layer 3');
+	const [, y1] = await mid('Layer 1');
+	await page.mouse.move(x3, y3);
+	await page.mouse.down();
+	await page.mouse.move(x3, y3 + 10, { steps: 3 });
+	await page.mouse.move(x3, y1 - 6, { steps: 8 }); // Layer 1's top half: just above it
+	await page.mouse.up();
+	await expect.poll(names).toEqual(['Layer 2', 'Layer 3', 'Layer 1']);
+	// the drop didn't count as a click on the row it ended on (Layer 2 is still picked)
+	await expect(row('Layer 2')).toHaveClass(/active/);
+	// and it undoes
+	await page.keyboard.press('Control+z');
+	await expect.poll(names).toEqual(['Layer 3', 'Layer 2', 'Layer 1']);
+});
+
 test('layer groups: group, hide, collapse, merge, undo, ungroup', async ({ page }) => {
 	await ready(page);
 	for (let i = 0; i < 3; i++) await page.keyboard.press(']');
