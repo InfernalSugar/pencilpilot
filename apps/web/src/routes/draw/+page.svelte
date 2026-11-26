@@ -1335,10 +1335,7 @@
 	{/snippet}
 	{#snippet options()}
 		<span class="brush-name">{brushName}</span>
-		<Swatches
-			bind:color
-			picker
-		/>
+		<Swatches bind:color picker />
 		{#if smoothKind}
 			<label class="slider">
 				<span>Smoothing <b>{Math.round(toolOpts.smoothing[smoothKind] * 100)}%</b></span>
