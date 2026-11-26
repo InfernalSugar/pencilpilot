@@ -349,6 +349,51 @@ test('ColorDrop: a dropped colour fills, and its spread can be changed', async (
 	await expect(chip).toBeHidden();
 });
 
+test('a swatch: a wobbly tap picks it; press, hold and drag drops it on the drawing', async ({
+	page
+}) => {
+	await ready(page);
+	await thick(page, 2);
+	await stroke(page, [
+		[0.3, 0.3],
+		[0.7, 0.3],
+		[0.7, 0.7],
+		[0.3, 0.7],
+		[0.3, 0.3]
+	]);
+	const blue = page.getByRole('radio', { name: 'Colour #3d6bff' });
+	const red = page.getByRole('radio', { name: 'Colour #e8492f' });
+	const b = (await red.boundingBox())!;
+	const [cx, cy] = [b.x + b.width / 2, b.y + b.height / 2];
+	// a pen tap that slides a few pixels: the colour is chosen, nothing is dropped
+	await page.mouse.move(cx, cy);
+	await page.mouse.down();
+	await page.mouse.move(cx + 6, cy + 4, { steps: 3 });
+	await page.mouse.up();
+	await expect(red).toHaveAttribute('aria-checked', 'true');
+	expect((await pixel(page, 0.5, 0.5))[2]).toBeGreaterThan(200);
+	// a quick drag (no hold) onto the drawing drops nothing
+	const [x, y] = await at(page, 0.5, 0.5);
+	const bb = (await blue.boundingBox())!;
+	await page.mouse.move(bb.x + bb.width / 2, bb.y + bb.height / 2);
+	await page.mouse.down();
+	await page.mouse.move(x, y, { steps: 8 });
+	await page.mouse.up();
+	await page.waitForTimeout(200);
+	expect((await pixel(page, 0.5, 0.5))[2]).toBeGreaterThan(200);
+	await expect(page.getByTestId('colordrop-threshold')).toBeHidden();
+	// press, hold, then drag: it fills where it's let go
+	await page.mouse.move(bb.x + bb.width / 2, bb.y + bb.height / 2);
+	await page.mouse.down();
+	await page.waitForTimeout(550);
+	await page.mouse.move(x, y, { steps: 8 });
+	await page.mouse.up();
+	await expect.poll(async () => (await pixel(page, 0.5, 0.5))[0]).toBeLessThan(120);
+	await expect(page.getByTestId('colordrop-threshold')).toBeVisible();
+	// a drop isn't a pick: the chosen colour stays red
+	await expect(red).toHaveAttribute('aria-checked', 'true');
+});
+
 test('a dropped picture comes in ready to place', async ({ page }) => {
 	await ready(page);
 	const [x, y] = await at(page, 0.5, 0.5);

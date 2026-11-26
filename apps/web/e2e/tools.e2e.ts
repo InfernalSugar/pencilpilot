@@ -222,12 +222,15 @@ test('fill: fills inside grainy pencil lines without leaking, undoable, and Colo
 	await page.getByRole('button', { name: /Undo/ }).click();
 	await expect.poll(async () => (await pixel(page, 0.45, 0.5))[0]).toBe(255);
 
-	// ColorDrop: drag a swatch onto the square
+	// ColorDrop: press and hold a swatch, then drag it onto the square
 	await page.keyboard.press('b');
 	b = await box(page);
-	await page
-		.getByRole('radio', { name: 'Colour #1f9d74' })
-		.dragTo(canvas(page), { targetPosition: { x: b.width * 0.45, y: b.height * 0.5 } });
+	const sw = (await page.getByRole('radio', { name: 'Colour #1f9d74' }).boundingBox())!;
+	await page.mouse.move(sw.x + sw.width / 2, sw.y + sw.height / 2);
+	await page.mouse.down();
+	await page.waitForTimeout(550);
+	await page.mouse.move(b.x + b.width * 0.45, b.y + b.height * 0.5, { steps: 8 });
+	await page.mouse.up();
 	await expect.poll(async () => (await pixel(page, 0.45, 0.5))[1]).toBeGreaterThan(120);
 	expect((await pixel(page, 0.45, 0.5))[0]).toBeLessThan(100);
 });
