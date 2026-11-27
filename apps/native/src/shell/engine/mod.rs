@@ -142,6 +142,21 @@ impl Engine {
         true
     }
 
+    /// Pixels that aren't on any layer yet (a paste) float at `at` (document pixels): the
+    /// GPU shows them moving as lifted ones; whoever floated them draws them in (the
+    /// painter has no transform for them, so [`Engine::float_end`] would only drop them).
+    pub fn float_pixels(&mut self, rgba: Vec<u8>, w: u32, h: u32, at: (f32, f32)) {
+        self.lifts += 1;
+        self.float = Some(Float {
+            rgba,
+            w,
+            h,
+            at,
+            m: IDENTITY,
+            lift: self.lifts,
+        });
+    }
+
     /// Moves the lifted pixels to `m` (see [`Float::m`]): nothing is redrawn but the screen.
     pub fn float_move(&mut self, m: [f32; 6]) {
         if let Some(f) = &mut self.float {
