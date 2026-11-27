@@ -817,8 +817,7 @@ fn idle(e: &Engine, s: &State) -> bool {
         && f.seen == (s.frame, s.active_layer, e.painter.layers().len())
         && history(e) == f.history
         && f.last.len() == s.layers.len()
-        && f
-            .last
+        && f.last
             .iter()
             .zip(&s.layers)
             .zip(&s.sheet.tracks)

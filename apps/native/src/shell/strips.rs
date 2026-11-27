@@ -589,7 +589,10 @@ fn thumb(f: &mut Frame, t: Option<&Thumb>, d: u32, r: Rect, radius: f32) {
     let k = (r.w / t.w as f32).min(r.h / t.h as f32);
     let (w, h) = (k * t.w as f32, k * t.h as f32);
     let at = Rect::new(r.x + (r.w - w) / 2.0, r.y + (r.h - h) / 2.0, w, h);
-    f.picture(&format!("strips/thumb/{d}"), t.w, t.h, &t.px, at);
+    // (in the drawing run only, as every quad here)
+    if drawing() {
+        f.picture(&format!("strips/thumb/{d}"), t.w, t.h, &t.px, at);
+    }
 }
 
 // ---- Animate: the timeline ----
@@ -2522,10 +2525,10 @@ mod tests {
         assert_eq!(h.s.sheet.thumbs.len(), 14, "a thumbnail per drawing");
         let quads = h.ui.shown().len();
         h.save("strips-draw-thumbs");
-        // the same strip without them has far fewer quads (the pictures are drawn)
+        // one picture (one quad) for each of Clean's six drawings
         h.s.sheet.thumbs.clear();
         h.pass();
-        assert!(h.ui.shown().len() + 50 < quads);
+        assert_eq!(h.ui.shown().len() + 6, quads);
         // a click on drawing 2: its first frame
         h.click("strips/drawing/1");
         run(&mut h, &mut e);
