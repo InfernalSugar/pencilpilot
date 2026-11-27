@@ -42,6 +42,7 @@ describe('settings', () => {
 		const good = {
 			...DEFAULTS,
 			theme: 'system' as const,
+			uiLayout: 'classic' as const,
 			layout: { ...DEFAULTS.layout, dock: false, bottomHeight: 300 },
 			fingers: 'move' as const,
 			autosaveSeconds: 60,
@@ -53,6 +54,7 @@ describe('settings', () => {
 	it('start every preference as the app always worked', () => {
 		const d = cleanSettings({});
 		expect(d).toMatchObject({
+			uiLayout: 'new',
 			uiScale: 1,
 			accent: '',
 			leftHanded: false,
@@ -82,6 +84,7 @@ describe('settings', () => {
 
 	it('clean the preferences: ranges clamped, unknown choices and bad colours dropped', () => {
 		const s = cleanSettings({
+			uiLayout: 'sideways',
 			uiScale: 9,
 			accent: 'red',
 			surround: '#123456',
@@ -106,6 +109,7 @@ describe('settings', () => {
 			askToSave: 'no'
 		});
 		expect(s).toMatchObject({
+			uiLayout: 'new',
 			uiScale: 1.5,
 			accent: '',
 			surround: '#123456',

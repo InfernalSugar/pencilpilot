@@ -85,8 +85,17 @@ export const BUILT_IN: readonly Workspace[] = [
 		layout: { ...base, bottom: false },
 		tab: 'colour',
 		tools: ['brush', 'eraser', 'picker', 'fill', 'lasso-fill', 'select-wand', 'gradient', 'smudge']
+	},
+	{
+		id: 'review',
+		name: 'Review',
+		layout: { ...base, options: false, context: false, bottom: false, dock: false, rail: false },
+		tab: 'layers',
+		tools: ['brush', 'eraser', 'picker']
 	}
 ];
+/** the workspaces the app came with before Review: settings saved then have seen only these */
+const FIRST_BUILT_IN = ['everything', 'draw', 'animate', 'colour'];
 
 export const isBuiltIn = (id: string) => BUILT_IN.some((w) => w.id === id);
 
@@ -113,8 +122,9 @@ export function cleanWorkspaces(
 	raw: unknown,
 	current: unknown,
 	layout: StudioLayout,
-	cleanLayout: (v: unknown, d: StudioLayout) => StudioLayout
-): { workspaces: Workspace[]; workspace: string } {
+	cleanLayout: (v: unknown, d: StudioLayout) => StudioLayout,
+	builtInsSeen: unknown = undefined
+): { workspaces: Workspace[]; workspace: string; builtInsSeen: string[] } {
 	const list: Workspace[] = [];
 	const seen = new Set<string>();
 	for (const v of Array.isArray(raw) ? raw : []) {
@@ -136,10 +146,16 @@ export function cleanWorkspaces(
 	if (!list.length) {
 		list.push(...BUILT_IN.map(copyOf));
 		list[0].layout = { ...layout };
+	} else {
+		// a built-in workspace that came with a later version is added once (deleted, it stays so)
+		const had = Array.isArray(builtInsSeen) ? builtInsSeen : FIRST_BUILT_IN;
+		for (const w of BUILT_IN)
+			if (!had.includes(w.id) && !list.some((x) => x.id === w.id) && list.length < MAX_WORKSPACES)
+				list.push(copyOf(w));
 	}
 	const workspace =
 		typeof current === 'string' && list.some((w) => w.id === current) ? current : list[0].id;
-	return { workspaces: list, workspace };
+	return { workspaces: list, workspace, builtInsSeen: BUILT_IN.map((w) => w.id) };
 }
 
 /** a new id that isn't taken */

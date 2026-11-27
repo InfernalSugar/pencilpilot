@@ -67,7 +67,8 @@
 		showOpacity = true,
 		keys = {},
 		maxSize = 6.06,
-		brushPx = 0
+		brushPx = 0,
+		ontoolmenu
 	}: {
 		tools?: ToolId[];
 		/** the active tool (the canvas's tool name; 'brush' covers the eraser too) */
@@ -85,6 +86,8 @@
 		maxSize?: number;
 		/** the brush's diameter in pixels at its own size: the size shows in pixels (0: as %) */
 		brushPx?: number;
+		/** a tool right-clicked (none: the browser's own menu) */
+		ontoolmenu?: (e: MouseEvent, tool: ToolId) => void;
 	} = $props();
 
 	/** the size as people read it: pixels across the canvas (a percentage until known) */
@@ -110,12 +113,24 @@
 		t.label.replace(/\([A-Z]\)$/, `(${key(t.id, t.key.toUpperCase())})`);
 </script>
 
-<div class="rail-inner" role="toolbar" aria-label="Drawing tools">
+<div
+	class="rail-inner"
+	role="toolbar"
+	tabindex="-1"
+	aria-label="Drawing tools"
+	oncontextmenu={(e) => {
+		const id = (e.target as Element | null)?.closest<HTMLElement>('[data-tool]')?.dataset.tool;
+		if (!ontoolmenu || !id) return;
+		e.preventDefault();
+		ontoolmenu(e, id as ToolId);
+	}}
+>
 	<div class="rail-tools" class:single={tools.length <= 4}>
 		{#if has('brush')}
 			<button
 				type="button"
 				class="tool"
+				data-tool="brush"
 				aria-pressed={!eraser && tool === 'brush'}
 				aria-label="Brush ({key('brush', 'B')})"
 				title="Brush ({key('brush', 'B')})"
@@ -143,6 +158,7 @@
 			<button
 				type="button"
 				class="tool"
+				data-tool="eraser"
 				aria-pressed={eraser && tool === 'brush'}
 				aria-label="Eraser ({key('eraser', 'E')})"
 				title="Eraser ({key('eraser', 'E')}) — uses the current brush shape"
@@ -170,6 +186,7 @@
 			<button
 				type="button"
 				class="tool"
+				data-tool="picker"
 				aria-pressed={tool === 'picker'}
 				aria-label="Eyedropper ({key('picker', 'I')})"
 				title="Eyedropper ({key(
@@ -199,6 +216,7 @@
 			<button
 				type="button"
 				class="tool"
+				data-tool="fill"
 				aria-pressed={tool === 'fill'}
 				aria-label="Fill ({key('fill', 'G')})"
 				title="Fill ({key(
@@ -228,6 +246,7 @@
 			<button
 				type="button"
 				class="tool"
+				data-tool="lasso-fill"
 				aria-pressed={tool === 'lasso-fill'}
 				aria-label="Lasso fill ({key('lasso-fill', 'F')})"
 				title="Lasso fill ({key(
@@ -259,6 +278,7 @@
 			<button
 				type="button"
 				class="tool"
+				data-tool="smudge"
 				aria-pressed={tool === 'smudge'}
 				aria-label="Smudge ({key('smudge', 'S')})"
 				title="Smudge ({key('smudge', 'S')}): push and blend the paint with the current brush"
@@ -285,6 +305,7 @@
 			<button
 				type="button"
 				class="tool"
+				data-tool="clone"
 				aria-pressed={tool === 'clone'}
 				aria-label="Clone ({key('clone', 'J')})"
 				title="Clone ({key(
@@ -312,6 +333,7 @@
 			<button
 				type="button"
 				class="tool"
+				data-tool="pen"
 				aria-pressed={tool === 'pen'}
 				aria-label="Pen path ({key('pen', 'P')})"
 				title="Pen path ({key(
@@ -339,6 +361,7 @@
 			<button
 				type="button"
 				class="tool"
+				data-tool="text"
 				aria-pressed={tool === 'text'}
 				aria-label="Text ({key('text', 'T')})"
 				title="Text ({key('text', 'T')}): click to add text, or on a text to change it"
@@ -363,6 +386,7 @@
 			<button
 				type="button"
 				class="tool"
+				data-tool="lines"
 				aria-pressed={tool === 'lines'}
 				aria-label="Select line ({key('lines', 'K')})"
 				title="Select line ({key(
@@ -394,6 +418,7 @@
 			<button
 				type="button"
 				class="tool"
+				data-tool="measure"
 				aria-pressed={tool === 'measure'}
 				aria-label="Measure ({key('measure', 'U')})"
 				title="Measure ({key(
@@ -422,6 +447,7 @@
 				<button
 					type="button"
 					class="tool"
+					data-tool={t.id}
 					aria-pressed={tool === t.id}
 					aria-label={selectLabel(t)}
 					title="{selectLabel(t)}. Shift adds, Alt subtracts."
@@ -448,6 +474,7 @@
 			<button
 				type="button"
 				class="tool"
+				data-tool="transform"
 				aria-pressed={tool === 'transform'}
 				aria-label="Transform ({key('transform', 'V')})"
 				title="Transform ({key(
@@ -477,6 +504,7 @@
 			<button
 				type="button"
 				class="tool"
+				data-tool="liquify"
 				aria-pressed={tool === 'liquify'}
 				aria-label="Liquify ({key('liquify', 'K')})"
 				title="Liquify ({key('liquify', 'K')}): push parts of the layer into place"
@@ -501,6 +529,7 @@
 			<button
 				type="button"
 				class="tool"
+				data-tool="gradient"
 				aria-pressed={tool === 'gradient'}
 				aria-label="Gradient"
 				title="Gradient: drag across the canvas"
@@ -530,6 +559,7 @@
 			<button
 				type="button"
 				class="tool"
+				data-tool="adjust"
 				aria-pressed={adjustOpen}
 				aria-expanded={adjustOpen}
 				aria-label="Adjust"
