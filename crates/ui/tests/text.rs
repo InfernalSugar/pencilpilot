@@ -20,7 +20,15 @@ fn text_in_the_designs_fonts_and_others() {
     let (w, h) = (640u32, 360u32);
     let frame = DmabufImage::new(&gpu, w, h, &[]).unwrap();
     let mut r = Renderer2d::new(&gpu).unwrap();
+    let t0 = std::time::Instant::now();
     let mut text = Text::new();
+    let ready = t0.elapsed();
+    text.wait_for_fonts();
+    eprintln!(
+        "the design's fonts ready in {ready:?}, the system's in {:?}",
+        t0.elapsed()
+    );
+    assert!(ready.as_millis() < 100, "the design's fonts take {ready:?}");
     let title = text.lay_out(&mut r, "Animate", &Style::display(44.0, INK), None);
     let regular = text.lay_out(&mut r, "Cut 1 · 24 frames", &Style::body(18.0, INK), None);
     let bold = text.lay_out(
