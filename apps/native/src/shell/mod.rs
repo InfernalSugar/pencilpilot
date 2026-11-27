@@ -161,6 +161,8 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut canvas: Option<Canvas> = None;
     let mut recs: Vec<FrameRec> = Vec::new();
+    // the moving pixels' picture, and which lift it holds
+    let mut float_tex: Option<(Canvas, u64)> = None;
     let (mut oldest_input, mut events): (Option<(u32, u64)>, u32) = (None, 0);
     let mut eng: Option<engine::Engine> = None;
     let mut mark = 0;
@@ -380,6 +382,29 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
                 _ => {}
             }
         }
+        // pixels being moved: the GPU shows them where they are now
+        if let Some(e) = &eng {
+            let now = e.float.as_ref().map(|f| crate::shell::view::Moving {
+                at: f.at,
+                w: f.w,
+                h: f.h,
+                m: f.m,
+            });
+            if now != s.moving {
+                s.moving = now;
+                dirty = true;
+            }
+            match (&e.float, &float_tex) {
+                (Some(f), Some((_, lift))) if *lift == f.lift => {}
+                (Some(f), _) => {
+                    let mut c = Canvas::new(&gpu, f.w.max(1), f.h.max(1))?;
+                    c.upload_all(&f.rgba);
+                    float_tex = Some((c, f.lift));
+                }
+                (None, Some(_)) => float_tex = None,
+                (None, None) => {}
+            }
+        }
         // time: playback
         if let Some(e) = &mut eng
             && e.tick(&mut s, std::time::Instant::now())
@@ -451,7 +476,14 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
         }
         canvas_dirty = false;
         let img = win.acquire(&gpu)?;
-        r.draw_layered(&gpu, img, ui.theme.paper, ui.shown(), canvas.as_mut())?;
+        r.draw_canvases(
+            &gpu,
+            img,
+            ui.theme.paper,
+            ui.shown(),
+            canvas.as_mut(),
+            float_tex.as_mut().map(|(c, _)| c),
+        )?;
         let frame = win.present()?;
         drawn += 1;
         recs.push(FrameRec {

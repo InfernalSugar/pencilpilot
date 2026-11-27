@@ -278,3 +278,70 @@ fn the_canvas_shows_through_a_view() {
         "mirrored: the left half shows on the right"
     );
 }
+
+#[test]
+fn a_second_picture_moves_over_the_canvas() {
+    use pencilpilot_gpu::Canvas;
+    let Some(gpu) = gpu() else { return };
+    let (w, h) = (100u32, 50u32);
+    let frame = DmabufImage::new(&gpu, w, h, &[]).unwrap();
+    let mut r = Renderer2d::new(&gpu).unwrap();
+    // the canvas: ink all over
+    let mut canvas = Canvas::new(&gpu, w, h).unwrap();
+    canvas.upload_all(
+        &(0..w * h)
+            .flat_map(|_| [22, 22, 26, 255])
+            .collect::<Vec<u8>>(),
+    );
+    // the second picture: 10×10, coral, its right half see-through
+    let px: Vec<u8> = (0..100u32)
+        .flat_map(|i| {
+            if i % 10 < 5 {
+                [232, 73, 47, 255]
+            } else {
+                [0, 0, 0, 0]
+            }
+        })
+        .collect();
+    let mut second = Canvas::new(&gpu, 10, 10).unwrap();
+    second.upload_all(&px);
+    let quads = [
+        Quad::canvas(
+            [0.0, 0.0, 100.0, 50.0],
+            [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            [100.0, 50.0],
+            [0.0; 4],
+            true,
+        ),
+        // moved to (60, 20)
+        Quad::canvas(
+            [0.0, 0.0, 100.0, 50.0],
+            [1.0, 0.0, 0.0, 1.0, -60.0, -20.0],
+            [10.0, 10.0],
+            [0.0; 4],
+            true,
+        )
+        .second(),
+    ];
+    r.draw_canvases(
+        &gpu,
+        &frame,
+        PAPER,
+        &quads,
+        Some(&mut canvas),
+        Some(&mut second),
+    )
+    .unwrap();
+    let out = gpu.read_back(&frame).unwrap();
+    let at = |x: u32, y: u32| {
+        let i = ((y * w + x) * 4) as usize;
+        [out[i + 2], out[i + 1], out[i]]
+    };
+    assert_eq!(at(62, 25), [232, 73, 47], "the moved picture");
+    assert_eq!(
+        at(67, 25),
+        [22, 22, 26],
+        "its see-through half shows the canvas"
+    );
+    assert_eq!(at(30, 25), [22, 22, 26], "the canvas elsewhere");
+}
