@@ -17,6 +17,8 @@ use crate::Presented;
 const SLACK_START: u64 = 1_000_000;
 const SLACK_MIN: u64 = 1_000_000;
 const WORK_KEPT: usize = 64;
+/// refreshes without a frame shown after which the next is drawn at once
+const PAUSE_REFRESHES: u64 = 2;
 /// frames on time before the slack tightens by 0.1 ms
 const ON_TIME_TO_TIGHTEN: u32 = 50;
 /// a rest from drawing late, after `MISSES_TO_REST` misses within `MISS_WINDOW`
@@ -100,9 +102,9 @@ impl Pacer {
             return None;
         }
         let p = p as u64;
-        // after a pause the refreshes' rhythm is stale (and the compositor may be idle):
-        // draw now, and plan again from that frame
-        if now.saturating_sub(last) > 8 * p {
+        // after a pause (even a short one: between two strokes) the compositor has gone idle
+        // and its rhythm is stale: drawing late would miss, so draw now and plan from there
+        if now.saturating_sub(last) > PAUSE_REFRESHES * p {
             return None;
         }
         let margin = self.margin_ns();
@@ -224,8 +226,9 @@ mod tests {
         // too close to that refresh: the one after
         let plan = p.plan(1_004_000_000).unwrap();
         assert_eq!(plan.target, 1_000_000_000 + 2 * P);
-        // after a pause: at once
+        // after a pause, even a short one: at once
         assert_eq!(p.plan(1_100_000_000), None);
+        assert_eq!(p.plan(1_000_000_000 + 3 * P), None);
     }
 
     #[test]

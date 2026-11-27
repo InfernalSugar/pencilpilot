@@ -180,10 +180,19 @@ Each step is its own PR, with tests that need no window on the screen.
     itself is 7–8 ms (25 ms before): tile copies and the lifted pixels' conversion on every core,
     and one copy fewer. What the interface's actions change shows in the same frame (a second
     pass after them).
-  - **Pen to screen:** the pacer's slack starts at 1 ms and tightens every 50 frames on time.
-    A continuous stroke: p99 9.6–9.9 ms at 165 Hz (budget 10.06), 19.6–20.6 ms at 60 Hz (budget
-    20.67), from the compositor's event time. Strokes with pauses: 10.7 ms and 20.6 ms; a run with
-    one missed frame reaches about 24 ms at 60 Hz.
+  - **Pen to screen:** within budget in every run (three, release, headless mutter), p99 from
+    the compositor's event time:
+
+    | | Strokes with pauses | One continuous stroke | Budget |
+    |---|---|---|---|
+    | 165 Hz | 8.5–9.3 ms (p50 from receipt 6.5–7.0) | 8.4–9.0 ms | 10.06 ms |
+    | 60 Hz | 19.1–20.1 ms | 19.9–20.2 ms | 20.67 ms |
+
+    What it took: a stroke's samples that come while its frame is being made go in that frame
+    (input is read again just before drawing; they waited a whole refresh before); after a pause
+    of over two refreshes the next frame is drawn at once (the compositor has gone idle, and a
+    late frame then missed, which also widened the margin for every frame after); the pacer's
+    slack starts at 1 ms and tightens every 50 frames on time.
   - **Tried and left out:** a real-time priority for the drawing thread (directly or through
     rtkit). Under load it made no consistent difference in three runs against three, so it isn't
     worth its risks.
