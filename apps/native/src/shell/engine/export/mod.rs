@@ -416,8 +416,8 @@ fn start(e: &mut Engine, s: &mut State, path: PathBuf) {
         total: plan.total(),
         layers,
         runs: runs.clone(),
-        // (x264's frame threads at 4K take 2 GB)
-        lean: out.0 as u64 * out.1 as u64 > 1920 * 1080,
+        // (x264 with frame threads takes 1.4 GB at 1080p, 2 GB at 4K; sliced: 0.45, 1.2)
+        lean: true,
     };
     let total = job.total;
     let (tx, shared, done) = worker::spawn(job);
