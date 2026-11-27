@@ -3387,6 +3387,7 @@ dependencies = [
  "gif",
  "hokusai",
  "libc",
+ "miniz_oxide 0.8.9",
  "pencilpilot-brush",
  "pencilpilot-export",
  "pencilpilot-gpu",

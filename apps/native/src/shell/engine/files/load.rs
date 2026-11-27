@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Seek};
 use std::path::Path;
 
-use brush::{Blend, DecodedTile, Painter};
+use brush::{Blend, Painter};
 use ppstudio::{Cut, Exposure, Manifest, Opened, Scene};
 use rayon::prelude::*;
 
@@ -186,70 +186,54 @@ pub fn open(e: &mut Engine, s: &mut State, path: &Path) -> Result<(Doc, OpenTime
         }
     }
 
-    // ---- the tiles, read and decoded on every core, each straight into its drawing (no
-    // copies: a 4K project's tiles are hundreds of MB in the painter) ----
+    // ---- the drawings, kept compressed as the file has them (the painter gets the ones
+    // showing, decoded when shown: a 4K cut's drawings all in it are hundreds of MB) ----
     let t = std::time::Instant::now();
     let (cols, rows) = (w.div_ceil(64), h.div_ceil(64));
-    // every tile of every drawing: (drawing, tile ref, the first of its hash?)
-    let mut seen = std::collections::HashSet::new();
-    let jobs: Vec<(u32, &ppstudio::TileRef, bool)> = loads
-        .iter()
-        .filter_map(|(id, n)| Some((*id, m.drawings.get(n)?)))
-        .flat_map(|(id, d)| {
-            d.tiles
-                .iter()
-                .filter(|r| r.x < cols && r.y < rows)
-                .map(move |r| (id, r))
-        })
-        .map(|(id, r)| (id, r, seen.insert(r.hash.as_str())))
-        .collect();
-    times.tiles = seen.len();
-    drop(seen);
-    type Decoded = (
-        u32,
-        (i32, i32),
-        Option<DecodedTile>,
-        Option<(String, String)>,
-    );
-    let decoded: Vec<Decoded> = jobs
+    let mut store = super::super::frames::store::Store::default();
+    let mut hashes: Vec<&str> = Vec::new();
+    for (id, name) in &loads {
+        let Some(d) = m.drawings.get(name) else {
+            continue;
+        };
+        let refs: Vec<(i32, i32, String)> = d
+            .tiles
+            .iter()
+            .filter(|r| r.x < cols && r.y < rows)
+            .map(|r| (r.x as i32, r.y as i32, r.hash.clone()))
+            .collect();
+        hashes.extend(d.tiles.iter().map(|r| r.hash.as_str()));
+        store.origin.insert(*id, refs.clone());
+        store.drawings.insert(
+            *id,
+            std::sync::Arc::new(super::super::frames::store::Kept::File(refs)),
+        );
+    }
+    hashes.sort_unstable();
+    hashes.dedup();
+    times.tiles = hashes.len();
+    use super::super::frames::store::FileTile;
+    type Read<'a> = (&'a str, std::sync::Arc<FileTile>);
+    let read: Vec<Read> = hashes
         .par_iter()
         .map_init(
-            || (o.tiles(), vec![0u8; 64 * 64 * 4]),
-            |(o, back), &(id, r, first)| -> Result<Decoded, String> {
-                let px = o.tile(&r.hash).map_err(|e| e.to_string())?;
-                let t = brush::decode_tile(&px);
-                // what it is after a trip through the painter: when that's other bytes
-                // (colour under faint alpha), a save of it unchanged keeps the file's
-                let same = match (&t, first) {
-                    (Some(t), true) => {
-                        brush::encode_tile(t, back);
-                        (back[..] != px[..]).then(|| (ppstudio::tile_hash(back), r.hash.clone()))
-                    }
-                    _ => None,
-                };
-                Ok((id, (r.x as i32, r.y as i32), t, same))
+            || o.tiles(),
+            |o, h| -> Result<Read, String> {
+                let (deflated, bytes) = o.tile_stored(h).map_err(|e| e.to_string())?;
+                Ok((
+                    *h,
+                    std::sync::Arc::new(FileTile {
+                        deflated,
+                        bytes: bytes.into_boxed_slice(),
+                    }),
+                ))
             },
         )
         .collect::<Result<_, _>>()?;
+    store.file = read.into_iter().map(|(h, t)| (h.to_string(), t)).collect();
     times.tiles_ms = t.elapsed().as_secs_f64() * 1e3;
-
-    // ---- a painter the file's size, with the drawings ----
     let t = std::time::Instant::now();
     let mut painter = Painter::new(w, h);
-    let mut same = HashMap::new();
-    type Placed = Vec<((i32, i32), DecodedTile)>;
-    let mut by_drawing: HashMap<u32, Placed> = HashMap::new();
-    for (id, key, tile, back) in decoded {
-        if let Some((b, orig)) = back {
-            same.insert(b, orig);
-        }
-        if let Some(tile) = tile {
-            by_drawing.entry(id).or_default().push((key, tile));
-        }
-    }
-    for (id, tiles) in by_drawing {
-        painter.put_drawing_decoded(id, tiles);
-    }
     painter.reserve_drawings(next);
     times.painter_ms = t.elapsed().as_secs_f64() * 1e3;
 
@@ -317,6 +301,7 @@ pub fn open(e: &mut Engine, s: &mut State, path: &Path) -> Result<(Doc, OpenTime
     // the engine: a new painter, frames and tools set up for it
     let t_rest = std::time::Instant::now();
     super::replace(e, s, painter);
+    e.frames.store = store;
     times.rest_ms = t_rest.elapsed().as_secs_f64() * 1e3;
     s.layers = layers;
     s.sheet = Sheet {
@@ -398,7 +383,6 @@ pub fn open(e: &mut Engine, s: &mut State, path: &Path) -> Result<(Doc, OpenTime
             scene_name,
             had_scenes: !o.manifest.timeline.scenes.is_empty(),
             layer_ids,
-            same,
         },
         times,
     ))

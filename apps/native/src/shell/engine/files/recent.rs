@@ -6,11 +6,23 @@ use std::path::{Path, PathBuf};
 /// The most recent files kept.
 pub const MAX: usize = 10;
 
+#[cfg(test)]
+thread_local! {
+    /// (checks: a folder of a check's own, instead of the one all share)
+    pub static TEST_HOME: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
 fn home_dir(var: &str, fallback: &str) -> PathBuf {
-    if cfg!(test) {
+    #[cfg(test)]
+    {
         // (checks never touch the real ones)
-        return std::env::temp_dir().join(format!("pencilpilot-test-{}", std::process::id()));
+        let _ = (var, fallback);
+        if let Some(d) = TEST_HOME.with(|h| h.borrow().clone()) {
+            return d;
+        }
+        std::env::temp_dir().join(format!("pencilpilot-test-{}", std::process::id()))
     }
+    #[cfg(not(test))]
     match std::env::var_os(var) {
         Some(v) if !v.is_empty() => PathBuf::from(v),
         _ => PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(fallback),

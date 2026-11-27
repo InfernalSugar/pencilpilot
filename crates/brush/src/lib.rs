@@ -4759,6 +4759,19 @@ impl Painter {
         any
     }
 
+    /// Take a kept drawing (one not showing on any layer) out of the painter, its tiles
+    /// as they are (to keep elsewhere, and put back with [`Painter::put_drawing_decoded`]).
+    /// None if it's showing or unknown.
+    pub fn take_drawing(&mut self, drawing: u32) -> Option<Vec<((i32, i32), DecodedTile)>> {
+        let tiles = self.cels.remove(&drawing)?;
+        Some(
+            tiles
+                .into_iter()
+                .map(|(k, t)| (k, DecodedTile(t)))
+                .collect(),
+        )
+    }
+
     /// Changes to the history so far (new edits, undo, redo): a different number, the
     /// layers or drawings may have changed.
     pub fn history_changes(&self) -> u64 {
@@ -6006,6 +6019,44 @@ pub(crate) fn pack_tiles(tiles: Option<&TileMap>) -> Vec<u8> {
 #[derive(Clone)]
 pub struct DecodedTile(Box<TilePixels>);
 
+impl DecodedTile {
+    /// Bytes in [`DecodedTile::to_bytes`].
+    pub const BYTES: usize = TILE_SIZE * TILE_SIZE * 8;
+
+    /// The painter's own pixels, as bytes (premultiplied 15-bit, little-endian): kept
+    /// elsewhere and put back with [`DecodedTile::from_bytes`], nothing changes (no
+    /// rounding, unlike going through RGBA8).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(Self::BYTES);
+        for row in self.0.iter() {
+            for p in row {
+                for c in p {
+                    out.extend_from_slice(&c.to_le_bytes());
+                }
+            }
+        }
+        out
+    }
+
+    /// Back from [`DecodedTile::to_bytes`] (None: the wrong size).
+    pub fn from_bytes(b: &[u8]) -> Option<DecodedTile> {
+        if b.len() != Self::BYTES {
+            return None;
+        }
+        let mut t = empty_tile();
+        let ts = TILE_SIZE;
+        for (k, px) in b.as_chunks::<8>().0.iter().enumerate() {
+            t[k / ts][k % ts] = [
+                u16::from_le_bytes([px[0], px[1]]),
+                u16::from_le_bytes([px[2], px[3]]),
+                u16::from_le_bytes([px[4], px[5]]),
+                u16::from_le_bytes([px[6], px[7]]),
+            ];
+        }
+        Some(DecodedTile(t))
+    }
+}
+
 /// A 64×64 tile of straight-alpha sRGB RGBA8 (16 384 bytes, as the project file keeps
 /// them) made ready for the painter: the slow part of loading a drawing, done on any
 /// thread. None if it's the wrong size or has nothing in it.
@@ -6014,6 +6065,13 @@ pub fn decode_tile(rgba: &[u8]) -> Option<DecodedTile> {
     if rgba.len() != ts * ts * 4 {
         return None;
     }
+    // (the sRGB curve of each 8-bit value, looked up: the same numbers premul_fix15 makes,
+    // without three powf a pixel)
+    static LINEAR: std::sync::OnceLock<[f32; 256]> = std::sync::OnceLock::new();
+    let lin = LINEAR.get_or_init(|| {
+        std::array::from_fn(|v| hokusai::color::srgb_to_linear((v as f32 / 255.0).clamp(0.0, 1.0)))
+    });
+    let one = hokusai::fix15::FIX15_ONE as f32;
     let mut t = empty_tile();
     let mut any = false;
     for (k, px) in rgba.as_chunks::<4>().0.iter().enumerate() {
@@ -6021,8 +6079,9 @@ pub fn decode_tile(rgba: &[u8]) -> Option<DecodedTile> {
             continue;
         }
         any = true;
-        let c = [px[0], px[1], px[2]].map(|v| v as f32 / 255.0);
-        t[k / ts][k % ts] = premul_fix15(c, px[3] as f32 / 255.0);
+        let a = (px[3] as f32 / 255.0).clamp(0.0, 1.0);
+        let f = |v: u8| (lin[v as usize] * a * one).round() as u16;
+        t[k / ts][k % ts] = [f(px[0]), f(px[1]), f(px[2]), (a * one).round() as u16];
     }
     any.then_some(DecodedTile(t))
 }
@@ -6076,6 +6135,32 @@ pub(crate) fn unpack_tiles(packed: &[u8]) -> Option<TileMap> {
         tiles.insert((tx, ty), t);
     }
     Some(tiles)
+}
+
+#[cfg(test)]
+mod decode_tile_tests {
+    use super::*;
+
+    /// The quick decoding gives what premul_fix15 gives, for every value and alpha.
+    #[test]
+    fn decode_tile_matches_premul_fix15() {
+        let mut px = vec![0u8; TILE_SIZE * TILE_SIZE * 4];
+        for a in 0..=255u32 {
+            for (k, p) in px.chunks_mut(4).enumerate() {
+                let v = ((k as u32 * 7 + a) % 256) as u8;
+                p.copy_from_slice(&[v, 255 - v, v / 2, a as u8]);
+            }
+            let Some(t) = decode_tile(&px) else {
+                assert_eq!(a, 0);
+                continue;
+            };
+            for (k, p) in px.chunks(4).enumerate() {
+                let c = [p[0], p[1], p[2]].map(|v| v as f32 / 255.0);
+                let want = premul_fix15(c, p[3] as f32 / 255.0);
+                assert_eq!(t.0[k / TILE_SIZE][k % TILE_SIZE], want, "{p:?}");
+            }
+        }
+    }
 }
 
 #[cfg(test)]
