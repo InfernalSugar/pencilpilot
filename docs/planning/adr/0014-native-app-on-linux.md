@@ -82,7 +82,22 @@ Each step is its own PR, with tests that need no window on the screen.
      "!" with Shift, and nothing for Ctrl+A.
    - **The real pen:** `cargo run --release -p pencilpilot-window --example pen` opens a window
      that darkens with pressure and prints what the pen reports.
-5. The first canvas: the brush engine (`crates/brush`) paints tiles, and the GPU composites and
-   presents them.
+5. The first canvas (`apps/native`, the `pencilpilot` binary; done, waiting on the owner's check):
+   - **How it draws:** the brush engine paints from the pen (or mouse). The changed rectangle goes
+     up to a canvas image kept on the GPU (`crates/gpu` `Canvas`), and each frame copies the canvas
+     into the image the compositor shows.
+   - **How it measures pen to screen:** from each reading's time to the compositor's report that
+     the frame with it was shown, both on CLOCK_MONOTONIC. `--replay` feeds a recorded 240 Hz
+     stroke, for measuring without a pen.
+   - **Drawing late:** the frame is drawn just before the compositor's next refresh is due, the
+     margin adjusting itself. Where it needs more than three quarters of a frame, drawing late
+     doesn't pay and the app draws as soon as it's asked.
+   - **Measured on headless mutter at 165 Hz** (2026-11-27), against today's app on the same
+     display (28 ms median, 40 ms p99, 60 fps): 165 fps, 0 frames missed. Pen to screen 9.0 ms
+     median, 12.0 ms p99. Painting 0.2 ms and the GPU 0.1 ms a frame.
+   - **mutter adds a frame of its own:** a commit is shown one refresh after the frame callback,
+     whenever it comes, so drawing late doesn't help there (60 Hz: 27 ms median, 31 ms p99).
+     Hyprland's own timing can only be measured on the owner's screen: it can't run headless
+     without a synthetic timer.
    - **Measured in the baseline:** pen to screen, frame rate at 60/75/100/165 Hz, memory and power.
    - **Phase 1's gate:** pen to screen within budget on the owner's Huion.

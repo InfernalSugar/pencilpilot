@@ -2925,6 +2925,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pencilpilot-native"
+version = "0.1.0"
+dependencies = [
+ "hokusai",
+ "pencilpilot-brush",
+ "pencilpilot-gpu",
+ "pencilpilot-window",
+]
+
+[[package]]
 name = "pencilpilot-ppstudio"
 version = "0.1.0"
 dependencies = [

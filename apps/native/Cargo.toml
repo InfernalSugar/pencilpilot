@@ -1,0 +1,17 @@
+[package]
+name = "pencilpilot-native"
+description = "PencilPilot as a native app (the rebuild): for now, Phase 1's canvas, drawn with the pen and measured"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "pencilpilot"
+path = "src/main.rs"
+
+[dependencies]
+pencilpilot-brush = { path = "../../crates/brush" }
+pencilpilot-gpu = { path = "../../crates/gpu" }
+pencilpilot-window = { path = "../../crates/window" }
+hokusai = { version = "0.3", default-features = false, features = ["myb-json"] }
