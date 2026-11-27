@@ -1,7 +1,8 @@
 //! Compiles the shaders (WGSL) to SPIR-V with naga, so building needs no outside tools.
 
 fn main() {
-    for name in ["quads"] {
+    let shaders: &[&str] = &["quads"];
+    for name in shaders {
         let path = format!("shaders/{name}.wgsl");
         println!("cargo:rerun-if-changed={path}");
         let src = std::fs::read_to_string(&path).unwrap();

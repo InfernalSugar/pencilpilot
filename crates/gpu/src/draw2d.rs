@@ -81,6 +81,20 @@ impl Quad {
             clip: NO_CLIP,
         }
     }
+    /// Moved by (dx, dy), its clip too.
+    pub fn moved(mut self, dx: f32, dy: f32) -> Quad {
+        self.rect[0] += dx;
+        self.rect[1] += dy;
+        if self.clip != NO_CLIP {
+            self.clip = [
+                self.clip[0] + dx,
+                self.clip[1] + dy,
+                self.clip[2] + dx,
+                self.clip[3] + dy,
+            ];
+        }
+        self
+    }
     /// Only inside this rectangle (x0, y0, x1, y1).
     pub fn clip(mut self, c: [f32; 4]) -> Quad {
         self.clip = c;
