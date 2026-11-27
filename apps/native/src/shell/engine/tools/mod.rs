@@ -818,11 +818,9 @@ fn xf_begin(e: &mut Engine, s: &mut State) -> bool {
         return true;
     }
     text_commit(e, s);
-    let b = e.painter.transform_begin();
+    let b = e.lift();
     if b.len() != 4 {
-        return false;
-    }
-    if !e.float_begin() {
+        // (lifted, but no picture for the GPU: put it back)
         e.painter.transform_cancel();
         return false;
     }
