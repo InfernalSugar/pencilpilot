@@ -1238,3 +1238,66 @@ fn quit_asks_when_unsaved() {
     settle(&mut e, &mut s, Duration::from_secs(10), |_, s| s.quit_now).expect("saved, then quit");
     assert!(!s.project.unsaved);
 }
+
+/// Showing other frames of an opened project (drawings not showing are kept compressed and
+/// decoded when needed): each step forward, back and random jumps timed (go to the frame,
+/// tick, picture), and the picture at the jumps compared with the file's. Budget: scrubbing
+/// at the display's rate (a frame within 6 ms at 165 Hz).
+#[test]
+#[ignore = "QA suite: tools/native-qa/run.sh"]
+fn scrub_an_opened_project() {
+    let dir = need_fixtures!();
+    let mut res = Vec::new();
+    for name in ["layers20-4k", "drawings500"] {
+        let path = dir.join(format!("{name}.ppstudio"));
+        let p = Project::open(&path).unwrap();
+        let (mut e, mut s) = fresh();
+        open(&mut e, &mut s, &path);
+        let len = s.frames;
+        let mut time = |e: &mut Engine, s: &mut State, f: u32| {
+            let t = Instant::now();
+            e.apply(s, &Action::GoToFrame(f));
+            e.tick(s, Instant::now());
+            let _ = e.picture(s);
+            t.elapsed().as_secs_f64() * 1000.0
+        };
+        let fwd: Vec<f64> = (0..len).map(|f| time(&mut e, &mut s, f)).collect();
+        let back: Vec<f64> = (0..len).rev().map(|f| time(&mut e, &mut s, f)).collect();
+        // random jumps (fixed seed)
+        let mut x = 12345u32;
+        let mut jumps = Vec::new();
+        let mut worst = 0u8;
+        let mut cache = HashMap::new();
+        for k in 0..20 {
+            x = x.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            let f = (x >> 8) % len;
+            jumps.push(time(&mut e, &mut s, f));
+            if k % 4 == 0 {
+                let got = native_frame(&mut e, &mut s, f);
+                let want = reference(&p, f, &mut cache);
+                worst = worst.max(diff(&got, &want).max);
+            }
+        }
+        let q = |v: &[f64]| {
+            let mut v = v.to_vec();
+            v.sort_by(f64::total_cmp);
+            format!(
+                r#"{{"p50":{:.2},"p99":{:.2},"max":{:.2}}}"#,
+                v[v.len() / 2],
+                v[(v.len() * 99 / 100).min(v.len() - 1)],
+                v[v.len() - 1]
+            )
+        };
+        res.push(format!(
+            r#""{name}":{{"forwardMs":{},"backMs":{},"jumpMs":{},"jumpPixelMax":{worst}}}"#,
+            q(&fwd),
+            q(&back),
+            q(&jumps)
+        ));
+        assert_eq!(
+            worst, 0,
+            "{name}: a frame shown after a jump differs from the file"
+        );
+    }
+    save_json("files-scrub.json", &format!("{{{}}}", res.join(",")));
+}
