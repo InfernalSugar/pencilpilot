@@ -1254,7 +1254,7 @@ fn scrub_an_opened_project() {
         let (mut e, mut s) = fresh();
         open(&mut e, &mut s, &path);
         let len = s.frames;
-        let mut time = |e: &mut Engine, s: &mut State, f: u32| {
+        let time = |e: &mut Engine, s: &mut State, f: u32| {
             let t = Instant::now();
             e.apply(s, &Action::GoToFrame(f));
             e.tick(s, Instant::now());
