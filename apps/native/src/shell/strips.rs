@@ -580,49 +580,16 @@ fn drawing_number(s: &State, layer: usize, drawing: u32) -> Option<usize> {
         .map(|i| i + 1)
 }
 
-/// A drawing's small picture in `r` (on white), as squares: the strips draw no images.
-fn thumb(f: &mut Frame, t: Option<&Thumb>, r: Rect, radius: f32) {
+/// A drawing's small picture in `r` (on white), kept in the atlas by drawing.
+fn thumb(f: &mut Frame, t: Option<&Thumb>, d: u32, r: Rect, radius: f32) {
     put(f, Quad::rect(r.x, r.y, r.w, r.h, WHITE).radius(radius));
     let Some(t) = t else {
         return;
     };
     let k = (r.w / t.w as f32).min(r.h / t.h as f32);
-    let (x0, y0) = (
-        r.x + (r.w - k * t.w as f32) / 2.0,
-        r.y + (r.h - k * t.h as f32) / 2.0,
-    );
-    let clip = [r.x, r.y, r.right(), r.bottom()];
-    for y in 0..t.h {
-        let mut x = 0;
-        while x < t.w {
-            let i = ((y * t.w + x) * 4) as usize;
-            let px = &t.px[i..i + 4];
-            if px[3] < 12 {
-                x += 1;
-                continue;
-            }
-            // a run of the same colour is one square
-            let mut run = 1;
-            while x + run < t.w {
-                let j = ((y * t.w + x + run) * 4) as usize;
-                if t.px[j..j + 4] != *px {
-                    break;
-                }
-                run += 1;
-            }
-            let c = [
-                px[0] as f32 / 255.0,
-                px[1] as f32 / 255.0,
-                px[2] as f32 / 255.0,
-                px[3] as f32 / 255.0,
-            ];
-            put(
-                f,
-                Quad::rect(x0 + x as f32 * k, y0 + y as f32 * k, run as f32 * k, k, c).clip(clip),
-            );
-            x += run;
-        }
-    }
+    let (w, h) = (k * t.w as f32, k * t.h as f32);
+    let at = Rect::new(r.x + (r.w - w) / 2.0, r.y + (r.h - h) / 2.0, w, h);
+    f.picture(&format!("strips/thumb/{d}"), t.w, t.h, &t.px, at);
 }
 
 // ---- Animate: the timeline ----
@@ -1534,7 +1501,7 @@ fn frame_strip(f: &mut Frame, r: Rect, s: &mut State) {
         };
         put(f, Quad::rect(c.x, c.y, c.w, c.h, fill).radius(8.0));
         let d = ds.get(i).copied().unwrap_or(0);
-        thumb(f, s.sheet.thumbs.get(&d), c.inset(3.0), 6.0);
+        thumb(f, s.sheet.thumbs.get(&d), d, c.inset(3.0), 6.0);
         if current {
             put(
                 f,
@@ -1738,7 +1705,7 @@ fn to_colour(f: &mut Frame, r: Rect, s: &mut State) {
         );
         let th = Rect::new(c.x + 8.0, c.y + 8.0, 104.0, thumb_h);
         let d = ds.get(i).copied().unwrap_or(0);
-        thumb(f, s.sheet.thumbs.get(&d), th, 8.0);
+        thumb(f, s.sheet.thumbs.get(&d), d, th, 8.0);
         let ly = th.bottom() + 6.0 + 8.0;
         let (st, sc) = status_of(s.to_colour[i]);
         let sl = text(f, st, 11.0, 500, sc);

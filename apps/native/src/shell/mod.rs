@@ -462,7 +462,8 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             win.wait_until(p.draw_at)?;
             continue;
         }
-        let work_from = pencilpilot_window::clock::now_ns();
+        // (from when it was meant to start: waking late under load counts too)
+        let work_from = plan.map_or(pencilpilot_window::clock::now_ns(), |p| p.draw_at);
         let (lw, lh) = win.logical_size();
         ui.scale = win.scale() as f32;
         let (w, h) = (lw as f32, lh as f32);
