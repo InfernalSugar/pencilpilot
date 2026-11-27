@@ -154,6 +154,10 @@ pub struct State {
     pub moving: Option<crate::shell::view::Moving>,
     /// the canvas tools' state the interface shows (`shell/engine/tools.rs`)
     pub tooling: crate::shell::engine::tools::ToolsUi,
+    /// the open project on disk (`shell/engine/files.rs`)
+    pub project: crate::shell::engine::files::ProjectUi,
+    /// the export dialog and progress (`shell/engine/export.rs`)
+    pub export: crate::shell::engine::export::ExportUi,
     /// the cut's exposure sheet (`shell/engine/frames.rs`)
     pub sheet: crate::shell::engine::frames::Sheet,
     /// each shell piece's own state (each defined in its piece's file)
@@ -265,6 +269,8 @@ impl State {
             view: Default::default(),
             moving: None,
             tooling: Default::default(),
+            project: Default::default(),
+            export: Default::default(),
             sheet: crate::shell::engine::frames::Sheet::demo(),
             header: Default::default(),
             tools: Default::default(),

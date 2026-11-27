@@ -5,6 +5,7 @@
 //! [`State`], change the state, and push [`crate::state::Action`]s.
 
 pub mod canvas;
+pub mod dialog;
 pub mod engine;
 pub mod header;
 pub mod layout;

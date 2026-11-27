@@ -11,6 +11,8 @@
 //!
 //! Positions here are the document's pixels (the shell maps the screen through the view).
 
+pub mod export;
+pub mod files;
 pub mod frames;
 pub mod tools;
 
@@ -123,6 +125,10 @@ pub struct Engine {
     pub frames: frames::Frames,
     /// pixels being moved, shown by the GPU ([`Engine::float_begin`])
     pub float: Option<Float>,
+    /// the open project on disk ([`files`])
+    pub files: files::Files,
+    /// an export in progress ([`export`])
+    pub exporter: export::Exporter,
     lifts: u64,
 }
 
@@ -137,6 +143,8 @@ impl Engine {
             frames: frames::Frames::default(),
             float: None,
             lifts: 0,
+            files: files::Files::default(),
+            exporter: export::Exporter::default(),
         }
     }
 
@@ -252,19 +260,33 @@ impl Engine {
         match a {
             Action::Undo => self.painter.undo(),
             Action::Redo => self.painter.redo(),
-            _ => tools::apply(self, s, a) || frames::apply(self, s, a),
+            _ => {
+                files::apply(self, s, a)
+                    || export::apply(self, s, a)
+                    || tools::apply(self, s, a)
+                    || frames::apply(self, s, a)
+            }
         }
     }
 
     /// Once a loop, before drawing: playback and anything else that moves with time.
     /// Returns whether the picture changed.
     pub fn tick(&mut self, s: &mut State, now: std::time::Instant) -> bool {
-        frames::tick(self, s, now)
+        let f = files::tick(self, s, now);
+        let x = export::tick(self, s, now);
+        frames::tick(self, s, now) | f | x
     }
 
     /// When [`Engine::tick`] next has something to do (the shell sleeps until then).
     pub fn next_tick_at(&self, s: &State) -> Option<std::time::Instant> {
-        frames::next_tick_at(self, s)
+        [
+            frames::next_tick_at(self, s),
+            files::next_tick_at(self, s),
+            export::next_tick_at(self, s),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     /// The canvas's picture (straight RGBA8, document size) and what changed in it since
