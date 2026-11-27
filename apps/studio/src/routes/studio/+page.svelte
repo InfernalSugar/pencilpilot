@@ -29,7 +29,8 @@
 		type LiveEvent
 	} from '@pencilpilot/paint/PaintCanvas.svelte';
 	import LayersPanel from '@pencilpilot/paint/LayersPanel.svelte';
-	import BrushPicker from '@pencilpilot/paint/BrushPicker.svelte';
+	import BrushPicker, { type BrushMenuTarget } from '@pencilpilot/paint/BrushPicker.svelte';
+	import { STRIP_TOOLS, cleanTools } from '#lib/workspaces.js';
 	import BrushTexturePanel from '@pencilpilot/paint/BrushTexturePanel.svelte';
 	import ColorPanel from '@pencilpilot/paint/ColorPanel.svelte';
 	import HistoryPanel from '@pencilpilot/paint/HistoryPanel.svelte';
@@ -71,6 +72,8 @@
 		strokeMemory
 	} from '#lib/settings.svelte.js';
 	import WorkspaceDialog from '#lib/WorkspaceDialog.svelte';
+	import ContextMenu, { type MenuAt, type MenuItem } from '#lib/ContextMenu.svelte';
+	import FrameStrip from '#lib/FrameStrip.svelte';
 	import { exportText, tagPng } from '#lib/png-meta.js';
 	import type { ViewPrefs } from '@pencilpilot/paint/view-prefs';
 	import { actionFor, comboOf, showKey, type ActionId } from '#lib/shortcuts.js';
@@ -223,6 +226,7 @@
 		isStage,
 		type Stage,
 		type Camera,
+		type DrawingKind,
 		type MouthChart,
 		type MouthShape,
 		type Timeline
@@ -1338,6 +1342,18 @@
 		const d = drawingAt(theCut().tracks[status.active], frame);
 		if (!d) return note('No drawing here to mark.');
 		const k = nextKind(timeline.kinds?.[d]);
+		setKind(timeline, d, k);
+		tlLabel = k ? `Mark ${k === 'inbetween' ? 'in-between' : k}` : 'Unmark drawing';
+		docVersion++;
+		note(k ? `Marked as ${k === 'inbetween' ? 'an in-between' : `a ${k}`}.` : 'Unmarked.', 1500);
+	}
+
+	/** Mark the active layer's drawing on this frame as one kind (null: unmark). */
+	function setMark(k: DrawingKind | null) {
+		if (!status) return;
+		const d = drawingAt(theCut().tracks[status.active], frame);
+		if (!d) return note('No drawing here to mark.');
+		if ((timeline.kinds?.[d] ?? null) === k) return;
 		setKind(timeline, d, k);
 		tlLabel = k ? `Mark ${k === 'inbetween' ? 'in-between' : k}` : 'Unmark drawing';
 		docVersion++;
@@ -3869,6 +3885,171 @@
 		if (!(w.tools as string[]).includes(tool) && tool !== 'eraser') tool = 'brush';
 	}
 
+	// ---- the new layout (Preferences › Interface › Layout): trays, page tabs, right-click menus ----
+	const newLayout = $derived(settings.uiLayout === 'new');
+	/** the slim strip under the canvas on the pages without the timeline (new layout) */
+	const stripKind = $derived.by(() => {
+		if (!newLayout || settings.layout.bottom) return null;
+		const id = workspace?.id;
+		return id === 'draw' || id === 'colour' || id === 'review' ? id : null;
+	});
+	/** the right-click menu open (the new layout's) */
+	let ctxMenu = $state<MenuAt | null>(null);
+	function openMenu(e: MouseEvent, label: string, items: MenuItem[]) {
+		e.preventDefault();
+		e.stopPropagation();
+		const box = (e.currentTarget as HTMLElement | null)?.getBoundingClientRect?.();
+		ctxMenu = {
+			x: e.clientX || (box ? box.left : 0),
+			y: e.clientY || (box ? box.bottom : 0),
+			label,
+			items
+		};
+	}
+	/** a page by its workspace id, if it's there */
+	function usePage(id: string) {
+		if (settings.workspaces.some((w) => w.id === id)) useWorkspace(id);
+	}
+	const SYMMETRY_CHOICES = [
+		['off', 'Off'],
+		['vertical', 'Vertical'],
+		['horizontal', 'Horizontal'],
+		['quadrant', 'Four ways'],
+		['radial', 'Radial']
+	] as const;
+	/** Right-click on the canvas: a selection's actions, then the canvas's. */
+	function canvasMenu(x: number, y: number) {
+		const items: MenuItem[] = [];
+		if (status?.selection)
+			items.push(
+				{ head: 'Selection' },
+				{ label: 'Cut', hint: keyOf('cut'), run: () => runAction('cut') },
+				{ label: 'Copy', hint: keyOf('copy'), run: () => runAction('copy') },
+				{ label: 'Transform', hint: keyOf('transform'), run: () => (tool = 'transform') },
+				{ label: 'Fill selection', run: () => canvas?.fillSelection() },
+				{
+					label: 'Invert selection',
+					hint: keyOf('invert-selection'),
+					run: () => runAction('invert-selection')
+				},
+				{ label: 'Deselect', hint: keyOf('deselect'), run: () => canvas?.deselect() },
+				{
+					label: 'Clear',
+					hint: keyOf('clear-selected'),
+					danger: true,
+					run: () => runAction('clear-selected')
+				},
+				{ sep: true }
+			);
+		const g = toolOpts.guides;
+		items.push(
+			{ head: 'Canvas' },
+			{ label: 'Undo', hint: keyOf('undo'), disabled: !status?.canUndo, run: () => undo() },
+			{ label: 'Redo', hint: keyOf('redo'), disabled: !status?.canRedo, run: () => redo() },
+			{ sep: true },
+			{
+				label: 'Paste',
+				hint: mac ? '⌘V' : 'Ctrl+V',
+				disabled: !canvas?.hasClip(),
+				run: () => toolOpts.pasteCopied()
+			},
+			{ label: 'Select all', hint: keyOf('select-all'), run: () => runAction('select-all') },
+			{ sep: true },
+			{ label: 'Eyedropper', hint: keyOf('picker'), run: () => (tool = 'picker') },
+			{
+				label: eraser ? 'Brush' : 'Eraser',
+				hint: keyOf(eraser ? 'brush' : 'eraser'),
+				run: () => {
+					eraser = !eraser;
+					tool = 'brush';
+				}
+			},
+			{ sep: true },
+			{
+				label: 'Grid',
+				checked: !!g?.grid.on,
+				disabled: !g,
+				run: () => {
+					if (g) g.grid.on = !g.grid.on;
+				}
+			},
+			{ head: 'Symmetry' },
+			...SYMMETRY_CHOICES.map(([id, label]) => ({
+				label,
+				checked: (g?.symmetry.mode ?? 'off') === id,
+				disabled: !g,
+				run: () => {
+					if (g) g.symmetry.mode = id;
+				}
+			})),
+			{ sep: true },
+			{ label: 'Rotate left', hint: keyOf('rotate-left'), run: () => runAction('rotate-left') },
+			{ label: 'Rotate right', hint: keyOf('rotate-right'), run: () => runAction('rotate-right') },
+			{
+				label: 'Straighten the view',
+				hint: keyOf('rotate-reset'),
+				run: () => runAction('rotate-reset')
+			},
+			{ label: 'Flip view', hint: keyOf('mirror'), run: () => canvas?.toggleMirror() },
+			{ label: 'Reset view', hint: keyOf('fit'), run: () => runAction('fit') },
+			{ sep: true },
+			{ label: 'Film of the drawing…', hint: 'timelapse', run: () => void openFilm() }
+		);
+		ctxMenu = { x, y, label: 'Canvas', items };
+	}
+	/** Right-click a tool on the strip. */
+	function toolMenu(e: MouseEvent, id: ToolId) {
+		const name = STRIP_TOOLS.find((t) => t.id === id)?.name ?? (id === 'eraser' ? 'Eraser' : id);
+		const ws = workspace;
+		const shown = (ws?.tools as string[] | undefined)?.includes(id) ?? true;
+		const action = (id === 'adjust' ? 'adjust' : id) as ActionId;
+		openMenu(e, 'Tool', [
+			{ head: name },
+			{
+				label: 'Tool settings…',
+				run: () => {
+					if (id === 'eraser') eraser = true;
+					else if (id !== 'adjust') tool = id;
+					settings.layout.context = true;
+				}
+			},
+			{ sep: true },
+			{
+				label: 'Set shortcut…',
+				hint: settings.keys[action] ? keyOf(action) : '',
+				run: () => (settingsOpen = true)
+			},
+			{
+				label: 'Hide from the strip',
+				disabled: !ws || id === 'brush' || id === 'eraser' || !shown,
+				run: () => {
+					if (!ws) return;
+					ws.tools = cleanTools(
+						(ws.tools as string[]).filter((t) => t !== id),
+						ws.tools
+					);
+				}
+			},
+			{ label: 'Choose the tools…', run: () => (workspacesOpen = true) }
+		]);
+	}
+	/** Right-click a brush in the Brushes panel. */
+	function brushMenu(e: MouseEvent, b: BrushMenuTarget) {
+		openMenu(e, 'Brush', [
+			{ head: b.name },
+			{ label: b.mine ? 'Edit brush…' : 'Adjust and save as mine…', run: b.edit },
+			...(b.mine
+				? []
+				: [
+						{
+							label: b.favourite ? 'Remove from favourites' : 'Add to favourites',
+							hint: b.favourite ? '★' : '☆',
+							run: b.toggleFavourite
+						}
+					])
+		]);
+	}
+
 	// the largest brush size: the slider stops there, and a bigger size comes down to it
 	$effect(() => {
 		if (size > settings.maxBrushSize) size = settings.maxBrushSize;
@@ -4072,6 +4253,11 @@
 			stopPlay();
 		if (!action) return;
 		e.preventDefault();
+		runAction(action);
+	}
+
+	/** What a shortcut does (the keys, and the menus that name them). */
+	function runAction(action: ActionId) {
 		const toolFor =
 			TOOL_ACTIONS[action] ?? (action === 'brush' || action === 'eraser' ? action : undefined);
 		// a tool's key: that tool; pressed again, back to the one it was come to from
@@ -4178,18 +4364,34 @@
 		{#snippet actions()}
 			{#if fileNote}<span class="note" role="alert">{fileNote}</span>{/if}
 			<div class="workspace">
-				<label>
-					<span class="visually-hidden">Workspace</span>
-					<select
-						value={workspace?.id}
-						title="Workspace: a layout of the studio, with its own panels and tools"
-						onchange={(e) => useWorkspace(e.currentTarget.value)}
-					>
+				{#if newLayout}
+					<div class="ws-tabs" role="tablist" aria-label="Workspace">
 						{#each settings.workspaces as w (w.id)}
-							<option value={w.id}>{w.name}</option>
+							<button
+								type="button"
+								role="tab"
+								aria-selected={workspace?.id === w.id}
+								title="{w.name}: a layout of the studio over the same drawing"
+								onclick={() => useWorkspace(w.id)}
+							>
+								{w.name}
+							</button>
 						{/each}
-					</select>
-				</label>
+					</div>
+				{:else}
+					<label>
+						<span class="visually-hidden">Workspace</span>
+						<select
+							value={workspace?.id}
+							title="Workspace: a layout of the studio, with its own panels and tools"
+							onchange={(e) => useWorkspace(e.currentTarget.value)}
+						>
+							{#each settings.workspaces as w (w.id)}
+								<option value={w.id}>{w.name}</option>
+							{/each}
+						</select>
+					</label>
+				{/if}
 				<button
 					type="button"
 					class="ws-edit"
@@ -4528,6 +4730,7 @@
 				maxSize={settings.maxBrushSize}
 				adjustOpen={toolOpts.adjustOpen}
 				onadjust={() => toolOpts.openAdjust()}
+				ontoolmenu={newLayout ? toolMenu : undefined}
 			/>
 		{/snippet}
 		{#snippet options()}
@@ -4714,7 +4917,7 @@
 						textFrame={toolOpts.text.frame}
 						onrasterize={toolOpts.text.onrasterize}
 						lineEraser={toolOpts.lineEraser}
-						onquickmenu={(x, y) => (quickMenu = { x, y })}
+						onquickmenu={(x, y) => (newLayout ? canvasMenu(x, y) : (quickMenu = { x, y }))}
 						onchange={canvasChanged}
 						locked={switching}
 						onionImage={playing ? null : onionImage}
@@ -4735,7 +4938,38 @@
 						</p>
 					{/if}
 				{/if}
-				{#if canvasNote}<p class="canvas-note" role="status">{canvasNote}</p>{/if}
+				{#if stripKind && status && timelineFor === canvasKey}
+					<FrameStrip
+						kind={stripKind}
+						{timeline}
+						{scene}
+						cut={cutIndex}
+						bind:frame
+						{fps}
+						layers={status.layers}
+						active={status.active}
+						{onion}
+						{playing}
+						bind:playMode
+						bind:playScope
+						onplay={togglePlay}
+						onnew={() => timelinePanel?.addDrawing()}
+						onlayers={() => {
+							tab = 'layers';
+							settings.layout.dock = true;
+							dockOpen = true;
+						}}
+						onopen={usePage}
+						onmenu={openMenu}
+						onedit={() => {
+							if (playing) stopPlay();
+							timelineEdited(false);
+						}}
+					/>
+				{/if}
+				{#if canvasNote}<p class="canvas-note" class:lifted={!!stripKind} role="status">
+						{canvasNote}
+					</p>{/if}
 			</RefSplit>
 		{/snippet}
 		{#snippet dockTop()}
@@ -4764,6 +4998,9 @@
 					onpin={pinFrame}
 					onflip={(kind, down) => (down ? void startFlip(kind) : endFlip())}
 					onmark={markKind}
+					onkind={setMark}
+					onlayerset={(id, patch) => panelControls?.setLayer(id, patch)}
+					layout={settings.uiLayout}
 					onplay={togglePlay}
 					onrange={setRange}
 					{stageView}
@@ -4810,7 +5047,12 @@
 				/>
 			{:else if t === 'brushes'}
 				{#if manifest}
-					<BrushPicker {manifest} bind:selected={brushId} askToDelete={settings.askToDelete} />
+					<BrushPicker
+						{manifest}
+						bind:selected={brushId}
+						askToDelete={settings.askToDelete}
+						onbrushmenu={newLayout ? brushMenu : undefined}
+					/>
 					<BrushTexturePanel {brushId} />
 				{:else}
 					<p>Loading brushes…</p>
@@ -4843,6 +5085,7 @@
 						eraser = false;
 					}}
 					fromReference={referenceColours}
+					onmenu={newLayout ? openMenu : undefined}
 				/>
 				<ColorPanel bind:color onclose={() => (tab = 'layers')} />
 			{/if}
@@ -4850,6 +5093,9 @@
 		{#snippet after()}
 			{#if settings.reference.shown && settings.reference.place === 'float'}
 				{@render reference('float')}
+			{/if}
+			{#if ctxMenu}
+				<ContextMenu menu={ctxMenu} onclose={() => (ctxMenu = null)} />
 			{/if}
 			{#if quickMenu}
 				<QuickMenu
@@ -5129,6 +5375,36 @@
 	}
 	.workspace select option {
 		color: #16161a;
+	}
+	.ws-tabs {
+		display: flex;
+		gap: 2px;
+		max-width: 42vw;
+		padding: 3px;
+		border-radius: 16px;
+		background: color-mix(in srgb, currentColor 8%, transparent);
+		overflow-x: auto;
+		scrollbar-width: none;
+	}
+	.ws-tabs button {
+		flex: none;
+		height: 32px;
+		padding: 0 11px;
+		border: 0;
+		border-radius: 12px;
+		background: transparent;
+		color: inherit;
+		font: 600 13px var(--pp-font-body);
+		opacity: 0.8;
+		cursor: pointer;
+	}
+	.ws-tabs button[aria-selected='true'] {
+		background: var(--pp-ink);
+		color: var(--pp-on-ink);
+		opacity: 1;
+	}
+	.canvas-note.lifted {
+		bottom: 92px;
 	}
 	.ws-edit {
 		display: grid;

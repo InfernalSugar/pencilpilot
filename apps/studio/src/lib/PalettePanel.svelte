@@ -14,13 +14,15 @@
 		MAX_PALETTES,
 		type Palette
 	} from './palettes';
+	import type { MenuItem } from './ContextMenu.svelte';
 
 	let {
 		palettes,
 		color,
 		onchange,
 		onuse,
-		fromReference
+		fromReference,
+		onmenu
 	}: {
 		palettes: Palette[];
 		/** the colour painted with now */
@@ -31,7 +33,35 @@
 		onuse: (hex: string) => void;
 		/** the reference picture's flat colours, and its name (null: no picture) */
 		fromReference?: () => Promise<{ name: string; colours: string[] } | null>;
+		/** a right-click menu at the pointer (none: the browser's own) */
+		onmenu?: (e: MouseEvent, label: string, items: MenuItem[]) => void;
 	} = $props();
+
+	function colourMenu(e: MouseEvent, i: number, j: number) {
+		if (!onmenu) return;
+		const c = palettes[i].colours[j];
+		onmenu(e, 'Palette colour', [
+			{ head: `${c.name} · ${c.hex}` },
+			{ label: 'Paint with it', run: () => onuse(c.hex) },
+			{ label: 'Rename…', run: () => (editing = i) },
+			{
+				label: 'Make it the colour I’m painting with',
+				disabled: same(c.hex, color),
+				run: () => onchange(setColour(palettes, i, j, { hex: color }), 'Change palette colour')
+			},
+			{ sep: true },
+			{
+				label: 'Copy hex code',
+				hint: c.hex,
+				run: () => void navigator.clipboard?.writeText(c.hex).catch(() => {})
+			},
+			{
+				label: 'Delete',
+				danger: true,
+				run: () => onchange(removeColour(palettes, i, j), 'Remove palette colour')
+			}
+		]);
+	}
 
 	/** the palette being edited (-1: none) */
 	let editing = $state(-1);
@@ -190,6 +220,7 @@
 							aria-label="{p.name}: {c.name}"
 							title="{c.name} ({c.hex})"
 							onclick={() => onuse(c.hex)}
+							oncontextmenu={(e) => colourMenu(e, i, j)}
 						></button>
 					{:else}
 						<p class="empty">No colours yet.</p>

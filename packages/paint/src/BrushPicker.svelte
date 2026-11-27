@@ -1,3 +1,18 @@
+<script lang="ts" module>
+	/** a right-clicked brush, with what can be done to it */
+	export interface BrushMenuTarget {
+		id: string;
+		name: string;
+		/** one of My brushes */
+		mine: boolean;
+		favourite: boolean;
+		/** edit it (My brushes), or adjust it and save as mine */
+		edit: () => void;
+		/** in or out of the favourites (built-in brushes) */
+		toggleFavourite: () => void;
+	}
+</script>
+
 <script lang="ts">
 	import { untrack } from 'svelte';
 	import { type BrushManifest } from './brushes';
@@ -11,13 +26,30 @@
 	let {
 		manifest,
 		selected = $bindable(),
-		askToDelete = true
+		askToDelete = true,
+		onbrushmenu
 	}: {
 		manifest: BrushManifest;
 		selected: string;
 		/** ask before deleting one of "My brushes" */
 		askToDelete?: boolean;
+		/** a brush right-clicked: what can be done to it (none: the browser's own menu) */
+		onbrushmenu?: (e: MouseEvent, brush: BrushMenuTarget) => void;
 	} = $props();
+
+	function brushMenu(e: MouseEvent, id: string, name: string, mine: boolean) {
+		if (!onbrushmenu) return;
+		e.preventDefault();
+		selected = id;
+		onbrushmenu(e, {
+			id,
+			name,
+			mine,
+			favourite: favourites.includes(id),
+			edit: () => create(id),
+			toggleFavourite: () => toggleFav(id)
+		});
+	}
 
 	const FAV_KEY = 'pp.favouriteBrushes';
 	const readFavs = (): string[] => {
@@ -168,6 +200,7 @@
 						aria-pressed={selected === b.id}
 						title={b.source ? b.name : `${b.name} · based on ${builtIn(b.base)?.name ?? b.base}`}
 						onclick={() => (selected = b.id)}
+						oncontextmenu={(e) => brushMenu(e, b.id, b.name, true)}
 					>
 						{#key b}<MyBrushThumb brush={b} />{/key}
 						<span class="name">{b.name}</span>
@@ -203,6 +236,7 @@
 						aria-pressed={selected === b.id}
 						title="{b.name} · {b.author}"
 						onclick={() => (selected = b.id)}
+						oncontextmenu={(e) => brushMenu(e, b.id, b.name, false)}
 					>
 						<PackBrushThumb id={b.id} picture={b.preview} />
 						<span class="name">{b.name}</span>
