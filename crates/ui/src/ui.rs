@@ -356,6 +356,11 @@ impl Frame<'_> {
         &self.ui.keys
     }
 
+    /// Logical → device pixels (for clipping in device pixels, say).
+    pub fn scale(&self) -> f32 {
+        self.ui.scale
+    }
+
     /// A text field has the keyboard (shortcuts should leave letters alone).
     pub fn typing(&self) -> bool {
         self.ui.focus.is_some()
@@ -731,7 +736,15 @@ impl Frame<'_> {
         let laid = self.lay_out(text, &Style::body(t.small, t.on_dark).weight(500), None);
         let (w, hh) = (laid.width + 16.0, laid.height + 10.0);
         let x = anchor.x + (anchor.w - w) / 2.0;
-        let y = anchor.bottom() + 6.0;
+        // under its anchor, or above it where there's no room below
+        let root = self.areas[0].rect;
+        let below = anchor.bottom() + 6.0;
+        let y = if below + hh > root.bottom() - 4.0 {
+            anchor.y - 6.0 - hh
+        } else {
+            below
+        };
+        let x = x.clamp(root.x + 4.0, (root.right() - w - 4.0).max(root.x + 4.0));
         self.put(Quad::rect(x, y, w, hh, t.ink).radius(8.0));
         self.put_text(&laid, x + 8.0, y + 5.0);
         self.in_overlay = was;

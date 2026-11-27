@@ -15,10 +15,10 @@ pub const PANEL_W: f32 = 320.0;
 pub fn strip_height(w: Workspace) -> f32 {
     match w {
         // the timeline: its two toolbars and the grid (four layers and the sound row)
-        Workspace::Animate => 268.0,
+        Workspace::Animate => 279.0,
         Workspace::Draw => 52.0,
-        Workspace::Colour => 132.0,
-        Workspace::Review => 118.0,
+        Workspace::Colour => 142.0,
+        Workspace::Review => 94.0,
     }
 }
 

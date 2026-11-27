@@ -50,11 +50,14 @@ pub fn render_png(
     let (w, h) = (width as f32, height as f32);
     let mut mark = 0;
     let mut canvas_rect = Rect::default();
-    let quads = ui
-        .pass(&mut r, w, h, |f| {
-            (mark, canvas_rect) = build(f, s, w, h);
-        })
-        .unwrap_or_default();
+    ui.pass(&mut r, w, h, |f| {
+        (mark, canvas_rect) = build(f, s, w, h);
+    });
+    // settled: what every piece shows after the first pass's changes
+    ui.pass(&mut r, w, h, |f| {
+        (mark, canvas_rect) = build(f, s, w, h);
+    });
+    let quads = ui.shown().to_vec();
     let (fw, fh) = ((w * scale).round() as u32, (h * scale).round() as u32);
     let frame = DmabufImage::new(&gpu, fw, fh, &[])?;
     // the drawing: paper for now (the engine's canvas plugs in here)
@@ -267,9 +270,15 @@ pub fn run_window(
         let (lw, lh) = win.logical_size();
         ui.scale = win.scale() as f32;
         let (w, h) = (lw as f32, lh as f32);
-        let changed = ui.pass(&mut r, w, h, |f| {
+        let first = ui.pass(&mut r, w, h, |f| {
             (mark, canvas_rect) = build(f, &mut s, w, h);
         });
+        // a settling pass, with no new input: a click that changed what an earlier piece had
+        // already drawn shows now, not at the next input (it acts on nothing a second time)
+        let settled = ui.pass(&mut r, w, h, |f| {
+            (mark, canvas_rect) = build(f, &mut s, w, h);
+        });
+        let changed = first.or(settled);
         dirty = false;
         // what the interface asked for
         for a in std::mem::take(&mut s.actions) {
