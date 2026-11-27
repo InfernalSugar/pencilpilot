@@ -31,6 +31,7 @@
 pub mod clock;
 pub mod input;
 mod keyboard;
+pub mod pace;
 
 use std::collections::{HashMap, HashSet};
 use std::os::fd::AsFd;
