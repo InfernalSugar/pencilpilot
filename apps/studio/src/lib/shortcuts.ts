@@ -196,6 +196,19 @@ export function actionFor(map: Keymap, combo: string): ActionId | null {
 	return null;
 }
 
+/**
+ * Keys the app keeps for itself (not in the list, so not changeable): what each does,
+ * to say why it can't be taken.
+ */
+const KEPT: Record<string, string> = {
+	'Ctrl+V': 'pasting',
+	Backspace: 'the pen path (it takes back the last point)'
+};
+/** What the app keeps a key for, if it does (it can't become a shortcut). */
+export function keptFor(combo: string): string | null {
+	return KEPT[combo] ?? null;
+}
+
 /** The actions another action's key would clash with. */
 export function clashes(map: Keymap, id: ActionId, combo: string): ActionId[] {
 	return ACTIONS.filter((a) => a.id !== id && map[a.id] === combo).map((a) => a.id);

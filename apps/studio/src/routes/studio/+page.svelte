@@ -252,6 +252,8 @@
 	let status = $state<CanvasStatus | null>(null);
 	let tool = $state<string>('brush');
 	let eraser = $state(false);
+	/** the current brush's diameter in pixels at its own size (sizes show in pixels) */
+	let brushPx = $state(0);
 	let size = $state(1);
 	let opacity = $state(1);
 	let color = $state('#16161a');
@@ -4516,6 +4518,7 @@
 		{/snippet}
 		{#snippet rail()}
 			<ToolRail
+				{brushPx}
 				tools={workspace?.tools ?? [...ALL_TOOLS, 'text', 'lines']}
 				bind:tool
 				bind:eraser
@@ -4529,7 +4532,7 @@
 		{/snippet}
 		{#snippet options()}
 			<span class="brush-name">{manifest ? brushLabel(manifest, brushId) : ''}</span>
-			<Swatches bind:color onmore={() => ((tab = 'colour'), (dockOpen = true))} />
+			<Swatches bind:color picker />
 			{#if smoothKind}
 				<label class="slider">
 					<span>Smoothing <b>{Math.round(toolOpts.smoothing[smoothKind] * 100)}%</b></span>
@@ -4623,6 +4626,7 @@
 			>
 				{#key canvasKey}
 					<PaintCanvas
+						onbrushdiameter={(px) => (brushPx = px)}
 						bind:this={canvas}
 						cursors={remoteCursors}
 						oncursor={onCursor}

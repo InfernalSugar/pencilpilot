@@ -246,6 +246,7 @@
 		color = '#16161a',
 		onchange,
 		onblocked,
+		onbrushdiameter,
 		overlaySrc = null,
 		overlayOpacity = 0.3,
 		onionImage = null,
@@ -335,6 +336,9 @@
 		/** a stroke couldn't start: the layer is locked or hidden, or something else is
 		 * still going on (`busy`: a move or an adjustment not finished) */
 		onblocked?: (why: 'locked' | 'hidden' | 'busy') => void;
+		/** the current brush's diameter in canvas pixels at its designed size (100%): sizes show
+		 * in pixels from it */
+		onbrushdiameter?: (px: number) => void;
 		/** a picture shown over the canvas (fitted like the grader fits references); never part of the drawing */
 		overlaySrc?: string | null;
 		overlayOpacity?: number;
@@ -853,6 +857,7 @@
 		brush.setColor((n >> 16) & 255, (n >> 8) & 255, n & 255);
 		brush.setEraser(er && tool !== 'smudge' && tool !== 'clone');
 		brushR = brush.radius();
+		if (s > 0) onbrushdiameter?.((2 * brushR) / s);
 		editShape = null;
 	}
 

@@ -49,6 +49,8 @@
 	let size = $state(1);
 	let opacity = $state(1);
 	let eraser = $state(false);
+	/** the current brush's diameter in pixels at its own size (sizes show in pixels) */
+	let brushPx = $state(0);
 	let tool = $state<'brush' | 'picker' | 'fill'>('brush');
 	let tab = $state('layers');
 	let dockOpen = $state(false);
@@ -153,6 +155,7 @@
 	{/snippet}
 	{#snippet rail()}
 		<ToolRail
+			{brushPx}
 			tools={['brush', 'eraser', 'picker', 'fill']}
 			bind:tool
 			bind:eraser
@@ -177,6 +180,7 @@
 	{#snippet stage()}
 		{#key lobby.round}
 			<PaintCanvas
+				onbrushdiameter={(px) => (brushPx = px)}
 				bind:this={canvas}
 				fill
 				width={lobby.settings.width}

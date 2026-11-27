@@ -481,6 +481,8 @@
 	let manifest = $state<BrushManifest>();
 	let brushId = $state(DEFAULT_BRUSH);
 	let eraser = $state(false);
+	/** the current brush's diameter in pixels at its own size (sizes show in pixels) */
+	let brushPx = $state(0);
 	/** the painting tool whose smoothing the slider shows */
 	const smoothKind = $derived(smoothTool(tool, eraser));
 	let size = $state(1);
@@ -505,10 +507,6 @@
 	$effect(() => remember('pp.dockTab', dockTab));
 	function setTab(t: string) {
 		dockTab = t;
-	}
-	function openDock(t: string) {
-		setTab(t);
-		dockOpen = true;
 	}
 	/**
 	 * Where the reference shows: in the side panel, beside the canvas (its own pane,
@@ -1322,6 +1320,7 @@
 	{/snippet}
 	{#snippet rail()}
 		<ToolRail
+			{brushPx}
 			bind:tool
 			bind:eraser
 			bind:size
@@ -1332,11 +1331,7 @@
 	{/snippet}
 	{#snippet options()}
 		<span class="brush-name">{brushName}</span>
-		<Swatches
-			bind:color
-			onmore={() => openDock('colour')}
-			moreOpen={dockTab === 'colour' && dockOpen}
-		/>
+		<Swatches bind:color picker />
 		{#if smoothKind}
 			<label class="slider">
 				<span>Smoothing <b>{Math.round(toolOpts.smoothing[smoothKind] * 100)}%</b></span>
@@ -1515,6 +1510,7 @@
 			<div class="canvas-pane">
 				{#key `${canvasEpoch}-${round}`}
 					<PaintCanvas
+						onbrushdiameter={(px) => (brushPx = px)}
 						bind:this={canvas}
 						fill
 						width={canvasSize.width}

@@ -12,16 +12,34 @@
 
 <script lang="ts">
 	/** Quick colours for the options bar (drag one onto the canvas to fill there). */
+	import ColorPanel from './ColorPanel.svelte';
+
 	let {
 		color = $bindable(),
 		onmore,
-		moreOpen = false
+		moreOpen = false,
+		picker = false
 	}: {
 		color: string;
-		/** "More colours" (none: no button) */
+		/** "More colours" (none: no button, unless `picker`) */
 		onmore?: () => void;
 		moreOpen?: boolean;
+		/** the colour wheel opens the full picker in a pop-up here, not elsewhere */
+		picker?: boolean;
 	} = $props();
+
+	/** the picker pop-up is open */
+	let popOpen = $state(false);
+	let wrap = $state<HTMLElement>();
+	function outside(e: PointerEvent) {
+		if (popOpen && wrap && !wrap.contains(e.target as Node)) popOpen = false;
+	}
+	function escape(e: KeyboardEvent) {
+		if (popOpen && e.key === 'Escape') {
+			e.stopPropagation();
+			popOpen = false;
+		}
+	}
 
 	/**
 	 * ColorDrop takes a press and hold before the drag: a tap picks the colour even when
@@ -125,7 +143,24 @@
 			style="left: {lifted.x}px; top: {lifted.y}px; background: {lifted.c}"
 		></div>
 	{/if}
-	{#if onmore}
+	{#if picker}
+		<span class="pop-anchor" bind:this={wrap}>
+			<button
+				type="button"
+				class="swatch custom"
+				aria-label="More colours"
+				aria-expanded={popOpen}
+				aria-haspopup="dialog"
+				title="Colour wheel, recent colours and palettes"
+				onclick={() => (popOpen = !popOpen)}
+			></button>
+			{#if popOpen}
+				<div class="pop">
+					<ColorPanel bind:color onclose={() => (popOpen = false)} />
+				</div>
+			{/if}
+		</span>
+	{:else if onmore}
 		<button
 			type="button"
 			class="swatch custom"
@@ -136,12 +171,33 @@
 		></button>
 	{/if}
 </div>
+<svelte:window onpointerdown={outside} onkeydowncapture={escape} />
 
 <style>
 	.swatches {
 		display: flex;
 		gap: 6px;
 		align-items: center;
+	}
+	.pop-anchor {
+		position: relative;
+		display: inline-flex;
+	}
+	/* the full picker, under the colour wheel, over the canvas */
+	.pop {
+		position: absolute;
+		top: calc(100% + 10px);
+		left: 50%;
+		transform: translateX(-50%);
+		z-index: 60;
+		width: 300px;
+		max-height: min(560px, 70vh);
+		overflow: auto;
+		padding: 12px;
+		border-radius: 20px;
+		background: var(--pp-surface, #fff);
+		border: 1px solid var(--pp-surface-sunk, #e4e0d6);
+		box-shadow: 0 16px 40px rgb(22 22 26 / 0.2);
 	}
 	.swatch {
 		flex: none;

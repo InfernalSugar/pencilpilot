@@ -42,6 +42,8 @@
 	let size = $state(1);
 	let opacity = $state(1);
 	let eraser = $state(false);
+	/** the current brush's diameter in pixels at its own size (sizes show in pixels) */
+	let brushPx = $state(0);
 	/** only tools whose strokes are shared live: the others would show differently for everyone */
 	let tool = $state<'brush' | 'picker'>('brush');
 	let tab = $state('brushes');
@@ -198,7 +200,14 @@
 		{/if}
 	{/snippet}
 	{#snippet rail()}
-		<ToolRail tools={['brush', 'eraser', 'picker']} bind:tool bind:eraser bind:size bind:opacity />
+		<ToolRail
+			tools={['brush', 'eraser', 'picker']}
+			bind:tool
+			bind:eraser
+			bind:size
+			bind:opacity
+			{brushPx}
+		/>
 	{/snippet}
 	{#snippet options()}
 		<span class="brush-name">{brushName}</span>
@@ -214,6 +223,7 @@
 	{/snippet}
 	{#snippet stage()}
 		<PaintCanvas
+			onbrushdiameter={(px) => (brushPx = px)}
 			bind:this={canvas}
 			fill
 			width={lobby.settings.width}
