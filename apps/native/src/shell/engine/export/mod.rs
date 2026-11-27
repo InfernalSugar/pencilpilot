@@ -248,6 +248,8 @@ struct Run {
     queued: usize,
     pending: VecDeque<Item>,
     partial: Option<Partial>,
+    /// tiles' memory to copy into (the renderer's, see [`worker::Shared::spare`])
+    spare: brush::TileBuffers,
     /// the layers merged into static runs, bottom first
     runs: Vec<Vec<u32>>,
     shared: Arc<worker::Shared>,
@@ -432,6 +434,7 @@ fn start(e: &mut Engine, s: &mut State, path: PathBuf) {
         queued: 0,
         pending: VecDeque::new(),
         partial: None,
+        spare: brush::TileBuffers::default(),
         runs,
         shared,
         done,
@@ -483,6 +486,10 @@ fn feed(e: &mut Engine) {
     let t0 = Instant::now();
     let Some(r) = &mut e.exporter.run else { return };
     let rendered = r.shared.rendered.load(Ordering::Relaxed) as usize;
+    // (never waits: the renderer holds it only to put more in)
+    if let Ok(mut g) = r.shared.spare.try_lock() {
+        r.spare.append(std::mem::take(&mut *g));
+    }
     while t0.elapsed() < TICK_BUDGET {
         if r.pending.is_empty() {
             if r.queued >= r.plan.frames.len() || r.queued >= rendered + AHEAD {
@@ -529,8 +536,12 @@ fn feed(e: &mut Engine) {
                     };
                 }
                 let to = (part.at + COPY_TILES).min(part.keys.len());
+                let had = r.spare.len();
                 part.copy
-                    .absorb(p.drawing_copy_tiles(d, &part.keys[part.at..to]));
+                    .absorb(p.drawing_copy_tiles(d, &part.keys[part.at..to], &mut r.spare));
+                r.shared
+                    .used
+                    .fetch_add(had - r.spare.len(), Ordering::Relaxed);
                 part.at = to;
                 if part.at < part.keys.len() {
                     continue;

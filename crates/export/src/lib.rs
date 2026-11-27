@@ -73,8 +73,9 @@ pub struct Spec {
     /// what to write into the file about the work: (key, text), e.g. ("Author", "Ana")
     #[serde(default)]
     pub meta: Vec<(String, String)>,
-    /// MP4: encode with less memory (x264's sliced threads and a short lookahead: at 4K
-    /// about 1.2 GB instead of 2 GB, as fast, files about 2% bigger)
+    /// MP4: encode faster and with less memory (x264's medium preset, sliced threads and a
+    /// short lookahead: 1080p 14 ms a frame and 0.4 GB instead of 18 ms and 1.4 GB, 4K 45 ms
+    /// and 1.1 GB instead of 60 ms and 2 GB; files about 1–5% bigger at the same quality)
     #[serde(default)]
     pub lean: bool,
     /// run FFmpeg at a lower priority than the app (the app's window stays smooth while it
@@ -330,8 +331,12 @@ fn ffmpeg_args(spec: &Spec, out: &Path) -> Vec<String> {
         _ => &[],
     };
     let crf = spec.quality.crf(spec.format).to_string();
-    a.extend(enc.iter().map(|s| s.replace("{crf}", &crf)));
-    if spec.lean && spec.format == Format::Mp4 {
+    let lean = spec.lean && spec.format == Format::Mp4;
+    a.extend(enc.iter().map(|s| match s.as_ref() {
+        "slow" if lean => "medium".to_string(),
+        s => s.replace("{crf}", &crf),
+    }));
+    if lean {
         a.extend([
             "-x264-params".into(),
             "sliced-threads=1:rc-lookahead=10".into(),
@@ -782,6 +787,7 @@ mod tests {
         assert!(!args(&s).contains("x264-params"));
         s.lean = true;
         assert!(args(&s).contains("-x264-params sliced-threads=1:rc-lookahead=10"));
+        assert!(args(&s).contains("-preset medium"));
         s.format = Format::Webm;
         s.quality = Quality::Good;
         assert!(args(&s).contains("-crf 33"));

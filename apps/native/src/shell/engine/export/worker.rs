@@ -5,12 +5,12 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use brush::{DrawingCopy, LayerProps, Painter};
+use brush::{DrawingCopy, LayerProps, Painter, TileBuffers};
 
 use super::{Format, resize};
 
@@ -68,6 +68,44 @@ pub struct Shared {
     /// output frames written
     pub written: AtomicU32,
     pub cancel: AtomicBool,
+    /// tiles' memory for the window to copy drawings into (made here, so the window's
+    /// copies cost no page faults), and how many tiles were offered and used in all
+    pub spare: Mutex<TileBuffers>,
+    pub offered: AtomicUsize,
+    pub used: AtomicUsize,
+}
+
+/// The window's spare tiles: topped up below LOW, kept to at most HIGH (32 MB).
+const SPARE_LOW: usize = 512;
+const SPARE_HIGH: usize = 1024;
+
+impl Shared {
+    /// Tiles the window has to copy into.
+    fn spare(&self) -> usize {
+        self.offered
+            .load(Ordering::Relaxed)
+            .saturating_sub(self.used.load(Ordering::Relaxed))
+    }
+
+    /// Tiles' memory to the window, up to what it keeps.
+    fn offer(&self, mut b: TileBuffers) {
+        b.truncate(SPARE_HIGH.saturating_sub(self.spare()));
+        if b.is_empty() {
+            return;
+        }
+        self.offered.fetch_add(b.len(), Ordering::Relaxed);
+        if let Ok(mut g) = self.spare.lock() {
+            g.append(b);
+        }
+    }
+
+    /// More, when the window is running low.
+    fn top_up(&self) {
+        let have = self.spare();
+        if have < SPARE_LOW {
+            self.offer(TileBuffers::allocate(SPARE_LOW - have));
+        }
+    }
 }
 
 /// How an export went.
@@ -117,6 +155,9 @@ pub fn spawn(job: Job) -> (mpsc::Sender<Msg>, Arc<Shared>, mpsc::Receiver<Outcom
         rendered: AtomicU32::new(0),
         written: AtomicU32::new(0),
         cancel: AtomicBool::new(false),
+        spare: Mutex::new(TileBuffers::default()),
+        offered: AtomicUsize::new(0),
+        used: AtomicUsize::new(0),
     });
     let started = Instant::now();
     // the shrink the painter can do itself (a whole fraction of the document), and the size
@@ -239,10 +280,12 @@ fn render(
         if sh.cancel.load(Ordering::Relaxed) {
             return (st, None);
         }
-        let msg = match rx.recv() {
+        sh.top_up();
+        let msg = match rx.recv_timeout(Duration::from_millis(4)) {
             Ok(m) => m,
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
             // the window let go of the export without ending it: it stops
-            Err(_) => {
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
                 sh.cancel.store(true, Ordering::Relaxed);
                 return (st, None);
             }
@@ -262,7 +305,7 @@ fn render(
                     && lp.visible
                 {
                     let acc = &mut merging[r].0;
-                    on(pool, || acc.merge(c, lp.opacity, lp.blend));
+                    sh.offer(on(pool, || acc.merge(c, lp.opacity, lp.blend)));
                 }
                 merging[r].1 += 1;
                 if merging[r].1 == runs[r].len() {
@@ -316,7 +359,9 @@ fn render(
                     px = on(pool, || resize::resize(&px, rw, rh, ow, oh));
                 }
                 for d in forget {
-                    p.forget_drawing(d);
+                    if let Some(c) = p.take_drawing_copy(d) {
+                        sh.offer(c.into_buffers());
+                    }
                     held.remove(&d);
                 }
                 let took = t.elapsed();

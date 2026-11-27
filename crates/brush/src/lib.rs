@@ -78,7 +78,7 @@ impl DrawingCopy {
     /// `over` laid on this one with `opacity` and `blend`, as merging a layer down does
     /// (layers that always show the same drawings, merged once for an export). Its tiles
     /// are taken where nothing's under them (a bottom layer costs nothing).
-    pub fn merge(&mut self, over: DrawingCopy, opacity: f32, blend: Blend) {
+    pub fn merge(&mut self, over: DrawingCopy, opacity: f32, blend: Blend) -> TileBuffers {
         let plain = opacity >= 1.0 && blend == Blend::Normal;
         let mut laid = Vec::new();
         for (k, t) in over.0 {
@@ -110,6 +110,55 @@ impl DrawingCopy {
         }
         #[cfg(target_arch = "wasm32")]
         self.0.iter_mut().for_each(|(k, t)| lay(k, t));
+        // (the tiles laid on others are free for more copies)
+        TileBuffers(over.into_values().collect())
+    }
+
+    /// Its tiles' memory, for more copies.
+    pub fn into_buffers(self) -> TileBuffers {
+        TileBuffers(self.0.into_values().collect())
+    }
+}
+
+/// Tiles' memory to copy drawings into ([`Painter::drawing_copy_tiles`]): made, and touched,
+/// on one thread so that copying into it on another (the window's) costs no page faults
+/// (with the whole process allocating, a fault can wait milliseconds).
+#[derive(Default)]
+pub struct TileBuffers(Vec<Box<TilePixels>>);
+
+impl TileBuffers {
+    /// `n` tiles, every page of them touched now.
+    pub fn allocate(n: usize) -> TileBuffers {
+        TileBuffers(
+            (0..n)
+                .map(|_| {
+                    let mut t = empty_tile();
+                    let p = t.as_mut_ptr() as *mut u8;
+                    for off in (0..std::mem::size_of::<TilePixels>()).step_by(4096) {
+                        // SAFETY: inside the tile's own allocation
+                        unsafe { std::ptr::write_volatile(p.add(off), 0) };
+                    }
+                    t
+                })
+                .collect(),
+        )
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn append(&mut self, mut other: TileBuffers) {
+        self.0.append(&mut other.0);
+    }
+
+    /// At most `n` of them kept (the rest let go).
+    pub fn truncate(&mut self, n: usize) {
+        self.0.truncate(n);
     }
 }
 
@@ -4396,16 +4445,38 @@ impl Painter {
 
     /// A copy of some of a drawing's tiles (those it has of `keys`), as
     /// [`Painter::drawing_copy`] copies them all.
-    pub fn drawing_copy_tiles(&self, drawing: u32, keys: &[(i32, i32)]) -> DrawingCopy {
+    /// The copies go into `spare`'s memory while it lasts.
+    pub fn drawing_copy_tiles(
+        &self,
+        drawing: u32,
+        keys: &[(i32, i32)],
+        spare: &mut TileBuffers,
+    ) -> DrawingCopy {
         let Some(tiles) = self.drawing_tiles(drawing) else {
             return DrawingCopy::empty();
         };
         // (on this thread alone: a part is small, and other threads may be busy)
         DrawingCopy(
             keys.iter()
-                .filter_map(|k| tiles.get(k).map(|t| (*k, t.clone())))
+                .filter_map(|k| {
+                    let t = tiles.get(k)?;
+                    let copy = match spare.0.pop() {
+                        Some(mut b) => {
+                            *b = **t;
+                            b
+                        }
+                        None => t.clone(),
+                    };
+                    Some((*k, copy))
+                })
                 .collect(),
         )
+    }
+
+    /// A kept drawing taken out (not showing; the export's own painter lets go of what it's
+    /// done with this way, to reuse the memory).
+    pub fn take_drawing_copy(&mut self, drawing: u32) -> Option<DrawingCopy> {
+        self.cels.remove(&drawing).map(DrawingCopy)
     }
 
     /// Counts changes to the history (new edits, undo, redo): a drawing copied a part at a
