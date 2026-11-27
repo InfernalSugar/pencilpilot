@@ -3361,10 +3361,12 @@ dependencies = [
  "hokusai",
  "pencilpilot-brush",
  "pencilpilot-gpu",
+ "pencilpilot-ppstudio",
  "pencilpilot-ui",
  "pencilpilot-window",
  "png",
  "rayon",
+ "serde_json",
  "zbus",
 ]
 
