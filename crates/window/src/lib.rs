@@ -28,6 +28,9 @@
 
 #![cfg(target_os = "linux")]
 
+pub mod input;
+mod keyboard;
+
 use std::collections::{HashMap, HashSet};
 use std::os::fd::AsFd;
 
@@ -50,7 +53,18 @@ use wayland_protocols::xdg::decoration::zv1::client::{
 };
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 
+pub use input::*;
 pub use wayland_client::protocol::wl_output::WlOutput;
+
+use keyboard::Keyboard;
+use wayland_client::backend::ObjectId;
+use wayland_client::event_created_child;
+use wayland_client::protocol::{wl_keyboard, wl_pointer, wl_seat};
+use wayland_protocols::wp::tablet::zv2::client::{
+    zwp_tablet_manager_v2, zwp_tablet_pad_dial_v2, zwp_tablet_pad_group_v2, zwp_tablet_pad_ring_v2,
+    zwp_tablet_pad_strip_v2, zwp_tablet_pad_v2, zwp_tablet_seat_v2, zwp_tablet_tool_v2,
+    zwp_tablet_v2,
+};
 
 #[derive(Debug)]
 pub enum Error {
@@ -126,6 +140,13 @@ struct State {
     discarded: u32,
     refused: bool,
     modifiers: Vec<u64>,
+    // input
+    input: Vec<InputEvent>,
+    pointer: Option<wl_pointer::WlPointer>,
+    pointer_gatherer: PointerGatherer,
+    keyboard: Option<wl_keyboard::WlKeyboard>,
+    keymap: Option<Keyboard>,
+    pens: HashMap<ObjectId, PenGatherer>,
 }
 
 struct Slot {
@@ -180,6 +201,13 @@ impl Window {
             globals.bind(&qh, 1..=1, ()).ok();
         let decorations: Option<zxdg_decoration_manager_v1::ZxdgDecorationManagerV1> =
             globals.bind(&qh, 1..=1, ()).ok();
+        // input: the seat (pointer, keyboard) and the pen (tablet v2)
+        let seat: Option<wl_seat::WlSeat> = globals.bind(&qh, 1..=9, ()).ok();
+        let tablets: Option<zwp_tablet_manager_v2::ZwpTabletManagerV2> =
+            globals.bind(&qh, 1..=2, ()).ok();
+        if let (Some(seat), Some(t)) = (&seat, &tablets) {
+            t.get_tablet_seat(seat, &qh, ());
+        }
         // every monitor, to know their refresh rates
         let mut outputs = Vec::new();
         let mut st = State {
@@ -337,6 +365,11 @@ impl Window {
     /// Frames shown since the last call, oldest first.
     pub fn take_presented(&mut self) -> Vec<Presented> {
         std::mem::take(&mut self.st.presented)
+    }
+
+    /// Input since the last call, in order.
+    pub fn take_input(&mut self) -> Vec<InputEvent> {
+        std::mem::take(&mut self.st.input)
     }
 
     /// Frames the compositor never showed (it skipped them), since the window opened.
@@ -705,5 +738,256 @@ impl Dispatch<wp_presentation_feedback::WpPresentationFeedback, ()> for State {
             wp_presentation_feedback::Event::Discarded => s.discarded += 1,
             _ => {}
         }
+    }
+}
+
+// ---- input ----
+
+impl Dispatch<wl_seat::WlSeat, ()> for State {
+    fn event(
+        s: &mut Self,
+        seat: &wl_seat::WlSeat,
+        e: wl_seat::Event,
+        _: &(),
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        if let wl_seat::Event::Capabilities {
+            capabilities: WEnum::Value(c),
+        } = e
+        {
+            if c.contains(wl_seat::Capability::Pointer) && s.pointer.is_none() {
+                s.pointer = Some(seat.get_pointer(qh, ()));
+            }
+            if c.contains(wl_seat::Capability::Keyboard) && s.keyboard.is_none() {
+                s.keyboard = Some(seat.get_keyboard(qh, ()));
+            }
+        }
+    }
+}
+
+impl Dispatch<wl_pointer::WlPointer, ()> for State {
+    fn event(
+        s: &mut Self,
+        p: &wl_pointer::WlPointer,
+        e: wl_pointer::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        use wl_pointer::Event as E;
+        let piece = match e {
+            E::Enter {
+                surface_x,
+                surface_y,
+                ..
+            } => PointerPiece::Enter(surface_x, surface_y),
+            E::Leave { .. } => PointerPiece::Leave,
+            E::Motion {
+                time,
+                surface_x,
+                surface_y,
+            } => PointerPiece::Motion(time, surface_x, surface_y),
+            E::Button {
+                time,
+                button,
+                state,
+                ..
+            } => PointerPiece::Button(
+                time,
+                button,
+                state == WEnum::Value(wl_pointer::ButtonState::Pressed),
+            ),
+            E::Axis { time, axis, value } => PointerPiece::Axis(
+                time,
+                axis == WEnum::Value(wl_pointer::Axis::VerticalScroll),
+                value,
+            ),
+            E::AxisSource {
+                axis_source: WEnum::Value(wl_pointer::AxisSource::Wheel),
+            } => PointerPiece::WheelSource,
+            E::Frame => PointerPiece::Frame,
+            _ => return,
+        };
+        let mut out = s.pointer_gatherer.take(piece);
+        // before version 5 there are no frames: each piece is a moment
+        if p.version() < 5 && piece != PointerPiece::Frame {
+            out.extend(s.pointer_gatherer.take(PointerPiece::Frame));
+        }
+        s.input.extend(out.into_iter().map(InputEvent::Pointer));
+    }
+}
+
+impl Dispatch<wl_keyboard::WlKeyboard, ()> for State {
+    fn event(
+        s: &mut Self,
+        _: &wl_keyboard::WlKeyboard,
+        e: wl_keyboard::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        use wl_keyboard::Event as E;
+        match e {
+            E::Keymap {
+                format: WEnum::Value(wl_keyboard::KeymapFormat::XkbV1),
+                fd,
+                size,
+            } => {
+                use std::io::Read;
+                let mut text = String::new();
+                let file = std::fs::File::from(fd);
+                if file.take(size as u64).read_to_string(&mut text).is_ok() {
+                    s.keymap = Keyboard::from_text(&text);
+                }
+            }
+            E::Enter { .. } => s.input.push(InputEvent::Focus(true)),
+            E::Leave { .. } => s.input.push(InputEvent::Focus(false)),
+            E::Modifiers {
+                mods_depressed,
+                mods_latched,
+                mods_locked,
+                group,
+                ..
+            } => {
+                if let Some(k) = &mut s.keymap {
+                    k.set_mods(mods_depressed, mods_latched, mods_locked, group);
+                }
+            }
+            E::Key {
+                time, key, state, ..
+            } => {
+                let pressed = state == WEnum::Value(wl_keyboard::KeyState::Pressed);
+                let (keysym, name, text, mods) = match &s.keymap {
+                    Some(k) => {
+                        let (sym, name, text) = k.key(key);
+                        (sym, name, text, k.mods())
+                    }
+                    None => (0, String::new(), None, Mods::default()),
+                };
+                s.input.push(InputEvent::Key(KeyEvent {
+                    keysym,
+                    name,
+                    text: if pressed { text } else { None },
+                    pressed,
+                    mods,
+                    code: key,
+                    time_ms: time,
+                }));
+            }
+            E::RepeatInfo { rate, delay } => s.input.push(InputEvent::KeyRepeat {
+                rate,
+                delay_ms: delay,
+            }),
+            _ => {}
+        }
+    }
+}
+
+delegate_noop!(State: ignore zwp_tablet_manager_v2::ZwpTabletManagerV2);
+delegate_noop!(State: ignore zwp_tablet_v2::ZwpTabletV2);
+delegate_noop!(State: ignore zwp_tablet_pad_ring_v2::ZwpTabletPadRingV2);
+delegate_noop!(State: ignore zwp_tablet_pad_strip_v2::ZwpTabletPadStripV2);
+delegate_noop!(State: ignore zwp_tablet_pad_dial_v2::ZwpTabletPadDialV2);
+
+impl Dispatch<zwp_tablet_seat_v2::ZwpTabletSeatV2, ()> for State {
+    fn event(
+        _: &mut Self,
+        _: &zwp_tablet_seat_v2::ZwpTabletSeatV2,
+        _: zwp_tablet_seat_v2::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        // tablets, tools and pads arrive as new objects (below)
+    }
+    event_created_child!(State, zwp_tablet_seat_v2::ZwpTabletSeatV2, [
+        zwp_tablet_seat_v2::EVT_TABLET_ADDED_OPCODE => (zwp_tablet_v2::ZwpTabletV2, ()),
+        zwp_tablet_seat_v2::EVT_TOOL_ADDED_OPCODE => (zwp_tablet_tool_v2::ZwpTabletToolV2, ()),
+        zwp_tablet_seat_v2::EVT_PAD_ADDED_OPCODE => (zwp_tablet_pad_v2::ZwpTabletPadV2, ()),
+    ]);
+}
+
+impl Dispatch<zwp_tablet_pad_v2::ZwpTabletPadV2, ()> for State {
+    fn event(
+        _: &mut Self,
+        _: &zwp_tablet_pad_v2::ZwpTabletPadV2,
+        _: zwp_tablet_pad_v2::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        // the tablet's own buttons and rings: later (shortcuts)
+    }
+    event_created_child!(State, zwp_tablet_pad_v2::ZwpTabletPadV2, [
+        zwp_tablet_pad_v2::EVT_GROUP_OPCODE => (zwp_tablet_pad_group_v2::ZwpTabletPadGroupV2, ()),
+    ]);
+}
+
+impl Dispatch<zwp_tablet_pad_group_v2::ZwpTabletPadGroupV2, ()> for State {
+    fn event(
+        _: &mut Self,
+        _: &zwp_tablet_pad_group_v2::ZwpTabletPadGroupV2,
+        _: zwp_tablet_pad_group_v2::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+    event_created_child!(State, zwp_tablet_pad_group_v2::ZwpTabletPadGroupV2, [
+        zwp_tablet_pad_group_v2::EVT_RING_OPCODE => (zwp_tablet_pad_ring_v2::ZwpTabletPadRingV2, ()),
+        zwp_tablet_pad_group_v2::EVT_STRIP_OPCODE => (zwp_tablet_pad_strip_v2::ZwpTabletPadStripV2, ()),
+        zwp_tablet_pad_group_v2::EVT_DIAL_OPCODE => (zwp_tablet_pad_dial_v2::ZwpTabletPadDialV2, ()),
+    ]);
+}
+
+impl Dispatch<zwp_tablet_tool_v2::ZwpTabletToolV2, ()> for State {
+    fn event(
+        s: &mut Self,
+        tool: &zwp_tablet_tool_v2::ZwpTabletToolV2,
+        e: zwp_tablet_tool_v2::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        use zwp_tablet_tool_v2::{ButtonState, Event as E, Type};
+        let piece = match e {
+            E::Type {
+                tool_type: WEnum::Value(t),
+            } => PenPiece::Type(match t {
+                Type::Eraser => PenTool::Eraser,
+                Type::Brush => PenTool::Brush,
+                Type::Pencil => PenTool::Pencil,
+                Type::Airbrush => PenTool::Airbrush,
+                Type::Finger => PenTool::Finger,
+                Type::Mouse => PenTool::Mouse,
+                Type::Lens => PenTool::Lens,
+                _ => PenTool::Pen,
+            }),
+            E::HardwareSerial {
+                hardware_serial_hi,
+                hardware_serial_lo,
+            } => PenPiece::Serial(((hardware_serial_hi as u64) << 32) | hardware_serial_lo as u64),
+            E::ProximityIn { .. } => PenPiece::ProximityIn,
+            E::ProximityOut => PenPiece::ProximityOut,
+            E::Down { .. } => PenPiece::Down,
+            E::Up => PenPiece::Up,
+            E::Motion { x, y } => PenPiece::Motion(x, y),
+            E::Pressure { pressure } => PenPiece::Pressure(pressure),
+            E::Distance { distance } => PenPiece::Distance(distance),
+            E::Tilt { tilt_x, tilt_y } => PenPiece::Tilt(tilt_x, tilt_y),
+            E::Rotation { degrees } => PenPiece::Rotation(degrees),
+            E::Button { button, state, .. } => {
+                PenPiece::Button(button, state == WEnum::Value(ButtonState::Pressed))
+            }
+            E::Frame { time } => PenPiece::Frame(time),
+            E::Removed => {
+                s.pens.remove(&tool.id());
+                return;
+            }
+            _ => return,
+        };
+        let out = s.pens.entry(tool.id()).or_default().take(piece);
+        s.input.extend(out.into_iter().map(InputEvent::Pen));
     }
 }

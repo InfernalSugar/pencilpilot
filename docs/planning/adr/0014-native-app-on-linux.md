@@ -73,7 +73,15 @@ Each step is its own PR, with tests that need no window on the screen.
    - **Frames are handed over** once the GPU has finished them (a fence wait). Explicit sync,
      which lets the compositor wait on the GPU instead, comes with the canvas, where its gain can
      be measured.
-4. Input: pointer, keyboard (keymaps through a standard library), and the pen (tablet v2).
+4. Input in `crates/window` (done): pointer (each compositor frame one moment), keyboard
+   (libxkbcommon, loaded at run time: the person's layouts, modifiers and text), and the pen
+   (tablet v2: pressure, tilt, rotation, distance, the eraser end, side buttons, per tool, with
+   the compositor's timestamps).
+   - **Tests:** recorded sequences cover a whole stroke, the eraser and buttons, leaving while
+     touching, a tap within one moment, and pointer moments and scrolls. A US keymap types "a",
+     "!" with Shift, and nothing for Ctrl+A.
+   - **The real pen:** `cargo run --release -p pencilpilot-window --example pen` opens a window
+     that darkens with pressure and prints what the pen reports.
 5. The first canvas: the brush engine (`crates/brush`) paints tiles, and the GPU composites and
    presents them.
    - **Measured in the baseline:** pen to screen, frame rate at 60/75/100/165 Hz, memory and power.
