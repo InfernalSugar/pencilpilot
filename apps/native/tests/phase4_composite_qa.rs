@@ -526,3 +526,234 @@ fn reference_matches_cpu() {
         "the CPU compositor differs from the reference by {worst_all}: {json}"
     );
 }
+
+// ------------------------------------------------------------------------------------------
+// the GPU's picture
+
+/// The engine's picture made on the GPU (as the window makes it) and read back; whether the
+/// GPU made it (not the CPU's fallback).
+fn gpu_picture(
+    e: &mut Engine,
+    s: &mut State,
+    g: &pencilpilot_gpu::Gpu,
+    comp: &mut pencilpilot_gpu::Compositor,
+) -> (Vec<u8>, bool) {
+    e.tick(s, Instant::now());
+    let on_gpu = match e.picture_gpu(s, g, comp) {
+        pencilpilot_native::shell::engine::frames::gpu::Pic::Gpu(_) => true,
+        pencilpilot_native::shell::engine::frames::gpu::Pic::Cpu(_) => false,
+    };
+    (comp.read_back(g).expect("read back"), on_gpu)
+}
+
+/// The GPU's picture against the CPU's (a second engine with the same project that never
+/// composites on the GPU) and against the reference, going 0 → 1 → 2 → 1 → 0 → 2 (kept tiles
+/// reused), with the onion skin off and on, then a layer hidden, an opacity changed and a
+/// blend mode changed through the painter. Budget: ±1 a channel.
+#[test]
+#[ignore]
+fn gpu_matches_cpu() {
+    let g = match pencilpilot_gpu::Gpu::new() {
+        Ok(g) => g,
+        Err(err) => {
+            eprintln!("skipped: no GPU ({err})");
+            return;
+        }
+    };
+    let (mut eg, mut sg, ls, masks) = opened();
+    let (mut ec, mut sc, _, _) = opened();
+    let mut comp =
+        pencilpilot_gpu::Compositor::new(&g, W, H, brush::srgb_table(), 256 << 20).unwrap();
+    let d = out_dir();
+    let mut rows = Vec::new();
+    let mut worst_all = 0u8;
+    let mut cpu_fallbacks = 0;
+    let mut step = |eg: &mut Engine,
+                    sg: &mut State,
+                    ec: &mut Engine,
+                    sc: &mut State,
+                    comp: &mut pencilpilot_gpu::Compositor,
+                    label: String,
+                    with_reference: bool| {
+        let cpu = shown(ec, sc);
+        let (gp, on) = gpu_picture(eg, sg, &g, comp);
+        if !on {
+            cpu_fallbacks += 1;
+        }
+        let (worst, over, at) = diff(&gp, &cpu, 1);
+        let vs_ref =
+            with_reference.then(|| diff(&gp, &reference(&ls, sg.frame as usize, &masks), 1).0);
+        if worst > 1 {
+            save_png(&d.join(format!("gpu-{label}.png")), &gp, W, H);
+            save_png(&d.join(format!("cpu-{label}.png")), &cpu, W, H);
+        }
+        rows.push(format!(
+            "{{\"step\": {label:?}, \"onGpu\": {on}, \"maxDiffVsCpu\": {worst}, \"channelsOver1\": {over}, \"worstAt\": [{}, {}], \"maxDiffVsReference\": {}}}",
+            at.0,
+            at.1,
+            vs_ref.map_or("null".into(), |v| v.to_string())
+        ));
+        worst_all = worst_all.max(worst);
+    };
+    for onion in [false, true] {
+        sg.onion = onion;
+        sc.onion = onion;
+        // the animated layer is the active one (its neighbours are the onion skin)
+        sg.active_layer = 0;
+        sc.active_layer = 0;
+        for f in [0u32, 1, 2, 1, 0, 2] {
+            for (e, s) in [(&mut eg, &mut sg), (&mut ec, &mut sc)] {
+                assert!(e.apply(s, &Action::GoToFrame(f)));
+                e.tick(s, Instant::now());
+            }
+            step(
+                &mut eg,
+                &mut sg,
+                &mut ec,
+                &mut sc,
+                &mut comp,
+                format!("onion{onion}-f{f}"),
+                !onion,
+            );
+        }
+    }
+    // the layers' settings changed (the same change on both)
+    sg.onion = false;
+    sc.onion = false;
+    type Change = (&'static str, &'static str, fn(&mut brush::LayerProps));
+    let changes: [Change; 4] = [
+        ("hidden", "Blend multiply", |p| p.visible = false),
+        ("opacity 0.2", "Blend screen", |p| p.opacity = 0.2),
+        ("blend overlay", "Clip base", |p| {
+            p.blend = brush::Blend::Overlay
+        }),
+        ("unclipped", "Clipped normal", |p| p.clip = false),
+    ];
+    for (what, name, f) in changes {
+        for (e, s) in [(&mut eg, &mut sg), (&mut ec, &mut sc)] {
+            let l = e
+                .painter
+                .layers()
+                .iter()
+                .find(|l| l.props.name == name)
+                .unwrap_or_else(|| panic!("{name}"));
+            let (id, mut p) = (l.id, l.props.clone());
+            f(&mut p);
+            assert!(e.painter.set_layer_props(id, p, false));
+            e.tick(s, Instant::now());
+        }
+        step(
+            &mut eg,
+            &mut sg,
+            &mut ec,
+            &mut sc,
+            &mut comp,
+            format!("{name} {what}"),
+            false,
+        );
+    }
+    let json = format!(
+        "{{\"cpuFallbacks\": {cpu_fallbacks}, \"steps\": [{}]}}",
+        rows.join(",\n ")
+    );
+    std::fs::write(d.join("gpu_vs_cpu.json"), &json).unwrap();
+    eprintln!("gpu vs cpu: {json}");
+    assert_eq!(
+        cpu_fallbacks, 0,
+        "the GPU didn't make every picture: {json}"
+    );
+    assert!(
+        worst_all <= 1,
+        "the GPU's picture differs from the CPU's by {worst_all}: {json}"
+    );
+}
+
+/// A project with more layers than the GPU takes at once (40): the picture is right, made
+/// by whichever compositor takes it.
+#[test]
+#[ignore]
+fn many_layers_picture_is_right() {
+    let Some(fix) = std::env::var_os("PP_QA_FIXTURES").map(PathBuf::from) else {
+        eprintln!("skipped: PP_QA_FIXTURES not set");
+        return;
+    };
+    let g = match pencilpilot_gpu::Gpu::new() {
+        Ok(g) => g,
+        Err(err) => {
+            eprintln!("skipped: no GPU ({err})");
+            return;
+        }
+    };
+    init();
+    let path = fix.join("layers40.ppstudio");
+    let open = |p: &Path| {
+        let mut s = State::demo();
+        s.onion = false;
+        let mut e = Engine::new(s.view.doc_w, s.view.doc_h);
+        settle(&mut e, &mut s);
+        unsafe { std::env::set_var("PENCILPILOT_DIALOG_ANSWER", p) };
+        assert!(e.apply(&mut s, &Action::File(files::OPEN.into())));
+        settle(&mut e, &mut s);
+        (e, s)
+    };
+    let (mut eg, mut sg) = open(&path);
+    let (mut ec, sc) = open(&path);
+    // (the painter holds at most 32 layers: a project with more opens with fewer, the
+    // ones over left out; at 32 the GPU takes them all)
+    eprintln!(
+        "layers40 opened with {} layers; note: {:?}",
+        sg.layers.len(),
+        sg.project.note
+    );
+    let _ = std::fs::write(
+        out_dir().join("layers40.json"),
+        format!(
+            "{{\"layersInFile\": 40, \"layersOpened\": {}, \"note\": {:?}}}",
+            sg.layers.len(),
+            sg.project.note
+        ),
+    );
+    let (w, h) = (eg.painter.width(), eg.painter.height());
+    let mut comp =
+        pencilpilot_gpu::Compositor::new(&g, w, h, brush::srgb_table(), 512 << 20).unwrap();
+    eg.tick(&mut sg, Instant::now());
+    let pic = match eg.picture_gpu(&sg, &g, &mut comp) {
+        pencilpilot_native::shell::engine::frames::gpu::Pic::Gpu(_) => None,
+        pencilpilot_native::shell::engine::frames::gpu::Pic::Cpu(p) => {
+            Some(p.map(|(px, _)| px.to_vec()))
+        }
+    };
+    let cpu = shown(&mut ec, &sc);
+    match pic {
+        None => {
+            // the GPU made it after all: it must be right
+            let gp = comp.read_back(&g).unwrap();
+            let worst = gp
+                .iter()
+                .zip(&cpu)
+                .enumerate()
+                .filter(|(i, _)| i % 4 != 3)
+                .map(|(_, (a, b))| a.abs_diff(*b))
+                .max()
+                .unwrap();
+            assert!(
+                worst <= 1,
+                "40 layers on the GPU differ from the CPU by {worst}"
+            );
+        }
+        Some(p) => {
+            let p = p.unwrap_or_else(|| eg.painter.rgba().to_vec());
+            assert_eq!(p.len(), cpu.len());
+            let worst = p
+                .iter()
+                .zip(&cpu)
+                .enumerate()
+                .filter(|(i, _)| i % 4 != 3)
+                .map(|(_, (a, b))| a.abs_diff(*b))
+                .max()
+                .unwrap();
+            assert_eq!(worst, 0, "the CPU's fallback picture isn't the CPU's");
+        }
+    }
+    unsafe { std::env::set_var("PENCILPILOT_DIALOG_ANSWER", "") };
+}
