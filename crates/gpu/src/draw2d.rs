@@ -210,8 +210,8 @@ pub struct Renderer2d {
     atlas: vk::Image,
     atlas_memory: vk::DeviceMemory,
     atlas_view: vk::ImageView,
-    /// what bindings 2 and 3 show: a picture's view, or the atlas's
-    bound_canvas: [vk::ImageView; 2],
+    /// what bindings 2 and 3 show: a picture's serial (0: the atlas; u64::MAX: nothing yet)
+    bound_canvas: [u64; 2],
     staging: vk::Buffer,
     staging_memory: vk::DeviceMemory,
     staging_ptr: *mut u8,
@@ -471,7 +471,7 @@ impl Renderer2d {
                 atlas,
                 atlas_memory,
                 atlas_view,
-                bound_canvas: [atlas_view; 2],
+                bound_canvas: [0; 2],
                 staging,
                 staging_memory,
                 staging_ptr: staging_ptr as *mut u8,
@@ -594,12 +594,21 @@ impl Renderer2d {
         let first = !self.atlas_ready;
         self.atlas_ready = true;
         // the canvas quads sample: bind these pictures (or the atlas, when there's none)
-        for (binding, want) in [
-            (2, canvas.as_ref().map_or(self.atlas_view, |c| c.view)),
-            (3, second.as_ref().map_or(self.atlas_view, |c| c.view)),
+        // (by serial: a new picture can get a destroyed one's handles back)
+        for (binding, want, serial) in [
+            (
+                2,
+                canvas.as_ref().map_or(self.atlas_view, |c| c.view),
+                canvas.as_ref().map_or(0, |c| c.serial),
+            ),
+            (
+                3,
+                second.as_ref().map_or(self.atlas_view, |c| c.view),
+                second.as_ref().map_or(0, |c| c.serial),
+            ),
         ] {
             let bound = &mut self.bound_canvas[binding as usize - 2];
-            if want == *bound {
+            if serial == *bound {
                 continue;
             }
             let img = [vk::DescriptorImageInfo::default()
@@ -616,7 +625,7 @@ impl Renderer2d {
                     &[],
                 )
             };
-            *bound = want;
+            *bound = serial;
         }
         let pictures: Vec<_> = canvas
             .into_iter()

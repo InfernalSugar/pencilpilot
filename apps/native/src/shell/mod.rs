@@ -174,7 +174,7 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
     let (mut dirty, mut canvas_dirty) = (true, false);
     // what a held button or pen is doing; Space and Shift held
     let mut drag = Drag::None;
-    let (mut space, mut shift) = (false, false);
+    let (mut space, mut shift, mut alt) = (false, false, false);
     let deadline = quit_after.map(|s| started + std::time::Duration::from_secs_f64(s));
     while win.is_open() && deadline.is_none_or(|d| std::time::Instant::now() < d) {
         if !win.wants_frame() || !(dirty || canvas_dirty) {
@@ -273,6 +273,7 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
                     } else if pressed && !middle && engine_here(x, y, &s, &ui) {
                         if let Some(e) = &mut eng {
                             let p = sample(&s, x, y, 0.5, (0.0, 0.0), time_ms);
+                            (s.tooling.shift, s.tooling.alt) = (shift, alt);
                             e.pointer(&mut s, engine::Phase::Down, p);
                             drag = Drag::Engine;
                         }
@@ -334,6 +335,9 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
                                     _ => engine::Phase::Up,
                                 };
                                 let smp = sample(&s, x, y, p.sample.pressure, tilt, p.time_ms);
+                                if phase == engine::Phase::Down {
+                                    (s.tooling.shift, s.tooling.alt) = (shift, alt);
+                                }
                                 e.pointer(&mut s, phase, smp);
                             }
                             if matches!(p.phase, PenPhase::Up | PenPhase::Leave) {
@@ -365,6 +369,9 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
                     }
                     if k.name.starts_with("Shift") {
                         shift = k.pressed;
+                    }
+                    if k.name.starts_with("Alt") {
+                        alt = k.pressed;
                     }
                     if !k.pressed {
                         continue;
@@ -445,6 +452,7 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             win.wait_until(p.draw_at)?;
             continue;
         }
+        let work_from = pencilpilot_window::clock::now_ns();
         let (lw, lh) = win.logical_size();
         ui.scale = win.scale() as f32;
         let (w, h) = (lw as f32, lh as f32);
@@ -501,7 +509,12 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             float_tex.as_mut().map(|(c, _)| c),
         )?;
         let frame = win.present()?;
-        pacer.drawn(frame, plan.take());
+        pacer.drawn(
+            frame,
+            plan.take(),
+            // (only frames input asked for: the startup's say nothing about drawing)
+            (events > 0).then(|| pencilpilot_window::clock::now_ns().saturating_sub(work_from)),
+        );
         drawn += 1;
         recs.push(FrameRec {
             frame,
@@ -545,12 +558,13 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             .collect();
         let c = canvas_rect;
         let json = format!(
-            "{{\"seconds\": {:.3}, \"startupToFirstFrameMs\": {}, \"framesDrawn\": {drawn}, \"framesPresented\": {presented}, \"drawingLate\": {}, \"marginMs\": {:.2}, \"framesLate\": {},\n \"view\": {{\"zoom\": {}, \"angle\": {}, \"flip\": {}, \"pan\": [{}, {}], \"docSize\": [{}, {}]}},\n \"canvasRect\": [{}, {}, {}, {}],\n \"state\": {{\"workspace\": {:?}, \"tool\": \"{:?}\", \"activeLayer\": {}, \"frame\": {}, \"playing\": {}, \"colour\": {:?}, \"layers\": [{}]}},\n \"frames\": [\n  {}\n ]}}\n",
+            "{{\"seconds\": {:.3}, \"startupToFirstFrameMs\": {}, \"framesDrawn\": {drawn}, \"framesPresented\": {presented}, \"drawingLate\": {}, \"marginMs\": {:.2}, \"framesLate\": {}, \"coolDowns\": {},\n \"view\": {{\"zoom\": {}, \"angle\": {}, \"flip\": {}, \"pan\": [{}, {}], \"docSize\": [{}, {}]}},\n \"canvasRect\": [{}, {}, {}, {}],\n \"state\": {{\"workspace\": {:?}, \"tool\": \"{:?}\", \"activeLayer\": {}, \"frame\": {}, \"playing\": {}, \"colour\": {:?}, \"layers\": [{}]}},\n \"frames\": [\n  {}\n ]}}\n",
             started.elapsed().as_secs_f64(),
             first_shown.map_or("null".into(), |v| format!("{v:.1}")),
             pacer.drawing_late(),
             pacer.margin_ms(),
             pacer.late,
+            pacer.cool_downs,
             v.zoom,
             v.angle,
             v.flip,

@@ -345,3 +345,49 @@ fn a_second_picture_moves_over_the_canvas() {
     );
     assert_eq!(at(30, 25), [22, 22, 26], "the canvas elsewhere");
 }
+
+/// A new picture in place of a dropped one shows its own pixels (its handles may be the
+/// dropped one's, reused).
+#[test]
+fn a_new_canvas_replaces_a_dropped_one() {
+    use pencilpilot_gpu::Canvas;
+    let Some(gpu) = gpu() else { return };
+    let (w, h) = (40u32, 20u32);
+    let frame = DmabufImage::new(&gpu, w, h, &[]).unwrap();
+    let mut r = Renderer2d::new(&gpu).unwrap();
+    let rounds = [
+        ([232u8, 73, 47], 40u32),
+        ([22, 22, 26], 300),
+        ([61, 107, 255], 64),
+        ([95, 208, 138], 1000),
+        ([232, 73, 47], 40),
+    ];
+    for (round, (colour, cw)) in rounds.into_iter().enumerate() {
+        // a picture cw × 20, shown pixel for pixel
+        let mut c = Canvas::new(&gpu, cw, h).unwrap();
+        c.upload_all(
+            &(0..cw * h)
+                .flat_map(|_| [colour[0], colour[1], colour[2], 255])
+                .collect::<Vec<u8>>(),
+        );
+        let q = [Quad::canvas(
+            [0.0, 0.0, w as f32, h as f32],
+            [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            [cw as f32, h as f32],
+            [0.0; 4],
+            true,
+        )];
+        r.draw_canvases(&gpu, &frame, PAPER, &q, Some(&mut c), None)
+            .unwrap();
+        let out = gpu.read_back(&frame).unwrap();
+        for (x, y) in [(5u32, 5u32), (20, 10), (35, 15)] {
+            let i = ((y * w + x) * 4) as usize;
+            assert_eq!(
+                [out[i + 2], out[i + 1], out[i]],
+                colour,
+                "round {round}, ({x}, {y})"
+            );
+        }
+        drop(c);
+    }
+}
