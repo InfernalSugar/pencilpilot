@@ -416,8 +416,12 @@ export async function askExportPath(
 	kind: keyof typeof EXPORT_KINDS,
 	folder?: string | null
 ): Promise<string | null> {
-	const { save } = await import('@tauri-apps/plugin-dialog');
 	const k = EXPORT_KINDS[kind];
+	// the performance baseline (tools/baseline) exports without a dialog; null otherwise
+	const { invoke } = await import('@tauri-apps/api/core');
+	const bench = await invoke<string | null>('bench_export_dir').catch(() => null);
+	if (typeof bench === 'string' && bench) return `${bench}/${name}.${k.ext}`;
+	const { save } = await import('@tauri-apps/plugin-dialog');
 	return save({
 		defaultPath: await inFolder(folder, `${name}.${k.ext}`),
 		filters: [{ name: k.name, extensions: [k.ext] }]
