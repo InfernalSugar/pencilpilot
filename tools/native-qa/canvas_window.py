@@ -325,33 +325,69 @@ def scenario_view(binary, out):
     return res
 
 
-def scenario_latency(binary, out):
-    """Drawing for 4 s, the pointer moving every 2 ms (500 Hz, like a pen): pen to screen and
-    the frame rate, at 165 Hz and at 60 Hz."""
+def latency_run(binary, out, tag, mode):
+    """Drawing for 4 s, the pointer moving every 2 ms (500 Hz, like a pen), at 165 Hz and
+    60 Hz. `mode`: "strokes" (400 ms strokes, the harness's ~20 ms between them), "pauses"
+    (the same with 150 ms between them) or "continuous" (one 4 s stroke, zig-zagging).
+    Pen to screen for every frame, and apart for the first two frames after a pause (input
+    arriving after more than a refresh with none) and the steady rest."""
     res = {}
     for hz in (165, 60):
         m = Mutter(out, hz)
         try:
-            app = App(binary, m, out, f"draw-{hz}", 8, "draw")
+            app = App(binary, m, out, f"{tag}-{hz}", 8, "draw")
             time.sleep(1.8)
             inp = Input()
             t0 = mono_ns()
-            # back-and-forth strokes across the canvas, each 400 ms
             k = 0
-            while (mono_ns() - t0) < 4e9:
-                y = 200 + (k % 30) * 15
-                inp.drag(line((200, y), (900, y + 40), 200), 0.002)
-                k += 1
+            if mode == "continuous":
+                pts = []
+                for i in range(2000):
+                    u = (i % 400) / 400
+                    x = 200 + 700 * (u if (i // 400) % 2 == 0 else 1 - u)
+                    pts.append((x, 200 + i * 0.2))
+                inp.drag(pts, 0.002)
+                k = 1
+            else:
+                while (mono_ns() - t0) < 4e9:
+                    y = 200 + (k % 30) * 15
+                    inp.drag(line((200, y), (900, y + 40), 200), 0.002)
+                    if mode == "pauses":
+                        time.sleep(0.15)
+                    k += 1
             t1 = mono_ns()
             inp.stop()
             st = app.wait()
             fr = frame_numbers(st, t0, t1 + 50_000_000)
-            res[str(hz)] = {"strokes": k, "rate": rate(fr, hz), "latency": latency([f for f in fr if f["events"]]),
+            inputs = sorted((f for f in fr if f["events"] and f["shownNs"]), key=lambda f: f["shownNs"])
+            period = 1e9 / hz
+            first, steady, since = [], [], 99
+            prev_shown = None
+            for f in inputs:
+                gap = prev_shown is None or f["receivedNs"] - prev_shown > period
+                since = 0 if gap else since + 1
+                (first if since < 2 else steady).append(f)
+                prev_shown = f["shownNs"]
+            res[str(hz)] = {"strokes": k, "rate": rate(fr, hz), "latency": latency(inputs),
+                            "latencyFirstTwoAfterPause": latency(first),
+                            "latencySteady": latency(steady),
                             "budgetMs": round(1000 / hz + 4, 2),
-                            "pacer": {k: st.get(k) for k in ("drawingLate", "marginMs", "framesLate")}}
+                            "pacer": {x: st.get(x) for x in ("drawingLate", "marginMs", "framesLate", "coolDowns")}}
         finally:
             m.stop()
     return res
+
+
+def scenario_latency(binary, out):
+    return latency_run(binary, out, "draw", "strokes")
+
+
+def scenario_latency_pauses(binary, out):
+    return latency_run(binary, out, "draw-pauses", "pauses")
+
+
+def scenario_latency_continuous(binary, out):
+    return latency_run(binary, out, "draw-continuous", "continuous")
 
 
 def scenario_viewfps(binary, out):
@@ -616,6 +652,7 @@ SCENARIOS = {
     "view": scenario_view, "latency": scenario_latency, "viewfps": scenario_viewfps,
     "idle": scenario_idle, "memory": scenario_memory, "playback": scenario_playback,
     "transform": scenario_transform, "turn": scenario_turn,
+    "latency-pauses": scenario_latency_pauses, "latency-continuous": scenario_latency_continuous,
 }
 
 
