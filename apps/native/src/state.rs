@@ -78,6 +78,8 @@ pub struct Note {
     pub frame: u32,
     /// the author's colour (straight RGBA)
     pub colour: [f32; 4],
+    /// dealt with (it stays, greyed)
+    pub resolved: bool,
 }
 
 /// A drawing's state in the Colour workspace.
@@ -116,8 +118,11 @@ pub struct State {
     /// the current colour (straight RGBA) and its name
     pub colour: [f32; 4],
     pub colour_name: String,
-    /// the palette: name and colour
+    /// the palette: its name, and each colour's name and colour
+    pub palette_name: String,
     pub palette: Vec<(String, [f32; 4])>,
+    /// the cut being worked on
+    pub cut_name: String,
     pub brushes: Vec<String>,
     pub brush: usize,
     pub brush_size: f32,
@@ -160,6 +165,8 @@ impl State {
             tool: Tool::Brush,
             colour: hex(0x16161A),
             colour_name: "Ink".into(),
+            palette_name: "Mina’s palette".into(),
+            cut_name: "Cut 2".into(),
             palette: vec![
                 ("Ink".into(), hex(0x16161A)),
                 ("Coral".into(), hex(0xE8492F)),
@@ -235,12 +242,14 @@ impl State {
                     text: "Hold the anticipation two frames longer".into(),
                     frame: 14,
                     colour: hex(0xE8492F),
+                    resolved: false,
                 },
                 Note {
                     author: "Rin".into(),
                     text: "Arc on the hand: a touch higher".into(),
                     frame: 22,
                     colour: hex(0x7C6CF0),
+                    resolved: false,
                 },
             ],
             can_undo: true,

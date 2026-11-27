@@ -383,7 +383,14 @@ fn colour_field(f: &mut Frame, body: Rect, s: &mut State) {
 
     let mut y = field.bottom() + GAP;
     let n = s.palette.len();
-    y += heading(f, body.x, y, body.w, "Palette", &count(n, "colour")) + GAP;
+    y += heading(
+        f,
+        body.x,
+        y,
+        body.w,
+        &s.palette_name.clone(),
+        &count(n, "colour"),
+    ) + GAP;
     // six to a row, 8 apart, round
     let gap = 8.0;
     let rows = n.div_ceil(6);
@@ -483,7 +490,14 @@ fn named_palette(f: &mut Frame, body: Rect, s: &mut State) {
     let t = f.theme();
     let n = s.palette.len();
     let mut y = body.y;
-    y += heading(f, body.x, y, body.w, "Palette", &count(n, "colour")) + GAP;
+    y += heading(
+        f,
+        body.x,
+        y,
+        body.w,
+        &s.palette_name.clone(),
+        &count(n, "colour"),
+    ) + GAP;
     // from the foot: the hint, then the two options above it
     let foot = footer(
         f,
@@ -849,8 +863,9 @@ fn picked_note(s: &State) -> Option<usize> {
 fn notes(f: &mut Frame, body: Rect, s: &mut State) {
     let t = f.theme();
     let mut y = body.y;
-    let open = count(s.notes.len(), "note");
-    y += heading(f, body.x, y, body.w, "Notes on this cut", &open) + GAP;
+    let open = s.notes.iter().filter(|n| !n.resolved).count();
+    let title = format!("Notes on {}", s.cut_name);
+    y += heading(f, body.x, y, body.w, &title, &format!("{open} open")) + GAP;
 
     // the foot: a field and Post, under their label
     let row_h = t.control_height;
@@ -883,6 +898,7 @@ fn notes(f: &mut Frame, body: Rect, s: &mut State) {
             text: draft.trim().to_string(),
             frame: s.frame,
             colour: t.coral,
+            resolved: false,
         });
         s.panel.note = Some(s.notes.len() - 1);
         s.actions.push(Action::Other("Post note".into()));
@@ -1461,6 +1477,7 @@ mod tests {
                 text: format!("Note number {i}"),
                 frame: i,
                 colour: hex(0xE8492F),
+                resolved: false,
             })
             .collect();
         h.pass();
