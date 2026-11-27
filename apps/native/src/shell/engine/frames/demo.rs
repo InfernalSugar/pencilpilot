@@ -22,9 +22,9 @@ pub fn paint(e: &mut Engine, s: &State, tracks: &[Track]) {
     };
     let layer_brush = |name: &str| -> (&'static str, u32, f32) {
         match name {
-            "Clean" => ("Liner", 0x16161A, (h / 220.0).max(1.5)),
-            "Tie-down" => ("2B pencil", 0x3D6BFF, (h / 160.0).max(1.5)),
-            _ => ("Rough pencil", 0x8C7B9E, (h / 130.0).max(1.5)),
+            "Clean" => ("Liner", 0x16161A, (h / 220.0).max(3.0)),
+            "Tie-down" => ("2B pencil", 0x3D6BFF, (h / 160.0).max(3.0)),
+            _ => ("Rough pencil", 0x8C7B9E, (h / 130.0).max(3.0)),
         }
     };
     for (li, t) in tracks.iter().enumerate() {
@@ -78,7 +78,7 @@ pub fn paint(e: &mut Engine, s: &State, tracks: &[Track]) {
                 }
             }
             let (brush, rgb, size) = if t.kind == 'S' {
-                ("Liner", 0x8C8B92, (h / 260.0).max(1.0))
+                ("Liner", 0x8C8B92, (h / 260.0).max(2.5))
             } else {
                 layer_brush(name)
             };

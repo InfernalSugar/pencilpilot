@@ -811,8 +811,7 @@ fn grid_area(f: &mut Frame, g: Rect, strip: Rect, s: &mut State) {
     let res = act(f, id("strips/ruler"), ruler);
     let under = ((p.x - left) / cw).floor().max(0.0) as u32;
     if res.clicked {
-        s.actions
-            .push(Action::GoToFrame(under.min(s.frames.saturating_sub(1))));
+        go_to(s, under.min(s.frames.saturating_sub(1)));
     }
     if res.context {
         s.strips.menu_frame = under.min(s.frames.saturating_sub(1));
@@ -872,6 +871,18 @@ fn grid_area(f: &mut Frame, g: Rect, strip: Rect, s: &mut State) {
         }
         let ny = name_r.y + name_r.h / 2.0;
         let badge = Rect::new(g.x + NAMES_W - 8.0 - 20.0, ny - 10.0, 20.0, 20.0);
+        // the row (a click picks the layer), then the eye on it (a press there is the eye's)
+        let lname = format!("strips/layer/{li}");
+        hit(s, &lname, name_r);
+        let res = act(f, id(&lname), name_r);
+        if res.clicked {
+            s.active_layer = li;
+        }
+        if res.context {
+            s.strips.menu_layer = li;
+            let items = layer_options(s, li);
+            open_above(f, "strips/layer-options", &items, p.x, p.y, strip);
+        }
         // the eye: hide or show the layer
         let eye = Rect::new(g.x + 6.0, ny - 12.0, 24.0, 24.0);
         let ename = format!("strips/eye/{li}");
@@ -911,17 +922,6 @@ fn grid_area(f: &mut Frame, g: Rect, strip: Rect, s: &mut State) {
         );
         let bl = text(f, &layer.kind.to_string(), 11.0, 700, ON_DARK);
         text_at(f, &bl, badge.x + (20.0 - bl.width) / 2.0, ny);
-        let lname = format!("strips/layer/{li}");
-        hit(s, &lname, name_r);
-        let res = act(f, id(&lname), name_r);
-        if res.clicked {
-            s.active_layer = li;
-        }
-        if res.context {
-            s.strips.menu_layer = li;
-            let items = layer_options(s, li);
-            open_above(f, "strips/layer-options", &items, p.x, p.y, strip);
-        }
 
         // the cels
         let cel_spans: Vec<(u32, u32, Mark, u32, String)> = spans(s, li)
@@ -1002,8 +1002,7 @@ fn grid_area(f: &mut Frame, g: Rect, strip: Rect, s: &mut State) {
             }
             if res.clicked {
                 s.active_layer = li;
-                s.actions
-                    .push(Action::GoToFrame(start.min(s.frames.saturating_sub(1))));
+                go_to(s, start.min(s.frames.saturating_sub(1)));
             }
             if res.context {
                 s.active_layer = li;
@@ -1053,13 +1052,13 @@ fn grid_area(f: &mut Frame, g: Rect, strip: Rect, s: &mut State) {
         // about the cel right-clicked: its layer and first frame
         if let Some((a, ..)) = spans(s, s.strips.menu_layer).get(s.strips.menu_drawing) {
             s.active_layer = s.strips.menu_layer;
-            s.actions.push(Action::GoToFrame(*a));
+            go_to(s, *a);
         }
         s.actions.push(Action::Other(p));
     }
     let items = ruler_menu(s, s.strips.menu_frame);
     if let Some(p) = show_menu(f, "strips/ruler-menu", &items) {
-        s.actions.push(Action::GoToFrame(s.strips.menu_frame));
+        go_to(s, s.strips.menu_frame);
         s.actions.push(Action::Other(p));
     }
 }
@@ -1560,7 +1559,7 @@ fn frame_strip(f: &mut Frame, r: Rect, s: &mut State) {
         if res.clicked && !current {
             s.drawing = i as u32;
             if let Some(fr) = first_frame(s, d) {
-                s.actions.push(Action::GoToFrame(fr));
+                go_to(s, fr);
             }
         }
         x += 44.0 + 4.0;
@@ -1604,6 +1603,14 @@ fn frame_strip(f: &mut Frame, r: Rect, s: &mut State) {
     if let Some(p) = show_menu(f, "strips/onion-menu", &onion_menu(s)) {
         onion_picked(s, &p);
     }
+}
+
+/// Go to a frame: at once in the state (what the strips show follows it in this pass),
+/// and for the engine (which shows that frame's drawings).
+fn go_to(s: &mut State, frame: u32) {
+    s.frame = frame.min(s.frames.saturating_sub(1));
+    s.actions.push(Action::GoToFrame(s.frame));
+    frames::derive(s);
 }
 
 /// The active layer's drawings, in the order they first show.
@@ -1751,7 +1758,7 @@ fn to_colour(f: &mut Frame, r: Rect, s: &mut State) {
         if res.clicked && !current {
             s.drawing = i as u32;
             if let Some(fr) = first_frame(s, d) {
-                s.actions.push(Action::GoToFrame(fr));
+                go_to(s, fr);
             }
         }
         if res.context {
@@ -2424,5 +2431,136 @@ mod tests {
             h.pass();
             assert!(h.settles(), "{ws:?}");
         }
+    }
+
+    /// The strip with the engine behind it: each pass's actions carried out, as the window
+    /// does.
+    fn run(h: &mut H, e: &mut crate::shell::engine::Engine) {
+        for a in h.take() {
+            e.apply(&mut h.s, &a);
+        }
+        e.tick(&mut h.s, std::time::Instant::now());
+        e.picture(&h.s);
+        h.pass();
+    }
+
+    fn engine_for(h: &mut H) -> crate::shell::engine::Engine {
+        h.s.sheet.demo = false;
+        let mut e = crate::shell::engine::Engine::new(256, 128);
+        e.tick(&mut h.s, std::time::Instant::now());
+        h.pass();
+        e
+    }
+
+    #[test]
+    fn the_timeline_drives_the_layers_and_the_sheet() {
+        let Some(mut h) = H::new(Workspace::Animate) else {
+            return;
+        };
+        let mut e = engine_for(&mut h);
+        assert!(h.has("strips/hint"), "the hint shows at 1440 wide");
+        // + : a new layer, in the painter, above Clean and active
+        h.click("strips/new-layer");
+        run(&mut h, &mut e);
+        assert_eq!(e.painter.layers().len(), 5);
+        assert_eq!(h.s.layers.len(), 5);
+        assert_eq!(h.s.active_layer, 0);
+        assert!(h.has("strips/layer/4"), "a row for it");
+        // the eye hides Clean (now row 1) in the painter
+        h.click("strips/eye/1");
+        run(&mut h, &mut e);
+        let clean = h.s.sheet.tracks[1].layer;
+        let props = |e: &crate::shell::engine::Engine| {
+            e.painter
+                .layers()
+                .iter()
+                .find(|l| l.id == clean)
+                .unwrap()
+                .props
+                .clone()
+        };
+        assert!(!props(&e).visible);
+        // undo shows it again, and the eye follows
+        e.apply(&mut h.s, &Action::Undo);
+        run(&mut h, &mut e);
+        assert!(h.s.layers[1].visible);
+        // the New tray's New drawing: on the new layer, at the current frame (15)
+        h.click("strips/tray/New");
+        h.click("strips/tray/New/New drawing");
+        run(&mut h, &mut e);
+        assert_eq!(h.s.sheet.tracks[0].drawings().len(), 1);
+        assert!(h.has("strips/cel/0/1"), "a blank, then the new drawing");
+        // a right-click on Clean's drawing 3: Hold longer
+        h.right_click("strips/cel/1/2");
+        let r = h.at("strips/cel/1/2");
+        let items = frame_menu(&h.s, 1, 2);
+        h.pick(&items, r.x + r.w / 2.0, r.y + r.h / 2.0, 2);
+        run(&mut h, &mut e);
+        assert_eq!(h.s.sheet.tracks[1].cels[2].hold, 7, "held one longer");
+        assert_eq!(h.s.active_layer, 1);
+        assert_eq!(h.s.frame, 12, "on the drawing right-clicked");
+        // the ruler's menu: loop from frame 21
+        let r = h.at("strips/ruler");
+        let cw = h.s.frame_width;
+        let (x, y) = (r.x + 20.5 * cw, r.y + 10.0);
+        h.ui.pointer_moved(x, y);
+        h.pass();
+        h.ui.pointer_context();
+        h.pass();
+        h.pass();
+        assert!(h.ui.overlay_open(), "the ruler's menu");
+        let items = ruler_menu(&h.s, 20);
+        h.pick(&items, x, y, 1);
+        run(&mut h, &mut e);
+        assert_eq!(h.s.sheet.loop_range, Some((20, 48)));
+        // keys: N a new drawing, → the next frame, Enter plays
+        let key = |h: &mut H, name: &str| {
+            h.ui.key(pencilpilot_ui::ui::Key {
+                name: name.into(),
+                text: None,
+                ctrl: false,
+                shift: false,
+            });
+            h.pass();
+        };
+        let before = h.s.sheet.tracks[1].drawings().len();
+        key(&mut h, "n");
+        run(&mut h, &mut e);
+        assert_eq!(h.s.sheet.tracks[1].drawings().len(), before + 1);
+        let f = h.s.frame;
+        key(&mut h, "Right");
+        run(&mut h, &mut e);
+        assert_eq!(h.s.frame, f + 1);
+        key(&mut h, "Return");
+        run(&mut h, &mut e);
+        assert!(h.s.playing);
+        key(&mut h, "Return");
+        run(&mut h, &mut e);
+        assert!(!h.s.playing);
+        h.save("strips-timeline-engine");
+    }
+
+    #[test]
+    fn the_draw_strip_shows_the_drawings_thumbnails() {
+        let Some(mut h) = H::new(Workspace::Draw) else {
+            return;
+        };
+        h.s.sheet.demo = true;
+        let mut e = crate::shell::engine::Engine::new(480, 270);
+        e.tick(&mut h.s, std::time::Instant::now());
+        e.tick(&mut h.s, std::time::Instant::now());
+        h.pass();
+        assert_eq!(h.s.sheet.thumbs.len(), 14, "a thumbnail per drawing");
+        let quads = h.ui.shown().len();
+        h.save("strips-draw-thumbs");
+        // the same strip without them has far fewer quads (the pictures are drawn)
+        h.s.sheet.thumbs.clear();
+        h.pass();
+        assert!(h.ui.shown().len() + 50 < quads);
+        // a click on drawing 2: its first frame
+        h.click("strips/drawing/1");
+        run(&mut h, &mut e);
+        assert_eq!(h.s.frame, 6);
+        assert!(h.settles());
     }
 }
