@@ -51,6 +51,9 @@ pub fn render_png(
     let (w, h) = (width as f32, height as f32);
     let mut mark = 0;
     let mut canvas_rect = Rect::default();
+    let mut e = engine::Engine::new(s.view.doc_w, s.view.doc_h);
+    // the engine sets up the layers, drawings and thumbnails on its first tick
+    e.tick(s, std::time::Instant::now());
     ui.pass(&mut r, w, h, |f| {
         (mark, canvas_rect) = build(f, s, w, h);
     });
@@ -62,7 +65,6 @@ pub fn render_png(
     let (fw, fh) = ((w * scale).round() as u32, (h * scale).round() as u32);
     let frame = DmabufImage::new(&gpu, fw, fh, &[])?;
     // the document, as the engine shows it
-    let mut e = engine::Engine::new(s.view.doc_w, s.view.doc_h);
     let mut canvas = Canvas::new(&gpu, s.view.doc_w, s.view.doc_h)?;
     match e.picture(s) {
         Some((rgba, _)) => canvas.upload_all(rgba),
@@ -460,7 +462,8 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             win.wait_until(p.draw_at)?;
             continue;
         }
-        let work_from = pencilpilot_window::clock::now_ns();
+        // (from when it was meant to start: waking late under load counts too)
+        let work_from = plan.map_or(pencilpilot_window::clock::now_ns(), |p| p.draw_at);
         let (lw, lh) = win.logical_size();
         ui.scale = win.scale() as f32;
         let (w, h) = (lw as f32, lh as f32);
@@ -497,7 +500,9 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
         let new_canvas = canvas.is_none();
         if new_canvas {
             s.view.reset(canvas_rect);
-            let e = engine::Engine::new(cw, ch);
+            let mut e = engine::Engine::new(cw, ch);
+            // set up (layers, drawings) before the first input reaches it
+            e.tick(&mut s, std::time::Instant::now());
             let mut c = Canvas::new(&gpu, cw, ch)?;
             c.upload_all(e.painter.rgba());
             canvas = Some(c);

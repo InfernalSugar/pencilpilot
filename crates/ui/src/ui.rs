@@ -164,6 +164,8 @@ pub struct Ui {
     blocking: Vec<Rect>,
     hover: Option<(Id, Instant)>,
     icons: HashMap<(String, u32), Option<[f32; 4]>>,
+    /// pictures in the atlas by key: their pixels' hash, size and place
+    pictures: HashMap<String, Picture>,
     shown: Vec<Quad>,
     next_at: Option<Instant>,
     /// the last input (the system's fonts join only once it's been calm for a while)
@@ -193,6 +195,7 @@ impl Ui {
             blocking: Vec::new(),
             hover: None,
             icons: HashMap::new(),
+            pictures: HashMap::new(),
             shown: Vec::new(),
             next_at: None,
             last_input: Instant::now(),
@@ -289,6 +292,7 @@ impl Ui {
         if calm && self.text.poll_fonts() {
             // the atlas started over: icons go in again, and the screen is redrawn
             self.icons.clear();
+            self.pictures.clear();
             self.shown.clear();
         }
         self.now = Instant::now();
@@ -376,6 +380,9 @@ impl Ui {
         }
     }
 }
+
+/// A picture in the atlas: its pixels' hash, its size, and its place (texture coordinates).
+type Picture = (u64, u32, u32, Option<[f32; 4]>);
 
 /// One pass: widgets are placed and drawn into it.
 pub struct Frame<'a> {
@@ -724,6 +731,58 @@ impl Frame<'_> {
             } else {
                 self.quads.push(q)
             }
+        }
+    }
+
+    /// A small picture (straight RGBA8, `w` × `h`) shown in `r`, one quad: it's kept in the
+    /// atlas under `key` and put there again only when its pixels change (in the same place
+    /// while its size doesn't).
+    pub fn picture(&mut self, key: &str, w: u32, h: u32, rgba: &[u8], r: Rect) {
+        if w == 0 || h == 0 || rgba.len() != (w * h * 4) as usize {
+            return;
+        }
+        // FNV-1a over the pixels: cheap enough for thumbnails every pass
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for c in rgba.chunks(8) {
+            let mut v = 0u64;
+            for (i, b) in c.iter().enumerate() {
+                v |= (*b as u64) << (i * 8);
+            }
+            hash = (hash ^ v).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        let premul = || -> Vec<u8> {
+            rgba.chunks(4)
+                .flat_map(|p| {
+                    let a = p[3] as u32;
+                    [
+                        (p[0] as u32 * a / 255) as u8,
+                        (p[1] as u32 * a / 255) as u8,
+                        (p[2] as u32 * a / 255) as u8,
+                        p[3],
+                    ]
+                })
+                .collect()
+        };
+        let uv = match self.ui.pictures.get(key) {
+            Some(&(h0, _, _, uv)) if h0 == hash => uv,
+            Some(&(_, w0, h1, Some(uv))) if (w0, h1) == (w, h) => {
+                // the same place, new pixels
+                let n = pencilpilot_gpu::ATLAS_SIZE as f32;
+                let (x, y) = ((uv[0] * n).round() as u32, (uv[1] * n).round() as u32);
+                self.r.atlas_put(x, y, w, h, &premul());
+                self.ui
+                    .pictures
+                    .insert(key.to_string(), (hash, w, h, Some(uv)));
+                Some(uv)
+            }
+            _ => {
+                let uv = self.ui.text.place(self.r, w, h, &premul());
+                self.ui.pictures.insert(key.to_string(), (hash, w, h, uv));
+                uv
+            }
+        };
+        if let Some(uv) = uv {
+            self.put(Quad::image(r.x, r.y, r.w, r.h, uv, 1.0));
         }
     }
 
