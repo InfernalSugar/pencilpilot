@@ -51,6 +51,17 @@ fn copy_tiles(tiles: &TileMap) -> TileMap {
     #[cfg(target_arch = "wasm32")]
     tiles.clone()
 }
+
+/// A drawing's tiles copied out of a painter ([`Painter::drawing_copy`]), for another.
+pub struct DrawingCopy(TileMap);
+
+impl DrawingCopy {
+    /// Bytes its tiles' pixels take.
+    pub fn bytes(&self) -> usize {
+        self.0.len() * std::mem::size_of::<TilePixels>()
+    }
+}
+
 /// Tiles as they were before an edit. `None` = the tile did not exist.
 type Snapshot = HashMap<TileKey, Option<Box<TilePixels>>>;
 
@@ -4312,6 +4323,25 @@ impl Painter {
         }
     }
 
+    /// A copy of a drawing's tiles as they are (no conversion: a memory copy, on every
+    /// core natively), to hand to another painter on another thread (an export renders
+    /// with its own). `None` for an empty or unknown drawing.
+    pub fn drawing_copy(&self, drawing: u32) -> Option<DrawingCopy> {
+        self.drawing_tiles(drawing)
+            .filter(|t| !t.is_empty())
+            .map(|t| DrawingCopy(copy_tiles(t)))
+    }
+
+    /// Keep a copied drawing here (as one not showing), replacing one with that id. Not
+    /// an undo step; [`Painter::forget_drawing`] lets go of it.
+    pub fn put_drawing_copy(&mut self, drawing: u32, copy: DrawingCopy) {
+        if drawing == 0 {
+            return;
+        }
+        self.next_drawing = self.next_drawing.max(drawing + 1);
+        self.cels.insert(drawing, copy.0);
+    }
+
     /// Whether a drawing has no paint.
     pub fn drawing_empty(&self, drawing: u32) -> bool {
         self.drawing_tiles(drawing).is_none_or(|t| t.is_empty())
@@ -4992,6 +5022,26 @@ impl Painter {
             })
             .collect();
         let (ow, oh) = (w.div_ceil(k), h.div_ceil(k));
+        if k == 1 {
+            // full size: the tiles straight in (no sums: a 4K frame's would be 130 MB)
+            let mut out = vec![255u8; w * h * 4];
+            for t in done {
+                let tw = (t.x1 - t.x0) as usize;
+                for (row, y) in (t.y0..t.y1).enumerate() {
+                    let o = (y as usize * w + t.x0 as usize) * 4;
+                    let dst = &mut out[o..o + tw * 4];
+                    for (d, px) in dst
+                        .as_chunks_mut::<4>()
+                        .0
+                        .iter_mut()
+                        .zip(&t.px[row * tw..(row + 1) * tw])
+                    {
+                        d[..3].copy_from_slice(px);
+                    }
+                }
+            }
+            return out;
+        }
         let mut sum = vec![[0u32; 4]; ow * oh];
         for t in done {
             let tw = (t.x1 - t.x0) as usize;

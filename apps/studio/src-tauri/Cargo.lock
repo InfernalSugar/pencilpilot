@@ -3428,6 +3428,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pencilpilot-export"
+version = "0.1.0"
+dependencies = [
+ "gif",
+ "png",
+ "serde",
+]
+
+[[package]]
 name = "pencilpilot-ppstudio"
 version = "0.1.0"
 dependencies = [
@@ -3458,6 +3467,7 @@ dependencies = [
  "blake3",
  "gif",
  "pencilpilot-anim",
+ "pencilpilot-export",
  "pencilpilot-ppstudio",
  "pencilpilot-share",
  "png",

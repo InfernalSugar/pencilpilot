@@ -16,8 +16,13 @@ pencilpilot-gpu = { path = "../../crates/gpu" }
 pencilpilot-window = { path = "../../crates/window" }
 hokusai = { version = "0.3", default-features = false, features = ["myb-json"] }
 pencilpilot-ui = { path = "../../crates/ui" }
+pencilpilot-export = { path = "../../crates/export" }
 png = "0.18"
 cosmic-text = "0.19"
 rayon = "1"
 # the desktop portal (the system file dialog), over D-Bus
 zbus = "5"
+
+[dev-dependencies]
+# (the export checks build an engine from the measuring fixtures)
+pencilpilot-ppstudio = { path = "../../crates/ppstudio" }

@@ -1,0 +1,12 @@
+[package]
+name = "pencilpilot-export"
+description = "Writing an animation's frames out: a PNG sequence, GIF, APNG, or video through FFmpeg"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+png = "0.18"
+gif = "0.14"
