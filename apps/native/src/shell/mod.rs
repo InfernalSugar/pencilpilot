@@ -4,6 +4,7 @@
 //! Each piece lives in its own file and has one job: draw itself in its region from the
 //! [`State`], change the state, and push [`crate::state::Action`]s.
 
+pub mod engine;
 pub mod header;
 pub mod layout;
 pub mod panel;
@@ -96,27 +97,36 @@ pub fn render_png(
 /// The shell in a window. With `quit_after`, it closes after that many seconds; with
 /// `stats`, it saves how it ran there as JSON (startup to the first frame shown, frames
 /// presented): for checks on a headless display.
+///
+/// Pen and mouse strokes that start on the canvas card paint (with a painting tool, and no
+/// menu open); everything else works the interface. A frame is drawn only when the
+/// interface or the drawing changed.
 pub fn run_window(
     quit_after: Option<f64>,
     stats: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use pencilpilot_window::{InputEvent, PointerEvent, Window};
+    use pencilpilot_window::{InputEvent, PenPhase, PointerEvent, Window};
+
+    use crate::state::Action;
     let started = std::time::Instant::now();
     let mut first_shown: Option<f64> = None;
-    let mut presented = 0u64;
-    let mut drawn = 0u64;
+    let (mut presented, mut drawn) = (0u64, 0u64);
     let gpu = Gpu::new()?;
     let mut win = Window::new(&gpu, "PencilPilot")?;
     let mut r = Renderer2d::new(&gpu)?;
     let mut ui = Ui::new(win.scale() as f32);
     let mut s = State::demo();
     let mut canvas: Option<Canvas> = None;
+    let mut eng: Option<engine::Engine> = None;
     let mut mark = 0;
     let mut canvas_rect = Rect::default();
-    let mut dirty = true;
+    // the interface may look different (input came) / the drawing changed
+    let (mut dirty, mut canvas_dirty) = (true, false);
+    // painting with the mouse: its left button went down on the canvas
+    let mut mouse_paints = false;
     let deadline = quit_after.map(|s| started + std::time::Duration::from_secs_f64(s));
     while win.is_open() && deadline.is_none_or(|d| std::time::Instant::now() < d) {
-        if !win.wants_frame() || !dirty {
+        if !win.wants_frame() || !(dirty || canvas_dirty) {
             let next = match (ui.next_pass_at(), deadline) {
                 (Some(a), Some(d)) => Some(a.min(d)),
                 (a, d) => a.or(d),
@@ -132,11 +142,24 @@ pub fn run_window(
                 None => win.wait()?,
             }
         }
+        let sc = win.scale() as f32;
+        let cr = canvas_rect;
+        let to_canvas = |x: f64, y: f64| ((x as f32 - cr.x) * sc, (y as f32 - cr.y) * sc);
         for ev in win.take_input() {
             dirty = true;
+            let paints_here = |x: f64, y: f64, ui: &Ui| {
+                engine::Engine::paints(&s) && !ui.overlay_open() && cr.contains(x as f32, y as f32)
+            };
             match ev {
-                InputEvent::Pointer(PointerEvent::Move { x, y, .. })
-                | InputEvent::Pointer(PointerEvent::Enter { x, y }) => {
+                InputEvent::Pointer(PointerEvent::Move { x, y, time_ms }) => {
+                    if mouse_paints && let Some(e) = &mut eng {
+                        let (cx, cy) = to_canvas(x, y);
+                        e.moved(cx, cy, 0.5, (0.0, 0.0), time_ms);
+                    } else {
+                        ui.pointer_moved(x as f32, y as f32);
+                    }
+                }
+                InputEvent::Pointer(PointerEvent::Enter { x, y }) => {
                     ui.pointer_moved(x as f32, y as f32)
                 }
                 InputEvent::Pointer(PointerEvent::Leave) => ui.pointer_left(),
@@ -145,10 +168,24 @@ pub fn run_window(
                     pressed,
                     x,
                     y,
-                    ..
+                    time_ms,
                 }) => {
-                    ui.pointer_moved(x as f32, y as f32);
-                    ui.pointer_button(pressed);
+                    if pressed
+                        && paints_here(x, y, &ui)
+                        && let Some(e) = &mut eng
+                    {
+                        let (cx, cy) = to_canvas(x, y);
+                        e.down(&s, cx, cy, 0.5, (0.0, 0.0), time_ms);
+                        mouse_paints = true;
+                    } else if !pressed && mouse_paints {
+                        if let Some(e) = &mut eng {
+                            e.up();
+                        }
+                        mouse_paints = false;
+                    } else {
+                        ui.pointer_moved(x as f32, y as f32);
+                        ui.pointer_button(pressed);
+                    }
                 }
                 InputEvent::Pointer(PointerEvent::Button {
                     button: 0x111,
@@ -165,33 +202,66 @@ pub fn run_window(
                     ui.scrolled(dy as f32);
                 }
                 InputEvent::Pen(p) => {
-                    // the pen works the interface too (the canvas's drawing comes with the engine)
-                    use pencilpilot_window::PenPhase;
-                    ui.pointer_moved(p.sample.x as f32, p.sample.y as f32);
-                    match p.phase {
-                        PenPhase::Down => ui.pointer_button(true),
-                        PenPhase::Up => ui.pointer_button(false),
-                        PenPhase::Leave => ui.pointer_left(),
-                        _ => {}
-                    }
-                    if p.buttons & 1 != 0 && p.phase == PenPhase::Down {
-                        ui.pointer_context();
+                    let (x, y) = (p.sample.x, p.sample.y);
+                    let tilt = (p.sample.tilt_x / 90.0, p.sample.tilt_y / 90.0);
+                    let stroking = eng.as_ref().is_some_and(|e| e.is_stroking());
+                    let starts =
+                        p.phase == PenPhase::Down && p.buttons == 0 && paints_here(x, y, &ui);
+                    if (stroking || starts)
+                        && let Some(e) = &mut eng
+                    {
+                        let (cx, cy) = to_canvas(x, y);
+                        match p.phase {
+                            PenPhase::Down => {
+                                e.down(&s, cx, cy, p.sample.pressure, tilt, p.time_ms)
+                            }
+                            PenPhase::Move => e.moved(cx, cy, p.sample.pressure, tilt, p.time_ms),
+                            PenPhase::Up | PenPhase::Leave => e.up(),
+                            _ => {}
+                        }
+                    } else {
+                        // the interface: the pen's side button right-clicks
+                        ui.pointer_moved(x as f32, y as f32);
+                        match p.phase {
+                            PenPhase::Down if p.buttons & 1 != 0 => ui.pointer_context(),
+                            PenPhase::Down => ui.pointer_button(true),
+                            PenPhase::Up => ui.pointer_button(false),
+                            PenPhase::Leave => ui.pointer_left(),
+                            _ => {}
+                        }
                     }
                 }
-                InputEvent::Key(k) if k.pressed => ui.key(pencilpilot_ui::ui::Key {
-                    name: k.name.clone(),
-                    text: k.text.clone(),
-                    ctrl: k.mods.ctrl,
-                    shift: k.mods.shift,
-                }),
+                InputEvent::Key(k) if k.pressed => {
+                    if k.mods.ctrl && k.name.eq_ignore_ascii_case("z") {
+                        s.actions.push(if k.mods.shift {
+                            Action::Redo
+                        } else {
+                            Action::Undo
+                        });
+                    }
+                    ui.key(pencilpilot_ui::ui::Key {
+                        name: k.name.clone(),
+                        text: k.text.clone(),
+                        ctrl: k.mods.ctrl,
+                        shift: k.mods.shift,
+                    });
+                }
                 _ => {}
             }
+        }
+        // the strokes' changes go up to the GPU
+        if let Some(e) = &mut eng
+            && let Some(d) = e.painter.flush()
+            && let Some(c) = &mut canvas
+        {
+            c.upload(e.painter.rgba(), d.x, d.y, d.w, d.h);
+            canvas_dirty = true;
         }
         for _ in win.take_presented() {
             presented += 1;
             first_shown.get_or_insert(started.elapsed().as_secs_f64() * 1e3);
         }
-        if !win.wants_frame() || !dirty {
+        if !win.wants_frame() || !(dirty || canvas_dirty) {
             continue;
         }
         let (lw, lh) = win.logical_size();
@@ -200,26 +270,47 @@ pub fn run_window(
         let changed = ui.pass(&mut r, w, h, |f| {
             (mark, canvas_rect) = build(f, &mut s, w, h);
         });
-        // (the app carries out the actions here, as the engine comes in)
-        s.actions.clear();
         dirty = false;
-        let size_now = win.size();
+        // what the interface asked for
+        for a in std::mem::take(&mut s.actions) {
+            let Some(e) = &mut eng else { continue };
+            let did = match a {
+                Action::Undo => e.painter.undo(),
+                Action::Redo => e.painter.redo(),
+                _ => false,
+            };
+            if did {
+                if let (Some(d), Some(c)) = (e.painter.flush(), &mut canvas) {
+                    c.upload(e.painter.rgba(), d.x, d.y, d.w, d.h);
+                }
+                canvas_dirty = true;
+            }
+        }
+        if let Some(e) = &eng {
+            let now = (e.painter.can_undo(), e.painter.can_redo());
+            if now != (s.can_undo, s.can_redo) {
+                (s.can_undo, s.can_redo) = now;
+                dirty = true; // the Undo and Redo buttons follow: another pass next frame
+            }
+        }
         let scale = ui.scale;
         let (cw, ch) = (
             (canvas_rect.w * scale).round().max(1.0) as u32,
             (canvas_rect.h * scale).round().max(1.0) as u32,
         );
-        let new_canvas = canvas
-            .as_ref()
-            .is_none_or(|c| (c.width, c.height) != (cw, ch));
+        // the drawing is made at the canvas card's first size (the card shows what fits after)
+        let new_canvas = canvas.is_none();
         if new_canvas {
+            let e = engine::Engine::new(cw, ch);
             let mut c = Canvas::new(&gpu, cw, ch)?;
-            c.upload_all(&vec![255u8; (cw * ch * 4) as usize]);
+            c.upload_all(e.painter.rgba());
             canvas = Some(c);
+            eng = Some(e);
         }
-        if changed.is_none() && !new_canvas {
+        if changed.is_none() && !new_canvas && !canvas_dirty {
             continue;
         }
+        canvas_dirty = false;
         let img = win.acquire(&gpu)?;
         let at = [
             (canvas_rect.x * scale).round() as i32,
@@ -227,7 +318,6 @@ pub fn run_window(
             cw as i32,
             ch as i32,
         ];
-        let _ = size_now;
         r.draw_layered(
             &gpu,
             img,
