@@ -27,8 +27,7 @@ pub fn build(f: &mut Frame, s: &mut State, width: f32, height: f32) -> (usize, R
         tools::build(f, tr, s);
     }
     // the canvas's card; the drawing goes in front of it, the rest in front of the drawing
-    let canvas = canvas::card(f, r.canvas);
-    s.view.follow(canvas);
+    let canvas = canvas::card(f, r.canvas, s);
     let mark = f.mark();
     canvas::overlays(f, r.canvas, s);
     panel::build(f, r.panel, s);
@@ -62,28 +61,15 @@ pub fn render_png(
     let quads = ui.shown().to_vec();
     let (fw, fh) = ((w * scale).round() as u32, (h * scale).round() as u32);
     let frame = DmabufImage::new(&gpu, fw, fh, &[])?;
-    // the drawing: paper for now (the engine's canvas plugs in here)
-    let (cw, ch) = (
-        (canvas_rect.w * scale).round().max(1.0) as u32,
-        (canvas_rect.h * scale).round().max(1.0) as u32,
-    );
-    let mut canvas = Canvas::new(&gpu, cw, ch)?;
-    let paper: Vec<u8> = (0..cw * ch).flat_map(|_| [255u8, 255, 255, 255]).collect();
-    canvas.upload_all(&paper);
-    let at = [
-        (canvas_rect.x * scale).round() as i32,
-        (canvas_rect.y * scale).round() as i32,
-        cw as i32,
-        ch as i32,
-    ];
-    r.draw_layered(
-        &gpu,
-        &frame,
-        ui.theme.paper,
-        &quads,
-        mark,
-        Some((&mut canvas, at)),
-    )?;
+    // the document, as the engine shows it
+    let mut e = engine::Engine::new(s.view.doc_w, s.view.doc_h);
+    let mut canvas = Canvas::new(&gpu, s.view.doc_w, s.view.doc_h)?;
+    match e.picture(s) {
+        Some((rgba, _)) => canvas.upload_all(rgba),
+        None => canvas.upload_all(e.painter.rgba()),
+    }
+    let _ = (mark, canvas_rect);
+    r.draw_layered(&gpu, &frame, ui.theme.paper, &quads, Some(&mut canvas))?;
     let px = gpu.read_back(&frame)?;
     let rgba: Vec<u8> = px
         .as_chunks::<4>()
@@ -91,11 +77,16 @@ pub fn render_png(
         .iter()
         .flat_map(|p| [p[2], p[1], p[0], 255])
         .collect();
-    let file = std::io::BufWriter::new(std::fs::File::create(out)?);
-    let mut enc = png::Encoder::new(file, fw, fh);
+    save_png(out, &rgba, fw, fh)
+}
+
+/// Straight RGBA8 as a PNG file.
+fn save_png(path: &str, rgba: &[u8], w: u32, h: u32) -> Result<(), Box<dyn std::error::Error>> {
+    let file = std::io::BufWriter::new(std::fs::File::create(path)?);
+    let mut enc = png::Encoder::new(file, w, h);
     enc.set_color(png::ColorType::Rgba);
     enc.set_depth(png::BitDepth::Eight);
-    enc.write_header()?.write_image_data(&rgba)?;
+    enc.write_header()?.write_image_data(rgba)?;
     Ok(())
 }
 
@@ -123,10 +114,37 @@ fn moves_view(s: &State, space: bool) -> bool {
     space || !engine::Engine::takes_canvas_input(s)
 }
 
-pub fn run_window(
-    quit_after: Option<f64>,
-    stats: Option<&str>,
-) -> Result<(), Box<dyn std::error::Error>> {
+/// How to run the window (for checks: see `main.rs`).
+#[derive(Debug, Clone, Default)]
+pub struct RunOptions {
+    /// close after this many seconds
+    pub quit_after: Option<f64>,
+    /// save how it ran here, as JSON
+    pub stats: Option<String>,
+    /// save the document here, as PNG, on closing
+    pub save_doc: Option<String>,
+    /// start in this workspace
+    pub workspace: Option<crate::state::Workspace>,
+}
+
+/// A frame drawn, for `--stats`.
+struct FrameRec {
+    /// `present`'s number
+    frame: u64,
+    /// the oldest input it shows: the event's own time (compositor ms) and when it came (ns)
+    input: Option<(u32, u64)>,
+    /// how many input events since the frame before
+    events: u32,
+    /// when it was handed over, ns
+    drawn_ns: u64,
+    /// the timeline frame it showed
+    sheet_frame: u32,
+    /// when it reached the screen, ns
+    shown_ns: Option<u64>,
+}
+
+pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
+    let (quit_after, stats) = (opts.quit_after, opts.stats.as_deref());
     use pencilpilot_window::{InputEvent, PenPhase, PointerEvent, Window};
 
     use crate::state::Action;
@@ -138,7 +156,12 @@ pub fn run_window(
     let mut r = Renderer2d::new(&gpu)?;
     let mut ui = Ui::new(win.scale() as f32);
     let mut s = State::demo();
+    if let Some(w) = opts.workspace {
+        s.workspace = w;
+    }
     let mut canvas: Option<Canvas> = None;
+    let mut recs: Vec<FrameRec> = Vec::new();
+    let (mut oldest_input, mut events): (Option<(u32, u64)>, u32) = (None, 0);
     let mut eng: Option<engine::Engine> = None;
     let mut mark = 0;
     let mut canvas_rect = Rect::default();
@@ -169,6 +192,20 @@ pub fn run_window(
         let cr = canvas_rect;
         for ev in win.take_input() {
             dirty = true;
+            let t = match &ev {
+                InputEvent::Pointer(
+                    PointerEvent::Move { time_ms, .. }
+                    | PointerEvent::Button { time_ms, .. }
+                    | PointerEvent::Scroll { time_ms, .. },
+                ) => Some(*time_ms),
+                InputEvent::Pen(p) => Some(p.time_ms),
+                InputEvent::Key(k) => Some(k.time_ms),
+                _ => None,
+            };
+            if let Some(t) = t {
+                events += 1;
+                oldest_input.get_or_insert((t, pencilpilot_window::clock::now_ns()));
+            }
             // a press here goes to the engine (its tool), not the interface
             let engine_here = |x: f64, y: f64, s: &State, ui: &Ui| {
                 engine::Engine::takes_canvas_input(s)
@@ -357,7 +394,10 @@ pub fn run_window(
             c.upload(rgba, x, y, w, h);
             canvas_dirty = true;
         }
-        for _ in win.take_presented() {
+        for p in win.take_presented() {
+            if let Some(r) = recs.iter_mut().rev().find(|r| r.frame == p.frame) {
+                r.shown_ns = Some(p.at_ns);
+            }
             presented += 1;
             first_shown.get_or_insert(started.elapsed().as_secs_f64() * 1e3);
         }
@@ -400,7 +440,6 @@ pub fn run_window(
                 dirty = true; // the Undo and Redo buttons follow: another pass next frame
             }
         }
-        let scale = ui.scale;
         let (cw, ch) = (s.view.doc_w, s.view.doc_h);
         // the document, made once the card's size is known (the view fits it there)
         let new_canvas = canvas.is_none();
@@ -417,28 +456,73 @@ pub fn run_window(
         }
         canvas_dirty = false;
         let img = win.acquire(&gpu)?;
-        let at = [
-            (canvas_rect.x * scale).round() as i32,
-            (canvas_rect.y * scale).round() as i32,
-            cw as i32,
-            ch as i32,
-        ];
-        r.draw_layered(
-            &gpu,
-            img,
-            ui.theme.paper,
-            ui.shown(),
-            mark,
-            canvas.as_mut().map(|c| (c, at)),
-        )?;
-        win.present()?;
+        r.draw_layered(&gpu, img, ui.theme.paper, ui.shown(), canvas.as_mut())?;
+        let frame = win.present()?;
         drawn += 1;
+        recs.push(FrameRec {
+            frame,
+            input: oldest_input.take(),
+            events: std::mem::take(&mut events),
+            drawn_ns: pencilpilot_window::clock::now_ns(),
+            sheet_frame: s.frame,
+            shown_ns: None,
+        });
+    }
+    if let (Some(path), Some(e)) = (&opts.save_doc, &eng) {
+        save_png(path, e.painter.rgba(), s.view.doc_w, s.view.doc_h)?;
     }
     if let Some(path) = stats {
+        let v = s.view;
+        let opt = |v: Option<u64>| v.map_or("null".into(), |v| v.to_string());
+        let frames: Vec<String> = recs
+            .iter()
+            .map(|r| {
+                format!(
+                    "{{\"frame\": {}, \"inputMs\": {}, \"receivedNs\": {}, \"events\": {}, \"drawnNs\": {}, \"shownNs\": {}, \"sheetFrame\": {}}}",
+                    r.frame,
+                    opt(r.input.map(|i| i.0 as u64)),
+                    opt(r.input.map(|i| i.1)),
+                    r.events,
+                    r.drawn_ns,
+                    opt(r.shown_ns),
+                    r.sheet_frame
+                )
+            })
+            .collect();
+        let layers: Vec<String> = s
+            .layers
+            .iter()
+            .map(|l| {
+                format!(
+                    "{{\"name\": {:?}, \"visible\": {}, \"locked\": {}}}",
+                    l.name, l.visible, l.locked
+                )
+            })
+            .collect();
+        let c = canvas_rect;
         let json = format!(
-            "{{\"seconds\": {:.3}, \"startupToFirstFrameMs\": {}, \"framesDrawn\": {drawn}, \"framesPresented\": {presented}}}\n",
+            "{{\"seconds\": {:.3}, \"startupToFirstFrameMs\": {}, \"framesDrawn\": {drawn}, \"framesPresented\": {presented},\n \"view\": {{\"zoom\": {}, \"angle\": {}, \"flip\": {}, \"pan\": [{}, {}], \"docSize\": [{}, {}]}},\n \"canvasRect\": [{}, {}, {}, {}],\n \"state\": {{\"workspace\": {:?}, \"tool\": \"{:?}\", \"activeLayer\": {}, \"frame\": {}, \"playing\": {}, \"colour\": {:?}, \"layers\": [{}]}},\n \"frames\": [\n  {}\n ]}}\n",
             started.elapsed().as_secs_f64(),
-            first_shown.map_or("null".into(), |v| format!("{v:.1}"))
+            first_shown.map_or("null".into(), |v| format!("{v:.1}")),
+            v.zoom,
+            v.angle,
+            v.flip,
+            v.pan.0,
+            v.pan.1,
+            v.doc_w,
+            v.doc_h,
+            c.x,
+            c.y,
+            c.w,
+            c.h,
+            s.workspace.name(),
+            s.tool,
+            s.active_layer,
+            s.frame,
+            s.playing,
+            s.colour,
+            layers.join(", "),
+            frames.join(",\n  ")
         );
         std::fs::write(path, json)?;
     }

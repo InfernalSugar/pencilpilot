@@ -5,7 +5,10 @@
 //!               [--size 1440x900] [--scale 1]    (no window anywhere: for checks)
 //!   pencilpilot --pen-check [--replay 10] …      Phase 1's pen check (see pencheck.rs)
 //!   pencilpilot --quit-after 5 --stats s.json    the app, closing after 5 s and saving how
-//!                                                it ran (startup, frames shown): for checks
+//!                                                it ran (startup, each frame: its input,
+//!                                                when shown; the view; the state): for checks
+//!               [--save-doc d.png]               …and the document as a PNG on quitting
+//!               [--workspace draw]               …starting in that workspace
 
 mod pencheck;
 
@@ -36,7 +39,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let out = val("--out").unwrap_or_else(|| format!("{ws}.png"));
         return shell::render_png(&mut s, w, h, scale, &out);
     }
-    let quit_after = val("--quit-after").and_then(|v| v.parse::<f64>().ok());
-    let stats = val("--stats");
-    shell::run_window(quit_after, stats.as_deref())
+    let workspace = match val("--workspace") {
+        Some(ws) => Some(
+            state::Workspace::parse(&ws)
+                .ok_or_else(|| format!("no workspace {ws}: animate, draw, colour or review"))?,
+        ),
+        None => None,
+    };
+    shell::run_window(shell::RunOptions {
+        quit_after: val("--quit-after").and_then(|v| v.parse::<f64>().ok()),
+        stats: val("--stats"),
+        save_doc: val("--save-doc"),
+        workspace,
+    })
 }

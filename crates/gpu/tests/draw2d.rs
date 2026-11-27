@@ -140,18 +140,19 @@ fn the_canvas_sits_between_the_layers() {
     let quads = [
         // below: a white card
         Quad::rect(20.0, 20.0, 200.0, 120.0, WHITE).radius(24.0),
+        // the canvas at (40, 40), pixel for pixel; the card shows outside it
+        Quad::canvas(
+            [40.0, 40.0, 100.0, 60.0],
+            [1.0, 0.0, 0.0, 1.0, -40.0, -40.0],
+            [cw as f32, ch as f32],
+            [0.0; 4],
+            true,
+        ),
         // above: a pill over the canvas's bottom-right
         Quad::rect(120.0, 90.0, 60.0, 24.0, CORAL).radius(12.0),
     ];
-    r.draw_layered(
-        &gpu,
-        &frame,
-        PAPER,
-        &quads,
-        1,
-        Some((&mut canvas, [40, 40, 100, 60])),
-    )
-    .unwrap();
+    r.draw_layered(&gpu, &frame, PAPER, &quads, Some(&mut canvas))
+        .unwrap();
     let out = gpu.read_back(&frame).unwrap();
     let at = |x: u32, y: u32| {
         let i = ((y * w + x) * 4) as usize;
@@ -214,5 +215,66 @@ fn gradients_run_the_way_they_are_told() {
         near(at(100, 99), [0, 0, 0], 6),
         "bottom: black {:?}",
         at(100, 99)
+    );
+}
+
+#[test]
+fn the_canvas_shows_through_a_view() {
+    use pencilpilot_gpu::Canvas;
+    let Some(gpu) = gpu() else { return };
+    let (w, h) = (200u32, 100u32);
+    let frame = DmabufImage::new(&gpu, w, h, &[]).unwrap();
+    let mut r = Renderer2d::new(&gpu).unwrap();
+    // a 20×10 canvas: its left half coral, its right half ink
+    let (cw, ch) = (20u32, 10u32);
+    let px: Vec<u8> = (0..cw * ch)
+        .flat_map(|i| {
+            if i % cw < 10 {
+                [232, 73, 47, 255]
+            } else {
+                [22, 22, 26, 255]
+            }
+        })
+        .collect();
+    let mut canvas = Canvas::new(&gpu, cw, ch).unwrap();
+    canvas.upload_all(&px);
+    let grey = [0.5, 0.5, 0.5, 1.0];
+    let quads = [
+        // zoomed ×4 at (0, 0): canvas = frame / 4; the rest of the rectangle is outside it
+        Quad::canvas(
+            [0.0, 0.0, 100.0, 100.0],
+            [0.25, 0.0, 0.0, 0.25, 0.0, 0.0],
+            [20.0, 10.0],
+            grey,
+            true,
+        ),
+        // mirrored ×4 at (100, 0): canvas.x = 20 − (x − 100) / 4
+        Quad::canvas(
+            [100.0, 0.0, 80.0, 40.0],
+            [-0.25, 0.0, 0.0, 0.25, 45.0, 0.0],
+            [20.0, 10.0],
+            grey,
+            true,
+        ),
+    ];
+    r.draw_layered(&gpu, &frame, PAPER, &quads, Some(&mut canvas))
+        .unwrap();
+    let out = gpu.read_back(&frame).unwrap();
+    let at = |x: u32, y: u32| {
+        let i = ((y * w + x) * 4) as usize;
+        [out[i + 2], out[i + 1], out[i]]
+    };
+    assert_eq!(at(10, 10), [232, 73, 47], "zoomed: the left half");
+    assert_eq!(at(60, 10), [22, 22, 26], "zoomed: the right half");
+    assert_eq!(at(10, 60), [128, 128, 128], "below the canvas: outside");
+    assert_eq!(
+        at(110, 10),
+        [22, 22, 26],
+        "mirrored: the right half shows on the left"
+    );
+    assert_eq!(
+        at(170, 10),
+        [232, 73, 47],
+        "mirrored: the left half shows on the right"
     );
 }
