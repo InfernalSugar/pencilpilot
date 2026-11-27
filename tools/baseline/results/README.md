@@ -40,3 +40,20 @@
 - **Power can't be read** on a machine in use: with the app closed it moved by ±10 W.
 
 Power numbers need a run like the reference one: every other program closed.
+
+## 2026-11-27 · Refresh rate
+
+`run.mjs --hz <rate> --refresh-only` measures the app on a hidden display at each of the owner's
+monitor rates.
+- **Idle:** the app's animation frames, asked for back to back for 3 s on an empty canvas.
+- **Drawing:** 3 pen strokes at 240 Hz.
+
+| Display | The app draws at | Frames while drawing (median / p99) | Pen to screen (median / p99) |
+|---|---|---|---|
+| 165 Hz | 62.5 fps | 16 / 19 ms | 29.5 / 39.5 ms |
+| 100 Hz | 62.5 fps | 16 / 18 ms | 27.5 / 39.2 ms |
+| 75 Hz | 62.5 fps | 16 / 18 ms | 28.7 / 39.3 ms |
+| 60 Hz | 62.5 fps | 16 / 19 ms | 28.8 / 38.8 ms |
+
+**Control:** a GTK 4 window on the same hidden 165 Hz display runs at 165.0 fps. The display isn't
+the limit: WebKitGTK caps the app at about 60 fps on every display.

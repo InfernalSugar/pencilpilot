@@ -26,7 +26,9 @@ const flag = (name) => argv.includes(`--${name}`);
 const APP = path.resolve(opt('app', ''));
 const PROJECTS = path.resolve(opt('projects', ''));
 const OUT = path.resolve(opt('out', 'baseline.json'));
-const DISPLAY = opt('display', 'pp-bench-0');
+const HZ = +opt('hz', 60);
+const DISPLAY = opt('display', `pp-bench-${HZ}`);
+const REFRESH_ONLY = flag('refresh-only');
 const QUICK = flag('quick');
 const COLD = flag('cold');
 const PORT = 4471;
@@ -48,7 +50,7 @@ const children = [];
 function headless() {
 	if (fs.existsSync(path.join(runtime, DISPLAY)))
 		return log(`using the headless display ${DISPLAY}`);
-	log(`starting a headless display ${DISPLAY} (3840x2160@60, off-screen)`);
+	log(`starting a headless display ${DISPLAY} (3840x2160@${HZ}, off-screen)`);
 	const env = { ...process.env };
 	delete env.DISPLAY;
 	delete env.WAYLAND_DISPLAY;
@@ -62,7 +64,7 @@ function headless() {
 			'--wayland-display',
 			DISPLAY,
 			'--virtual-monitor',
-			'3840x2160@60'
+			`3840x2160@${HZ}`
 		],
 		{ env, stdio: 'ignore' }
 	);
@@ -459,6 +461,19 @@ async function playFor(seconds) {
 	return { startMs: started ? started - tClick : null, changes, intervals, length };
 }
 
+/** the app's own frame rate: animation frames for `ms`, asked for back to back */
+function framesFor(ms) {
+	const raf = window.__ppb.orig;
+	return new Promise((res) => {
+		const t = [];
+		raf(function loop(now) {
+			t.push(now);
+			if (now - t[0] < ms) raf(loop);
+			else res(t.slice(1).map((x, i) => x - t[i]));
+		});
+	});
+}
+
 // ---- statistics ----
 
 const sorted = (a) => [...a].sort((x, y) => x - y);
@@ -492,7 +507,7 @@ const report = {
 			}
 		})(),
 		kernel: os.release(),
-		display: `headless mutter ${DISPLAY}, 3840x2160@60`
+		display: `headless mutter ${DISPLAY}, 3840x2160@${HZ}`
 	},
 	notes: [],
 	results: {}
@@ -640,7 +655,41 @@ async function playback(app, ref, secs) {
 	};
 }
 
+/** does the app draw at the display's rate: idle frame rate, then drawing at it */
+async function refresh() {
+	const app = await App.launch();
+	await app.until(homeReady);
+	await app.maximise();
+	await openStudio(app, `new=1920x1080&fps=24`);
+	await sleep(2000);
+	const iv = await app.runAsync(framesFor, 3000);
+	const med = pct(iv, 50);
+	const out = {
+		displayHz: HZ,
+		frameMs: dist(iv),
+		appFps: r2(1000 / med),
+		matchesDisplay: Math.abs(1000 / med - HZ) / HZ < 0.05
+	};
+	log(`display ${HZ} Hz: the app draws at ${out.appFps} fps`);
+	out.draw = await draw(
+		app,
+		report.results.machineIdle ?? {},
+		{ hz: 240, strokes: 3, strokeSeconds: 1 },
+		`draw-${HZ}hz.png`
+	);
+	await app.quit();
+	return out;
+}
+
 async function main() {
+	if (REFRESH_ONLY) {
+		headless();
+		await sleep(1500);
+		startDriver();
+		await sleep(1000);
+		report.results.refresh = await refresh();
+		return;
+	}
 	headless();
 	await sleep(1500);
 	startDriver();

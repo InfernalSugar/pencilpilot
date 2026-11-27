@@ -25,6 +25,9 @@ node tools/baseline/run.mjs --app apps/studio/src-tauri/target/release/pencilpil
   --projects target/baseline/projects --out target/baseline/report.json [--cold]
 ```
 
+`--hz <rate>` runs the hidden display at that refresh rate (60 by default). With
+`--refresh-only`, the tool only measures the app's frame rate and drawing at that rate.
+
 `--cold` adds a cold start: the system's file cache is dropped first with `sudo`, which reads
 its password from this program's input when it isn't cached.
 
@@ -56,3 +59,5 @@ its password from this program's input when it isn't cached.
 - **Power** is the CPU package (RAPL) and the GPU's own sensor, minus the machine without the
   app. It is the whole machine, so other programs add noise: compare runs taken with the
   desktop left alone.
+
+The budgets the native app is held to are in [BUDGETS.md](BUDGETS.md), and the results in [results/](results/README.md).
