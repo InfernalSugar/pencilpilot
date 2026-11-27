@@ -328,7 +328,7 @@ fn layers_are_added_duplicated_moved_and_deleted() {
     );
     // its frame-1 drawing has the stroke
     let d = a.drawing_at(0);
-    assert!(!e.painter.drawing_empty(d));
+    assert!(!e.drawing_empty(d));
     // delete it
     op(&mut e, &mut s, ops::DELETE_LAYER);
     assert_eq!(s.layers.len(), 5);
@@ -405,7 +405,7 @@ fn boiling_a_held_drawing_alternates_copies_on_twos() {
     assert_eq!(first[0].0, 1);
     assert!(first.iter().all(|c| c.1 == 2), "{first:?}");
     assert_eq!(s.frames, 48, "the same length");
-    assert!(!e.painter.drawing_empty(first[1].0));
+    assert!(!e.drawing_empty(first[1].0));
 }
 
 #[test]
@@ -566,7 +566,7 @@ fn the_demo_paints_its_drawings() {
     let took = started.elapsed();
     for t in &s.sheet.tracks {
         for d in t.drawings() {
-            assert!(!e.painter.drawing_empty(d), "drawing {d} has lines");
+            assert!(!e.drawing_empty(d), "drawing {d} has lines");
         }
     }
     assert_eq!(s.frame, 14);

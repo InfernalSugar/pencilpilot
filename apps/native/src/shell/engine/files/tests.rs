@@ -211,7 +211,7 @@ fn seen(e: &mut Engine, s: &State) -> Seen {
     let mut drawings = BTreeMap::new();
     for t in &s.sheet.tracks {
         for d in t.drawings() {
-            drawings.insert(d, e.painter.drawing_rgba(d));
+            drawings.insert(d, e.drawing_rgba(d));
         }
     }
     Seen {
@@ -314,7 +314,7 @@ fn a_web_project_opens_as_it_was_saved() {
     // every drawing's pixels, within a level (the painter keeps them premultiplied)
     for dr in [1u32, 2, 3, 4, 5, 6] {
         let want = p.drawing(&format!("D{dr}")).unwrap().0;
-        let (colour, alpha) = drawing_diff(&want, &e.painter.drawing_rgba(dr));
+        let (colour, alpha) = drawing_diff(&want, &e.drawing_rgba(dr));
         assert!(
             colour <= 1 && alpha <= 1,
             "drawing {dr}: {colour} / {alpha}"
@@ -462,7 +462,7 @@ fn a_still_opens_as_one_cut() {
     assert_eq!(s.frames, 1);
     let top = s.sheet.tracks[0].drawing_at(0);
     assert!(top != 0);
-    let (c, a) = drawing_diff(&p.drawing("L7").unwrap().0, &e.painter.drawing_rgba(top));
+    let (c, a) = drawing_diff(&p.drawing("L7").unwrap().0, &e.drawing_rgba(top));
     assert!(c <= 1 && a <= 1);
     let out = d.join("out.ppstudio");
     assert!(save_to(&mut e, &mut s, &out));
@@ -521,7 +521,7 @@ fn edits_are_unsaved_until_saved() {
     e.tick(&mut s, Instant::now());
     assert!(s.project.unsaved, "a stroke is an unsaved change");
     assert!(s.project.subtitle(&s.cut_name).ends_with("unsaved"));
-    let painted = e.painter.drawing_rgba(2);
+    let painted = e.drawing_rgba(2);
     assert!(save_to(&mut e, &mut s, &path));
     assert!(!s.project.unsaved);
     let t = e.files.last_save.clone().unwrap();
@@ -558,14 +558,14 @@ fn edits_are_unsaved_until_saved() {
     e.tick(&mut s, Instant::now());
     let nd = s.sheet.tracks[s.active_layer].drawing_at(s.frame);
     assert!(nd > 9, "a new drawing: {nd}");
-    let px = e.painter.drawing_rgba(nd);
+    let px = e.drawing_rgba(nd);
     assert!(px.chunks(4).any(|p| p[3] > 0));
     assert!(save_to(&mut e, &mut s, &path));
     let (mut e3, mut s3) = engine();
     assert!(open_path(&mut e3, &mut s3, &path));
     assert_eq!(s3.layers.len(), 4);
     // (painted here: a level off at most where the paint is faint, as the file quantises)
-    let (c, a) = drawing_diff(&px, &e3.painter.drawing_rgba(nd));
+    let (c, a) = drawing_diff(&px, &e3.drawing_rgba(nd));
     assert!(c <= 1 && a <= 1, "{c} {a}");
     let back = Project::open(&path).unwrap();
     assert_eq!(back.manifest.layers.len(), 4);
@@ -604,7 +604,7 @@ fn new_asks_first_when_unsaved() {
     e.apply(&mut s, &Action::File(CONFIRM_CANCEL.into()));
     assert!(s.project.asking.is_none() && s.project.unsaved);
     let d = s.sheet.tracks[0].drawing_at(0);
-    assert!(e.painter.drawing_rgba(d).chunks(4).any(|p| p[3] > 0));
+    assert!(e.drawing_rgba(d).chunks(4).any(|p| p[3] > 0));
     // Don't save: a new one
     e.apply(&mut s, &Action::File(NEW.into()));
     e.apply(&mut s, &Action::File(CONFIRM_DISCARD.into()));
@@ -718,6 +718,149 @@ fn a_file_given_at_startup_opens() {
     );
 }
 
+/// Only the drawings wanted now are in the painter (showing, onion skin, undo); the rest
+/// are kept compressed, come back when shown, and save as they were; an undo on another
+/// frame still works, and a drawing put away after a change keeps it exactly.
+#[test]
+fn drawings_not_showing_stay_out_of_the_painter() {
+    let d = dir("store");
+    let path = d.join("chase.ppstudio");
+    web_project(&path);
+    let (mut e, mut s) = engine();
+    assert!(open_path(&mut e, &mut s, &path));
+    s.onion = false;
+    s.frame = 0;
+    e.tick(&mut s, Instant::now());
+    let _ = e.picture(&s);
+    let resident = |e: &Engine| {
+        let mut v: Vec<u32> = (1..=9).filter(|d| e.painter.has_drawing(*d)).collect();
+        v.sort();
+        v
+    };
+    // what frames f - 1, f and f + 1 show (the next and previous are brought in ahead)
+    let near = |s: &State, f: u32| -> Vec<u32> {
+        let n = s.frames;
+        let mut v: Vec<u32> = [f, (f + 1) % n, (f + n - 1) % n]
+            .iter()
+            .flat_map(|&g| s.sheet.tracks.iter().map(move |t| t.drawing_at(g)))
+            .filter(|d| *d != 0)
+            .collect();
+        v.sort();
+        v.dedup();
+        v
+    };
+    let first = seen(&mut e, &s);
+    for f in 0..s.frames {
+        s.frame = f;
+        e.tick(&mut s, Instant::now());
+        let _ = e.picture(&s);
+        let showing: Vec<u32> = s
+            .sheet
+            .tracks
+            .iter()
+            .map(|t| t.drawing_at(f))
+            .filter(|d| *d != 0)
+            .collect();
+        let held = resident(&e);
+        for dd in &showing {
+            assert!(held.contains(dd), "frame {f}: {dd} showing");
+        }
+        // (what the frame before had near stays until the drawings showing change)
+        let mut ok = near(&s, f);
+        ok.extend(near(&s, f.saturating_sub(1)));
+        assert!(
+            held.iter().all(|d| ok.contains(d)),
+            "frame {f}: {held:?}, only {ok:?}"
+        );
+    }
+    // (and ahead: the next frame's, decoded on another thread, arrive)
+    s.frame = 0;
+    e.tick(&mut s, Instant::now());
+    let t = Instant::now();
+    while !near(&s, 0).iter().all(|d| e.painter.has_drawing(*d)) {
+        assert!(t.elapsed() < Duration::from_secs(5), "brought in ahead");
+        std::thread::sleep(Duration::from_millis(2));
+        e.tick(&mut s, Instant::now());
+    }
+    assert_eq!(resident(&e), near(&s, 0));
+    // the onion skin's neighbours come in too
+    s.onion = true;
+    s.active_layer = 0;
+    s.frame = 3;
+    e.tick(&mut s, Instant::now());
+    let _ = e.picture(&s);
+    for x in super::super::frames::onion_entries(&s).chunks(3) {
+        assert!(e.painter.has_drawing(x[0]), "onion {}", x[0]);
+    }
+    s.onion = false;
+    // a stroke on frame 0 (Ink's drawing 2), then away: an undo there still works
+    s.frame = 0;
+    s.tool = crate::state::Tool::Brush;
+    e.tick(&mut s, Instant::now());
+    let _ = e.picture(&s);
+    let before = e.drawing_rgba(2);
+    stroke(&mut e, &s, 30.0, 30.0);
+    e.tick(&mut s, Instant::now());
+    let painted = e.drawing_rgba(2);
+    assert_ne!(before, painted);
+    s.frame = 4;
+    e.tick(&mut s, Instant::now());
+    let _ = e.picture(&s);
+    assert!(e.painter.has_drawing(2), "undo still changes it: kept");
+    e.apply(&mut s, &Action::Undo);
+    e.tick(&mut s, Instant::now());
+    assert_eq!(e.drawing_rgba(2), before, "undone on another frame");
+    e.apply(&mut s, &Action::Redo);
+    e.tick(&mut s, Instant::now());
+    assert_eq!(e.drawing_rgba(2), painted);
+    // the history let go: the changed drawing is put away, as it is (no rounding)
+    e.painter.clear_history();
+    s.frame = 3;
+    e.tick(&mut s, Instant::now());
+    let _ = e.picture(&s);
+    assert!(!e.painter.has_drawing(2), "put away");
+    assert!(matches!(
+        e.frames.store.drawings.get(&2).map(|k| &**k),
+        Some(super::super::frames::store::Kept::Raw(_))
+    ));
+    for _ in 0..3 {
+        s.frame = 0;
+        e.tick(&mut s, Instant::now());
+        let _ = e.picture(&s);
+        s.frame = 3;
+        e.tick(&mut s, Instant::now());
+        let _ = e.picture(&s);
+    }
+    assert_eq!(
+        e.drawing_rgba(2),
+        painted,
+        "back and forth: exactly the same"
+    );
+    // saved: every drawing, the changed one as it is, the others as the file had them
+    let out = d.join("out.ppstudio");
+    assert!(save_to(&mut e, &mut s, &out));
+    let (mut e2, mut s2) = engine();
+    assert!(open_path(&mut e2, &mut s2, &out));
+    let after = seen(&mut e2, &s2);
+    for (k, v) in &first.drawings {
+        if *k == 2 {
+            let (c, a) = drawing_diff(&painted, &after.drawings[k]);
+            assert!(c <= 1 && a <= 1);
+        } else {
+            assert!(*v == after.drawings[k], "drawing {k}");
+        }
+    }
+    // thumbnails: every drawing has one
+    for _ in 0..40 {
+        e2.tick(&mut s2, Instant::now());
+    }
+    for t in &s2.sheet.tracks {
+        for dd in t.drawings() {
+            assert!(s2.sheet.thumbs.contains_key(&dd), "thumbnail {dd}");
+        }
+    }
+}
+
 /// Open and save times for the baseline's projects (`tools/baseline/fixtures.py` into
 /// `PP_FIXTURES`), their round trips, and PNGs of what opened into `PP_SAVE`.
 #[test]
@@ -741,6 +884,56 @@ fn fixtures_open_save_and_round_trip() {
         let t = Instant::now();
         let _ = e.picture(&s);
         let first_picture = t.elapsed().as_secs_f64() * 1e3;
+        // scrubbing at 165 Hz (a frame change each refresh, 6 ms apart): each frame in
+        // turn, both ways; then jumps anywhere. A change: the tick and the picture; and of
+        // that, bringing drawings back from the store
+        for _ in 0..600 {
+            e.tick(&mut s, Instant::now());
+        }
+        let p95 = |v: &mut Vec<f64>| {
+            v.sort_by(f64::total_cmp);
+            v[(v.len() * 95 / 100).min(v.len() - 1)]
+        };
+        let scrub = |e: &mut Engine, s: &mut State, order: Vec<u32>| {
+            let (mut all, mut back) = (Vec::new(), Vec::new());
+            for f in order {
+                // (what arrived meanwhile: the loop ticks between frames)
+                e.tick(s, Instant::now());
+                let start = Instant::now();
+                s.frame = f;
+                let ds: Vec<u32> = s.sheet.tracks.iter().map(|t| t.drawing_at(f)).collect();
+                let t = Instant::now();
+                super::super::frames::load_drawings(e, &ds);
+                back.push(t.elapsed().as_secs_f64() * 1e3);
+                e.tick(s, Instant::now());
+                let _ = e.picture(s);
+                all.push(start.elapsed().as_secs_f64() * 1e3);
+                if let Some(rest) = Duration::from_micros(6060).checked_sub(start.elapsed()) {
+                    std::thread::sleep(rest);
+                }
+                e.tick(s, Instant::now());
+            }
+            (p95(&mut all), p95(&mut back))
+        };
+        let n = s.frames;
+        let seq = scrub(&mut e, &mut s, (0..n).chain((0..n).rev()).collect());
+        let jumps = scrub(&mut e, &mut s, (0..n).map(|k| (k * 7919 + 3) % n).collect());
+        eprintln!(
+            "{name}: scrubbing at 165 Hz, frame change p95 (of which bringing drawings back): \
+             frame by frame {:.2} ms ({:.2}), jumps {:.2} ms ({:.2})",
+            seq.0, seq.1, jumps.0, jumps.1
+        );
+        let resident = e
+            .painter
+            .layers()
+            .iter()
+            .filter(|l| e.painter.layer_drawing(l.id) != 0)
+            .count()
+            + e.painter.kept_drawings().len();
+        eprintln!(
+            "{name}: the painter holds {resident} drawings, the store {} KB compressed",
+            e.frames.store.bytes() / 1024
+        );
         let saved = fixtures.join(format!("{name}.native.ppstudio"));
         let t = Instant::now();
         assert!(save_to(&mut e, &mut s, &saved), "{}", s.project.note);

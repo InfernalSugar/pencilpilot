@@ -3359,6 +3359,7 @@ version = "0.1.0"
 dependencies = [
  "cosmic-text",
  "hokusai",
+ "miniz_oxide 0.8.9",
  "pencilpilot-brush",
  "pencilpilot-gpu",
  "pencilpilot-ppstudio",

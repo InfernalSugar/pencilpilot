@@ -22,5 +22,7 @@ rayon = "1"
 # project files (.ppstudio)
 pencilpilot-ppstudio = { path = "../../crates/ppstudio" }
 serde_json = "1"
+# drawings not showing, kept compressed
+miniz_oxide = "0.8"
 # the desktop portal (the system file dialog), over D-Bus
 zbus = "5"

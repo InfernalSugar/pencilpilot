@@ -276,33 +276,83 @@ pub fn project(e: &Engine, s: &State, doc: &mut Doc) -> Result<(Project, SaveTim
             .filter_map(|x| x.drawing.as_ref())
             .find_map(|n| base.drawings.get(n).and_then(|d| d.mask.clone()))
     };
-    // every tile of every drawing, read and named on every core
+    // every drawing's tiles, named on every core: a drawing kept as the file has it
+    // (unchanged since read) keeps its tiles; one changed here is read from the painter
+    // (or from where it was put away: the painter's own pixels, compressed)
     let t0 = std::time::Instant::now();
     let (cols, rows) = (
         w.div_ceil(TILE as u32) as i32,
         h.div_ceil(TILE as u32) as i32,
     );
-    let jobs: Vec<(u32, (i32, i32))> = drawings
-        .iter()
-        .flat_map(|(d, _)| {
-            e.painter
-                .drawing_tile_keys(*d)
-                .into_iter()
-                .filter(|&(x, y)| x >= 0 && y >= 0 && x < cols && y < rows)
-                .map(move |k| (*d, k))
-        })
-        .collect();
+    use super::super::frames::store::Kept;
+    let store = &e.frames.store;
+    let on = |x: i32, y: i32| x >= 0 && y >= 0 && x < cols && y < rows;
+    let mut kept_refs: HashMap<u32, Vec<TileRef>> = HashMap::new();
+    // (drawing, tile, where: None the painter, Some(i) the store's i-th tile)
+    let mut jobs: Vec<(u32, (i32, i32), Option<usize>)> = Vec::new();
+    for (d, _) in &drawings {
+        match store.drawings.get(d).map(|k| &**k) {
+            Some(Kept::File(refs)) => {
+                kept_refs.insert(
+                    *d,
+                    refs.iter()
+                        .filter(|(x, y, _)| on(*x, *y))
+                        .map(|(x, y, h)| TileRef {
+                            x: *x as u32,
+                            y: *y as u32,
+                            hash: h.clone(),
+                        })
+                        .collect(),
+                );
+            }
+            Some(Kept::Raw(tiles)) => jobs.extend(
+                tiles
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (k, _))| on(k.0, k.1))
+                    .map(|(i, (k, _))| (*d, *k, Some(i))),
+            ),
+            None => jobs.extend(
+                e.painter
+                    .drawing_tile_keys(*d)
+                    .into_iter()
+                    .filter(|&(x, y)| on(x, y))
+                    .map(|k| (*d, k, None)),
+            ),
+        }
+    }
     let source = doc.source.as_ref();
     let painter = &e.painter;
-    let same = &doc.same;
+    // where drawings read from the file had each tile: one that didn't change keeps the
+    // file's bytes (the painter rounds faint colour a little on the way out)
+    let origin: HashMap<(u32, (i32, i32)), &String> = drawings
+        .iter()
+        .filter_map(|(d, _)| Some((*d, store.origin.get(d)?)))
+        .flat_map(|(d, refs)| refs.iter().map(move |(x, y, h)| ((d, (*x, *y)), h)))
+        .collect();
     // (drawing, tile, its name, its bytes when the old file hasn't it)
     type Named = (u32, (i32, i32), String, Option<Vec<u8>>);
     let tiles: Vec<Named> = jobs
         .par_iter()
-        .filter_map(|&(d, (x, y))| {
+        .filter_map(|&(d, (x, y), at)| {
             let mut px = vec![0u8; TILE * TILE * 4];
-            if !painter.drawing_tile_rgba(d, (x, y), &mut px) {
-                return None;
+            match at {
+                None => {
+                    if !painter.drawing_tile_rgba(d, (x, y), &mut px) {
+                        return None;
+                    }
+                }
+                Some(i) => {
+                    let Some(Kept::Raw(t)) = store.drawings.get(&d).map(|k| &**k) else {
+                        return None;
+                    };
+                    let raw = miniz_oxide::inflate::decompress_to_vec_with_limit(
+                        &t.get(i)?.1,
+                        brush::DecodedTile::BYTES,
+                    )
+                    .ok()?;
+                    brush::encode_tile(&brush::DecodedTile::from_bytes(&raw)?, &mut px);
+                }
             }
             // (paint past the canvas's edge isn't part of the picture: as the file cuts
             // tiles from a whole canvas)
@@ -313,25 +363,31 @@ pub fn project(e: &Engine, s: &State, doc: &mut Doc) -> Result<(Project, SaveTim
                     let from = if row < hn { wn } else { 0 };
                     px[(row * TILE + from) * 4..(row + 1) * TILE * 4].fill(0);
                 }
-                if px.chunks(4).all(|p| p[3] == 0) {
-                    return None;
-                }
+            }
+            if px.chunks(4).all(|p| p[3] == 0) {
+                return None;
             }
             let mut hash = ppstudio::tile_hash(&px);
             let mut known = source.is_some_and(|o| o.has_tile(&hash));
             // (unchanged since it was read: the file's own bytes for it)
             if !known
-                && let Some(orig) = same.get(&hash)
+                && let Some(orig) = origin.get(&(d, (x, y)))
                 && source.is_some_and(|o| o.has_tile(orig))
+                && let Some(file) = store.file_rgba(orig)
+                && let Some(t) = brush::decode_tile(&file)
             {
-                hash = orig.clone();
-                known = true;
+                let mut back = vec![0u8; TILE * TILE * 4];
+                brush::encode_tile(&t, &mut back);
+                if back == px {
+                    hash = (*orig).clone();
+                    known = true;
+                }
             }
             Some((d, (x, y), hash, (!known).then_some(px)))
         })
         .collect();
     times.tiles = tiles.len();
-    let mut refs: HashMap<u32, Vec<TileRef>> = HashMap::new();
+    let mut refs: HashMap<u32, Vec<TileRef>> = kept_refs;
     for (d, (x, y), hash, px) in tiles {
         if let Some(px) = px
             && !p.tiles.contains_key(&hash)

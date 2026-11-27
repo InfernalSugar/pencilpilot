@@ -4556,6 +4556,19 @@ impl Painter {
         any
     }
 
+    /// Take a kept drawing (one not showing on any layer) out of the painter, its tiles
+    /// as they are (to keep elsewhere, and put back with [`Painter::put_drawing_decoded`]).
+    /// None if it's showing or unknown.
+    pub fn take_drawing(&mut self, drawing: u32) -> Option<Vec<((i32, i32), DecodedTile)>> {
+        let tiles = self.cels.remove(&drawing)?;
+        Some(
+            tiles
+                .into_iter()
+                .map(|(k, t)| (k, DecodedTile(t)))
+                .collect(),
+        )
+    }
+
     /// Changes to the history so far (new edits, undo, redo): a different number, the
     /// layers or drawings may have changed.
     pub fn history_changes(&self) -> u64 {
@@ -5782,6 +5795,44 @@ pub(crate) fn pack_tiles(tiles: Option<&TileMap>) -> Vec<u8> {
 /// A tile ready for the painter ([`Painter::put_drawing_decoded`]).
 #[derive(Clone)]
 pub struct DecodedTile(Box<TilePixels>);
+
+impl DecodedTile {
+    /// Bytes in [`DecodedTile::to_bytes`].
+    pub const BYTES: usize = TILE_SIZE * TILE_SIZE * 8;
+
+    /// The painter's own pixels, as bytes (premultiplied 15-bit, little-endian): kept
+    /// elsewhere and put back with [`DecodedTile::from_bytes`], nothing changes (no
+    /// rounding, unlike going through RGBA8).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(Self::BYTES);
+        for row in self.0.iter() {
+            for p in row {
+                for c in p {
+                    out.extend_from_slice(&c.to_le_bytes());
+                }
+            }
+        }
+        out
+    }
+
+    /// Back from [`DecodedTile::to_bytes`] (None: the wrong size).
+    pub fn from_bytes(b: &[u8]) -> Option<DecodedTile> {
+        if b.len() != Self::BYTES {
+            return None;
+        }
+        let mut t = empty_tile();
+        let ts = TILE_SIZE;
+        for (k, px) in b.as_chunks::<8>().0.iter().enumerate() {
+            t[k / ts][k % ts] = [
+                u16::from_le_bytes([px[0], px[1]]),
+                u16::from_le_bytes([px[2], px[3]]),
+                u16::from_le_bytes([px[4], px[5]]),
+                u16::from_le_bytes([px[6], px[7]]),
+            ];
+        }
+        Some(DecodedTile(t))
+    }
+}
 
 /// A 64×64 tile of straight-alpha sRGB RGBA8 (16 384 bytes, as the project file keeps
 /// them) made ready for the painter: the slow part of loading a drawing, done on any

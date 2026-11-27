@@ -62,9 +62,6 @@ pub struct Doc {
     pub had_scenes: bool,
     /// the painter's layer ids → the file's
     pub layer_ids: HashMap<u32, u32>,
-    /// a tile's hash after a trip through the painter → the file's for it (where they
-    /// differ: an unchanged tile is saved as the file had it)
-    pub same: HashMap<String, String>,
 }
 
 impl Default for Doc {
@@ -77,7 +74,6 @@ impl Default for Doc {
             scene_name: "Scene 1".into(),
             had_scenes: false,
             layer_ids: HashMap::new(),
-            same: HashMap::new(),
         }
     }
 }

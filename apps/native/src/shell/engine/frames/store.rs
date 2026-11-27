@@ -1,0 +1,147 @@
+//! Drawings not showing, kept out of the painter and compressed (the painter keeps a
+//! drawing at 8 bytes a pixel: a 4K cut's drawings all in it took 600 MB).
+//!
+//! Two kinds:
+//! - as the project file has it: its tiles' compressed bytes, straight from the file (a
+//!   drawing not changed since it was opened costs what it costs on disk, and comes back
+//!   exactly as it was read);
+//! - the painter's own pixels (premultiplied 15-bit), deflated: a drawing changed here,
+//!   kept without rounding (going through RGBA8 would round faint colour a little each
+//!   time).
+//!
+//! The painter holds the drawings showing, the onion skin's, and those its undo history
+//! changes ([`super::trim`]); the rest come back when wanted ([`super::load_drawings`]).
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use brush::DecodedTile;
+use rayon::prelude::*;
+
+const RGBA_TILE: usize = 64 * 64 * 4;
+
+/// A tile's column and row.
+pub type Key = (i32, i32);
+
+/// A tile as the project file stores it.
+#[derive(Debug)]
+pub struct FileTile {
+    /// raw deflate (else stored)
+    pub deflated: bool,
+    pub bytes: Box<[u8]>,
+}
+
+/// A drawing kept out of the painter.
+#[derive(Debug)]
+pub enum Kept {
+    /// as the project file has it: each tile's column, row and hash (in [`Store::file`])
+    File(Vec<(i32, i32, String)>),
+    /// the painter's own pixels, each tile deflated
+    Raw(Vec<(Key, Box<[u8]>)>),
+}
+
+#[derive(Debug, Default)]
+pub struct Store {
+    /// drawings kept here: not in the painter, or in it unchanged since they came back
+    pub drawings: HashMap<u32, Arc<Kept>>,
+    /// the project file's tiles, compressed, by hash
+    pub file: HashMap<String, Arc<FileTile>>,
+    /// where each drawing read from the file had its tiles (kept through changes: a save
+    /// keeps the file's own bytes for a tile that didn't change)
+    pub origin: HashMap<u32, Vec<(i32, i32, String)>>,
+}
+
+fn inflate(b: &[u8], limit: usize) -> Option<Vec<u8>> {
+    miniz_oxide::inflate::decompress_to_vec_with_limit(b, limit).ok()
+}
+
+fn file_rgba(t: &FileTile) -> Option<Vec<u8>> {
+    let px = if t.deflated {
+        inflate(&t.bytes, RGBA_TILE)?
+    } else {
+        t.bytes.to_vec()
+    };
+    (px.len() == RGBA_TILE).then_some(px)
+}
+
+/// A drawing to decode, with what it needs (for another thread).
+pub struct Job {
+    pub d: u32,
+    kept: Arc<Kept>,
+    file: HashMap<String, Arc<FileTile>>,
+}
+
+impl Job {
+    /// Its tiles, ready for the painter (decoded on every core).
+    pub fn decode(&self) -> Vec<((i32, i32), DecodedTile)> {
+        match &*self.kept {
+            Kept::File(refs) => refs
+                .par_iter()
+                .filter_map(|(x, y, h)| {
+                    Some((
+                        (*x, *y),
+                        brush::decode_tile(&file_rgba(self.file.get(h)?)?)?,
+                    ))
+                })
+                .collect(),
+            Kept::Raw(tiles) => tiles
+                .par_iter()
+                .filter_map(|(k, b)| {
+                    let raw = inflate(b, DecodedTile::BYTES)?;
+                    Some((*k, DecodedTile::from_bytes(&raw)?))
+                })
+                .collect(),
+        }
+    }
+}
+
+impl Store {
+    /// A file tile's RGBA (16 384 bytes).
+    pub fn file_rgba(&self, hash: &str) -> Option<Vec<u8>> {
+        file_rgba(self.file.get(hash)?)
+    }
+
+    /// A kept drawing's tiles, ready for the painter (decoded on every core).
+    pub fn decode(&self, d: u32) -> Option<Vec<((i32, i32), DecodedTile)>> {
+        Some(self.job(d)?.decode())
+    }
+
+    /// What decoding a drawing needs, to do it on another thread.
+    pub fn job(&self, d: u32) -> Option<Job> {
+        let kept = self.drawings.get(&d)?.clone();
+        let file = match &*kept {
+            Kept::File(refs) => refs
+                .iter()
+                .filter_map(|(_, _, h)| Some((h.clone(), self.file.get(h)?.clone())))
+                .collect(),
+            Kept::Raw(_) => HashMap::new(),
+        };
+        Some(Job { d, kept, file })
+    }
+
+    /// The painter's tiles of a drawing, packed to keep.
+    pub fn pack(tiles: Vec<((i32, i32), DecodedTile)>) -> Kept {
+        Kept::Raw(
+            tiles
+                .into_par_iter()
+                .map(|(k, t)| {
+                    let b = miniz_oxide::deflate::compress_to_vec(&t.to_bytes(), 1);
+                    (k, b.into_boxed_slice())
+                })
+                .collect(),
+        )
+    }
+
+    /// Bytes held (compressed tiles), for checks.
+    pub fn bytes(&self) -> usize {
+        let raw: usize = self
+            .drawings
+            .values()
+            .map(|k| match &**k {
+                Kept::Raw(t) => t.iter().map(|(_, b)| b.len()).sum(),
+                Kept::File(r) => r.len() * 48,
+            })
+            .sum();
+        raw + self.file.values().map(|t| t.bytes.len()).sum::<usize>()
+    }
+}
