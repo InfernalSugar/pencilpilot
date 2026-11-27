@@ -37,6 +37,8 @@ pub mod ops {
     pub const CANCEL: &str = "Export: cancel";
     pub const CLOSE: &str = "Export: close";
     pub const SHOW: &str = "Export: show in folder";
+    /// back to the settings (after a failure)
+    pub const BACK: &str = "Export: back";
 }
 
 /// The formats offered, in the dialog's order.
@@ -60,6 +62,9 @@ const COPY_TILES: usize = 16;
 const TICK_BUDGET: Duration = Duration::from_millis(2);
 /// How often the window looks at an export's progress.
 const POLL: Duration = Duration::from_millis(8);
+/// How often the dialog's progress moves: each change redraws the whole interface (with a
+/// long timeline, more than a display frame), so a few times a second, not every frame.
+const PROGRESS_EVERY: Duration = Duration::from_millis(250);
 
 /// Where the export stands, for the dialog.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -271,6 +276,8 @@ pub struct Exporter {
     pub feed_total: Duration,
     /// each tick's copying of the last export (for checks)
     pub feed_ticks: Vec<Duration>,
+    /// when the dialog's progress last moved
+    shown_at: Option<Instant>,
 }
 
 impl std::fmt::Debug for Exporter {
@@ -309,7 +316,18 @@ pub fn apply(e: &mut Engine, s: &mut State, a: &Action) -> bool {
             true
         }
         Action::Other(n) if n == ops::START => {
-            if !s.export.busy() && s.export.available(s.export.format) {
+            if !s.export.busy() && !s.export.available(s.export.format) {
+                // (said in the dialog, rather than nothing happening)
+                let f = format_name(s.export.format);
+                s.export.status = Status::Failed(match &s.export.videos {
+                    None => format!("Still looking for FFmpeg, which {f} needs: a moment."),
+                    Some(v) if v.is_empty() => format!(
+                        "{f} needs FFmpeg, which isn't installed. Install it (or set \
+                         PENCILPILOT_FFMPEG to it), or export a GIF or PNGs."
+                    ),
+                    Some(_) => format!("This FFmpeg can't write {f}."),
+                });
+            } else if !s.export.busy() {
                 let f = s.export.format;
                 let name = format!("{}.{}", file_stem(&s.cut_name), f.extension());
                 let label = match f {
@@ -340,6 +358,12 @@ pub fn apply(e: &mut Engine, s: &mut State, a: &Action) -> bool {
         Action::Other(n) if n == ops::CLOSE => {
             if !s.export.busy() {
                 s.export.open = false;
+                s.export.status = Status::Idle;
+            }
+            true
+        }
+        Action::Other(n) if n == ops::BACK => {
+            if !s.export.busy() {
                 s.export.status = Status::Idle;
             }
             true
@@ -607,9 +631,17 @@ pub fn tick(e: &mut Engine, s: &mut State, _now: Instant) -> bool {
     feed(e);
     if let Some(r) = &e.exporter.run {
         let done = r.shared.written.load(Ordering::Relaxed);
-        if let Status::Running { total, .. } = s.export.status {
+        let due = e
+            .exporter
+            .shown_at
+            .is_none_or(|t| t.elapsed() >= PROGRESS_EVERY);
+        if let Status::Running { total, done: was } = s.export.status
+            && done != was
+            && due
+        {
             s.export.status = Status::Running { done, total };
             s.export_progress = Some((done, total));
+            e.exporter.shown_at = Some(Instant::now());
         }
         if let Ok(out) = r.done.try_recv() {
             s.export.status = match &out.result {

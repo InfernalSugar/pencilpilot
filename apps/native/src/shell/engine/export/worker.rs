@@ -149,7 +149,7 @@ enum Out {
 /// once.
 pub fn spawn(job: Job) -> (mpsc::Sender<Msg>, Arc<Shared>, mpsc::Receiver<Outcome>) {
     let (tx, rx) = mpsc::channel::<Msg>();
-    let (out_tx, out_rx) = mpsc::sync_channel::<Out>(2);
+    let (out_tx, out_rx) = mpsc::sync_channel::<Out>(1);
     let (done_tx, done_rx) = mpsc::channel();
     let shared = Arc::new(Shared {
         rendered: AtomicU32::new(0),
@@ -188,6 +188,7 @@ pub fn spawn(job: Job) -> (mpsc::Sender<Msg>, Arc<Shared>, mpsc::Receiver<Outcom
         quality: Default::default(),
         meta: vec![("Software".into(), "PencilPilot".into())],
         lean: job.lean,
+        yuv: video,
         background: true,
     };
 
@@ -198,11 +199,11 @@ pub fn spawn(job: Job) -> (mpsc::Sender<Msg>, Arc<Shared>, mpsc::Receiver<Outcom
         .name("export-render".into())
         .spawn(move || {
             lower_priority();
-            // its own threads to render on: the window's (rayon's global ones) stay free
-            // for the window, which copies drawings on them
+            // its own threads to render on, half the cores: rayon's global ones stay free for
+            // the window, and FFmpeg has room
             let n = std::thread::available_parallelism().map_or(4, |n| n.get());
             let pool = rayon::ThreadPoolBuilder::new()
-                .num_threads(n.saturating_sub(2).max(2))
+                .num_threads((n / 2).max(2))
                 .thread_name(|i| format!("export-{i}"))
                 .start_handler(|_| lower_priority())
                 .build()
@@ -216,6 +217,7 @@ pub fn spawn(job: Job) -> (mpsc::Sender<Msg>, Arc<Shared>, mpsc::Receiver<Outcom
                 k,
                 transparent,
                 resize_to,
+                video,
                 layers,
                 runs,
             );
@@ -247,6 +249,7 @@ fn render(
     k: u32,
     transparent: bool,
     resize_to: Option<(u32, u32)>,
+    yuv: bool,
     layers: Vec<LayerSetup>,
     runs: Vec<Vec<u32>>,
 ) -> (Stats, Option<String>) {
@@ -358,6 +361,10 @@ fn render(
                 if let Some((ow, oh)) = resize_to {
                     px = on(pool, || resize::resize(&px, rw, rh, ow, oh));
                 }
+                if yuv {
+                    // (a third of the bytes through the pipe and in FFmpeg's queues)
+                    px = on(pool, || to_yuv(&px, rw, rh));
+                }
                 for d in forget {
                     if let Some(c) = p.take_drawing_copy(d) {
                         sh.offer(c.into_buffers());
@@ -386,6 +393,24 @@ fn lower_priority() {
     unsafe {
         libc::setpriority(libc::PRIO_PROCESS, 0, pencilpilot_export::BACKGROUND_NICE);
     }
+}
+
+/// A frame as YUV 4:2:0 for FFmpeg, its row pairs on many threads.
+fn to_yuv(rgba: &[u8], w: u32, h: u32) -> Vec<u8> {
+    use rayon::prelude::*;
+    let (wu, hu) = (w as usize, h as usize);
+    let cw = wu.div_ceil(2);
+    let mut out = vec![0u8; pencilpilot_export::yuv420_len(w, h)];
+    let (ys, uv) = out.split_at_mut(wu * hu);
+    let (us, vs) = uv.split_at_mut(cw * hu.div_ceil(2));
+    ys.par_chunks_mut(2 * wu)
+        .zip(us.par_chunks_mut(cw))
+        .zip(vs.par_chunks_mut(cw))
+        .enumerate()
+        .for_each(|(pair, ((y, u), v))| {
+            pencilpilot_export::yuv420_row_pair(rgba, w, h, pair, y, u, v)
+        });
+    out
 }
 
 /// `f` on the export's threads (rayon's work inside it goes there).

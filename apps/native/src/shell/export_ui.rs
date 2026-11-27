@@ -17,6 +17,8 @@ use crate::state::{Action, State};
 
 const NAME: &str = "export/dialog";
 const WIDTH: f32 = 440.0;
+/// the card while exporting and once done
+const CARD_WIDTH: f32 = 320.0;
 const PAD: f32 = 18.0;
 const GAP: f32 = 12.0;
 const SUBTLE: [f32; 4] = hex(0x5E5D63);
@@ -26,8 +28,18 @@ pub fn build(f: &mut Frame, s: &mut State) {
     if !f.typing() && f.take_key("e", true) {
         s.actions.push(Action::File("Export…".into()));
     }
-    let shown = f.is_open(NAME);
     let x = &mut s.export;
+    if x.open && matches!(x.status, Status::Running { .. } | Status::Done(_)) {
+        // while it runs, and once it's done: a card that leaves the canvas free (a pop-up
+        // would take every press, and the window must go on being drawn in)
+        if f.is_open(NAME) {
+            f.close();
+        }
+        x.was_open = false;
+        card(f, s);
+        return;
+    }
+    let shown = f.is_open(NAME);
     if x.open && !shown {
         if x.was_open && !x.busy() {
             // a click elsewhere or Escape put it away
@@ -65,12 +77,64 @@ pub fn build(f: &mut Frame, s: &mut State) {
     s.actions.extend(actions);
 }
 
+/// The card while exporting and once done: not a pop-up (it takes only presses on itself),
+/// narrower, over the side panel.
+fn card(f: &mut Frame, s: &mut State) {
+    let anchor = s.header.layout.export;
+    let w = CARD_WIDTH;
+    let h = height(f, s);
+    let rect = Rect::new((anchor.right() - w).max(8.0), anchor.bottom() + 10.0, w, h);
+    let mut actions = Vec::new();
+    let status = s.export.status.clone();
+    f.overlay(|f| {
+        let t = f.theme();
+        f.block(rect);
+        f.put(
+            Quad::rect(
+                rect.x + 2.0,
+                rect.y + 8.0,
+                rect.w,
+                rect.h,
+                alpha(t.ink, 0.14),
+            )
+            .radius(22.0)
+            .shadow(18.0),
+        );
+        f.put(
+            Quad::rect(rect.x, rect.y, rect.w, rect.h, t.card)
+                .radius(22.0)
+                .border(1.0, t.line),
+        );
+        f.column_in(rect.inset(PAD), GAP, |f| match status {
+            Status::Running { done: d, total } => running(f, d, total, &mut actions),
+            Status::Done(p) => done(f, &p, &mut actions),
+            _ => {}
+        });
+    });
+    s.actions.extend(actions);
+}
+
 /// The card's height for what it shows.
 fn height(f: &mut Frame, s: &State) -> f32 {
     let x = &s.export;
     let rows: Vec<f32> = match &x.status {
         Status::Running { .. } => vec![28.0, 18.0, 8.0, 44.0],
-        Status::Done(_) => vec![28.0, 18.0, 16.0, 44.0],
+        Status::Done(p) => {
+            let inner = CARD_WIDTH - 2.0 * PAD;
+            let lines = |f: &mut Frame, t: &str| {
+                f.lay_out(t, &Style::body(13.0, SUBTLE).weight(600), Some(inner))
+                    .height
+            };
+            let name = p
+                .file_name()
+                .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+            let dir = p
+                .parent()
+                .map_or_else(String::new, |d| d.display().to_string());
+            let a = lines(f, &format!("Exported to {name}")).max(18.0);
+            let b = lines(f, &dir).max(16.0);
+            vec![28.0, a, b, 44.0]
+        }
         Status::Failed(m) => {
             let l = f.lay_out(m, &Style::body(13.0, SUBTLE), Some(WIDTH - 2.0 * PAD));
             vec![28.0, l.height, 44.0]
@@ -108,11 +172,8 @@ fn title(f: &mut Frame, text: &str) {
 }
 
 fn small(f: &mut Frame, text: &str, color: [f32; 4], h: f32) {
-    let l = f.lay_out(
-        text,
-        &Style::body(13.0, color).weight(600),
-        Some(WIDTH - 2.0 * PAD),
-    );
+    let max = f.remaining().w;
+    let l = f.lay_out(text, &Style::body(13.0, color).weight(600), Some(max));
     let r = f.alloc(0.0, h.max(l.height));
     f.put_text(&l, r.x, r.y);
 }
@@ -252,9 +313,10 @@ fn failed(f: &mut Frame, m: &str, actions: &mut Vec<Action>) {
     small(f, m, SUBTLE, 16.0);
     f.row(44.0, |f| {
         f.then_right();
-        if f.button("export/fail-close", "Close", Kind::Secondary)
-            .clicked
-        {
+        if f.button("export/fail-back", "Back", Kind::Primary).clicked {
+            actions.push(Action::Other(ops::BACK.into()));
+        }
+        if f.button("export/fail-close", "Close", Kind::Ghost).clicked {
             actions.push(Action::Other(ops::CLOSE.into()));
         }
     });

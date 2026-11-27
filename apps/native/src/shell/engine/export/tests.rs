@@ -147,7 +147,14 @@ fn export_asks_for_a_file_first() {
     s.export.videos = Some(Vec::new());
     s.export.format = Format::Mp4;
     e.apply(&mut s, &Action::Other(ops::START.into()));
-    assert_eq!(s.export.status, Status::Idle, "nothing asked");
+    assert!(e.exporter.asked.is_none(), "nothing asked");
+    let Status::Failed(why) = &s.export.status else {
+        panic!("{:?}", s.export.status)
+    };
+    assert!(why.contains("FFmpeg"), "{why}");
+    // Close: back to the settings
+    e.apply(&mut s, &Action::Other(ops::CLOSE.into()));
+    assert_eq!(s.export.status, Status::Idle);
 }
 
 /// A PNG sequence of the demo: a file per frame, each the window's own render of that frame
@@ -477,9 +484,15 @@ fn export_fixtures() {
             }
         }
         let (rss0, pss0) = memory();
-        let video = out.join(format!("{name}.mp4"));
+        let webm = std::env::var("PP_EXPORT_FORMAT").is_ok_and(|f| f == "webm");
+        let (format, ext) = if webm {
+            (Format::Webm, "webm")
+        } else {
+            (Format::Mp4, "mp4")
+        };
+        let video = out.join(format!("{name}.{ext}"));
         let _ = std::fs::remove_file(&video);
-        s.export.format = Format::Mp4;
+        s.export.format = format;
         let t0 = Instant::now();
         start(&mut e, &mut s, video.clone());
         let (mut rss_max, mut pss_max) = (rss0, pss0);
@@ -525,6 +538,7 @@ fn export_fixtures() {
         let check = decode_check(&real_ff, &video, &e, &s, &[0, mid, s.frames - 1], &out);
         let line = serde_line(&[
             ("fixture", name.to_string()),
+            ("format", ext.to_string()),
             (
                 "size",
                 format!("{}x{}", e.painter.width(), e.painter.height()),

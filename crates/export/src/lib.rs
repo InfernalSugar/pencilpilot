@@ -73,11 +73,16 @@ pub struct Spec {
     /// what to write into the file about the work: (key, text), e.g. ("Author", "Ana")
     #[serde(default)]
     pub meta: Vec<(String, String)>,
-    /// MP4: encode faster and with less memory (x264's medium preset, sliced threads and a
-    /// short lookahead: 1080p 14 ms a frame and 0.4 GB instead of 18 ms and 1.4 GB, 4K 45 ms
-    /// and 1.1 GB instead of 60 ms and 2 GB; files about 1–5% bigger at the same quality)
+    /// Videos: encode faster and with far less memory. MP4: x264's medium preset, sliced
+    /// threads, two B-frames and references, a 5-frame lookahead (4K from YUV: 26 ms a frame
+    /// and 0.67 GB, against 60 ms and 2 GB; files a few % bigger at the same quality). WebM:
+    /// no frames held back (VP9 `lag-in-frames` 0: 4K 0.86 GB, not 1.1)
     #[serde(default)]
     pub lean: bool,
+    /// Videos: frames come as YUV 4:2:0 (BT.709, limited range: [`rgba_to_yuv420`]) rather
+    /// than RGBA, 2.7 times smaller through the pipe and in FFmpeg's queues
+    #[serde(default)]
+    pub yuv: bool,
     /// run FFmpeg at a lower priority than the app (the app's window stays smooth while it
     /// encodes on every core)
     #[serde(default)]
@@ -161,7 +166,7 @@ pub struct Job {
 }
 
 /// How much lower a background export runs (Unix nice: 0 is normal, 19 the lowest).
-pub const BACKGROUND_NICE: i32 = 10;
+pub const BACKGROUND_NICE: i32 = 15;
 
 /// Where ffmpeg is: `PENCILPILOT_FFMPEG`, the one installed with the app (next to it,
 /// as `pencilpilot-ffmpeg`: see scripts/fetch-ffmpeg.mjs), the PATH, or a usual folder.
@@ -237,7 +242,7 @@ fn ffmpeg_args(spec: &Spec, out: &Path) -> Vec<String> {
         "-f",
         "rawvideo",
         "-pix_fmt",
-        "rgba",
+        if spec.yuv { "yuv420p" } else { "rgba" },
         "-s",
     ]
     .iter()
@@ -245,7 +250,24 @@ fn ffmpeg_args(spec: &Spec, out: &Path) -> Vec<String> {
     .collect();
     let (iw, ih) = spec.input.unwrap_or((spec.width, spec.height));
     a.push(format!("{iw}x{ih}"));
-    a.extend(["-r".into(), spec.fps.to_string(), "-i".into(), "-".into()]);
+    a.extend(["-r".into(), spec.fps.to_string()]);
+    if spec.yuv {
+        // (the frames are BT.709 already: said so, FFmpeg leaves them as they are)
+        a.extend(
+            [
+                "-colorspace",
+                "bt709",
+                "-color_range",
+                "tv",
+                "-color_primaries",
+                "bt709",
+                "-color_trc",
+                "iec61966-2-1",
+            ]
+            .map(String::from),
+        );
+    }
+    a.extend(["-i".into(), "-".into()]);
     if (iw, ih) != (spec.width, spec.height) {
         a.extend([
             "-vf".into(),
@@ -332,15 +354,18 @@ fn ffmpeg_args(spec: &Spec, out: &Path) -> Vec<String> {
     };
     let crf = spec.quality.crf(spec.format).to_string();
     let lean = spec.lean && spec.format == Format::Mp4;
-    a.extend(enc.iter().map(|s| match s.as_ref() {
+    a.extend(enc.iter().map(|s| match *s {
         "slow" if lean => "medium".to_string(),
         s => s.replace("{crf}", &crf),
     }));
     if lean {
         a.extend([
             "-x264-params".into(),
-            "sliced-threads=1:rc-lookahead=10".into(),
+            "sliced-threads=1:rc-lookahead=5:ref=2:bframes=2".into(),
         ]);
+    }
+    if spec.lean && spec.format == Format::Webm {
+        a.extend(["-lag-in-frames".into(), "0".into()]);
     }
     // the pixels are sRGB: say so (BT.709 primaries are sRGB's)
     a.extend(
@@ -484,8 +509,14 @@ impl Job {
     pub fn frame(&mut self, rgba: &[u8], repeat: u32) -> Result<(), String> {
         let (w, h) = (self.spec.width, self.spec.height);
         let (iw, ih) = self.spec.input.unwrap_or((w, h));
-        if rgba.len() != (iw * ih * 4) as usize {
-            return Err(format!("a frame of {} bytes for {w}×{h}", rgba.len()));
+        let video = matches!(self.writer, Writer::Video { .. });
+        let want = if self.spec.yuv && video {
+            yuv420_len(iw, ih)
+        } else {
+            (iw * ih * 4) as usize
+        };
+        if rgba.len() != want {
+            return Err(format!("a frame of {} bytes for {iw}×{ih}", rgba.len()));
         }
         if self.sent >= self.spec.frames {
             return Err("more frames than were announced".into());
@@ -496,6 +527,7 @@ impl Job {
         // opaque formats: anything see-through goes over white
         let flat;
         let rgba = if (self.spec.transparent && !matches!(self.spec.format, Format::Mp4))
+            || (self.spec.yuv && video)
             || rgba.as_chunks::<4>().0.iter().all(|p| p[3] == 255)
         {
             rgba
@@ -656,6 +688,82 @@ fn ffmpeg_error(child: &mut Child) -> String {
     s.lines().last().unwrap_or("it stopped").trim().to_string()
 }
 
+/// Bytes of a `w` × `h` YUV 4:2:0 frame (chroma rounded up on odd sides).
+pub fn yuv420_len(w: u32, h: u32) -> usize {
+    let (w, h) = (w as usize, h as usize);
+    w * h + 2 * w.div_ceil(2) * h.div_ceil(2)
+}
+
+/// Rows `2·pair` and `2·pair + 1` of straight RGBA8 (`w` wide, `h` tall; see-through goes
+/// over white) as YUV 4:2:0, BT.709 limited range: their two luma rows and their one row of
+/// each chroma. A frame is all its row pairs (on many threads at once, say), laid out as
+/// [`rgba_to_yuv420`] does.
+pub fn yuv420_row_pair(
+    rgba: &[u8],
+    w: u32,
+    h: u32,
+    pair: usize,
+    y: &mut [u8],
+    u: &mut [u8],
+    v: &mut [u8],
+) {
+    let (w, h) = (w as usize, h as usize);
+    let (kr, kb) = (0.2126f32, 0.0722f32);
+    let kg = 1.0 - kr - kb;
+    let rows = (2 * pair..(2 * pair + 2).min(h)).collect::<Vec<_>>();
+    let px = |x: usize, row: usize| {
+        let p = &rgba[(row * w + x) * 4..][..4];
+        let a = p[3] as f32 / 255.0;
+        let c = |i: usize| (p[i] as f32 * a + 255.0 * (1.0 - a)) / 255.0;
+        (c(0), c(1), c(2))
+    };
+    for (k, &row) in rows.iter().enumerate() {
+        for x in 0..w {
+            let (r, g, b) = px(x, row);
+            let l = kr * r + kg * g + kb * b;
+            y[k * w + x] = (16.0 + 219.0 * l).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+    for cx in 0..w.div_ceil(2) {
+        let (mut cb, mut cr, mut n) = (0.0f32, 0.0f32, 0.0f32);
+        for &row in &rows {
+            for x in (2 * cx)..(2 * cx + 2).min(w) {
+                let (r, g, b) = px(x, row);
+                let l = kr * r + kg * g + kb * b;
+                cb += (b - l) / (2.0 * (1.0 - kb));
+                cr += (r - l) / (2.0 * (1.0 - kr));
+                n += 1.0;
+            }
+        }
+        u[cx] = (128.0 + 224.0 * cb / n).round().clamp(0.0, 255.0) as u8;
+        v[cx] = (128.0 + 224.0 * cr / n).round().clamp(0.0, 255.0) as u8;
+    }
+}
+
+/// Straight RGBA8 as one YUV 4:2:0 frame (all of Y, then U, then V), BT.709 limited range,
+/// for a video's [`Spec::yuv`].
+pub fn rgba_to_yuv420(rgba: &[u8], w: u32, h: u32) -> Vec<u8> {
+    let (wu, hu) = (w as usize, h as usize);
+    let (cw, ch) = (wu.div_ceil(2), hu.div_ceil(2));
+    let mut out = vec![0u8; yuv420_len(w, h)];
+    let (ys, uv) = out.split_at_mut(wu * hu);
+    let (us, vs) = uv.split_at_mut(cw * ch);
+    for pair in 0..ch {
+        let y0 = 2 * pair * wu;
+        let y1 = ((2 * pair + 2).min(hu)) * wu;
+        yuv420_row_pair(
+            rgba,
+            w,
+            h,
+            pair,
+            &mut ys[y0..y1],
+            &mut us[pair * cw..(pair + 1) * cw],
+            &mut vs[pair * cw..(pair + 1) * cw],
+        );
+    }
+    out
+}
+
 /// Straight RGBA over white, opaque (for formats without transparency).
 fn over_white(rgba: &[u8]) -> Vec<u8> {
     let mut out = rgba.to_vec();
@@ -692,6 +800,7 @@ mod tests {
             quality: Quality::Best,
             meta: Vec::new(),
             lean: false,
+            yuv: false,
             background: false,
         }
     }
@@ -786,7 +895,7 @@ mod tests {
         assert!(args(&s).contains("-metadata artist=Ana"));
         assert!(!args(&s).contains("x264-params"));
         s.lean = true;
-        assert!(args(&s).contains("-x264-params sliced-threads=1:rc-lookahead=10"));
+        assert!(args(&s).contains("-x264-params sliced-threads=1:rc-lookahead=5:ref=2:bframes=2"));
         assert!(args(&s).contains("-preset medium"));
         s.format = Format::Webm;
         s.quality = Quality::Good;
@@ -907,6 +1016,69 @@ mod tests {
         {
             assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "16,8");
         }
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    /// YUV frames: BT.709's colours, and FFmpeg reads them back to the same picture.
+    #[test]
+    fn yuv_frames_are_bt709_and_go_through_ffmpeg() {
+        // white, black, and pure red (BT.709 limited: Y 63, Cb 102, Cr 240)
+        let px = [
+            [255, 255, 255, 255],
+            [0, 0, 0, 255],
+            [255, 0, 0, 255],
+            [0, 0, 0, 0],
+        ];
+        for (p, want) in px.iter().zip([
+            [235, 128, 128],
+            [16, 128, 128],
+            [63, 102, 240],
+            [235, 128, 128],
+        ]) {
+            let f = rgba_to_yuv420(&p.repeat(4), 2, 2);
+            assert_eq!(f.len(), 6);
+            assert_eq!([f[0], f[4], f[5]], want, "{p:?}");
+        }
+        // odd sides: chroma rounded up
+        assert_eq!(rgba_to_yuv420(&[9; 3 * 3 * 4], 3, 3).len(), 9 + 2 * 4);
+        let Some(ff) = find_ffmpeg() else { return };
+        if !video_formats(&ff).contains(&Format::Mp4) {
+            return;
+        }
+        let d = tmp();
+        let mut s = spec(Format::Mp4, &d, "y.mp4", 1);
+        (s.width, s.height, s.yuv, s.lean) = (32, 16, true, true);
+        // four flat colours (H.264's loss on flat areas is small)
+        let mut rgba = Vec::new();
+        for y in 0..16 {
+            for x in 0..32 {
+                rgba.extend(match (x < 16, y < 8) {
+                    (true, true) => [232, 73, 47, 255],
+                    (false, true) => [90, 150, 210, 255],
+                    (true, false) => [246, 244, 239, 255],
+                    (false, false) => [22, 22, 26, 255],
+                });
+            }
+        }
+        let mut j = Job::begin(s).unwrap();
+        assert!(j.frame(&rgba, 1).is_err(), "RGBA isn't taken");
+        j.frame(&rgba_to_yuv420(&rgba, 32, 16), 1).unwrap();
+        let p = j.end().unwrap();
+        let out = Command::new(&ff)
+            .args([
+                "-v", "error", "-i", &p, "-f", "rawvideo", "-pix_fmt", "rgba", "-",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(out.stdout.len(), rgba.len());
+        // each colour's middle (its edges ring a little)
+        let worst = [(4, 3), (27, 3), (4, 12), (27, 12)]
+            .iter()
+            .flat_map(|&(x, y)| (0..3).map(move |c| (y * 32 + x) * 4 + c))
+            .map(|i| (out.stdout[i] as i32 - rgba[i] as i32).abs())
+            .max()
+            .unwrap();
+        assert!(worst <= 6, "decoded back within {worst}");
         std::fs::remove_dir_all(d).unwrap();
     }
 
