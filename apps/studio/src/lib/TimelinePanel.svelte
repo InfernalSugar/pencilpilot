@@ -26,11 +26,14 @@
 		fitCamera,
 		removeExposure,
 		setStatic,
+		setKind,
 		setLength,
 		setTiming,
 		startOf,
 		staticDrawing,
 		trackIn,
+		trackLength,
+		DRAWING_KINDS,
 		STAGES,
 		STAGE_LABELS,
 		isStage,
@@ -55,6 +58,7 @@
 		type FrameRange
 	} from './frametools';
 	import type { OnionSettings } from './onion';
+	import ContextMenu, { type MenuAt, type MenuItem } from './ContextMenu.svelte';
 	import type { AudioBank } from './audio';
 	import { AUDIO_TYPES } from './audio';
 	import { TRANSITIONS } from './exporting';
@@ -105,7 +109,10 @@
 		onsound,
 		onlipsync,
 		onmarker,
-		onedit
+		onedit,
+		layout = 'classic',
+		onkind,
+		onlayerset
 	}: {
 		timeline: Timeline;
 		scene?: number;
@@ -175,10 +182,38 @@
 		onmarker?: () => void;
 		/** the timeline changed (or the frame did): show it */
 		onedit: (changed: boolean) => void;
+		/** classic: every control in one bar; new: icon trays above, playback and view below */
+		layout?: 'new' | 'classic';
+		/** mark the drawing here as a key, breakdown or in-between (null: unmark) */
+		onkind?: (kind: DrawingKind | null) => void;
+		/** show / hide or lock / unlock a layer */
+		onlayerset?: (id: number, patch: { visible?: boolean; locked?: boolean }) => void;
 	} = $props();
 
-	/** px per frame */
+	/** px per frame (the new layout's zoom slider changes it) */
 	const CELL = 22;
+	const ZOOM_MIN = 8;
+	const ZOOM_MAX = 44;
+	const ZOOM_KEY = 'pp.timelineZoom';
+	function readZoom() {
+		try {
+			const v = Number(localStorage.getItem(ZOOM_KEY));
+			return v >= ZOOM_MIN && v <= ZOOM_MAX ? v : CELL;
+		} catch {
+			return CELL;
+		}
+	}
+	let zoom = $state(readZoom());
+	function setZoom(v: number) {
+		zoom = Math.round(Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, v)));
+		try {
+			localStorage.setItem(ZOOM_KEY, String(zoom));
+		} catch {
+			/* storage blocked: this visit only */
+		}
+	}
+	const cell = $derived(layout === 'new' ? zoom : CELL);
+	const isNew = $derived(layout === 'new');
 	const theScene = $derived(timeline.scenes[scene] ?? timeline.scenes[0]);
 	const theCut = $derived(theScene.cuts[cut] ?? theScene.cuts[0]);
 	const statics = $derived(timeline.statics);
@@ -338,7 +373,7 @@
 	}
 	function dragMove(e: PointerEvent) {
 		if (!drag) return;
-		const by = Math.round((e.clientX - drag.x0) / CELL);
+		const by = Math.round((e.clientX - drag.x0) / cell);
 		if (by === drag.by) return;
 		drag.by = by;
 		if (drag.mode === 'hold') {
@@ -382,13 +417,13 @@
 	/** Draw a clip's waveform for the frames it covers in this cut. */
 	function waveform(
 		el: HTMLCanvasElement,
-		args: { file: string; from: number; frames: number; fps: number; tick: number }
+		args: { file: string; from: number; frames: number; fps: number; tick: number; cell: number }
 	) {
 		const draw = (a: typeof args) => {
 			if (!audio) return;
 			const peaks = audio.peaks(a.file, a.fps);
 			const dpr = window.devicePixelRatio || 1;
-			const [w, h] = [Math.max(1, a.frames * CELL), 24];
+			const [w, h] = [Math.max(1, a.frames * a.cell), 24];
 			el.width = Math.round(w * dpr);
 			el.height = Math.round(h * dpr);
 			el.style.width = `${w}px`;
@@ -402,7 +437,7 @@
 				// (silence: no bar)
 				if (p < 0.004) continue;
 				const bar = Math.max(1, p * (h - 2));
-				g.fillRect(f * CELL + 1, (h - bar) / 2, CELL - 2, bar);
+				g.fillRect(f * a.cell + 1, (h - bar) / 2, Math.max(1, a.cell - 2), bar);
 			}
 		};
 		draw(args);
@@ -421,7 +456,7 @@
 	function clipMove(e: PointerEvent) {
 		if (!clipDrag) return;
 		const c = clips.find((x) => x.id === clipDrag!.id);
-		const start = clipDrag.start0 + Math.round((e.clientX - clipDrag.x0) / CELL);
+		const start = clipDrag.start0 + Math.round((e.clientX - clipDrag.x0) / cell);
 		if (c && c.start !== start) {
 			c.start = start;
 			edited();
@@ -438,7 +473,7 @@
 	function cellClick(e: MouseEvent, layer: number) {
 		const box = (e.currentTarget as HTMLElement).getBoundingClientRect();
 		onlayer(layer);
-		pick(e, Math.floor((e.clientX - box.left) / CELL));
+		pick(e, Math.floor((e.clientX - box.left) / cell));
 	}
 
 	// ---- frame tools: on the chosen frames (Shift+click), or the drawing here ----
@@ -559,7 +594,7 @@
 	let scrubbing = false;
 	function scrubAt(e: PointerEvent) {
 		const ruler = e.currentTarget as HTMLElement;
-		const f = Math.floor((e.clientX - ruler.getBoundingClientRect().left) / CELL);
+		const f = Math.floor((e.clientX - ruler.getBoundingClientRect().left) / cell);
 		if (f !== frame) go(Math.max(0, Math.min(shown - 1, f)));
 	}
 	const inRange = (f: number) => !!playRange && f >= playRange.from && f <= playRange.to;
@@ -580,818 +615,1383 @@
 		shift[shiftSide] = { x: s.x + dx * k * 2, y: s.y + dy * k * 2, r: s.r + dr * k };
 	}
 	let padDrag: { x: number; y: number } | null = null;
-</script>
 
-<section class="timeline pp-ink-bar" aria-label="Timeline">
-	<div class="bar">
-		<label class="pick">
-			<span class="sr">Scene</span>
-			<select
-				aria-label="Scene"
-				value={scene}
-				onchange={(e) => {
-					scene = +e.currentTarget.value;
+	// ---- the new layout: icon trays, right-click menus, the zoom ----
+	/** blank: an empty frame after this drawing on the active layer (nothing shows there) */
+	function addBlank() {
+		if (activeStatic) return;
+		const t = trackOf(active);
+		if (here) {
+			insertExposure(t, here.index + 1, { drawing: 0, length: 1 });
+			frame = startOf(t, here.index + 1);
+		} else {
+			const end = trackLength(t);
+			if (frame > end) insertExposure(t, t.length, { drawing: 0, length: frame - end });
+			insertExposure(t, t.length, { drawing: 0, length: 1 });
+			frame = trackLength(t) - 1;
+		}
+		edited();
+	}
+	function kind(k: DrawingKind | null) {
+		const d = drawingAt(activeTrack, frame);
+		if (!d) return;
+		if (onkind) onkind(k);
+		else {
+			setKind(timeline, d, k);
+			edited();
+		}
+	}
+
+	const ICON = {
+		clap: 'M4 10h16v10H4Z M4 10 5.5 5l14-1 0.5 4 M9 4.6 8 9.5 M14 4.2 13 9.5',
+		film: 'M4 5h16v14H4Z M8 5v14 M16 5v14 M4 9h4 M4 15h4 M16 9h4 M16 15h4',
+		pencilPlus: 'M4 20l1-4L15 6l3 3L8 19Z M13 8l3 3 M19 14v6 M16 17h6',
+		dup: 'M9 9h11v11H9Z M5 15V4h11',
+		blank: 'M6 4h12v16H6Z',
+		clock: 'M12 3a9 9 0 1 0 0.01 0Z M12 7v5l3 2',
+		key: 'M14.5 4a5 5 0 1 1-4.2 7.7L4 18v2h3v-2h2v-2h2l1.2-1.2 M16 8h0.01',
+		diamond: 'M12 4l8 8-8 8-8-8Z',
+		dot: 'M12 8a4 4 0 1 0 0.01 0Z',
+		clear: 'M6 6l12 12 M18 6 6 18',
+		frames: 'M3 6h5v12H3Z M9.5 6h5v12h-5Z M16 6h5v12h-5Z',
+		extend: 'M4 12h16 M16 8l4 4-4 4 M4 7v10',
+		reverse: 'M4 9h13l-3-3 M20 15H7l3 3',
+		more: 'M5 12h.01M12 12h.01M19 12h.01'
+	};
+	interface TrayOption {
+		id: string;
+		label: string;
+		icon: string;
+		tag?: string;
+		/** this is how things are now (the Scene / Cut in use, the hold, the mark) */
+		on?: boolean;
+		disabled?: boolean;
+		run: () => void;
+	}
+	interface Tray {
+		id: string;
+		label: string;
+		side: 'left' | 'right';
+		accent?: boolean;
+		options: TrayOption[];
+		/** what the folded tray shows */
+		current: TrayOption;
+		menu?: (e: MouseEvent) => void;
+	}
+	/** the tray open (one at a time) */
+	let openTray = $state<string | null>(null);
+	/** the last pick in the trays that do things (New, Frames): what they show folded */
+	let lastPick = $state<Record<string, string>>({ create: 'draw', frames: 'ins' });
+	const markable = $derived(drawingAt(activeTrack, frame));
+	const kindHere = $derived(markable ? timeline.kinds?.[markable] : undefined);
+
+	const trays = $derived.by((): Tray[] => {
+		const len = here ? activeTrack[here.index].length : 0;
+		const sceneOpts: TrayOption[] = [
+			...timeline.scenes.map((s, i) => ({
+				id: `s${i}`,
+				label: s.name,
+				icon: ICON.clap,
+				tag: String(i + 1),
+				on: i === scene,
+				run: () => {
+					scene = i;
 					cut = 0;
 					go(0);
-				}}
-			>
-				{#each timeline.scenes as s, i (s.id)}<option value={i}>{s.name}</option>{/each}
-			</select>
-		</label>
-		<label class="pick">
-			<select
-				aria-label="Cut"
-				value={cut}
-				onchange={(e) => {
-					cut = +e.currentTarget.value;
+				}
+			})),
+			{ id: 'sNew', label: 'New scene', icon: ICON.clap, tag: '+', run: newScene }
+		];
+		const cutOpts: TrayOption[] = [
+			...theScene.cuts.map((c, i) => ({
+				id: `c${i}`,
+				label: `${c.name} · ${(cutLength(c, statics) / fps).toFixed(1)} s`,
+				icon: ICON.film,
+				tag: String(i + 1),
+				on: i === cut,
+				run: () => {
+					cut = i;
 					go(0);
-				}}
-			>
-				{#each theScene.cuts as c, i (c.id)}<option value={i}>
-						{c.name} · {(cutLength(c, statics) / fps).toFixed(1)} s
-					</option>{/each}
-			</select>
-		</label>
-		<select
-			aria-label="Into the next cut"
-			title={TRANSITIONS.find((t) => t.id === (theCut.transition ?? ''))?.note}
-			value={theCut.transition ?? ''}
-			onchange={(e) => {
-				const v = e.currentTarget.value;
-				if (v === 'flash' || v === 'dissolve') theCut.transition = v;
+				}
+			})),
+			{ id: 'cNew', label: 'New cut', icon: ICON.film, tag: '+', run: newCut }
+		];
+		const create: TrayOption[] = [
+			{
+				id: 'draw',
+				label: 'New drawing',
+				icon: ICON.pencilPlus,
+				disabled: activeStatic,
+				run: addDrawing
+			},
+			{
+				id: 'dup',
+				label: 'Duplicate drawing',
+				icon: ICON.dup,
+				disabled: !target,
+				run: () => void duplicateRange()
+			},
+			{
+				id: 'blank',
+				label: 'Blank frame',
+				icon: ICON.blank,
+				disabled: activeStatic,
+				run: addBlank
+			},
+			{ id: 'newCut', label: 'New cut', icon: ICON.film, tag: '+', run: newCut },
+			{ id: 'newScene', label: 'New scene', icon: ICON.clap, tag: '+', run: newScene }
+		];
+		const holds: TrayOption[] = [1, 2, 3].map((n) => ({
+			id: `h${n}`,
+			label: `Hold on ${n}s`,
+			icon: ICON.clock,
+			tag: `${n}s`,
+			on: len === n,
+			disabled: !here,
+			run: () => timing(n)
+		}));
+		const marks: TrayOption[] = [
+			...DRAWING_KINDS.map((k) => ({
+				id: k,
+				label: KIND_NAME[k],
+				icon: k === 'key' ? ICON.key : k === 'breakdown' ? ICON.diamond : ICON.dot,
+				tag: k === 'inbetween' ? '' : KIND_SHORT[k],
+				on: kindHere === k,
+				disabled: !markable,
+				run: () => kind(k)
+			})),
+			{
+				id: 'none',
+				label: 'Clear mark',
+				icon: ICON.clear,
+				disabled: !markable || !kindHere,
+				run: () => kind(null)
+			}
+		];
+		const frames: TrayOption[] = [
+			{ id: 'ins', label: 'Insert frame', icon: ICON.frames, tag: '+', run: insertFrame },
+			{ id: 'del', label: 'Remove frame', icon: ICON.frames, tag: '−', run: deleteFrame },
+			{ id: 'ext', label: 'Extend hold', icon: ICON.extend, disabled: !here, run: () => hold(1) },
+			{
+				id: 'rev',
+				label: 'Reverse frames',
+				icon: ICON.reverse,
+				disabled: !target || target.from === target.to,
+				run: reverseRange
+			},
+			{
+				id: 'more',
+				label: 'More frame tools…',
+				icon: ICON.more,
+				run: () => (toolsOpen = true)
+			}
+		];
+		const picked = (list: TrayOption[], id: string) => list.find((o) => o.id === id) ?? list[0];
+		return [
+			{
+				id: 'scene',
+				label: 'Scene',
+				side: 'left',
+				options: sceneOpts,
+				current: sceneOpts[scene] ?? sceneOpts[0],
+				menu: (e) => sceneMenu(e)
+			},
+			{
+				id: 'cut',
+				label: 'Cut',
+				side: 'left',
+				options: cutOpts,
+				current: cutOpts[cut] ?? cutOpts[0],
+				menu: (e) => cutMenu(e)
+			},
+			{
+				id: 'create',
+				label: 'New',
+				side: 'right',
+				accent: true,
+				options: create,
+				current: picked(create, lastPick.create)
+			},
+			{
+				id: 'hold',
+				label: 'Hold',
+				side: 'right',
+				options: holds,
+				current: holds.find((o) => o.on) ?? {
+					id: 'hold',
+					label: here ? `${len} frames` : 'nothing here',
+					icon: ICON.clock,
+					tag: here ? `${len}f` : '',
+					run: () => {}
+				}
+			},
+			{
+				id: 'key',
+				label: 'Mark frame',
+				side: 'right',
+				options: marks,
+				current: marks.find((o) => o.on) ?? {
+					id: 'unmarked',
+					label: markable ? 'unmarked' : 'nothing here',
+					icon: ICON.key,
+					run: () => {}
+				}
+			},
+			{
+				id: 'frames',
+				label: 'Frames',
+				side: 'right',
+				options: frames,
+				current: picked(frames, lastPick.frames)
+			}
+		];
+	});
+	function trayPick(t: Tray, o: TrayOption) {
+		if (o.disabled) return;
+		openTray = null;
+		if (t.id === 'create' || t.id === 'frames') lastPick[t.id] = o.id;
+		o.run();
+	}
+
+	// ---- right-click menus ----
+	let menu = $state<MenuAt | null>(null);
+	function openMenu(e: MouseEvent, label: string, items: MenuItem[]) {
+		e.preventDefault();
+		e.stopPropagation();
+		openTray = null;
+		const box = (e.currentTarget as HTMLElement | null)?.getBoundingClientRect();
+		// (from the keyboard, the event has no pointer: under the button instead)
+		const x = e.clientX || (box ? box.left : 0);
+		const y = e.clientY || (box ? box.bottom : 0);
+		menu = { x, y, label, items };
+	}
+	const transitionItems = (): MenuItem[] =>
+		TRANSITIONS.map((t) => ({
+			label: t.label,
+			checked: (theCut.transition ?? '') === t.id,
+			run: () => {
+				if (t.id === 'flash' || t.id === 'dissolve') theCut.transition = t.id;
 				else delete theCut.transition;
 				edited();
-			}}
-		>
-			{#each TRANSITIONS as t (t.id)}
-				<option value={t.id}>→ {t.label}</option>
-			{/each}
-		</select>
-		<button type="button" class="b" title="A new cut after this one" onclick={newCut}>+ Cut</button>
-		<button type="button" class="b" title="A new scene after this one" onclick={newScene}>
-			+ Scene
-		</button>
-		<span class="sep"></span>
-		<button
-			type="button"
-			class="b play"
-			aria-pressed={playing}
-			aria-label={playing ? 'Stop' : 'Play'}
-			title={playing ? 'Stop' : 'Play the cut (or the loop range)'}
-			onclick={onplay}
-		>
-			{playing ? '■' : '▶'}
-		</button>
-		<select aria-label="Frames a second" title="Frames a second" bind:value={fps}>
-			{#each [6, 8, 12, 15, 24, 25, 30, 48, 50, 60] as n (n)}<option value={n}>
-					{n} fps
-				</option>{/each}
-		</select>
-		<div class="seg" role="radiogroup" aria-label="Play what">
-			{#each [['cut', 'Cut'], ['scene', 'Scene']] as [id, label] (id)}
+			}
+		}));
+	function sceneMenu(e: MouseEvent) {
+		openMenu(e, 'Scene', [
+			{ head: theScene.name },
+			{ label: 'New scene', hint: 'after this one', run: newScene },
+			{ sep: true },
+			{ label: 'Add sound…', hint: 'on this frame', run: () => fileInput?.click() }
+		]);
+	}
+	function cutMenu(e: MouseEvent) {
+		openMenu(e, 'Cut', [
+			{ head: `${theCut.name} · ${(length / fps).toFixed(1)} s` },
+			{ label: 'New cut', hint: 'after this one', run: newCut },
+			{ sep: true },
+			{ head: 'Into the next cut' },
+			...transitionItems(),
+			{ sep: true },
+			{ label: 'Add sound…', hint: 'on this frame', run: () => fileInput?.click() }
+		]);
+	}
+	/** a drawing on the timeline: go there, then what can be done to it */
+	function frameMenu(e: MouseEvent, layer: LayerInfo, index: number) {
+		const t = trackOf(layer.id);
+		const start = startOf(t, index);
+		const ex = t[index];
+		const nums = numbers(t);
+		onlayer(layer.id);
+		if (!sel || !inSel(sel, start)) {
+			sel = null;
+			go(start);
+		}
+		openMenu(e, 'Frame', [
+			{
+				head: `Drawing ${nums[index]} · ${layer.name} · ${ex.length > 1 ? `frames ${start + 1}–${start + ex.length}` : `frame ${start + 1}`}`
+			},
+			{
+				label: 'Remove drawing',
+				danger: true,
+				run: () => {
+					removeExposure(t, index);
+					edited();
+				}
+			},
+			{
+				label: 'Hold longer',
+				hint: '+1',
+				run: () => {
+					setLength(t, index, t[index].length + 1);
+					edited();
+				}
+			},
+			{
+				label: 'Hold shorter',
+				hint: '−1',
+				disabled: ex.length < 2,
+				run: () => {
+					setLength(t, index, t[index].length - 1);
+					edited();
+				}
+			},
+			{ sep: true },
+			{ label: 'Copy frames', hint: 'Alt+C', run: copyRange },
+			{ label: 'Paste frames', hint: 'Alt+V', disabled: !clip, run: pasteRange },
+			{ label: 'Duplicate frames', hint: 'Shift+D', run: () => void duplicateRange() },
+			{ label: 'Reverse frames', run: reverseRange },
+			{ label: 'Cycle…', run: () => (toolsOpen = true) },
+			{ label: 'Boil…', run: () => (toolsOpen = true) },
+			{ sep: true },
+			{ head: 'Apply to' },
+			{ label: 'This layer', checked: scope === 'layer', run: () => (scope = 'layer') },
+			{ label: 'All layers', checked: scope === 'all', run: () => (scope = 'all') }
+		]);
+	}
+	function rulerMenu(e: MouseEvent, f: number) {
+		go(f);
+		const marked = markersHere.some((m) => m.f === f);
+		openMenu(e, 'Frame ruler', [
+			{ head: `Frame ${f + 1}` },
+			{ label: 'Loop from here', hint: 'In', run: () => onrange('from') },
+			{ label: 'Loop to here', hint: 'Out', run: () => onrange('to') },
+			{
+				label: 'Clear the loop range',
+				hint: playRange ? `Frames ${playRange.from + 1}–${playRange.to + 1} ×` : '',
+				disabled: !playRange,
+				run: () => (playRange = null)
+			},
+			{ sep: true },
+			{
+				label: marked ? 'Remove the marker' : 'Add a marker',
+				hint: 'Shift+M',
+				run: () => onmarker?.()
+			},
+			{ label: 'Markers…', run: () => (markersOpen = true) },
+			{ sep: true },
+			{
+				label: pinned.includes(f) ? 'Unpin this frame' : 'Pin this frame',
+				hint: 'light table',
+				run: onpin
+			},
+			{
+				label: 'Unpin all',
+				hint: pinned.length ? `${pinned.length} pinned` : '',
+				disabled: !pinned.length,
+				run: () => (pinned = [])
+			}
+		]);
+	}
+	function layerMenu(e: MouseEvent, l: LayerInfo) {
+		onlayer(l.id);
+		const still = statics.includes(l.id);
+		const items: MenuItem[] = [{ head: l.name }];
+		if (onlayerset)
+			items.push(
+				{
+					label: l.visible ? 'Hide layer' : 'Show layer',
+					run: () => onlayerset(l.id, { visible: !l.visible })
+				},
+				{
+					label: l.locked ? 'Unlock layer' : 'Lock layer',
+					run: () => onlayerset(l.id, { locked: !l.locked })
+				},
+				{ sep: true }
+			);
+		items.push(
+			{
+				label: 'Cel layer: a drawing per exposure',
+				checked: !still,
+				run: () => still && toggleStatic(l.id)
+			},
+			{
+				label: 'Static: one drawing all cut long',
+				checked: still,
+				run: () => !still && toggleStatic(l.id)
+			},
+			{ sep: true },
+			...[1, 2, 3].map((n) => ({
+				label: `All on ${['ones', 'twos', 'threes'][n - 1]}`,
+				disabled: still,
+				run: () => {
+					setTiming(trackOf(l.id), n);
+					edited();
+				}
+			})),
+			{ sep: true }
+		);
+		if (onlipsync && clips.length)
+			for (const c of clips)
+				items.push({ label: `Lip sync from ${c.name}…`, run: () => onlipsync(c.id) });
+		else
+			items.push({
+				label: 'Lip sync from a sound…',
+				hint: 'add one first',
+				run: () => fileInput?.click()
+			});
+		openMenu(e, 'Layer', items);
+	}
+	function soundMenu(e: MouseEvent, c: { id: number; name: string; muted?: boolean }) {
+		openMenu(e, 'Sound', [
+			{ head: c.name },
+			{
+				label: c.muted ? 'Unmute' : 'Mute',
+				run: () => {
+					const clip = clips.find((x) => x.id === c.id);
+					if (clip) clip.muted = !clip.muted;
+					edited();
+				}
+			},
+			...(onlipsync ? [{ label: 'Lip sync…', run: () => onlipsync(c.id) }] : []),
+			{ sep: true },
+			{ label: 'Remove sound', danger: true, run: () => removeClip(c.id) }
+		]);
+	}
+	/** the play options (▾ beside Play, or right-click Play) */
+	function playMenu(e: MouseEvent) {
+		const marked = markersHere.some((m) => m.f === frame);
+		openMenu(e, 'Play options', [
+			{ head: 'Play' },
+			{ label: 'This cut', checked: playScope === 'cut', run: () => (playScope = 'cut') },
+			{
+				label: 'The whole scene',
+				checked: playScope === 'scene',
+				run: () => (playScope = 'scene')
+			},
+			{ sep: true },
+			...(
+				[
+					['once', 'Once'],
+					['loop', 'Loop'],
+					['pingpong', 'Ping-pong']
+				] as const
+			).map(([id, label]) => ({
+				label,
+				checked: playMode === id,
+				run: () => (playMode = id)
+			})),
+			{ sep: true },
+			{ label: 'Loop from this frame', hint: 'In', run: () => onrange('from') },
+			{ label: 'Loop to this frame', hint: 'Out', run: () => onrange('to') },
+			{
+				label: 'Loop range',
+				hint: playRange ? `Frames ${playRange.from + 1}–${playRange.to + 1} ×` : 'the whole cut',
+				disabled: !playRange,
+				run: () => (playRange = null)
+			},
+			{ sep: true },
+			{
+				label: marked ? 'Remove the marker here' : 'Marker on this frame',
+				hint: 'Shift+M',
+				run: () => onmarker?.()
+			},
+			{ label: 'Markers…', run: () => (markersOpen = true) },
+			{ label: 'Add sound…', hint: 'on this frame', run: () => fileInput?.click() }
+		]);
+	}
+	/** flipping from the bar: Shift held flips the keys only */
+	let flipKind: 'roll' | 'keys' = 'roll';
+	const playLabel = $derived(
+		`${playScope === 'scene' ? 'the scene' : 'this cut'}, ${playMode === 'pingpong' ? 'ping-pong' : playMode}`
+	);
+</script>
+
+{#snippet showPop()}
+	<div class="pop" role="group" aria-label="Show stages">
+		<div class="views" role="radiogroup" aria-label="View">
+			{#each VIEW_PRESETS as p (p.id)}
 				<button
 					type="button"
 					class="b"
 					role="radio"
-					aria-checked={playScope === id}
-					title={id === 'scene'
-						? 'Play the whole scene, every cut, with the transitions between them'
-						: 'Play this cut (or its loop range)'}
-					onclick={() => (playScope = id as 'cut' | 'scene')}
+					aria-checked={stageView.id === p.id}
+					onclick={() => {
+						onview?.({ id: p.id });
+						showOpen = false;
+					}}
 				>
-					{label}
+					{p.label}
 				</button>
 			{/each}
 		</div>
-		<div class="seg" role="radiogroup" aria-label="Play">
-			{#each [['once', 'Once'], ['loop', 'Loop'], ['pingpong', 'Ping-pong']] as [id, label] (id)}
+		<p class="hint">Or pick the stages (layers with no stage always show):</p>
+		{#each STAGES as st (st)}
+			<div class="line">
+				<label class="check grow">
+					<input type="checkbox" checked={viewing.includes(st)} onchange={() => toggleStage(st)} />
+					{STAGE_LABELS[st]}
+				</label>
 				<button
 					type="button"
 					class="b"
-					role="radio"
-					aria-checked={playMode === id}
-					onclick={() => (playMode = id as PlayMode)}
+					aria-label="Only {STAGE_LABELS[st]}"
+					title="Show only this stage"
+					onclick={() => {
+						onview?.({ id: 'custom', stages: [st] });
+						showOpen = false;
+					}}
 				>
-					{label}
+					Only
 				</button>
-			{/each}
-		</div>
-		<button
-			type="button"
-			class="b"
-			title="Play from this frame"
-			aria-pressed={!!playRange && playRange.from === frame}
-			onclick={() => onrange('from')}
-		>
-			In
-		</button>
-		<button
-			type="button"
-			class="b"
-			title="Play to this frame"
-			aria-pressed={!!playRange && playRange.to === frame}
-			onclick={() => onrange('to')}
-		>
-			Out
-		</button>
-		{#if playRange}
-			<button type="button" class="b" title="Play the whole cut" onclick={() => (playRange = null)}>
-				Frames {playRange.from + 1}–{playRange.to + 1} ×
-			</button>
+			</div>
+		{/each}
+		{#if onlighttable}
+			<div class="table" role="group" aria-label="Light table">
+				<b>Light table</b>
+				<label
+					title="Another stage's drawings, faintly, under what shows (only to see by: never in an export)"
+				>
+					Under
+					<select
+						value={lightTable.stage ?? ''}
+						onchange={(e) => {
+							const v = e.currentTarget.value;
+							onlighttable({ ...lightTable, stage: isStage(v) ? v : null });
+						}}
+					>
+						<option value="">Off</option>
+						{#each STAGES as st (st)}
+							<option value={st}>{STAGE_LABELS[st]}</option>
+						{/each}
+					</select>
+				</label>
+				{#if lightTable.stage}
+					{#if lightTableNote}
+						<p class="hint">{lightTableNote}</p>
+					{/if}
+					<label class="check">
+						<input
+							type="checkbox"
+							checked={lightTable.tint === null}
+							onchange={(e) =>
+								onlighttable({
+									...lightTable,
+									tint: e.currentTarget.checked ? null : NON_PHOTO_BLUE
+								})}
+						/>
+						Original colours
+					</label>
+					{#if lightTable.tint !== null}
+						<label>
+							Tint
+							<input
+								type="color"
+								aria-label="Light table tint"
+								value={lightTable.tint}
+								onchange={(e) => onlighttable({ ...lightTable, tint: e.currentTarget.value })}
+							/>
+						</label>
+					{/if}
+					<label>
+						Opacity <b>{Math.round(lightTable.opacity * 100)}%</b>
+						<input
+							type="range"
+							aria-label="Light table opacity"
+							min="0.05"
+							max="1"
+							step="0.05"
+							value={lightTable.opacity}
+							oninput={(e) => onlighttable({ ...lightTable, opacity: +e.currentTarget.value })}
+						/>
+					</label>
+				{/if}
+			</div>
 		{/if}
-		{#if onview}
+	</div>
+{/snippet}
+
+{#snippet onionPop()}
+	<div class="pop" role="group" aria-label="Onion skin">
+		<label>
+			Before <input type="number" min="0" max="5" bind:value={onion.before} />
+			<input type="color" aria-label="Colour before" bind:value={onion.beforeColour} />
+		</label>
+		<label>
+			After <input type="number" min="0" max="5" bind:value={onion.after} />
+			<input type="color" aria-label="Colour after" bind:value={onion.afterColour} />
+		</label>
+		<label>
+			Opacity <b>{Math.round(onion.opacity * 100)}%</b>
+			<input type="range" min="0.05" max="1" step="0.05" bind:value={onion.opacity} />
+		</label>
+		<label class="check">
+			<input type="checkbox" bind:checked={onion.keysOnly} />
+			Keys and breakdowns only
+		</label>
+		<div class="shift" role="group" aria-label="Shift and trace">
+			<b>Shift &amp; trace</b>
+			<div class="seg" role="radiogroup" aria-label="Move">
+				{#each [['before', 'Before'], ['after', 'After']] as [id, label] (id)}
+					<button
+						type="button"
+						class="b"
+						role="radio"
+						aria-checked={shiftSide === id}
+						onclick={() => (shiftSide = id as 'before' | 'after')}
+					>
+						{label}
+					</button>
+				{/each}
+			</div>
+			<div
+				class="pad"
+				role="slider"
+				tabindex="0"
+				aria-label="Drag to move the {shiftSide === 'before'
+					? 'drawings before'
+					: 'drawings after'}"
+				aria-valuetext="{shift[shiftSide].x}, {shift[shiftSide].y} px, {shift[shiftSide].r}°"
+				aria-valuenow={shift[shiftSide].x}
+				title="Drag to move them; arrow keys nudge (Shift: further)"
+				onpointerdown={(e) => {
+					(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+					padDrag = { x: e.clientX, y: e.clientY };
+				}}
+				onpointermove={(e) => {
+					if (!padDrag) return;
+					const s = shift[shiftSide];
+					shift[shiftSide] = {
+						...s,
+						x: s.x + Math.round((e.clientX - padDrag.x) * 2),
+						y: s.y + Math.round((e.clientY - padDrag.y) * 2)
+					};
+					padDrag = { x: e.clientX, y: e.clientY };
+				}}
+				onpointerup={() => (padDrag = null)}
+				onkeydown={(e) => {
+					const d = {
+						ArrowLeft: [-1, 0],
+						ArrowRight: [1, 0],
+						ArrowUp: [0, -1],
+						ArrowDown: [0, 1]
+					}[e.key];
+					if (!d) return;
+					e.preventDefault();
+					e.stopPropagation();
+					nudge(d[0], d[1], 0, e.shiftKey);
+				}}
+			>
+				{shift[shiftSide].x}, {shift[shiftSide].y}
+			</div>
+			<button
+				type="button"
+				class="b"
+				aria-label="Turn left"
+				onclick={(e) => nudge(0, 0, -1, e.shiftKey)}
+			>
+				↺
+			</button>
+			<button
+				type="button"
+				class="b"
+				aria-label="Turn right"
+				onclick={(e) => nudge(0, 0, 1, e.shiftKey)}
+			>
+				↻
+			</button>
+			<button
+				type="button"
+				class="b"
+				onclick={() => (shift = { before: { x: 0, y: 0, r: 0 }, after: { x: 0, y: 0, r: 0 } })}
+			>
+				Put back
+			</button>
+		</div>
+		<div class="seg" role="radiogroup" aria-label="Onion skin layers">
+			{#each [['active', 'This layer'], ['all', 'All layers']] as [id, label] (id)}
+				<button
+					type="button"
+					class="b"
+					role="radio"
+					aria-checked={onion.layers === id}
+					onclick={() => (onion.layers = id as 'active' | 'all')}
+				>
+					{label}
+				</button>
+			{/each}
+		</div>
+	</div>
+{/snippet}
+
+{#snippet markersPop()}
+	<div class="pop" role="group" aria-label="Markers in this scene">
+		{#if !theScene.markers?.length}
+			<p class="hint">No markers yet. Press Shift+M on a frame, or tap it while playing.</p>
+		{/if}
+		{#each theScene.markers ?? [] as m, i (m.frame)}
+			<div class="line">
+				<button
+					type="button"
+					class="b"
+					title="Go to it"
+					onclick={() => {
+						const at = m.frame - sceneAt;
+						if (at >= 0) go(at);
+					}}
+				>
+					{m.frame + 1}
+				</button>
+				<input
+					class="mark-label"
+					aria-label="Marker {m.frame + 1} label"
+					placeholder="label"
+					bind:value={m.label}
+					onchange={edited}
+				/>
+				<button
+					type="button"
+					class="b"
+					aria-label="Remove marker {m.frame + 1}"
+					onclick={() => {
+						theScene.markers?.splice(i, 1);
+						if (!theScene.markers?.length) delete theScene.markers;
+						edited();
+					}}
+				>
+					×
+				</button>
+			</div>
+		{/each}
+	</div>
+{/snippet}
+
+{#snippet cameraPop()}
+	<div class="pop wide" role="group" aria-label="Camera">
+		<div class="seg wrap" role="group" aria-label="Camera shape">
+			<button type="button" class="b" aria-pressed={!theCut.camera} onclick={() => setCamera(null)}>
+				Whole canvas
+			</button>
+			{#each ASPECTS as [label, k] (label)}
+				<button type="button" class="b" onclick={() => setCamera(fitCamera(k, canvasSize))}>
+					{label}
+				</button>
+			{/each}
+		</div>
+		<div class="nums">
+			{#each [['x', 'X'], ['y', 'Y'], ['width', 'W'], ['height', 'H']] as [key, label] (key)}
+				<label>
+					{label}
+					<input
+						type="number"
+						aria-label="Camera {key}"
+						min="0"
+						value={Math.round(camera[key as keyof Camera])}
+						onchange={(e) => cameraField(key as keyof Camera, +e.currentTarget.value)}
+					/>
+				</label>
+			{/each}
+		</div>
+		<div class="seg">
+			<button
+				type="button"
+				class="b"
+				title="Zoom in (a smaller frame)"
+				onclick={() => zoomCamera(0.9)}
+			>
+				Zoom in
+			</button>
+			<button
+				type="button"
+				class="b"
+				title="Zoom out (a bigger frame)"
+				onclick={() => zoomCamera(1 / 0.9)}
+			>
+				Zoom out
+			</button>
+		</div>
+		<label>
+			<input type="checkbox" bind:checked={cameraView.safe} />
+			Safe areas (action 90%, title 80%)
+		</label>
+		<small class="hint">Each cut has its own camera; a new cut starts with this one.</small>
+	</div>
+{/snippet}
+
+{#snippet toolsPop()}
+	<div class="pop wide right" role="group" aria-label="Frame tools">
+		<p class="hint" data-testid="frames-target">
+			On {rangeLabel(target)}{sel ? '' : ' (this drawing)'}. Shift+click frames to choose others.
+		</p>
+		<div class="seg" role="radiogroup" aria-label="Frame tools work on">
+			{#each [['layer', 'This layer'], ['all', 'All layers']] as [id, label] (id)}
+				<button
+					type="button"
+					class="b"
+					role="radio"
+					aria-checked={scope === id}
+					onclick={() => (scope = id as 'layer' | 'all')}
+				>
+					{label}
+				</button>
+			{/each}
+		</div>
+		<div class="seg wrap">
+			<button
+				type="button"
+				class="b"
+				disabled={!target}
+				title="Copy these frames (Alt+C)"
+				onclick={copyRange}
+			>
+				Copy
+			</button>
+			<button
+				type="button"
+				class="b"
+				disabled={!clip}
+				title="Paste before this frame: the same drawings, so changing one changes both (Alt+V)"
+				onclick={pasteRange}
+			>
+				Paste
+			</button>
+			<button
+				type="button"
+				class="b"
+				disabled={!target}
+				title="The frames again right after them, as new drawings to change (Shift+D)"
+				onclick={duplicateRange}
+			>
+				Duplicate
+			</button>
+			<button
+				type="button"
+				class="b"
+				disabled={!target || target.from === target.to}
+				title="Play these frames backwards"
+				onclick={reverseRange}
+			>
+				Reverse
+			</button>
+		</div>
+		<div class="line">
+			<span>Cycle</span>
+			<input type="number" min="1" max="99" aria-label="Cycle times" bind:value={cycleTimes} />
+			<span>× more</span>
+			<select aria-label="Cycle as" bind:value={cycleMode}>
+				<option value="loop">Loop (A B C A B C)</option>
+				<option value="pingpong">Back and forth (A B C B A)</option>
+			</select>
+			<button
+				type="button"
+				class="b"
+				disabled={!target}
+				title="Repeat these frames after them (the same drawings)"
+				onclick={cycleRange}
+			>
+				Cycle
+			</button>
+		</div>
+		<div class="line">
+			<span>Boil</span>
+			<select aria-label="Boil drawings" bind:value={boilSet.variants}>
+				<option value={2}>2 drawings</option>
+				<option value={3}>3 drawings</option>
+				<option value={4}>4 drawings</option>
+			</select>
+			<select aria-label="Boil every" bind:value={boilSet.step}>
+				<option value={1}>on ones</option>
+				<option value={2}>on twos</option>
+				<option value={3}>on threes</option>
+			</select>
+			<select aria-label="Boil strength" bind:value={boilSet.amount}>
+				<option value={0.6}>Subtle</option>
+				<option value={1}>Light</option>
+				<option value={2}>Medium</option>
+				<option value={3.5}>Strong</option>
+			</select>
+			<button
+				type="button"
+				class="b"
+				disabled={!target || boiling}
+				title="Held drawings swap between themselves and slightly wobbled copies, as if traced again"
+				onclick={boilRange}
+			>
+				{boiling ? 'Boiling…' : 'Boil'}
+			</button>
+		</div>
+		{#if toolNote}<p class="hint" aria-live="polite">{toolNote}</p>{/if}
+	</div>
+{/snippet}
+
+{#snippet icon(d: string, size = 18)}
+	<svg
+		width={size}
+		height={size}
+		viewBox="0 0 24 24"
+		fill="none"
+		stroke="currentColor"
+		stroke-width="2"
+		stroke-linecap="round"
+		stroke-linejoin="round"
+		aria-hidden="true"
+	>
+		<path {d} />
+	</svg>
+{/snippet}
+
+{#snippet tray(t: Tray)}
+	{@const open = openTray === t.id}
+	<div class="tray" class:open class:accent={t.accent} data-tray={t.id}>
+		<button
+			type="button"
+			class="trigger"
+			aria-label="{t.label}: {t.current.label}. {open ? 'Collapse' : 'Show more'}"
+			aria-expanded={open}
+			title="{t.label}: {t.current.label}{t.menu ? ' (right-click for more)' : ''}"
+			onclick={() => (openTray = open ? null : t.id)}
+			oncontextmenu={t.menu}
+		>
+			{@render icon(t.current.icon)}
+			{#if t.current.tag}<span aria-hidden="true">{t.current.tag}</span>{/if}
+			{@render icon(open ? 'M15 6l-6 6 6 6' : 'M9 6l6 6-6 6', 12)}
+		</button>
+		<div class="opts" role="group" aria-label={t.label} style:--n={t.options.length} inert={!open}>
+			{#each t.options as o (o.id)}
+				<button
+					type="button"
+					class="opt"
+					aria-label={o.label}
+					title={o.label}
+					aria-pressed={!!o.on}
+					disabled={o.disabled}
+					onclick={() => trayPick(t, o)}
+				>
+					{@render icon(o.icon)}
+					{#if o.tag}<span aria-hidden="true">{o.tag}</span>{/if}
+				</button>
+			{/each}
+		</div>
+		{#if t.id === 'frames' && toolsOpen}
+			{@render toolsPop()}
+		{/if}
+	</div>
+{/snippet}
+
+<section class="timeline pp-ink-bar" class:new={isNew} aria-label="Timeline">
+	<input
+		bind:this={fileInput}
+		class="sr"
+		type="file"
+		accept={AUDIO_TYPES}
+		multiple
+		aria-label="Sound files"
+		tabindex="-1"
+		onchange={(e) => {
+			const files = [...(e.currentTarget.files ?? [])];
+			e.currentTarget.value = '';
+			if (files.length) onsound?.(files);
+		}}
+	/>
+	{#if !isNew}
+		<div class="bar">
+			<label class="pick">
+				<span class="sr">Scene</span>
+				<select
+					aria-label="Scene"
+					value={scene}
+					onchange={(e) => {
+						scene = +e.currentTarget.value;
+						cut = 0;
+						go(0);
+					}}
+				>
+					{#each timeline.scenes as s, i (s.id)}<option value={i}>{s.name}</option>{/each}
+				</select>
+			</label>
+			<label class="pick">
+				<select
+					aria-label="Cut"
+					value={cut}
+					onchange={(e) => {
+						cut = +e.currentTarget.value;
+						go(0);
+					}}
+				>
+					{#each theScene.cuts as c, i (c.id)}<option value={i}>
+							{c.name} · {(cutLength(c, statics) / fps).toFixed(1)} s
+						</option>{/each}
+				</select>
+			</label>
+			<select
+				aria-label="Into the next cut"
+				title={TRANSITIONS.find((t) => t.id === (theCut.transition ?? ''))?.note}
+				value={theCut.transition ?? ''}
+				onchange={(e) => {
+					const v = e.currentTarget.value;
+					if (v === 'flash' || v === 'dissolve') theCut.transition = v;
+					else delete theCut.transition;
+					edited();
+				}}
+			>
+				{#each TRANSITIONS as t (t.id)}
+					<option value={t.id}>→ {t.label}</option>
+				{/each}
+			</select>
+			<button type="button" class="b" title="A new cut after this one" onclick={newCut}>
+				+ Cut
+			</button>
+			<button type="button" class="b" title="A new scene after this one" onclick={newScene}>
+				+ Scene
+			</button>
+			<span class="sep"></span>
+			<button
+				type="button"
+				class="b play"
+				aria-pressed={playing}
+				aria-label={playing ? 'Stop' : 'Play'}
+				title={playing ? 'Stop' : 'Play the cut (or the loop range)'}
+				onclick={onplay}
+			>
+				{playing ? '■' : '▶'}
+			</button>
+			<select aria-label="Frames a second" title="Frames a second" bind:value={fps}>
+				{#each [6, 8, 12, 15, 24, 25, 30, 48, 50, 60] as n (n)}<option value={n}>
+						{n} fps
+					</option>{/each}
+			</select>
+			<div class="seg" role="radiogroup" aria-label="Play what">
+				{#each [['cut', 'Cut'], ['scene', 'Scene']] as [id, label] (id)}
+					<button
+						type="button"
+						class="b"
+						role="radio"
+						aria-checked={playScope === id}
+						title={id === 'scene'
+							? 'Play the whole scene, every cut, with the transitions between them'
+							: 'Play this cut (or its loop range)'}
+						onclick={() => (playScope = id as 'cut' | 'scene')}
+					>
+						{label}
+					</button>
+				{/each}
+			</div>
+			<div class="seg" role="radiogroup" aria-label="Play">
+				{#each [['once', 'Once'], ['loop', 'Loop'], ['pingpong', 'Ping-pong']] as [id, label] (id)}
+					<button
+						type="button"
+						class="b"
+						role="radio"
+						aria-checked={playMode === id}
+						onclick={() => (playMode = id as PlayMode)}
+					>
+						{label}
+					</button>
+				{/each}
+			</div>
+			<button
+				type="button"
+				class="b"
+				title="Play from this frame"
+				aria-pressed={!!playRange && playRange.from === frame}
+				onclick={() => onrange('from')}
+			>
+				In
+			</button>
+			<button
+				type="button"
+				class="b"
+				title="Play to this frame"
+				aria-pressed={!!playRange && playRange.to === frame}
+				onclick={() => onrange('to')}
+			>
+				Out
+			</button>
+			{#if playRange}
+				<button
+					type="button"
+					class="b"
+					title="Play the whole cut"
+					onclick={() => (playRange = null)}
+				>
+					Frames {playRange.from + 1}–{playRange.to + 1} ×
+				</button>
+			{/if}
+			{#if onview}
+				<div class="onion">
+					<button
+						type="button"
+						class="b"
+						aria-label="Show: {viewLabel(stageView)}"
+						aria-expanded={showOpen}
+						aria-pressed={stageView.id !== 'all'}
+						title="Show the layers of some stages only (on the canvas, in playback and in the onion skin)"
+						onclick={() => (showOpen = !showOpen)}
+					>
+						Show: {viewLabel(stageView)}{lightTable.stage
+							? ` · Under ${STAGE_LABELS[lightTable.stage]}`
+							: ''} ▾
+					</button>
+					{#if showOpen}
+						{@render showPop()}
+					{/if}
+				</div>
+			{/if}
+			<span class="sep"></span>
 			<div class="onion">
 				<button
 					type="button"
 					class="b"
-					aria-label="Show: {viewLabel(stageView)}"
-					aria-expanded={showOpen}
-					aria-pressed={stageView.id !== 'all'}
-					title="Show the layers of some stages only (on the canvas, in playback and in the onion skin)"
-					onclick={() => (showOpen = !showOpen)}
+					aria-pressed={onion.on}
+					title="Onion skin: the drawings before (red) and after (green), faintly"
+					onclick={() => (onion.on = !onion.on)}
 				>
-					Show: {viewLabel(stageView)}{lightTable.stage
-						? ` · Under ${STAGE_LABELS[lightTable.stage]}`
-						: ''} ▾
+					Onion
 				</button>
-				{#if showOpen}
-					<div class="pop" role="group" aria-label="Show stages">
-						<div class="views" role="radiogroup" aria-label="View">
-							{#each VIEW_PRESETS as p (p.id)}
-								<button
-									type="button"
-									class="b"
-									role="radio"
-									aria-checked={stageView.id === p.id}
-									onclick={() => {
-										onview({ id: p.id });
-										showOpen = false;
-									}}
-								>
-									{p.label}
-								</button>
-							{/each}
-						</div>
-						<p class="hint">Or pick the stages (layers with no stage always show):</p>
-						{#each STAGES as st (st)}
-							<div class="line">
-								<label class="check grow">
-									<input
-										type="checkbox"
-										checked={viewing.includes(st)}
-										onchange={() => toggleStage(st)}
-									/>
-									{STAGE_LABELS[st]}
-								</label>
-								<button
-									type="button"
-									class="b"
-									aria-label="Only {STAGE_LABELS[st]}"
-									title="Show only this stage"
-									onclick={() => {
-										onview({ id: 'custom', stages: [st] });
-										showOpen = false;
-									}}
-								>
-									Only
-								</button>
-							</div>
-						{/each}
-						{#if onlighttable}
-							<div class="table" role="group" aria-label="Light table">
-								<b>Light table</b>
-								<label
-									title="Another stage's drawings, faintly, under what shows (only to see by: never in an export)"
-								>
-									Under
-									<select
-										value={lightTable.stage ?? ''}
-										onchange={(e) => {
-											const v = e.currentTarget.value;
-											onlighttable({ ...lightTable, stage: isStage(v) ? v : null });
-										}}
-									>
-										<option value="">Off</option>
-										{#each STAGES as st (st)}
-											<option value={st}>{STAGE_LABELS[st]}</option>
-										{/each}
-									</select>
-								</label>
-								{#if lightTable.stage}
-									{#if lightTableNote}
-										<p class="hint">{lightTableNote}</p>
-									{/if}
-									<label class="check">
-										<input
-											type="checkbox"
-											checked={lightTable.tint === null}
-											onchange={(e) =>
-												onlighttable({
-													...lightTable,
-													tint: e.currentTarget.checked ? null : NON_PHOTO_BLUE
-												})}
-										/>
-										Original colours
-									</label>
-									{#if lightTable.tint !== null}
-										<label>
-											Tint
-											<input
-												type="color"
-												aria-label="Light table tint"
-												value={lightTable.tint}
-												onchange={(e) =>
-													onlighttable({ ...lightTable, tint: e.currentTarget.value })}
-											/>
-										</label>
-									{/if}
-									<label>
-										Opacity <b>{Math.round(lightTable.opacity * 100)}%</b>
-										<input
-											type="range"
-											aria-label="Light table opacity"
-											min="0.05"
-											max="1"
-											step="0.05"
-											value={lightTable.opacity}
-											oninput={(e) =>
-												onlighttable({ ...lightTable, opacity: +e.currentTarget.value })}
-										/>
-									</label>
-								{/if}
-							</div>
-						{/if}
-					</div>
+				<button
+					type="button"
+					class="b caret"
+					aria-label="Onion skin settings"
+					aria-expanded={onionOpen}
+					onclick={() => (onionOpen = !onionOpen)}
+				>
+					▾
+				</button>
+				{#if onionOpen}
+					{@render onionPop()}
 				{/if}
 			</div>
-		{/if}
-		<span class="sep"></span>
-		<div class="onion">
-			<button
-				type="button"
-				class="b"
-				aria-pressed={onion.on}
-				title="Onion skin: the drawings before (red) and after (green), faintly"
-				onclick={() => (onion.on = !onion.on)}
-			>
-				Onion
-			</button>
-			<button
-				type="button"
-				class="b caret"
-				aria-label="Onion skin settings"
-				aria-expanded={onionOpen}
-				onclick={() => (onionOpen = !onionOpen)}
-			>
-				▾
-			</button>
-			{#if onionOpen}
-				<div class="pop" role="group" aria-label="Onion skin">
-					<label>
-						Before <input type="number" min="0" max="5" bind:value={onion.before} />
-						<input type="color" aria-label="Colour before" bind:value={onion.beforeColour} />
-					</label>
-					<label>
-						After <input type="number" min="0" max="5" bind:value={onion.after} />
-						<input type="color" aria-label="Colour after" bind:value={onion.afterColour} />
-					</label>
-					<label>
-						Opacity <b>{Math.round(onion.opacity * 100)}%</b>
-						<input type="range" min="0.05" max="1" step="0.05" bind:value={onion.opacity} />
-					</label>
-					<label class="check">
-						<input type="checkbox" bind:checked={onion.keysOnly} />
-						Keys and breakdowns only
-					</label>
-					<div class="shift" role="group" aria-label="Shift and trace">
-						<b>Shift &amp; trace</b>
-						<div class="seg" role="radiogroup" aria-label="Move">
-							{#each [['before', 'Before'], ['after', 'After']] as [id, label] (id)}
-								<button
-									type="button"
-									class="b"
-									role="radio"
-									aria-checked={shiftSide === id}
-									onclick={() => (shiftSide = id as 'before' | 'after')}
-								>
-									{label}
-								</button>
-							{/each}
-						</div>
-						<div
-							class="pad"
-							role="slider"
-							tabindex="0"
-							aria-label="Drag to move the {shiftSide === 'before'
-								? 'drawings before'
-								: 'drawings after'}"
-							aria-valuetext="{shift[shiftSide].x}, {shift[shiftSide].y} px, {shift[shiftSide].r}°"
-							aria-valuenow={shift[shiftSide].x}
-							title="Drag to move them; arrow keys nudge (Shift: further)"
-							onpointerdown={(e) => {
-								(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-								padDrag = { x: e.clientX, y: e.clientY };
-							}}
-							onpointermove={(e) => {
-								if (!padDrag) return;
-								const s = shift[shiftSide];
-								shift[shiftSide] = {
-									...s,
-									x: s.x + Math.round((e.clientX - padDrag.x) * 2),
-									y: s.y + Math.round((e.clientY - padDrag.y) * 2)
-								};
-								padDrag = { x: e.clientX, y: e.clientY };
-							}}
-							onpointerup={() => (padDrag = null)}
-							onkeydown={(e) => {
-								const d = {
-									ArrowLeft: [-1, 0],
-									ArrowRight: [1, 0],
-									ArrowUp: [0, -1],
-									ArrowDown: [0, 1]
-								}[e.key];
-								if (!d) return;
-								e.preventDefault();
-								e.stopPropagation();
-								nudge(d[0], d[1], 0, e.shiftKey);
-							}}
-						>
-							{shift[shiftSide].x}, {shift[shiftSide].y}
-						</div>
-						<button
-							type="button"
-							class="b"
-							aria-label="Turn left"
-							onclick={(e) => nudge(0, 0, -1, e.shiftKey)}
-						>
-							↺
-						</button>
-						<button
-							type="button"
-							class="b"
-							aria-label="Turn right"
-							onclick={(e) => nudge(0, 0, 1, e.shiftKey)}
-						>
-							↻
-						</button>
-						<button
-							type="button"
-							class="b"
-							onclick={() =>
-								(shift = { before: { x: 0, y: 0, r: 0 }, after: { x: 0, y: 0, r: 0 } })}
-						>
-							Put back
-						</button>
-					</div>
-					<div class="seg" role="radiogroup" aria-label="Onion skin layers">
-						{#each [['active', 'This layer'], ['all', 'All layers']] as [id, label] (id)}
-							<button
-								type="button"
-								class="b"
-								role="radio"
-								aria-checked={onion.layers === id}
-								onclick={() => (onion.layers = id as 'active' | 'all')}
-							>
-								{label}
-							</button>
-						{/each}
-					</div>
-				</div>
+			{#if onflip}
+				{#each [['roll', 'Flip', 'Hold to flip the drawings around this one (R)'], ['keys', 'Flip keys', 'Hold to flip through the keys and breakdowns (Shift+R)']] as [kind, label, title] (kind)}
+					<button
+						type="button"
+						class="b"
+						{title}
+						onpointerdown={(e) => {
+							(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+							onflip(kind as 'roll' | 'keys', true);
+						}}
+						onpointerup={() => onflip(kind as 'roll' | 'keys', false)}
+						onpointercancel={() => onflip(kind as 'roll' | 'keys', false)}
+					>
+						{label}
+					</button>
+				{/each}
 			{/if}
-		</div>
-		{#if onflip}
-			{#each [['roll', 'Flip', 'Hold to flip the drawings around this one (R)'], ['keys', 'Flip keys', 'Hold to flip through the keys and breakdowns (Shift+R)']] as [kind, label, title] (kind)}
+			{#if onmark}
+				{@const markable = drawingAt(activeTrack, frame)}
+				{@const k = markable ? timeline.kinds?.[markable] : undefined}
 				<button
 					type="button"
 					class="b"
-					{title}
-					onpointerdown={(e) => {
-						(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-						onflip(kind as 'roll' | 'keys', true);
-					}}
-					onpointerup={() => onflip(kind as 'roll' | 'keys', false)}
-					onpointercancel={() => onflip(kind as 'roll' | 'keys', false)}
+					disabled={!markable}
+					aria-label="Mark this drawing: {k ? KIND_NAME[k] : 'unmarked'}"
+					title="Mark this drawing as a key, breakdown or in-between (Shift+K)"
+					onclick={onmark}
 				>
-					{label}
+					{k ? KIND_NAME[k] : 'Mark'}
 				</button>
-			{/each}
-		{/if}
-		{#if onmark}
-			{@const markable = drawingAt(activeTrack, frame)}
-			{@const k = markable ? timeline.kinds?.[markable] : undefined}
+			{/if}
 			<button
 				type="button"
 				class="b"
-				disabled={!markable}
-				aria-label="Mark this drawing: {k ? KIND_NAME[k] : 'unmarked'}"
-				title="Mark this drawing as a key, breakdown or in-between (Shift+K)"
-				onclick={onmark}
+				aria-pressed={pinned.includes(frame)}
+				title="Light table: pin this frame to show it (blue) while you draw others"
+				onclick={onpin}
 			>
-				{k ? KIND_NAME[k] : 'Mark'}
+				Pin frame
 			</button>
-		{/if}
-		<button
-			type="button"
-			class="b"
-			aria-pressed={pinned.includes(frame)}
-			title="Light table: pin this frame to show it (blue) while you draw others"
-			onclick={onpin}
-		>
-			Pin frame
-		</button>
-		{#if pinned.length}
-			<button type="button" class="b" title="Unpin every frame" onclick={() => (pinned = [])}>
-				{pinned.length} pinned ×
+			{#if pinned.length}
+				<button type="button" class="b" title="Unpin every frame" onclick={() => (pinned = [])}>
+					{pinned.length} pinned ×
+				</button>
+			{/if}
+			<span class="sep"></span>
+			<button
+				type="button"
+				class="b"
+				title="Add sound (WAV, MP3, OGG, M4A, FLAC) starting on this frame"
+				onclick={() => fileInput?.click()}
+			>
+				+ Sound
 			</button>
-		{/if}
-		<span class="sep"></span>
-		<button
-			type="button"
-			class="b"
-			title="Add sound (WAV, MP3, OGG, M4A, FLAC) starting on this frame"
-			onclick={() => fileInput?.click()}
-		>
-			+ Sound
-		</button>
-		<input
-			bind:this={fileInput}
-			class="sr"
-			type="file"
-			accept={AUDIO_TYPES}
-			multiple
-			aria-label="Sound files"
+			<div class="onion">
+				<button
+					type="button"
+					class="b"
+					aria-pressed={markersHere.some((m) => m.f === frame)}
+					title="A marker on this frame, for syncing to a beat or a line (Shift+M, even while playing)"
+					onclick={() => onmarker?.()}
+				>
+					Marker
+				</button>
+				<button
+					type="button"
+					class="b caret"
+					aria-label="Markers"
+					aria-expanded={markersOpen}
+					onclick={() => (markersOpen = !markersOpen)}
+				>
+					▾
+				</button>
+				{#if markersOpen}
+					{@render markersPop()}
+				{/if}
+			</div>
+			<div class="onion">
+				<button
+					type="button"
+					class="b"
+					aria-pressed={cameraView.show && (!!theCut.camera || cameraView.safe)}
+					title="Camera: the part of the canvas this cut shows (playback shows only that)"
+					onclick={() => (cameraView.show = !cameraView.show)}
+				>
+					Camera
+				</button>
+				<button
+					type="button"
+					class="b caret"
+					aria-label="Camera settings"
+					aria-expanded={cameraOpen}
+					onclick={() => (cameraOpen = !cameraOpen)}
+				>
+					▾
+				</button>
+				{#if cameraOpen}
+					{@render cameraPop()}
+				{/if}
+			</div>
+			<span class="sep"></span>
+			<button type="button" class="b" aria-label="Previous frame" onclick={() => go(frame - 1)}>
+				‹
+			</button>
+			<span class="where" aria-live="polite">
+				Frame <b data-testid="frame">{frame + 1}</b> of {length}
+				<small>{seconds(frame)}</small>
+			</span>
+			<button type="button" class="b" aria-label="Next frame" onclick={() => go(frame + 1)}>
+				›
+			</button>
+			<span class="sep"></span>
+			<button
+				type="button"
+				class="b strong"
+				title={activeStatic
+					? 'A static layer shows one drawing all cut long'
+					: 'A new, empty drawing after this one on the active layer'}
+				disabled={activeStatic}
+				onclick={addDrawing}
+			>
+				New drawing
+			</button>
+			<div class="seg" role="group" aria-label="Hold this drawing for">
+				{#each [1, 2, 3] as n (n)}
+					<button
+						type="button"
+						class="b"
+						aria-pressed={here ? activeTrack[here.index].length === n : false}
+						disabled={!here}
+						title="Hold this drawing for {n} frame{n > 1 ? 's' : ''} (on {n === 1
+							? 'ones'
+							: n === 2
+								? 'twos'
+								: 'threes'})"
+						onclick={() => timing(n)}
+					>
+						{n}s
+					</button>
+				{/each}
+			</div>
+			<button
+				type="button"
+				class="b"
+				aria-label="Hold longer"
+				title="Hold this drawing one frame longer"
+				disabled={!here}
+				onclick={() => hold(1)}
+			>
+				+1
+			</button>
+			<button
+				type="button"
+				class="b"
+				aria-label="Hold shorter"
+				title="Hold this drawing one frame less"
+				disabled={!here || activeTrack[here.index].length < 2}
+				onclick={() => hold(-1)}
+			>
+				−1
+			</button>
+			<select
+				class="b"
+				aria-label="Timing for the whole layer"
+				title="Every drawing on this layer on ones, twos or threes"
+				disabled={activeStatic}
+				value=""
+				onchange={(e) => {
+					const n = +e.currentTarget.value;
+					e.currentTarget.value = '';
+					if (n) timingAll(n);
+				}}
+			>
+				<option value="">Layer timing…</option>
+				<option value="1">All on ones</option>
+				<option value="2">All on twos</option>
+				<option value="3">All on threes</option>
+			</select>
+			<span class="sep"></span>
+			<button
+				type="button"
+				class="b"
+				title="One more frame here on every layer (each holds what it shows)"
+				onclick={insertFrame}
+			>
+				Insert frame
+			</button>
+			<button
+				type="button"
+				class="b"
+				title="Take this frame out of every layer"
+				onclick={deleteFrame}
+			>
+				Delete frame
+			</button>
+			<button
+				type="button"
+				class="b"
+				title="Take this drawing out of the timeline (the ones after it move back)"
+				disabled={!here}
+				onclick={removeHere}
+			>
+				Remove drawing
+			</button>
+			<div class="onion">
+				<button
+					type="button"
+					class="b"
+					aria-expanded={toolsOpen}
+					title="Frame tools: copy, paste, duplicate, reverse, cycle, boil"
+					onclick={() => (toolsOpen = !toolsOpen)}
+				>
+					Frames ▾
+				</button>
+				{#if toolsOpen}
+					{@render toolsPop()}
+				{/if}
+			</div>
+		</div>
+	{:else}
+		<div
+			class="trays"
+			role="toolbar"
+			aria-label="Where you are and drawing"
 			tabindex="-1"
-			onchange={(e) => {
-				const files = [...(e.currentTarget.files ?? [])];
-				e.currentTarget.value = '';
-				if (files.length) onsound?.(files);
+			onkeydown={(e) => {
+				if (e.key === 'Escape' && openTray) {
+					e.stopPropagation();
+					openTray = null;
+				}
 			}}
-		/>
-		<div class="onion">
-			<button
-				type="button"
-				class="b"
-				aria-pressed={markersHere.some((m) => m.f === frame)}
-				title="A marker on this frame, for syncing to a beat or a line (Shift+M, even while playing)"
-				onclick={() => onmarker?.()}
-			>
-				Marker
-			</button>
-			<button
-				type="button"
-				class="b caret"
-				aria-label="Markers"
-				aria-expanded={markersOpen}
-				onclick={() => (markersOpen = !markersOpen)}
-			>
-				▾
-			</button>
-			{#if markersOpen}
-				<div class="pop" role="group" aria-label="Markers in this scene">
-					{#if !theScene.markers?.length}
-						<p class="hint">No markers yet. Press Shift+M on a frame, or tap it while playing.</p>
-					{/if}
-					{#each theScene.markers ?? [] as m, i (m.frame)}
-						<div class="line">
-							<button
-								type="button"
-								class="b"
-								title="Go to it"
-								onclick={() => {
-									const at = m.frame - sceneAt;
-									if (at >= 0) go(at);
-								}}
-							>
-								{m.frame + 1}
-							</button>
-							<input
-								class="mark-label"
-								aria-label="Marker {m.frame + 1} label"
-								placeholder="label"
-								bind:value={m.label}
-								onchange={edited}
-							/>
-							<button
-								type="button"
-								class="b"
-								aria-label="Remove marker {m.frame + 1}"
-								onclick={() => {
-									theScene.markers?.splice(i, 1);
-									if (!theScene.markers?.length) delete theScene.markers;
-									edited();
-								}}
-							>
-								×
-							</button>
-						</div>
-					{/each}
-				</div>
-			{/if}
-		</div>
-		<div class="onion">
-			<button
-				type="button"
-				class="b"
-				aria-pressed={cameraView.show && (!!theCut.camera || cameraView.safe)}
-				title="Camera: the part of the canvas this cut shows (playback shows only that)"
-				onclick={() => (cameraView.show = !cameraView.show)}
-			>
-				Camera
-			</button>
-			<button
-				type="button"
-				class="b caret"
-				aria-label="Camera settings"
-				aria-expanded={cameraOpen}
-				onclick={() => (cameraOpen = !cameraOpen)}
-			>
-				▾
-			</button>
-			{#if cameraOpen}
-				<div class="pop wide" role="group" aria-label="Camera">
-					<div class="seg wrap" role="group" aria-label="Camera shape">
-						<button
-							type="button"
-							class="b"
-							aria-pressed={!theCut.camera}
-							onclick={() => setCamera(null)}
-						>
-							Whole canvas
-						</button>
-						{#each ASPECTS as [label, k] (label)}
-							<button type="button" class="b" onclick={() => setCamera(fitCamera(k, canvasSize))}>
-								{label}
-							</button>
-						{/each}
-					</div>
-					<div class="nums">
-						{#each [['x', 'X'], ['y', 'Y'], ['width', 'W'], ['height', 'H']] as [key, label] (key)}
-							<label>
-								{label}
-								<input
-									type="number"
-									aria-label="Camera {key}"
-									min="0"
-									value={Math.round(camera[key as keyof Camera])}
-									onchange={(e) => cameraField(key as keyof Camera, +e.currentTarget.value)}
-								/>
-							</label>
-						{/each}
-					</div>
-					<div class="seg">
-						<button
-							type="button"
-							class="b"
-							title="Zoom in (a smaller frame)"
-							onclick={() => zoomCamera(0.9)}
-						>
-							Zoom in
-						</button>
-						<button
-							type="button"
-							class="b"
-							title="Zoom out (a bigger frame)"
-							onclick={() => zoomCamera(1 / 0.9)}
-						>
-							Zoom out
-						</button>
-					</div>
-					<label>
-						<input type="checkbox" bind:checked={cameraView.safe} />
-						Safe areas (action 90%, title 80%)
-					</label>
-					<small class="hint">Each cut has its own camera; a new cut starts with this one.</small>
-				</div>
-			{/if}
-		</div>
-		<span class="sep"></span>
-		<button type="button" class="b" aria-label="Previous frame" onclick={() => go(frame - 1)}>
-			‹
-		</button>
-		<span class="where" aria-live="polite">
-			Frame <b data-testid="frame">{frame + 1}</b> of {length}
-			<small>{seconds(frame)}</small>
-		</span>
-		<button type="button" class="b" aria-label="Next frame" onclick={() => go(frame + 1)}>›</button>
-		<span class="sep"></span>
-		<button
-			type="button"
-			class="b strong"
-			title={activeStatic
-				? 'A static layer shows one drawing all cut long'
-				: 'A new, empty drawing after this one on the active layer'}
-			disabled={activeStatic}
-			onclick={addDrawing}
 		>
-			New drawing
-		</button>
-		<div class="seg" role="group" aria-label="Hold this drawing for">
-			{#each [1, 2, 3] as n (n)}
-				<button
-					type="button"
-					class="b"
-					aria-pressed={here ? activeTrack[here.index].length === n : false}
-					disabled={!here}
-					title="Hold this drawing for {n} frame{n > 1 ? 's' : ''} (on {n === 1
-						? 'ones'
-						: n === 2
-							? 'twos'
-							: 'threes'})"
-					onclick={() => timing(n)}
-				>
-					{n}s
-				</button>
+			{#each trays.filter((t) => t.side === 'left') as t (t.id)}
+				{@render tray(t)}
+			{/each}
+			<span class="grow"></span>
+			{#each trays.filter((t) => t.side === 'right') as t (t.id)}
+				{@render tray(t)}
 			{/each}
 		</div>
-		<button
-			type="button"
-			class="b"
-			aria-label="Hold longer"
-			title="Hold this drawing one frame longer"
-			disabled={!here}
-			onclick={() => hold(1)}
-		>
-			+1
-		</button>
-		<button
-			type="button"
-			class="b"
-			aria-label="Hold shorter"
-			title="Hold this drawing one frame less"
-			disabled={!here || activeTrack[here.index].length < 2}
-			onclick={() => hold(-1)}
-		>
-			−1
-		</button>
-		<select
-			class="b"
-			aria-label="Timing for the whole layer"
-			title="Every drawing on this layer on ones, twos or threes"
-			disabled={activeStatic}
-			value=""
-			onchange={(e) => {
-				const n = +e.currentTarget.value;
-				e.currentTarget.value = '';
-				if (n) timingAll(n);
-			}}
-		>
-			<option value="">Layer timing…</option>
-			<option value="1">All on ones</option>
-			<option value="2">All on twos</option>
-			<option value="3">All on threes</option>
-		</select>
-		<span class="sep"></span>
-		<button
-			type="button"
-			class="b"
-			title="One more frame here on every layer (each holds what it shows)"
-			onclick={insertFrame}
-		>
-			Insert frame
-		</button>
-		<button
-			type="button"
-			class="b"
-			title="Take this frame out of every layer"
-			onclick={deleteFrame}
-		>
-			Delete frame
-		</button>
-		<button
-			type="button"
-			class="b"
-			title="Take this drawing out of the timeline (the ones after it move back)"
-			disabled={!here}
-			onclick={removeHere}
-		>
-			Remove drawing
-		</button>
-		<div class="onion">
-			<button
-				type="button"
-				class="b"
-				aria-expanded={toolsOpen}
-				title="Frame tools: copy, paste, duplicate, reverse, cycle, boil"
-				onclick={() => (toolsOpen = !toolsOpen)}
-			>
-				Frames ▾
-			</button>
-			{#if toolsOpen}
-				<div class="pop wide right" role="group" aria-label="Frame tools">
-					<p class="hint" data-testid="frames-target">
-						On {rangeLabel(target)}{sel ? '' : ' (this drawing)'}. Shift+click frames to choose
-						others.
-					</p>
-					<div class="seg" role="radiogroup" aria-label="Frame tools work on">
-						{#each [['layer', 'This layer'], ['all', 'All layers']] as [id, label] (id)}
-							<button
-								type="button"
-								class="b"
-								role="radio"
-								aria-checked={scope === id}
-								onclick={() => (scope = id as 'layer' | 'all')}
-							>
-								{label}
-							</button>
-						{/each}
-					</div>
-					<div class="seg wrap">
-						<button
-							type="button"
-							class="b"
-							disabled={!target}
-							title="Copy these frames (Alt+C)"
-							onclick={copyRange}
-						>
-							Copy
-						</button>
-						<button
-							type="button"
-							class="b"
-							disabled={!clip}
-							title="Paste before this frame: the same drawings, so changing one changes both (Alt+V)"
-							onclick={pasteRange}
-						>
-							Paste
-						</button>
-						<button
-							type="button"
-							class="b"
-							disabled={!target}
-							title="The frames again right after them, as new drawings to change (Shift+D)"
-							onclick={duplicateRange}
-						>
-							Duplicate
-						</button>
-						<button
-							type="button"
-							class="b"
-							disabled={!target || target.from === target.to}
-							title="Play these frames backwards"
-							onclick={reverseRange}
-						>
-							Reverse
-						</button>
-					</div>
-					<div class="line">
-						<span>Cycle</span>
-						<input
-							type="number"
-							min="1"
-							max="99"
-							aria-label="Cycle times"
-							bind:value={cycleTimes}
-						/>
-						<span>× more</span>
-						<select aria-label="Cycle as" bind:value={cycleMode}>
-							<option value="loop">Loop (A B C A B C)</option>
-							<option value="pingpong">Back and forth (A B C B A)</option>
-						</select>
-						<button
-							type="button"
-							class="b"
-							disabled={!target}
-							title="Repeat these frames after them (the same drawings)"
-							onclick={cycleRange}
-						>
-							Cycle
-						</button>
-					</div>
-					<div class="line">
-						<span>Boil</span>
-						<select aria-label="Boil drawings" bind:value={boilSet.variants}>
-							<option value={2}>2 drawings</option>
-							<option value={3}>3 drawings</option>
-							<option value={4}>4 drawings</option>
-						</select>
-						<select aria-label="Boil every" bind:value={boilSet.step}>
-							<option value={1}>on ones</option>
-							<option value={2}>on twos</option>
-							<option value={3}>on threes</option>
-						</select>
-						<select aria-label="Boil strength" bind:value={boilSet.amount}>
-							<option value={0.6}>Subtle</option>
-							<option value={1}>Light</option>
-							<option value={2}>Medium</option>
-							<option value={3.5}>Strong</option>
-						</select>
-						<button
-							type="button"
-							class="b"
-							disabled={!target || boiling}
-							title="Held drawings swap between themselves and slightly wobbled copies, as if traced again"
-							onclick={boilRange}
-						>
-							{boiling ? 'Boiling…' : 'Boil'}
-						</button>
-					</div>
-					{#if toolNote}<p class="hint" aria-live="polite">{toolNote}</p>{/if}
-				</div>
-			{/if}
-		</div>
-	</div>
+	{/if}
 
-	<div class="grid" style="--cell: {CELL}px; --cols: {shown}">
+	<div class="grid" class:wide={isNew} style="--cell: {cell}px; --cols: {shown}">
 		<div class="corner"></div>
 		<div
 			class="ruler"
@@ -1423,8 +2023,9 @@
 					aria-label="Frame {f + 1}{markersHere.some((m) => m.f === f) ? ', marker' : ''}"
 					aria-current={f === frame ? 'true' : undefined}
 					onclick={(e) => pick(e, f)}
+					oncontextmenu={isNew ? (e) => rulerMenu(e, f) : undefined}
 				>
-					{f === 0 || (f + 1) % 5 === 0 ? f + 1 : ''}
+					{f === 0 || (f + 1) % (cell < 14 ? 10 : 5) === 0 ? f + 1 : ''}
 				</button>
 			{/each}
 		</div>
@@ -1432,8 +2033,19 @@
 			{@const t = theCut.tracks[l.id] ?? []}
 			{@const nums = numbers(t)}
 			{@const still = statics.includes(l.id)}
-			<div class="name" class:on={l.id === active} class:out={viewHidden.includes(l.id)}>
-				<button type="button" class="label" onclick={() => onlayer(l.id)} title={l.name}>
+			<div
+				class="name"
+				class:on={l.id === active}
+				class:out={viewHidden.includes(l.id)}
+				role="presentation"
+				oncontextmenu={isNew ? (e) => layerMenu(e, l) : undefined}
+			>
+				<button
+					type="button"
+					class="label"
+					onclick={() => onlayer(l.id)}
+					title={isNew ? `${l.name} (right-click for more)` : l.name}
+				>
 					{l.name}
 				</button>
 				<button
@@ -1448,6 +2060,23 @@
 				>
 					{still ? 'S' : 'C'}
 				</button>
+				{#if isNew && onlayerset}
+					<button
+						type="button"
+						class="eye"
+						class:off={!l.visible}
+						aria-label="{l.visible ? 'Hide' : 'Show'} {l.name}"
+						title={l.visible ? 'Hide this layer' : 'Show this layer'}
+						onclick={() => onlayerset(l.id, { visible: !l.visible })}
+					>
+						{@render icon(
+							l.visible
+								? 'M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z M12 9a3 3 0 1 0 0.01 0Z'
+								: 'M3 3l18 18 M10.6 5.1A10 10 0 0 1 12 5c6.4 0 10 7 10 7a17 17 0 0 1-3.2 4 M6.6 6.6A17 17 0 0 0 2 12s3.6 7 10 7a9.6 9.6 0 0 0 5.4-1.6',
+							14
+						)}
+					</button>
+				{/if}
 			</div>
 			<div
 				class="row"
@@ -1457,12 +2086,22 @@
 				role="presentation"
 				data-layer={l.id}
 				onclick={(e) => cellClick(e, l.id)}
+				oncontextmenu={isNew
+					? (e) => {
+							const box = (e.currentTarget as HTMLElement).getBoundingClientRect();
+							const f = Math.max(0, Math.floor((e.clientX - box.left) / cell));
+							const at = still ? null : exposureAt(t, f);
+							onlayer(l.id);
+							if (at && t[at.index].drawing) frameMenu(e, l, at.index);
+							else rulerMenu(e, f);
+						}
+					: undefined}
 			>
-				<div class="playhead" style="left: {frame * CELL}px"></div>
+				<div class="playhead" style="left: {frame * cell}px"></div>
 				{#if sel && (scope === 'all' || l.id === active) && !still}
 					<div
 						class="band"
-						style="left: {sel.from * CELL}px; width: {(sel.to - sel.from + 1) * CELL}px"
+						style="left: {sel.from * cell}px; width: {(sel.to - sel.from + 1) * cell}px"
 					></div>
 				{/if}
 				{#if still}
@@ -1470,7 +2109,7 @@
 						<div
 							class="cel static"
 							class:here={l.id === active}
-							style="left: 0; width: {length * CELL}px"
+							style="left: 0; width: {length * cell}px"
 							aria-label="{l.name}: static, all cut long"
 						>
 							<span>Static</span>
@@ -1485,10 +2124,10 @@
 								class="cel"
 								class:here={l.id === active && here?.index === i}
 								class:dragging={drag?.layer === l.id && drag.index === i}
-								style="left: {start * CELL}px; width: {e.length * CELL}px; {drag?.layer === l.id &&
+								style="left: {start * cell}px; width: {e.length * cell}px; {drag?.layer === l.id &&
 								drag.index === i &&
 								drag.mode === 'move'
-									? `transform: translateX(${drag.by * CELL}px)`
+									? `transform: translateX(${drag.by * cell}px)`
 									: ''}"
 								data-kind={timeline.kinds?.[e.drawing]}
 								aria-label="{l.name}: drawing {nums[i]}{timeline.kinds?.[e.drawing]
@@ -1499,6 +2138,7 @@
 								onpointerup={dragEnd}
 								onpointercancel={() => (drag = null)}
 								onclick={(ev) => ev.stopPropagation()}
+								oncontextmenu={isNew ? (ev) => frameMenu(ev, l, i) : undefined}
 							>
 								<span>{nums[i]}</span>
 								{#if timeline.kinds?.[e.drawing]}
@@ -1525,7 +2165,12 @@
 			{@const from = Math.max(0, sceneAt - c.start)}
 			{@const left = Math.max(0, c.start - sceneAt)}
 			{@const frames = Math.max(0, Math.min(len - from, shown - left))}
-			<div class="name sound" class:muted={c.muted}>
+			<div
+				class="name sound"
+				class:muted={c.muted}
+				role="presentation"
+				oncontextmenu={isNew ? (e) => soundMenu(e, c) : undefined}
+			>
 				<span class="label" title={c.name}>♪ {c.name}</span>
 				<button
 					type="button"
@@ -1570,7 +2215,7 @@
 				</button>
 			</div>
 			<div class="row sound" role="presentation" data-sound={c.id}>
-				<div class="playhead" style="left: {frame * CELL}px"></div>
+				<div class="playhead" style="left: {frame * cell}px"></div>
 				{#if frames > 0}
 					<div
 						class="clip"
@@ -1580,18 +2225,248 @@
 						aria-label="{c.name}: starts on scene frame {c.start + 1}"
 						aria-valuenow={c.start + 1}
 						title="Drag to move it along the scene"
-						style="left: {left * CELL}px; width: {frames * CELL}px"
+						style="left: {left * cell}px; width: {frames * cell}px"
 						onpointerdown={(e) => clipDown(e, c.id)}
 						onpointermove={clipMove}
 						onpointerup={() => (clipDrag = null)}
 						onpointercancel={() => (clipDrag = null)}
 					>
-						<canvas use:waveform={{ file: c.file, from, frames, fps, tick: soundTick }}></canvas>
+						<canvas use:waveform={{ file: c.file, from, frames, fps, tick: soundTick, cell }}
+						></canvas>
 					</div>
 				{/if}
 			</div>
 		{/each}
 	</div>
+	{#if isNew}
+		<div class="pbar" role="toolbar" aria-label="Playback and view">
+			<div class="onion">
+				<button
+					type="button"
+					class="ib onion-btn"
+					aria-pressed={onion.on}
+					aria-label="Onion skin"
+					title="Onion skin: the drawings before (red) and after (green), faintly (O)"
+					onclick={() => (onion.on = !onion.on)}
+					oncontextmenu={(e) => {
+						e.preventDefault();
+						onionOpen = !onionOpen;
+					}}
+				>
+					<svg
+						width="16"
+						height="14"
+						viewBox="0 0 28 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2.4"
+						aria-hidden="true"
+					>
+						<circle cx="10" cy="12" r="7" /><circle cx="18" cy="12" r="7" stroke-opacity="0.45" />
+					</svg>
+				</button>
+				<button
+					type="button"
+					class="ib caret"
+					aria-label="Onion skin settings"
+					aria-expanded={onionOpen}
+					onclick={() => (onionOpen = !onionOpen)}
+				>
+					▾
+				</button>
+				{#if onionOpen}
+					{@render onionPop()}
+				{/if}
+			</div>
+			{#if onview}
+				<div class="onion">
+					<button
+						type="button"
+						class="b"
+						aria-label="Show: {viewLabel(stageView)}"
+						aria-expanded={showOpen}
+						aria-pressed={stageView.id !== 'all'}
+						title="Show the layers of some stages only (on the canvas, in playback and in the onion skin)"
+						onclick={() => (showOpen = !showOpen)}
+					>
+						Show: {viewLabel(stageView)}{lightTable.stage
+							? ` · Under ${STAGE_LABELS[lightTable.stage]}`
+							: ''} ▾
+					</button>
+					{#if showOpen}
+						{@render showPop()}
+					{/if}
+				</div>
+			{/if}
+			<div class="onion">
+				<button
+					type="button"
+					class="ib"
+					aria-pressed={cameraView.show && (!!theCut.camera || cameraView.safe)}
+					aria-label="Camera"
+					title="Camera: the part of the canvas this cut shows (right-click or ▾ for its settings)"
+					onclick={() => (cameraView.show = !cameraView.show)}
+					oncontextmenu={(e) => {
+						e.preventDefault();
+						cameraOpen = !cameraOpen;
+					}}
+				>
+					{@render icon('M3 6h13v12H3Z M16 10l5-3v10l-5-3Z', 15)}
+				</button>
+				<button
+					type="button"
+					class="ib caret"
+					aria-label="Camera settings"
+					aria-expanded={cameraOpen}
+					onclick={() => (cameraOpen = !cameraOpen)}
+				>
+					▾
+				</button>
+				{#if cameraOpen}
+					{@render cameraPop()}
+				{/if}
+			</div>
+			<button
+				type="button"
+				class="ib"
+				aria-pressed={pinned.includes(frame)}
+				aria-label="Pin frame"
+				title="Light table: pin this frame to show it (blue) while you draw others"
+				onclick={onpin}
+				oncontextmenu={(e) =>
+					openMenu(e, 'Light table', [
+						{ head: 'Light table' },
+						{ label: pinned.includes(frame) ? 'Unpin this frame' : 'Pin this frame', run: onpin },
+						{
+							label: 'Unpin all',
+							hint: pinned.length ? `${pinned.length} pinned` : '',
+							disabled: !pinned.length,
+							run: () => (pinned = [])
+						}
+					])}
+			>
+				{@render icon('M12 17v5M8 3h8l-1 6 3 3H6l3-3Z', 15)}
+			</button>
+			{#if pinned.length}
+				<button
+					type="button"
+					class="b small"
+					title="Unpin every frame"
+					onclick={() => (pinned = [])}
+				>
+					{pinned.length} pinned ×
+				</button>
+			{/if}
+			{#if onflip}
+				<button
+					type="button"
+					class="ib"
+					aria-label="Flip"
+					title="Hold to flip the drawings around this one (R); with Shift, the keys and breakdowns only (Shift+R)"
+					onpointerdown={(e) => {
+						(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+						flipKind = e.shiftKey ? 'keys' : 'roll';
+						onflip(flipKind, true);
+					}}
+					onpointerup={() => onflip(flipKind, false)}
+					onpointercancel={() => onflip(flipKind, false)}
+				>
+					{@render icon('M5 4h10l4 4v12H5Z M9 4v6l2-1.5L13 10V4', 15)}
+				</button>
+			{/if}
+			<span class="grow"></span>
+			<button type="button" class="ib" aria-label="Previous frame" onclick={() => go(frame - 1)}>
+				{@render icon('M15 5l-7 7 7 7', 13)}
+			</button>
+			<button
+				type="button"
+				class="ib play"
+				aria-pressed={playing}
+				aria-label={playing ? 'Stop' : 'Play'}
+				title={playing ? 'Stop' : `Play ${playLabel} (right-click for loop and range)`}
+				onclick={onplay}
+				oncontextmenu={playMenu}
+			>
+				{#if playing}
+					<svg width="13" height="13" viewBox="0 0 24 24" aria-hidden="true">
+						<rect x="6" y="6" width="12" height="12" rx="1.5" fill="currentColor" />
+					</svg>
+				{:else}
+					<svg width="13" height="13" viewBox="0 0 24 24" aria-hidden="true">
+						<path d="M7 4v16l13-8Z" fill="currentColor" />
+					</svg>
+				{/if}
+			</button>
+			<button type="button" class="ib" aria-label="Next frame" onclick={() => go(frame + 1)}>
+				{@render icon('M9 5l7 7-7 7', 13)}
+			</button>
+			<div class="onion">
+				<button
+					type="button"
+					class="b"
+					aria-label="Play options: {playLabel}"
+					aria-haspopup="menu"
+					title="Play options: this cut or the scene, once, loop or ping-pong, the loop range, markers"
+					onclick={playMenu}
+				>
+					{@render icon(
+						'M17 2l4 4-4 4 M3 12V9a3 3 0 0 1 3-3h15 M7 22l-4-4 4-4 M21 12v3a3 3 0 0 1-3 3H3',
+						14
+					)}
+					▾
+				</button>
+				{#if markersOpen}
+					{@render markersPop()}
+				{/if}
+			</div>
+			<span class="where" aria-live="polite">
+				<b data-testid="frame">{frame + 1}</b>
+				<span class="muted">/ {length} · {(frame / fps).toFixed(2)} s ·</span>
+			</span>
+			<select class="b" aria-label="Frames a second" title="Frames a second" bind:value={fps}>
+				{#each [6, 8, 12, 15, 24, 25, 30, 48, 50, 60] as n (n)}<option value={n}>
+						{n} fps
+					</option>{/each}
+			</select>
+			<span class="grow"></span>
+			<span class="tip">Right-click a frame, layer or the ruler for more</span>
+			<button
+				type="button"
+				class="zb"
+				aria-label="Narrower frames"
+				title="Narrower frames"
+				onclick={() => setZoom(zoom - 6)}
+			>
+				<svg width="12" height="9" viewBox="0 0 28 20" aria-hidden="true">
+					<path d="M2 18 11 6l5 6 3-3 7 9Z" fill="currentColor" />
+				</svg>
+			</button>
+			<label class="zoom">
+				<span class="sr">Timeline zoom</span>
+				<input
+					type="range"
+					min={ZOOM_MIN}
+					max={ZOOM_MAX}
+					value={zoom}
+					oninput={(e) => setZoom(+e.currentTarget.value)}
+				/>
+			</label>
+			<button
+				type="button"
+				class="zb"
+				aria-label="Wider frames"
+				title="Wider frames"
+				onclick={() => setZoom(zoom + 6)}
+			>
+				<svg width="22" height="15" viewBox="0 0 28 20" aria-hidden="true">
+					<path d="M2 18 11 6l5 6 3-3 7 9Z" fill="currentColor" />
+				</svg>
+			</button>
+		</div>
+	{/if}
+	{#if menu}
+		<ContextMenu {menu} onclose={() => (menu = null)} />
+	{/if}
 </section>
 
 <style>
@@ -2044,5 +2919,281 @@
 		border-radius: 0 6px 6px 0;
 		background: rgba(0, 0, 0, 0.18);
 		cursor: ew-resize;
+	}
+	/* ---- the new layout: icon trays above, playback and view below ---- */
+	.timeline.new {
+		gap: 8px;
+		padding: 8px 12px;
+		border-radius: 22px;
+		container-type: inline-size;
+	}
+	@container (max-width: 1180px) {
+		.pbar .tip {
+			display: none;
+		}
+	}
+	@container (max-width: 760px) {
+		.zoom input {
+			width: 70px;
+		}
+	}
+	.trays,
+	.pbar {
+		position: relative;
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 6px;
+		outline: none;
+	}
+	.grow {
+		flex: 1 1 0;
+	}
+	.tray {
+		position: relative;
+		display: inline-flex;
+		align-items: center;
+		padding: 2px;
+		border-radius: 12px;
+		transition: background 0.2s ease;
+	}
+	.tray.open {
+		background: #24242a;
+	}
+	.tray .trigger,
+	.tray .opt {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		gap: 3px;
+		height: 34px;
+		border: 0;
+		color: #f6f4ef;
+		font: 700 11px var(--pp-font-body);
+		cursor: pointer;
+	}
+	.tray .trigger {
+		padding: 0 6px 0 8px;
+		border-radius: 10px;
+		background: #2a2a30;
+	}
+	.tray.open .trigger {
+		background: #3a3a42;
+	}
+	.tray.accent .trigger {
+		background: var(--pp-accent-strong, #e8492f);
+		color: #fff;
+	}
+	.tray .trigger > :global(svg:last-child) {
+		opacity: 0.75;
+	}
+	.tray .opts {
+		display: inline-flex;
+		align-items: center;
+		gap: 2px;
+		max-width: 0;
+		padding-left: 0;
+		overflow: hidden;
+		opacity: 0;
+		visibility: hidden;
+		transition:
+			max-width 0.24s ease,
+			opacity 0.18s ease,
+			padding 0.24s ease,
+			visibility 0.24s;
+	}
+	.tray.open .opts {
+		max-width: calc(var(--n) * 48px + 8px);
+		padding-left: 4px;
+		opacity: 1;
+		visibility: visible;
+	}
+	.tray .opt {
+		flex: none;
+		min-width: 34px;
+		padding: 0 6px;
+		border-radius: 9px;
+		background: transparent;
+	}
+	.tray .opt:hover:not(:disabled) {
+		background: #34343c;
+	}
+	.tray .opt[aria-pressed='true'] {
+		background: #f6f4ef;
+		color: #16161a;
+	}
+	.tray .opt:disabled {
+		opacity: 0.35;
+		cursor: not-allowed;
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.tray .opts {
+			transition: none;
+		}
+	}
+	.pbar .b,
+	.pbar select {
+		height: 30px;
+		padding: 0 8px;
+		border-radius: 9px;
+		font-size: 12px;
+	}
+	.pbar .b {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+	}
+	.pbar .b.small {
+		padding: 0 6px;
+		font-size: 11px;
+	}
+	.ib {
+		display: grid;
+		place-items: center;
+		width: 30px;
+		height: 30px;
+		padding: 0;
+		border: 0;
+		border-radius: 9px;
+		background: #2a2a30;
+		color: #f6f4ef;
+		cursor: pointer;
+	}
+	.ib.caret {
+		width: 20px;
+		font-size: 11px;
+	}
+	.ib[aria-pressed='true'] {
+		background: var(--pp-yellow, #ffd84d);
+		color: #16161a;
+	}
+	.ib.play {
+		width: 40px;
+		background: var(--pp-accent-strong, #e8492f);
+		color: #fff;
+	}
+	.ib.play[aria-pressed='true'] {
+		background: #f6f4ef;
+		color: #16161a;
+	}
+	.pbar .where {
+		min-width: 0;
+		padding: 0 4px 0 8px;
+		font-size: 13px;
+		font-variant-numeric: tabular-nums;
+	}
+	.pbar .muted,
+	.pbar .tip {
+		color: #a9a8ae;
+		font-weight: 500;
+	}
+	.pbar .tip {
+		font-size: 11px;
+	}
+	.zb {
+		display: grid;
+		place-items: center;
+		width: 26px;
+		height: 26px;
+		padding: 0;
+		border: 0;
+		border-radius: 8px;
+		background: transparent;
+		color: #a9a8ae;
+		cursor: pointer;
+	}
+	.zoom input {
+		width: 110px;
+		accent-color: #f6f4ef;
+	}
+	.trays .pop {
+		top: calc(100% + 8px);
+		bottom: auto;
+	}
+	.grid.wide {
+		grid-template-columns: 170px calc(var(--cell) * var(--cols));
+		border-radius: 12px;
+		background: #1e1e24;
+	}
+	.grid.wide .corner,
+	.grid.wide .ruler {
+		background: #1e1e24;
+	}
+	.grid.wide .ruler {
+		height: 24px;
+	}
+	.new .name {
+		border-radius: 0;
+		border-top: 1px solid #2b2b32;
+		margin: 0;
+		height: 30px;
+	}
+	.new .row {
+		height: 30px;
+		margin: 0;
+		border-top: 1px solid #2b2b32;
+	}
+	.new .name.on {
+		background: #2e2a26;
+	}
+	.new .name .label {
+		padding-left: 10px;
+	}
+	.new .eye {
+		flex: none;
+		display: grid;
+		place-items: center;
+		width: 24px;
+		height: 24px;
+		margin-right: 4px;
+		padding: 0;
+		border: 0;
+		border-radius: 6px;
+		background: transparent;
+		color: #a9a8ae;
+		cursor: pointer;
+	}
+	.new .eye.off {
+		color: #6b6a70;
+	}
+	.new .cel {
+		top: 4px;
+		bottom: 4px;
+		border-radius: 5px;
+		background: #34343c;
+		color: #f6f4ef;
+		box-shadow: inset 0 0 0 1px #45454e;
+		overflow: hidden;
+	}
+	.new .cel.here {
+		background: #4a4a55;
+		box-shadow:
+			inset 0 0 0 1px #45454e,
+			0 0 0 2px #f6f4ef;
+	}
+	.new .cel[data-kind='key'] {
+		box-shadow: inset 0 0 0 2px #ffd84d;
+	}
+	.new .cel.here[data-kind='key'] {
+		box-shadow:
+			inset 0 0 0 2px #ffd84d,
+			0 0 0 2px #f6f4ef;
+	}
+	.new .kind-mark {
+		background: none;
+		color: #ffd84d;
+	}
+	.new .cel[data-kind='breakdown'] .kind-mark {
+		background: none;
+	}
+	.new .cel.static {
+		background: #2c3550;
+		color: #c9d6ff;
+	}
+	.new .edge {
+		background: rgba(255, 255, 255, 0.1);
+	}
+	.new .playhead {
+		background: rgba(232, 73, 47, 0.28);
 	}
 </style>
