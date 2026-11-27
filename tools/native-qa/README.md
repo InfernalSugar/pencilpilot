@@ -91,6 +91,12 @@ Measuring notes:
 - **The rate** counts only the intervals where input was already waiting when the earlier
   frame was shown, so pauses between strokes aren't counted as misses. A miss is an interval
   over 1.5 display frames. A stall is input that waited over 2 frames to be drawn.
+- **The first frame of a stroke** counts from the oldest input it includes. The driver moves
+  the pointer to the stroke's start 20 ms before pressing, and that move needs no frame, so
+  the first frame after a pause reads about 20 ms long. `latencySteady` leaves out the first
+  two frames after a pause. `latency-continuous` is one 4 s stroke.
+- **Documents** are compared with the app's own starting document (the demo's drawings),
+  saved once per workspace (`baseline-<workspace>-doc.png`).
 - **RemoteDesktop** drops the input sent in about the first 0.2 s after a session starts,
   the first key included. The driver waits and sends a Shift tap first. Relative motion
   isn't accelerated: a 200 px middle-drag pans exactly 200 px.

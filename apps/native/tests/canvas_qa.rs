@@ -799,3 +799,55 @@ fn check_float(name: &str, minx: f32, want: f32, commit_ms: f64, p99: f64) -> Ve
     }
     out
 }
+
+/// A stroke's start (the press) and end (the release) at 1920 × 1080, with the demo's
+/// layers and frames set up: each must fit well inside a display frame (6 ms at 165 Hz),
+/// or the first frame of every stroke shows late.
+#[test]
+#[ignore = "QA suite: tools/native-qa/run.sh"]
+fn a_strokes_start_and_end_fit_a_frame() {
+    let mut s = State::demo();
+    s.workspace = Workspace::Draw;
+    let mut e = Engine::new(DOC.0, DOC.1);
+    e.tick(&mut s, Instant::now());
+    let _ = e.picture(&s);
+    let (mut downs, mut ups, mut firsts) = (Vec::new(), Vec::new(), Vec::new());
+    for k in 0..20 {
+        let y = 200.0 + k as f32 * 30.0;
+        let p = |x: f32, ms: u32| Sample {
+            x,
+            y,
+            pressure: 0.6,
+            tilt: (0.0, 0.0),
+            ms,
+        };
+        let t = Instant::now();
+        e.pointer(&mut s, Phase::Down, p(300.0, 0));
+        let _ = e.picture(&s);
+        downs.push(t.elapsed().as_secs_f64() * 1e3);
+        let t = Instant::now();
+        e.pointer(&mut s, Phase::Move, p(304.0, 2));
+        let _ = e.picture(&s);
+        firsts.push(t.elapsed().as_secs_f64() * 1e3);
+        for i in 2..100 {
+            e.pointer(&mut s, Phase::Move, p(300.0 + i as f32 * 4.0, i * 2));
+        }
+        let _ = e.picture(&s);
+        let t = Instant::now();
+        e.pointer(&mut s, Phase::Up, p(700.0, 202));
+        e.tick(&mut s, Instant::now());
+        let _ = e.picture(&s);
+        ups.push(t.elapsed().as_secs_f64() * 1e3);
+    }
+    let (d50, _, _, dmax) = stats(&mut downs);
+    let (m50, _, _, mmax) = stats(&mut firsts);
+    let (u50, _, _, umax) = stats(&mut ups);
+    save_json(
+        "stroke-start-end.json",
+        &format!(
+            "{{\"downMs\": {{\"p50\": {d50:.2}, \"max\": {dmax:.2}}}, \"firstMoveMs\": {{\"p50\": {m50:.2}, \"max\": {mmax:.2}}}, \"upMs\": {{\"p50\": {u50:.2}, \"max\": {umax:.2}}}}}"
+        ),
+    );
+    assert!(dmax < 4.0, "a press takes {dmax:.1} ms");
+    assert!(umax < 4.0, "a release takes {umax:.1} ms");
+}

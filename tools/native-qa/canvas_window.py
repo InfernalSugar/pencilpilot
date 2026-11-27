@@ -174,13 +174,31 @@ def view_to_screen(st, d):
     return (cx + cw / 2 + v["pan"][0] + c * vx - s * vy, cy + ch / 2 + v["pan"][1] + s * vx + c * vy)
 
 
-def ink(png):
+def ink(png, base=None):
+    """The document's pixels with paint on them; with `base` (the document the app starts
+    with, the demo's drawings), the pixels that differ from it."""
     import numpy as np
     from PIL import Image
-    a = np.asarray(Image.open(png).convert("RGBA"))
+    a = np.asarray(Image.open(png).convert("RGBA")).astype(int)
+    if base:
+        b = np.asarray(Image.open(base).convert("RGBA")).astype(int)
+        ys, xs = np.nonzero(np.abs(a - b).max(axis=2) > 3)
+        return xs + 0.5, ys + 0.5
     # (a mouse stroke with the 2B pencil at pressure 0.5 is light and grainy)
     ys, xs = np.nonzero((a[:, :, 0] < 250) & (a[:, :, 3] > 0))
     return xs + 0.5, ys + 0.5
+
+
+BASE = {}
+
+
+def baseline(binary, m, out, ws):
+    """The document the app starts with in workspace `ws`, untouched (saved once)."""
+    if ws not in BASE:
+        a = App(binary, m, out, f"baseline-{ws}", 2.5, ws)
+        a.wait()
+        BASE[ws] = a.doc
+    return BASE[ws]
 
 
 def seg_dist(p, a, b):
@@ -301,7 +319,7 @@ def scenario_view(binary, out):
                 inp.drag(line(a, b, 80), 0.004)
             inp.stop()
             st = app.wait()
-            xs, ys = ink(app.doc)
+            xs, ys = ink(app.doc, baseline(binary, m, out, "animate"))
             r = {"view": st["view"], "canvasRect": st["canvasRect"], "inkPx": int(len(xs)),
                  "angleDeg": round(math.degrees(st["view"]["angle"]), 3)}
             if stroke and len(xs):
@@ -420,7 +438,7 @@ def scenario_viewfps(binary, out):
             zoom = frame_numbers(st, t1, t2)
             res[str(hz)] = {"pan": {"rate": rate(pan, hz), "latency": latency([f for f in pan if f["events"]])},
                             "zoom": {"rate": rate(zoom, hz), "wheelSteps": n},
-                            "docInkAfter": int(len(ink(app.doc)[0]))}
+                            "docInkAfter": int(len(ink(app.doc, baseline(binary, m, out, "animate"))[0]))}
         finally:
             m.stop()
     return res
@@ -599,7 +617,7 @@ def scenario_transform(binary, out):
             fv = first_after(t_v)
             fret = first_after(t_ret + 150_000_000)
             drag = [f for f in fr if t_drag <= f["drawnNs"] <= t_ret]
-            xs, ys = ink(app.doc)
+            xs, ys = ink(app.doc, baseline(binary, m, out, "draw"))
             res[str(hz)] = {
                 "liftKeyToShownMs": fv and round((fv["shownNs"] - fv["receivedNs"]) / 1e6, 1),
                 "commitKeyToShownMs": fret and round((fret["shownNs"] - fret["receivedNs"]) / 1e6, 1),
@@ -639,7 +657,7 @@ def scenario_turn(binary, out):
             inp.stop()
             st = app.wait()
             res[tag] = {"angleDeg": round(math.degrees(st["view"]["angle"]), 2),
-                        "inkPx": int(len(ink(app.doc)[0]))}
+                        "inkPx": int(len(ink(app.doc, baseline(binary, m, out, ws))[0]))}
     finally:
         m.stop()
     res["pass"] = (res["review-shift"]["angleDeg"] != 0 and res["review-shift"]["inkPx"] == 0
