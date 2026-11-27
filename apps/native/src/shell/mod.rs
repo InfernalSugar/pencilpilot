@@ -177,8 +177,16 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
     let (mut space, mut shift, mut alt) = (false, false, false);
     let deadline = quit_after.map(|s| started + std::time::Duration::from_secs_f64(s));
     while win.is_open() && deadline.is_none_or(|d| std::time::Instant::now() < d) {
+        // playback goes by when frames are shown: a frame started now shows after about
+        // `show_delay`; half a refresh more picks the refresh nearest each frame's time
+        let lead = std::time::Duration::from_nanos(
+            pacer.show_delay_ns(pencilpilot_window::clock::now_ns()) + pacer.refresh_ns() / 2,
+        );
         if !win.wants_frame() || !(dirty || canvas_dirty) {
-            let tick = eng.as_ref().and_then(|e| e.next_tick_at(&s));
+            let tick = eng
+                .as_ref()
+                .and_then(|e| e.next_tick_at(&s))
+                .map(|t| t.checked_sub(lead).unwrap_or(t));
             let next = [ui.next_pass_at(), deadline, tick]
                 .into_iter()
                 .flatten()
@@ -418,7 +426,7 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
         }
         // time: playback
         if let Some(e) = &mut eng
-            && e.tick(&mut s, std::time::Instant::now())
+            && e.tick(&mut s, std::time::Instant::now() + lead)
         {
             dirty = true;
         }
