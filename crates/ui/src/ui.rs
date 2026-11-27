@@ -1,19 +1,26 @@
 //! Widgets. The interface is described in code each pass; what must last between passes
-//! (values, which widget is held, focus) lives here, keyed by widget ids.
+//! (values, which widget is held, focus, open menus) lives here, keyed by widget ids.
 //!
-//! **Nothing is drawn unless something changed.** Input runs a pass that builds the quads.
-//! If they're the same as what's on screen, no frame is sent, so an idle app (or a pointer
-//! moving over nothing that reacts) draws nothing.
+//! **Nothing is drawn unless something changed.**
+//! - Input runs a pass that builds the quads. If they're the same as what's on screen, no
+//!   frame is sent, so an idle app (or a pointer moving over nothing that reacts) draws
+//!   nothing.
+//! - Timed things (a tooltip after a hover) say when the next pass is needed
+//!   ([`Ui::next_pass_at`]), so the app never polls.
+//!
+//! **Overlays** (menus, right-click menus, pop-ups, tooltips) draw above everything. Where
+//! one was open in the last pass, the pointer belongs to it, not to what's under it.
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::time::{Duration, Instant};
 
 use pencilpilot_gpu::{Quad, Renderer2d};
 
 use crate::text::{Laid, Style, Text};
-use crate::theme::{Theme, alpha};
+use crate::theme::{Theme, alpha, hex};
 
-/// A widget's id: from its name (and its parent's, for widgets made in loops).
+/// A widget's id, from its name.
 pub type Id = u64;
 
 pub fn id(name: &str) -> Id {
@@ -21,6 +28,9 @@ pub fn id(name: &str) -> Id {
     name.hash(&mut h);
     h.finish()
 }
+
+/// How long the pointer rests on a widget before its tooltip shows.
+pub const TOOLTIP_DELAY: Duration = Duration::from_millis(500);
 
 /// The pointer, in logical pixels.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -31,7 +41,22 @@ pub struct Pointer {
     /// went down / came up since the last pass
     pub pressed: bool,
     pub released: bool,
+    /// the secondary (right) button went down since the last pass
+    pub context: bool,
     pub inside: bool,
+    /// scrolled since the last pass (logical pixels; positive: down)
+    pub scroll: f32,
+}
+
+/// A key, as the interface needs it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Key {
+    /// the keysym's name: "a", "Escape", "BackSpace", "Left"…
+    pub name: String,
+    /// what it types
+    pub text: Option<String>,
+    pub ctrl: bool,
+    pub shift: bool,
 }
 
 /// What happened to a widget this pass.
@@ -40,6 +65,8 @@ pub struct Response {
     pub hovered: bool,
     pub held: bool,
     pub clicked: bool,
+    /// right-clicked
+    pub context: bool,
     /// its value changed
     pub changed: bool,
 }
@@ -67,6 +94,12 @@ impl Rect {
             (self.w - 2.0 * d).max(0.0),
             (self.h - 2.0 * d).max(0.0),
         )
+    }
+    pub fn bottom(&self) -> f32 {
+        self.y + self.h
+    }
+    pub fn right(&self) -> f32 {
+        self.x + self.w
     }
 }
 
@@ -98,6 +131,20 @@ struct Area {
     from_end: bool,
 }
 
+/// An open menu or pop-up: whose, and where.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Open {
+    id: Id,
+    x: f32,
+    y: f32,
+}
+
+/// A text field's editing state.
+#[derive(Debug, Clone, Default)]
+struct Editing {
+    caret: usize,
+}
+
 /// The interface between passes.
 pub struct Ui {
     pub text: Text,
@@ -105,11 +152,19 @@ pub struct Ui {
     /// logical → device pixels
     pub scale: f32,
     pointer: Pointer,
+    keys: Vec<Key>,
     held: Option<Id>,
+    focus: Option<Id>,
+    editing: Editing,
     values: HashMap<Id, f32>,
+    open: Option<Open>,
+    /// where overlays were in the last pass: the pointer is theirs there
+    blocking: Vec<Rect>,
+    hover: Option<(Id, Instant)>,
+    icons: HashMap<(String, u32), Option<[f32; 4]>>,
     shown: Vec<Quad>,
-    /// a widget asked for another pass (an animation)
-    again: bool,
+    next_at: Option<Instant>,
+    now: Instant,
 }
 
 impl Default for Ui {
@@ -125,10 +180,18 @@ impl Ui {
             theme: Theme::default(),
             scale,
             pointer: Pointer::default(),
+            keys: Vec::new(),
             held: None,
+            focus: None,
+            editing: Editing::default(),
             values: HashMap::new(),
+            open: None,
+            blocking: Vec::new(),
+            hover: None,
+            icons: HashMap::new(),
             shown: Vec::new(),
-            again: false,
+            next_at: None,
+            now: Instant::now(),
         }
     }
 
@@ -140,6 +203,7 @@ impl Ui {
     pub fn pointer_left(&mut self) {
         self.pointer.inside = false;
     }
+    /// The primary button (left; a pen's tip).
     pub fn pointer_button(&mut self, down: bool) {
         if down && !self.pointer.down {
             self.pointer.pressed = true;
@@ -148,6 +212,21 @@ impl Ui {
             self.pointer.released = true;
         }
         self.pointer.down = down;
+    }
+    /// The secondary button (right; a pen's side button) went down.
+    pub fn pointer_context(&mut self) {
+        self.pointer.context = true;
+    }
+    pub fn scrolled(&mut self, dy: f32) {
+        self.pointer.scroll += dy;
+    }
+    pub fn key(&mut self, k: Key) {
+        self.keys.push(k);
+    }
+
+    /// Is a menu or pop-up open?
+    pub fn overlay_open(&self) -> bool {
+        self.open.is_some()
     }
 
     /// A pass: build the interface (logical size `w` × `h`) with `build`. Returns the quads
@@ -160,14 +239,27 @@ impl Ui {
         build: impl FnOnce(&mut Frame),
     ) -> Option<Vec<Quad>> {
         if self.text.poll_fonts() {
-            // new glyphs may now exist: the next pass draws whatever it builds
+            // the atlas started over: icons go in again, and the screen is redrawn
+            self.icons.clear();
             self.shown.clear();
         }
-        self.again = false;
+        self.now = Instant::now();
+        self.next_at = None;
+        // Escape closes what's open
+        if self.keys.iter().any(|k| k.name == "Escape") {
+            if self.open.take().is_some() {
+                self.keys.retain(|k| k.name != "Escape");
+            } else if self.focus.take().is_some() {
+                self.keys.retain(|k| k.name != "Escape");
+            }
+        }
+        let open_before = self.open;
         let mut f = Frame {
             ui: self,
             r,
             quads: Vec::new(),
+            overlay: Vec::new(),
+            blocking: Vec::new(),
             areas: vec![Area {
                 rect: Rect::new(0.0, 0.0, w, h),
                 dir: Dir::Column,
@@ -176,24 +268,57 @@ impl Ui {
                 end: 0.0,
                 from_end: false,
             }],
+            in_overlay: false,
+            hovered_any: None,
         };
         build(&mut f);
-        let quads = f.quads;
+        let Frame {
+            mut quads,
+            overlay,
+            blocking,
+            hovered_any,
+            ..
+        } = f;
+        quads.extend(overlay);
+        // a press outside every overlay closes what was open (and that press reaches nothing)
+        let p = self.pointer;
+        if (p.pressed || p.context)
+            && self.open == open_before
+            && open_before.is_some()
+            && !self.blocking.iter().any(|b| b.contains(p.x, p.y))
+        {
+            self.open = None;
+            self.shown.clear();
+        }
+        self.blocking = blocking;
+        // hovering: when it started (for tooltips)
+        match (hovered_any, self.hover) {
+            (Some(id), Some((h, _))) if h == id => {}
+            (Some(id), _) => self.hover = Some((id, self.now)),
+            (None, _) => self.hover = None,
+        }
         let p = &mut self.pointer;
         if p.released {
             self.held = None;
         }
-        (p.pressed, p.released) = (false, false);
-        if quads == self.shown && !self.again {
+        (p.pressed, p.released, p.context, p.scroll) = (false, false, false, 0.0);
+        self.keys.clear();
+        if quads == self.shown {
             return None;
         }
         self.shown = quads.clone();
         Some(quads)
     }
 
-    /// Something asked for another pass soon (an animation running).
-    pub fn wants_another_pass(&self) -> bool {
-        self.again
+    /// What's on screen now (device pixels): to draw again when the window needs a frame
+    /// though nothing changed (a resize, a new monitor).
+    pub fn shown(&self) -> &[Quad] {
+        &self.shown
+    }
+
+    /// When the next pass is due even without input (a tooltip about to show), if ever.
+    pub fn next_pass_at(&self) -> Option<Instant> {
+        self.next_at
     }
 }
 
@@ -202,7 +327,11 @@ pub struct Frame<'a> {
     ui: &'a mut Ui,
     r: &'a mut Renderer2d,
     quads: Vec<Quad>,
+    overlay: Vec<Quad>,
+    blocking: Vec<Rect>,
     areas: Vec<Area>,
+    in_overlay: bool,
+    hovered_any: Option<Id>,
 }
 
 impl Frame<'_> {
@@ -216,8 +345,12 @@ impl Frame<'_> {
 
     /// Draw a quad given in logical pixels.
     fn put(&mut self, q: Quad) {
-        let s = self.s();
-        self.quads.push(q.scaled(s));
+        let q = q.scaled(self.s());
+        if self.in_overlay {
+            self.overlay.push(q)
+        } else {
+            self.quads.push(q)
+        }
     }
 
     /// Lay text out (logical sizes) for measuring and drawing.
@@ -239,8 +372,12 @@ impl Frame<'_> {
     fn put_text(&mut self, laid: &Laid, x: f32, y: f32) {
         let s = self.s();
         let (dx, dy) = ((x * s).round(), (y * s).round());
-        self.quads
-            .extend(laid.quads.iter().map(|q| q.moved(dx, dy)));
+        let qs = laid.quads.iter().map(|q| q.moved(dx, dy));
+        if self.in_overlay {
+            self.overlay.extend(qs)
+        } else {
+            self.quads.extend(qs)
+        }
     }
 
     // ---- layout ----
@@ -350,17 +487,26 @@ impl Frame<'_> {
 
     // ---- interaction ----
 
+    fn pointer_free(&self) -> bool {
+        let p = self.ui.pointer;
+        self.in_overlay || !self.ui.blocking.iter().any(|b| b.contains(p.x, p.y))
+    }
+
     fn interact(&mut self, id: Id, rect: Rect) -> Response {
         let p = self.ui.pointer;
-        let over = p.inside && rect.contains(p.x, p.y);
+        let over = p.inside && rect.contains(p.x, p.y) && self.pointer_free();
         if over && p.pressed {
             self.ui.held = Some(id);
+        }
+        if over {
+            self.hovered_any = Some(id);
         }
         let held = self.ui.held == Some(id);
         Response {
             hovered: over,
             held: held && p.down,
             clicked: held && p.released && over,
+            context: over && p.context,
             changed: false,
         }
     }
@@ -383,9 +529,10 @@ impl Frame<'_> {
 
     pub fn button(&mut self, name: &str, text: &str, kind: Kind) -> Response {
         let t = self.ui.theme;
-        let fg = match kind {
-            Kind::Primary => t.on_coral,
-            _ => t.ink,
+        let fg = if kind == Kind::Primary {
+            t.on_coral
+        } else {
+            t.ink
         };
         let laid = self.lay_out(text, &Style::body(t.text, fg).weight(600), None);
         let rect = self.alloc(laid.width + 2.0 * 18.0, t.control_height);
@@ -395,7 +542,6 @@ impl Frame<'_> {
             Kind::Secondary => t.line,
             Kind::Ghost => alpha(t.line, 0.0),
         };
-        // hover lifts it a little, holding darkens it
         let fill = if res.held {
             mix(base, t.ink, 0.18)
         } else if res.hovered {
@@ -414,6 +560,108 @@ impl Frame<'_> {
             rect.y + (rect.h - laid.height) / 2.0,
         );
         res
+    }
+
+    /// An icon (an SVG path in a 24 × 24 box, drawn as a 2 px line, as the design's icons)
+    /// at `size`, in `color`.
+    pub fn icon(&mut self, path: &str, x: f32, y: f32, size: f32, color: [f32; 4]) {
+        let px = (size * self.s()).round().max(1.0) as u32;
+        let key = (path.to_string(), px);
+        let uv = match self.ui.icons.get(&key) {
+            Some(uv) => *uv,
+            None => {
+                let uv = raster_icon(path, px)
+                    .and_then(|rgba| self.ui.text.place(self.r, px, px, &rgba));
+                self.ui.icons.insert(key, uv);
+                uv
+            }
+        };
+        if let Some(uv) = uv {
+            let s = self.s();
+            let q = Quad::glyph(
+                (x * s).round(),
+                (y * s).round(),
+                px as f32,
+                px as f32,
+                uv,
+                color,
+            );
+            if self.in_overlay {
+                self.overlay.push(q)
+            } else {
+                self.quads.push(q)
+            }
+        }
+    }
+
+    /// A square icon button (`size` logical px); `on` shows it picked. Its `label` shows as
+    /// a tooltip after a moment's hover.
+    pub fn icon_button(
+        &mut self,
+        name: &str,
+        path: &str,
+        label: &str,
+        on: bool,
+        dark: bool,
+    ) -> Response {
+        let t = self.ui.theme;
+        let size = 34.0;
+        let rect = self.alloc(size, size);
+        let res = self.interact(id(name), rect);
+        let (bg, fg) = match (dark, on) {
+            (true, true) => (t.on_dark, t.ink),
+            (true, false) => (
+                if res.hovered {
+                    mix(t.dark_raised, t.on_dark, 0.12)
+                } else {
+                    t.dark_raised
+                },
+                t.on_dark,
+            ),
+            (false, true) => (t.ink, t.card),
+            (false, false) => (
+                if res.hovered {
+                    t.line
+                } else {
+                    alpha(t.line, 0.0)
+                },
+                t.ink,
+            ),
+        };
+        self.put(Quad::rect(rect.x, rect.y, rect.w, rect.h, bg).radius(9.0));
+        self.icon(path, rect.x + 8.0, rect.y + 8.0, 18.0, fg);
+        if res.hovered {
+            self.tooltip(id(name), label, rect);
+        }
+        res
+    }
+
+    /// A tooltip under `anchor`, once the pointer has rested on `owner` a moment.
+    fn tooltip(&mut self, owner: Id, text: &str, anchor: Rect) {
+        let Some((h, since)) = self.ui.hover else {
+            // the hover starts this pass: the tooltip is due after the delay
+            self.ui.next_at = Some(self.ui.now + TOOLTIP_DELAY);
+            return;
+        };
+        if h != owner {
+            self.ui.next_at = Some(self.ui.now + TOOLTIP_DELAY);
+            return;
+        }
+        let due = since + TOOLTIP_DELAY;
+        if self.ui.now < due {
+            self.ui.next_at = Some(due);
+            return;
+        }
+        let t = self.ui.theme;
+        let was = self.in_overlay;
+        self.in_overlay = true;
+        let laid = self.lay_out(text, &Style::body(t.small, t.on_dark).weight(500), None);
+        let (w, hh) = (laid.width + 16.0, laid.height + 10.0);
+        let x = anchor.x + (anchor.w - w) / 2.0;
+        let y = anchor.bottom() + 6.0;
+        self.put(Quad::rect(x, y, w, hh, t.ink).radius(8.0));
+        self.put_text(&laid, x + 8.0, y + 5.0);
+        self.in_overlay = was;
     }
 
     /// A switch with its label; clicking anywhere on it flips `on`.
@@ -510,6 +758,333 @@ impl Frame<'_> {
         res
     }
 
+    /// A one-line text field, `w` wide. Clicking it focuses it; typing edits `value`
+    /// (Backspace, Delete, Left, Right, Home, End; Escape or a click elsewhere leaves it).
+    /// The caret doesn't blink, so a focused field draws nothing while idle.
+    pub fn text_field(
+        &mut self,
+        name: &str,
+        value: &mut String,
+        placeholder: &str,
+        w: f32,
+    ) -> Response {
+        let t = self.ui.theme;
+        let me = id(name);
+        let rect = self.alloc(w, t.control_height);
+        let mut res = self.interact(me, rect);
+        let p = self.ui.pointer;
+        if res.clicked || (res.hovered && p.pressed) {
+            if self.ui.focus != Some(me) {
+                self.ui.editing.caret = value.len();
+            }
+            self.ui.focus = Some(me);
+        } else if p.pressed
+            && self.pointer_free()
+            && !rect.contains(p.x, p.y)
+            && self.ui.focus == Some(me)
+        {
+            self.ui.focus = None;
+        }
+        let focused = self.ui.focus == Some(me);
+        if focused {
+            let keys = std::mem::take(&mut self.ui.keys);
+            let mut caret = self.ui.editing.caret.min(value.len());
+            for k in &keys {
+                match k.name.as_str() {
+                    "BackSpace" => {
+                        if let Some((i, _)) = value[..caret].char_indices().next_back() {
+                            value.replace_range(i..caret, "");
+                            caret = i;
+                            res.changed = true;
+                        }
+                    }
+                    "Delete" => {
+                        if let Some(c) = value[caret..].chars().next() {
+                            value.replace_range(caret..caret + c.len_utf8(), "");
+                            res.changed = true;
+                        }
+                    }
+                    "Left" => {
+                        caret = value[..caret]
+                            .char_indices()
+                            .next_back()
+                            .map_or(0, |(i, _)| i)
+                    }
+                    "Right" => {
+                        caret = value[caret..]
+                            .chars()
+                            .next()
+                            .map_or(caret, |c| caret + c.len_utf8())
+                    }
+                    "Home" => caret = 0,
+                    "End" => caret = value.len(),
+                    _ => {
+                        if let Some(text) = &k.text
+                            && !k.ctrl
+                        {
+                            value.insert_str(caret, text);
+                            caret += text.len();
+                            res.changed = true;
+                        }
+                    }
+                }
+            }
+            self.ui.editing.caret = caret;
+            // keys the field didn't use stay for others (Escape was handled before the pass)
+            self.ui.keys = keys
+                .into_iter()
+                .filter(|k| {
+                    k.text.is_none()
+                        && !matches!(
+                            k.name.as_str(),
+                            "BackSpace" | "Delete" | "Left" | "Right" | "Home" | "End"
+                        )
+                })
+                .collect();
+        }
+        let border = if focused {
+            t.ink
+        } else if res.hovered {
+            t.muted
+        } else {
+            t.line
+        };
+        self.put(
+            Quad::rect(rect.x, rect.y, rect.w, rect.h, t.card)
+                .radius(t.control_radius)
+                .border(if focused { 2.0 } else { 1.5 }, border),
+        );
+        let pad = 14.0;
+        let (shown, color) = if value.is_empty() {
+            (placeholder, t.muted)
+        } else {
+            (value.as_str(), t.ink)
+        };
+        let laid = self.lay_out(shown, &Style::body(t.text, color), None);
+        let ty = rect.y + (rect.h - laid.height) / 2.0;
+        self.put_text(&laid, rect.x + pad, ty);
+        if focused {
+            let before = if value.is_empty() {
+                0.0
+            } else {
+                self.lay_out(
+                    &value[..self.ui.editing.caret.min(value.len())],
+                    &Style::body(t.text, t.ink),
+                    None,
+                )
+                .width
+            };
+            self.put(
+                Quad::rect(
+                    rect.x + pad + before,
+                    ty + 2.0,
+                    2.0,
+                    laid.height.max(t.text) - 4.0,
+                    t.coral,
+                )
+                .radius(1.0),
+            );
+        }
+        res
+    }
+
+    /// A scrolling area `h` tall: `build` lays out content `content_h` tall inside it,
+    /// moved by the scroll and clipped to the area. The wheel scrolls it.
+    pub fn scroll_area(
+        &mut self,
+        name: &str,
+        h: f32,
+        content_h: f32,
+        build: impl FnOnce(&mut Self),
+    ) {
+        let t = self.ui.theme;
+        let rect = self.alloc(0.0, h);
+        let key = format!("{name}/scroll");
+        let max = (content_h - h).max(0.0);
+        let mut off = self.value(&key, 0.0).clamp(0.0, max);
+        let p = self.ui.pointer;
+        if p.scroll != 0.0 && rect.contains(p.x, p.y) && self.pointer_free() {
+            off = (off + p.scroll).clamp(0.0, max);
+        }
+        self.set_value(&key, off);
+        let (q0, o0) = (self.quads.len(), self.overlay.len());
+        let inner = Rect::new(rect.x, rect.y - off, rect.w - 10.0, content_h.max(h));
+        // the pointer reaches only what's inside the visible part
+        let saved = self.ui.pointer;
+        if !rect.contains(p.x, p.y) {
+            self.ui.pointer.inside = false;
+        }
+        self.within(inner, Dir::Column, t.gap, build);
+        self.ui.pointer.inside = saved.inside;
+        let s = self.s();
+        let clip = [rect.x * s, rect.y * s, rect.right() * s, rect.bottom() * s];
+        for q in &mut self.quads[q0..] {
+            *q = q.clip(clip);
+        }
+        let _ = o0;
+        if max > 0.0 {
+            let bar_h = (h * h / content_h).max(24.0);
+            let y = rect.y + (h - bar_h) * off / max;
+            self.put(Quad::rect(rect.right() - 6.0, y, 4.0, bar_h, alpha(t.ink, 0.25)).radius(2.0));
+        }
+    }
+
+    // ---- menus and pop-ups ----
+
+    /// Is the menu or pop-up called `name` open?
+    pub fn is_open(&self, name: &str) -> bool {
+        self.ui.open.is_some_and(|o| o.id == id(name))
+    }
+
+    /// Open the menu or pop-up `name` at (x, y) (logical), closing any other.
+    pub fn open(&mut self, name: &str, x: f32, y: f32) {
+        self.ui.open = Some(Open { id: id(name), x, y });
+    }
+
+    pub fn close(&mut self) {
+        self.ui.open = None;
+    }
+
+    /// A right-click (or a pen's side button) over `area` opens the menu `name` there.
+    pub fn context_area(&mut self, name: &str, area: Rect) {
+        let p = self.ui.pointer;
+        if p.context && area.contains(p.x, p.y) && self.pointer_free() {
+            self.open(name, p.x, p.y);
+        }
+    }
+
+    /// The menu `name`, if open: `build` adds its items. Dark, as the design's menus; an
+    /// item clicked closes it, and its text is returned.
+    pub fn menu(&mut self, name: &str, build: impl FnOnce(&mut Menu)) -> Option<String> {
+        let o = self.ui.open.filter(|o| o.id == id(name))?;
+        let mut m = Menu { items: Vec::new() };
+        build(&mut m);
+        let t = self.ui.theme;
+        let was = self.in_overlay;
+        self.in_overlay = true;
+        let pad = 6.0;
+        // measure
+        let laid: Vec<(Laid, Option<Laid>)> = m
+            .items
+            .iter()
+            .map(|it| match it {
+                Item::Head(s) => (
+                    self.lay_out(
+                        &s.to_uppercase(),
+                        &Style::body(11.0, t.on_dark_muted).weight(600),
+                        None,
+                    ),
+                    None,
+                ),
+                Item::Entry { text, hint, .. } => (
+                    self.lay_out(text, &Style::body(13.0, t.on_dark).weight(500), None),
+                    (!hint.is_empty())
+                        .then(|| self.lay_out(hint, &Style::body(12.0, t.on_dark_muted), None)),
+                ),
+                Item::Sep => (Laid::default(), None),
+            })
+            .collect();
+        let w = laid
+            .iter()
+            .map(|(a, b)| a.width + b.as_ref().map_or(0.0, |b| b.width + 24.0))
+            .fold(160.0f32, f32::max)
+            + 20.0
+            + 2.0 * pad;
+        let heights: Vec<f32> = m
+            .items
+            .iter()
+            .map(|it| match it {
+                Item::Head(_) => 26.0,
+                Item::Entry { .. } => 32.0,
+                Item::Sep => 9.0,
+            })
+            .collect();
+        let h = heights.iter().sum::<f32>() + 2.0 * pad;
+        let rect = Rect::new(o.x, o.y, w, h);
+        self.blocking.push(rect);
+        self.put(
+            Quad::rect(rect.x, rect.y + 8.0, w, h, alpha(t.ink, 0.18))
+                .radius(16.0)
+                .shadow(18.0),
+        );
+        self.put(
+            Quad::rect(rect.x, rect.y, w, h, hex(0x1E1E24))
+                .radius(16.0)
+                .border(1.0, hex(0x34343C)),
+        );
+        let mut y = rect.y + pad;
+        let mut chosen = None;
+        for (i, ((it, (l, hint)), ih)) in m.items.iter().zip(&laid).zip(&heights).enumerate() {
+            let row = Rect::new(rect.x + pad, y, w - 2.0 * pad, *ih);
+            match it {
+                Item::Head(_) => self.put_text(l, row.x + 10.0, row.y + 8.0),
+                Item::Sep => self.put(Quad::rect(
+                    row.x + 8.0,
+                    row.y + 4.0,
+                    row.w - 16.0,
+                    1.0,
+                    hex(0x34343C),
+                )),
+                Item::Entry { .. } => {
+                    let r = self.interact(id(&format!("{name}/item/{i}")), row);
+                    if r.hovered {
+                        self.put(Quad::rect(row.x, row.y, row.w, row.h, hex(0x2E2E36)).radius(9.0));
+                    }
+                    self.put_text(l, row.x + 10.0, row.y + (row.h - l.height) / 2.0);
+                    if let Some(hint) = hint {
+                        self.put_text(
+                            hint,
+                            row.right() - 10.0 - hint.width,
+                            row.y + (row.h - hint.height) / 2.0,
+                        );
+                    }
+                    if r.clicked {
+                        chosen = Some(i);
+                    }
+                }
+            }
+            y += ih;
+        }
+        self.in_overlay = was;
+        let i = chosen?;
+        self.close();
+        match &m.items[i] {
+            Item::Entry { text, picked, .. } => {
+                picked.set(true);
+                Some(text.clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// A pop-up card under `anchor` (logical), `w` × `h`, if `name` is open.
+    pub fn popup(
+        &mut self,
+        name: &str,
+        anchor: Rect,
+        w: f32,
+        h: f32,
+        build: impl FnOnce(&mut Self),
+    ) {
+        if !self.is_open(name) {
+            return;
+        }
+        let t = self.ui.theme;
+        let was = self.in_overlay;
+        self.in_overlay = true;
+        let rect = Rect::new(anchor.x, anchor.bottom() + 8.0, w, h);
+        self.blocking.push(rect);
+        self.put(
+            Quad::rect(rect.x + 2.0, rect.y + 8.0, w, h, alpha(t.ink, 0.14))
+                .radius(t.card_radius)
+                .shadow(18.0),
+        );
+        self.put(Quad::rect(rect.x, rect.y, w, h, t.card).radius(t.card_radius));
+        let inner = rect.inset(t.pad);
+        self.within(inner, Dir::Column, t.gap * 1.5, build);
+        self.in_overlay = was;
+    }
+
     /// A value kept between passes (for widgets the app doesn't hold state for).
     pub fn value(&mut self, name: &str, default: f32) -> f32 {
         *self.ui.values.entry(id(name)).or_insert(default)
@@ -517,6 +1092,77 @@ impl Frame<'_> {
     pub fn set_value(&mut self, name: &str, v: f32) {
         self.ui.values.insert(id(name), v);
     }
+}
+
+/// A menu's items, added in order.
+pub struct Menu {
+    items: Vec<Item>,
+}
+
+enum Item {
+    Head(String),
+    Entry {
+        text: String,
+        hint: String,
+        picked: std::rc::Rc<std::cell::Cell<bool>>,
+    },
+    Sep,
+}
+
+/// Whether a menu item was picked (read after the menu is built).
+#[derive(Clone)]
+pub struct Picked(std::rc::Rc<std::cell::Cell<bool>>);
+
+impl Picked {
+    pub fn get(&self) -> bool {
+        self.0.get()
+    }
+}
+
+impl Menu {
+    pub fn head(&mut self, text: &str) {
+        self.items.push(Item::Head(text.into()));
+    }
+    pub fn separator(&mut self) {
+        self.items.push(Item::Sep);
+    }
+    /// An item (with a hint on its right: a shortcut, a ✓, a current value). `Picked`
+    /// says whether it was clicked, once `menu` has returned (not while building it).
+    pub fn item(&mut self, text: &str, hint: &str) -> Picked {
+        let p = std::rc::Rc::new(std::cell::Cell::new(false));
+        self.items.push(Item::Entry {
+            text: text.into(),
+            hint: hint.into(),
+            picked: p.clone(),
+        });
+        Picked(p)
+    }
+}
+
+/// An icon path (24 × 24 box) as a white mask, `px` square, 2 px lines with round ends.
+fn raster_icon(path: &str, px: u32) -> Option<Vec<u8>> {
+    use resvg::{tiny_skia, usvg};
+    let svg = format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="{path}" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>"##
+    );
+    let tree = usvg::Tree::from_str(&svg, &usvg::Options::default()).ok()?;
+    let mut pixmap = tiny_skia::Pixmap::new(px, px)?;
+    let k = px as f32 / 24.0;
+    resvg::render(
+        &tree,
+        tiny_skia::Transform::from_scale(k, k),
+        &mut pixmap.as_mut(),
+    );
+    // white, premultiplied: every channel is the coverage
+    Some(
+        pixmap
+            .data()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|p| [p[3]; 4])
+            .collect(),
+    )
 }
 
 fn mix(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {

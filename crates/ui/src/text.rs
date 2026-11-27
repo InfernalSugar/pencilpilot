@@ -258,6 +258,21 @@ impl Text {
         out
     }
 
+    /// Put a picture (premultiplied RGBA8, `w` × `h`) into the atlas; its texture
+    /// coordinates. (The atlas starts over when the system's fonts join: pictures put
+    /// before then are put again.)
+    pub fn place(&mut self, r: &mut Renderer2d, w: u32, h: u32, rgba: &[u8]) -> Option<[f32; 4]> {
+        let (x, y) = self.shelves.place(w, h)?;
+        r.atlas_put(x, y, w, h, rgba);
+        let s = ATLAS_SIZE as f32;
+        Some([
+            x as f32 / s,
+            y as f32 / s,
+            (x + w) as f32 / s,
+            (y + h) as f32 / s,
+        ])
+    }
+
     /// A glyph's place in the atlas, drawing it there the first time.
     fn glyph(&mut self, r: &mut Renderer2d, key: CacheKey) -> Option<Slot> {
         if let Some(s) = self.glyphs.get(&key) {
