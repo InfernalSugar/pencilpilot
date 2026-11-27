@@ -3192,9 +3192,8 @@ impl Painter {
         let (nw, nh) = ((now.2 - now.0 + 1) as usize, (now.3 - now.1 + 1) as usize);
         let mut drawn: Vec<Option<[u16; 4]>> = vec![None; nw * nh];
         {
-            // rows are independent: on every core
-            use rayon::prelude::*;
-            drawn.par_chunks_mut(nw).enumerate().for_each(|(ry, row)| {
+            // rows are independent: on every core natively (the browser build: one by one)
+            let fill_row = |(ry, row): (usize, &mut [Option<[u16; 4]>])| {
                 let cy = now.1 + ry as i64;
                 for p in &pieces {
                     let b = clip(p.bbox);
@@ -3216,7 +3215,14 @@ impl Painter {
                         row[i] = Some(sample(sx, sy));
                     }
                 }
-            });
+            };
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                use rayon::prelude::*;
+                drawn.par_chunks_mut(nw).enumerate().for_each(fill_row);
+            }
+            #[cfg(target_arch = "wasm32")]
+            drawn.chunks_mut(nw).enumerate().for_each(fill_row);
         }
         t.cover = track.then(|| {
             (
