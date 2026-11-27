@@ -181,6 +181,11 @@ struct FrameRec {
     /// when the compositor asked for it, from when it was meant to start, ns (negative:
     /// before)
     asked_ns: i64,
+    /// the document it showed: its size, and which one (`State::doc_id`)
+    doc: (u32, u32),
+    doc_gen: u32,
+    /// an export running then: frames done, of how many
+    export: Option<(u32, u32)>,
     /// when it reached the screen, ns
     shown_ns: Option<u64>,
 }
@@ -649,6 +654,9 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             wake_ns: woke.saturating_sub(work_from),
             pass_ns,
             asked_ns: asked as i64 - work_from as i64,
+            doc: (s.view.doc_w, s.view.doc_h),
+            doc_gen: s.doc_id,
+            export: s.export_progress,
             shown_ns: None,
         });
     }
@@ -662,7 +670,7 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             .iter()
             .map(|r| {
                 format!(
-                    "{{\"frame\": {}, \"inputMs\": {}, \"receivedNs\": {}, \"events\": {}, \"drawnNs\": {}, \"shownNs\": {}, \"sheetFrame\": {}, \"workNs\": {}, \"gpuNs\": {}, \"wakeNs\": {}, \"passNs\": {}, \"askedNs\": {}}}",
+                    "{{\"frame\": {}, \"inputMs\": {}, \"receivedNs\": {}, \"events\": {}, \"drawnNs\": {}, \"shownNs\": {}, \"sheetFrame\": {}, \"workNs\": {}, \"gpuNs\": {}, \"wakeNs\": {}, \"passNs\": {}, \"askedNs\": {}, \"doc\": [{}, {}], \"docGen\": {}, \"export\": {}}}",
                     r.frame,
                     opt(r.input.map(|i| i.0 as u64)),
                     opt(r.input.map(|i| i.1)),
@@ -674,7 +682,12 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
                     r.gpu_ns,
                     r.wake_ns,
                     r.pass_ns,
-                    r.asked_ns
+                    r.asked_ns,
+                    r.doc.0,
+                    r.doc.1,
+                    r.doc_gen,
+                    r.export
+                        .map_or("null".to_string(), |(d, n)| format!("[{d}, {n}]"))
                 )
             })
             .collect();
