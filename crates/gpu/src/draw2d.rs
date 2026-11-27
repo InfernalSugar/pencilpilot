@@ -32,6 +32,44 @@ fn premul(c: [f32; 4]) -> [f32; 4] {
 const NO_CLIP: [f32; 4] = [-1e9, -1e9, 1e9, 1e9];
 
 impl Quad {
+    /// The canvas (the picture given to [`Renderer2d::draw_layered`]), shown over the
+    /// rectangle (x, y, w, h, frame pixels) through `map`: frame pixel → canvas pixel as
+    /// `[a, b, c, d, tx, ty]` (`canvas = (a·x + b·y + tx, c·x + d·y + ty)`). Outside the
+    /// canvas, `outside` shows. `size` is the canvas's size; `sharp` shows its pixels as
+    /// squares (zoomed in) rather than smoothed.
+    pub fn canvas(
+        rect: [f32; 4],
+        map: [f32; 6],
+        size: [f32; 2],
+        outside: [f32; 4],
+        sharp: bool,
+    ) -> Quad {
+        Quad {
+            rect,
+            fill: premul(outside),
+            border_color: [map[4], map[5], size[0], size[1]],
+            uv: [map[0], map[1], map[2], map[3]],
+            params: [0.0, if sharp { 1.0 } else { 0.0 }, 0.0, 4.0],
+            clip: NO_CLIP,
+        }
+    }
+
+    /// A canvas quad showing the second picture (see [`Renderer2d::draw_canvases`]).
+    pub fn second(mut self) -> Quad {
+        self.params[2] = 1.0;
+        self
+    }
+
+    /// Its rectangle (x, y, w, h), for checks.
+    pub fn rect_xywh(&self) -> [f32; 4] {
+        self.rect
+    }
+
+    /// Its fill colour (premultiplied), for checks.
+    pub fn fill_rgba(&self) -> [f32; 4] {
+        self.fill
+    }
+
     /// A filled rectangle (pixels).
     pub fn rect(x: f32, y: f32, w: f32, h: f32, fill: [f32; 4]) -> Quad {
         Quad {
@@ -87,6 +125,19 @@ impl Quad {
         for v in &mut self.rect {
             *v *= s;
         }
+        if self.params[3] == 4.0 {
+            // a canvas: its map now takes the scaled pixels; its corners scale
+            for v in &mut self.uv {
+                *v /= s;
+            }
+            self.params[0] *= s;
+            if self.clip != NO_CLIP {
+                for v in &mut self.clip {
+                    *v *= s;
+                }
+            }
+            return self;
+        }
         self.params[0] *= s;
         self.params[1] *= s;
         self.params[2] *= s;
@@ -101,6 +152,12 @@ impl Quad {
     pub fn moved(mut self, dx: f32, dy: f32) -> Quad {
         self.rect[0] += dx;
         self.rect[1] += dy;
+        if self.params[3] == 4.0 {
+            // a canvas: the same canvas pixel shows (dx, dy) further on
+            let [a, b, c, d] = self.uv;
+            self.border_color[0] -= a * dx + b * dy;
+            self.border_color[1] -= c * dx + d * dy;
+        }
         if self.clip != NO_CLIP {
             self.clip = [
                 self.clip[0] + dx,
@@ -153,6 +210,8 @@ pub struct Renderer2d {
     atlas: vk::Image,
     atlas_memory: vk::DeviceMemory,
     atlas_view: vk::ImageView,
+    /// what bindings 2 and 3 show: a picture's serial (0: the atlas; u64::MAX: nothing yet)
+    bound_canvas: [u64; 2],
     staging: vk::Buffer,
     staging_memory: vk::DeviceMemory,
     staging_ptr: *mut u8,
@@ -182,6 +241,17 @@ impl Renderer2d {
                 vk::DescriptorSetLayoutBinding::default()
                     .binding(1)
                     .descriptor_type(vk::DescriptorType::SAMPLER)
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+                // the canvas and a second picture (the atlas stands in when there's none)
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(2)
+                    .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(3)
+                    .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
                     .descriptor_count(1)
                     .stage_flags(vk::ShaderStageFlags::FRAGMENT),
             ];
@@ -331,7 +401,7 @@ impl Renderer2d {
             let sizes = [
                 vk::DescriptorPoolSize {
                     ty: vk::DescriptorType::SAMPLED_IMAGE,
-                    descriptor_count: 1,
+                    descriptor_count: 3,
                 },
                 vk::DescriptorPoolSize {
                     ty: vk::DescriptorType::SAMPLER,
@@ -369,6 +439,16 @@ impl Renderer2d {
                         .dst_binding(1)
                         .descriptor_type(vk::DescriptorType::SAMPLER)
                         .image_info(&smp),
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(set)
+                        .dst_binding(2)
+                        .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                        .image_info(&img),
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(set)
+                        .dst_binding(3)
+                        .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                        .image_info(&img),
                 ],
                 &[],
             );
@@ -391,6 +471,7 @@ impl Renderer2d {
                 atlas,
                 atlas_memory,
                 atlas_view,
+                bound_canvas: [0; 2],
                 staging,
                 staging_memory,
                 staging_ptr: staging_ptr as *mut u8,
@@ -431,19 +512,32 @@ impl Renderer2d {
         clear: [f32; 4],
         quads: &[Quad],
     ) -> Result<()> {
-        self.draw_layered(gpu, frame, clear, quads, quads.len(), None)
+        self.draw_layered(gpu, frame, clear, quads, None)
     }
 
-    /// Draw `quads[..below]`, then the canvas copied into `at` (x, y, w, h in the frame's
-    /// pixels; its changes go up first), then the rest of `quads` over it.
+    /// Draw `quads`, in order, into `frame` over `clear`, with `canvas` (its changes go up
+    /// first) available to [`Quad::canvas`] quads, and hand it to the compositor.
     pub fn draw_layered(
         &mut self,
         gpu: &Gpu,
         frame: &DmabufImage,
         clear: [f32; 4],
         quads: &[Quad],
-        below: usize,
-        canvas: Option<(&mut Canvas, [i32; 4])>,
+        canvas: Option<&mut Canvas>,
+    ) -> Result<()> {
+        self.draw_canvases(gpu, frame, clear, quads, canvas, None)
+    }
+
+    /// [`Renderer2d::draw_layered`] with a second picture, `second`, for
+    /// [`Quad::canvas`] quads marked [`Quad::second`] (e.g. pixels being moved).
+    pub fn draw_canvases(
+        &mut self,
+        gpu: &Gpu,
+        frame: &DmabufImage,
+        clear: [f32; 4],
+        quads: &[Quad],
+        canvas: Option<&mut Canvas>,
+        second: Option<&mut Canvas>,
     ) -> Result<()> {
         if quads.len() > self.capacity {
             let cap = quads.len().next_power_of_two();
@@ -499,40 +593,69 @@ impl Renderer2d {
             .collect();
         let first = !self.atlas_ready;
         self.atlas_ready = true;
-        let below = below.min(quads.len());
-        let under = canvas.map(|(c, at)| {
-            let regions: Vec<vk::BufferImageCopy> = c
-                .pending
-                .drain(..)
-                .map(|[x, y, w, h]| {
-                    vk::BufferImageCopy::default()
-                        .buffer_offset((y as u64 * c.width as u64 + x as u64) * 4)
-                        .buffer_row_length(c.width)
-                        .image_subresource(super::COLOR_LAYERS)
-                        .image_offset(vk::Offset3D {
-                            x: x as i32,
-                            y: y as i32,
-                            z: 0,
-                        })
-                        .image_extent(vk::Extent3D {
-                            width: w,
-                            height: h,
-                            depth: 1,
-                        })
-                })
-                .collect();
-            let was_ready = c.ready;
-            c.ready = true;
-            // the part of the canvas that fits at `at` inside the frame
-            let (x, y) = (at[0].max(0), at[1].max(0));
-            let w = (at[2].min(c.width as i32))
-                .min(frame.width as i32 - x)
-                .max(0) as u32;
-            let h = (at[3].min(c.height as i32))
-                .min(frame.height as i32 - y)
-                .max(0) as u32;
-            (c.image, c.staging, regions, was_ready, [x, y], [w, h])
-        });
+        // the canvas quads sample: bind these pictures (or the atlas, when there's none)
+        // (by serial: a new picture can get a destroyed one's handles back)
+        for (binding, want, serial) in [
+            (
+                2,
+                canvas.as_ref().map_or(self.atlas_view, |c| c.view),
+                canvas.as_ref().map_or(0, |c| c.serial),
+            ),
+            (
+                3,
+                second.as_ref().map_or(self.atlas_view, |c| c.view),
+                second.as_ref().map_or(0, |c| c.serial),
+            ),
+        ] {
+            let bound = &mut self.bound_canvas[binding as usize - 2];
+            if serial == *bound {
+                continue;
+            }
+            let img = [vk::DescriptorImageInfo::default()
+                .image_view(want)
+                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+            // SAFETY: the set isn't in use (each draw waits for the GPU)
+            unsafe {
+                self.device.update_descriptor_sets(
+                    &[vk::WriteDescriptorSet::default()
+                        .dst_set(self.set)
+                        .dst_binding(binding)
+                        .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                        .image_info(&img)],
+                    &[],
+                )
+            };
+            *bound = serial;
+        }
+        let pictures: Vec<_> = canvas
+            .into_iter()
+            .chain(second)
+            .map(|c| {
+                let regions: Vec<vk::BufferImageCopy> = c
+                    .pending
+                    .drain(..)
+                    .map(|[x, y, w, h]| {
+                        vk::BufferImageCopy::default()
+                            .buffer_offset((y as u64 * c.width as u64 + x as u64) * 4)
+                            .buffer_row_length(c.width)
+                            .image_subresource(super::COLOR_LAYERS)
+                            .image_offset(vk::Offset3D {
+                                x: x as i32,
+                                y: y as i32,
+                                z: 0,
+                            })
+                            .image_extent(vk::Extent3D {
+                                width: w,
+                                height: h,
+                                depth: 1,
+                            })
+                    })
+                    .collect();
+                let was_ready = c.ready;
+                c.ready = true;
+                (c.image, c.staging, regions, was_ready)
+            })
+            .collect();
         let fam = gpu.family;
         let (atlas, staging, pipeline, layout, set, instances) = (
             self.atlas,
@@ -694,31 +817,34 @@ impl Renderer2d {
                 }
                 d.cmd_end_rendering(cmd);
             };
-            pass(0, below, vk::AttachmentLoadOp::CLEAR);
-            if let Some((cimg, cstaging, cregions, was_ready, [x, y], [w, h])) = &under {
-                let cfrom = if *was_ready {
-                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL
+            // the pictures' changes go up, then they're read by the shader
+            for (cimg, cstaging, cregions, was_ready) in &pictures {
+                if cregions.is_empty() && *was_ready {
+                    continue;
+                }
+                let from = if *was_ready {
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
                 } else {
                     vk::ImageLayout::UNDEFINED
                 };
+                Gpu::barrier(
+                    d,
+                    cmd,
+                    *cimg,
+                    (
+                        from,
+                        vk::AccessFlags::SHADER_READ,
+                        vk::PipelineStageFlags::FRAGMENT_SHADER,
+                        vk::QUEUE_FAMILY_IGNORED,
+                    ),
+                    (
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        vk::AccessFlags::TRANSFER_WRITE,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::QUEUE_FAMILY_IGNORED,
+                    ),
+                );
                 if !cregions.is_empty() {
-                    Gpu::barrier(
-                        d,
-                        cmd,
-                        *cimg,
-                        (
-                            cfrom,
-                            vk::AccessFlags::TRANSFER_READ,
-                            vk::PipelineStageFlags::TRANSFER,
-                            vk::QUEUE_FAMILY_IGNORED,
-                        ),
-                        (
-                            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                            vk::AccessFlags::TRANSFER_WRITE,
-                            vk::PipelineStageFlags::TRANSFER,
-                            vk::QUEUE_FAMILY_IGNORED,
-                        ),
-                    );
                     d.cmd_copy_buffer_to_image(
                         cmd,
                         *cstaging,
@@ -726,82 +852,26 @@ impl Renderer2d {
                         vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                         cregions,
                     );
-                    Gpu::barrier(
-                        d,
-                        cmd,
-                        *cimg,
-                        (
-                            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                            vk::AccessFlags::TRANSFER_WRITE,
-                            vk::PipelineStageFlags::TRANSFER,
-                            vk::QUEUE_FAMILY_IGNORED,
-                        ),
-                        (
-                            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                            vk::AccessFlags::TRANSFER_READ,
-                            vk::PipelineStageFlags::TRANSFER,
-                            vk::QUEUE_FAMILY_IGNORED,
-                        ),
-                    );
                 }
-                if (*was_ready || !cregions.is_empty()) && *w > 0 && *h > 0 {
-                    Gpu::barrier(
-                        d,
-                        cmd,
-                        frame.image,
-                        (
-                            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                            vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-                            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                            vk::QUEUE_FAMILY_IGNORED,
-                        ),
-                        (
-                            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                            vk::AccessFlags::TRANSFER_WRITE,
-                            vk::PipelineStageFlags::TRANSFER,
-                            vk::QUEUE_FAMILY_IGNORED,
-                        ),
-                    );
-                    let copy = vk::ImageCopy::default()
-                        .src_subresource(super::COLOR_LAYERS)
-                        .dst_subresource(super::COLOR_LAYERS)
-                        .dst_offset(vk::Offset3D { x: *x, y: *y, z: 0 })
-                        .extent(vk::Extent3D {
-                            width: *w,
-                            height: *h,
-                            depth: 1,
-                        });
-                    d.cmd_copy_image(
-                        cmd,
-                        *cimg,
-                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                        frame.image,
+                Gpu::barrier(
+                    d,
+                    cmd,
+                    *cimg,
+                    (
                         vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                        &[copy],
-                    );
-                    Gpu::barrier(
-                        d,
-                        cmd,
-                        frame.image,
-                        (
-                            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                            vk::AccessFlags::TRANSFER_WRITE,
-                            vk::PipelineStageFlags::TRANSFER,
-                            vk::QUEUE_FAMILY_IGNORED,
-                        ),
-                        (
-                            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                            vk::AccessFlags::COLOR_ATTACHMENT_WRITE
-                                | vk::AccessFlags::COLOR_ATTACHMENT_READ,
-                            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                            vk::QUEUE_FAMILY_IGNORED,
-                        ),
-                    );
-                }
+                        vk::AccessFlags::TRANSFER_WRITE,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::QUEUE_FAMILY_IGNORED,
+                    ),
+                    (
+                        vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                        vk::AccessFlags::SHADER_READ,
+                        vk::PipelineStageFlags::FRAGMENT_SHADER,
+                        vk::QUEUE_FAMILY_IGNORED,
+                    ),
+                );
             }
-            if quads.len() > below || under.is_some() {
-                pass(below, quads.len(), vk::AttachmentLoadOp::LOAD);
-            }
+            pass(0, quads.len(), vk::AttachmentLoadOp::CLEAR);
             Gpu::barrier(
                 d,
                 cmd,

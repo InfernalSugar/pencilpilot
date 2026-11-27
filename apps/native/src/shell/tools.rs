@@ -180,8 +180,9 @@ pub fn build(f: &mut Frame, r: Rect, s: &mut State) {
         .copied()
         .filter(|t| !s.tools.hidden.contains(t))
         .collect();
-    // the tools' keys (not while a text field has the keyboard: typing never switches tools)
-    let typing = f.typing();
+    // the tools' keys (not while a text field has the keyboard, nor while text is typed on
+    // the canvas: typing never switches tools)
+    let typing = f.typing() || s.tooling.text.is_some();
     for &tool in shown.iter().filter(|_| !typing) {
         let key = tool_info(tool).1;
         if key.len() == 1 && f.take_key(key, false) {

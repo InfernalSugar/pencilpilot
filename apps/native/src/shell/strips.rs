@@ -14,6 +14,7 @@ use pencilpilot_ui::text::{Laid, Style};
 use pencilpilot_ui::theme::{alpha, hex};
 use pencilpilot_ui::ui::{Frame, Rect, Response, id};
 
+use crate::shell::engine::frames::{self, Mark, Thumb, ops};
 use crate::state::{Action, ColourStatus, State, Workspace};
 
 // ---- the design's colours ----
@@ -36,9 +37,6 @@ const SUN: [f32; 4] = hex(0xFFD84D);
 const LEAF: [f32; 4] = hex(0x5FD08A);
 const SOUND: [f32; 4] = hex(0x4A3F7A);
 const ACTIVE_ROW: [f32; 4] = hex(0x2E2A26);
-const SKIN: [f32; 4] = hex(0xF2C9A8);
-const SKIN_SHADE: [f32; 4] = hex(0xD99C7A);
-const JACKET_SHADE: [f32; 4] = hex(0xA8321F);
 const WHITE: [f32; 4] = hex(0xFFFFFF);
 
 // ---- icons (24 × 24 paths, drawn as 2 px lines) ----
@@ -170,25 +168,6 @@ const TRAYS: [Tray; 6] = [
     },
 ];
 
-/// How a drawing is marked in the timeline.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mark {
-    None,
-    Key,
-    Breakdown,
-}
-
-/// A drawing held for some frames on a layer (numbered by its place in the row).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Exposure {
-    pub hold: u32,
-    pub mark: Mark,
-}
-
-const fn ex(hold: u32, mark: Mark) -> Exposure {
-    Exposure { hold, mark }
-}
-
 /// What the grid shows ("Show ▾").
 pub const SHOW: [&str; 3] = ["All", "Keys and breakdowns", "Keys only"];
 /// Onion skin's range ("onion ▾").
@@ -212,9 +191,6 @@ pub struct StripsState {
     pub open_tray: Option<usize>,
     /// each tray's current option
     pub picked: [usize; 6],
-    /// each layer's drawings and their holds, by layer index (until the engine's exposure
-    /// sheet comes in; a static layer is one drawing all cut long)
-    pub exposures: Vec<Vec<Exposure>>,
     /// the cut's sound: first frame and length
     pub sound: (u32, u32),
     /// the grid's horizontal scroll, logical pixels
@@ -232,6 +208,8 @@ pub struct StripsState {
     menu_layer: usize,
     /// the drawing a right-click menu is about
     menu_drawing: usize,
+    /// the frame the ruler's right-click menu is about
+    menu_frame: u32,
     /// where the widgets went in the last pass (for the tests)
     #[cfg(test)]
     hits: std::collections::HashMap<String, Rect>,
@@ -239,18 +217,10 @@ pub struct StripsState {
 
 impl Default for StripsState {
     fn default() -> Self {
-        use Mark::{Breakdown as B, Key as K, None as N};
         StripsState {
             open_tray: None,
             // Scene 1, Cut 2, New drawing, Hold on 2s, Key, Insert frame
             picked: [0, 1, 0, 1, 0, 0],
-            // the design's example cut
-            exposures: vec![
-                vec![ex(6, K), ex(6, N), ex(6, B), ex(6, K), ex(8, N), ex(16, K)],
-                vec![ex(12, K), ex(12, N), ex(24, K)],
-                vec![ex(12, N), ex(12, N), ex(12, N), ex(12, N)],
-                vec![],
-            ],
             sound: (6, 22),
             scroll_x: 0.0,
             show: 0,
@@ -262,6 +232,7 @@ impl Default for StripsState {
             pressed_open: false,
             menu_layer: 0,
             menu_drawing: 0,
+            menu_frame: 0,
             #[cfg(test)]
             hits: Default::default(),
         }
@@ -269,6 +240,9 @@ impl Default for StripsState {
 }
 
 pub fn build(f: &mut Frame, r: Rect, s: &mut State) {
+    // what the strips show follows the exposure sheet
+    frames::derive(s);
+    keys(f, s);
     // twice: first for the input (what's clicked changes the state, menus open and pick),
     // then to draw the state as it is now, so a click shows in the pass it happens in
     DRAW.set(false);
@@ -278,6 +252,33 @@ pub fn build(f: &mut Frame, r: Rect, s: &mut State) {
     DRAW.set(true);
     put(f, Quad::rect(r.x, r.y, r.w, r.h, INK).radius(22.0));
     strip(f, r, s);
+}
+
+/// The timeline's keys (not while typing): N a new drawing, O onion skin, ← and → a frame,
+/// Enter plays or stops.
+fn keys(f: &mut Frame, s: &mut State) {
+    if f.typing() {
+        return;
+    }
+    if f.take_key("n", false) {
+        s.actions.push(Action::NewDrawing);
+    }
+    if f.take_key("o", false) {
+        s.onion = !s.onion;
+    }
+    if f.take_key("Left", false) {
+        s.actions.push(Action::PreviousFrame);
+    }
+    if f.take_key("Right", false) {
+        s.actions.push(Action::NextFrame);
+    }
+    if f.take_key("Return", false) {
+        s.actions.push(if s.playing {
+            Action::Stop
+        } else {
+            Action::Play
+        });
+    }
 }
 
 fn strip(f: &mut Frame, r: Rect, s: &mut State) {
@@ -525,7 +526,11 @@ fn layer_option_picked(s: &mut State, layer: usize, picked: &str) {
         "Unlock layer" => l.locked = false,
         "Cel layer: a drawing per exposure" => l.kind = 'C',
         "Static: one drawing all cut long" => l.kind = 'S',
-        other => s.actions.push(Action::Other(other.to_string())),
+        other => {
+            // (about this layer: it becomes the active one first)
+            s.active_layer = layer;
+            s.actions.push(Action::Other(other.to_string()));
+        }
     }
 }
 
@@ -552,22 +557,42 @@ fn onion_picked(s: &mut State, picked: &str) {
     }
 }
 
-/// The drawings' frame spans on a layer: (first frame, hold, mark) for each drawing.
-fn spans(s: &State, layer: usize) -> Vec<(u32, u32, Mark)> {
-    let mut at = 0;
-    s.strips
-        .exposures
+/// A layer's cels from the exposure sheet: (first frame, hold, mark, drawing) each.
+fn spans(s: &State, layer: usize) -> Vec<(u32, u32, Mark, u32)> {
+    s.sheet
+        .tracks
         .get(layer)
-        .map(|v| {
-            v.iter()
-                .map(|e| {
-                    let span = (at, e.hold, e.mark);
-                    at += e.hold;
-                    span
-                })
+        .map(|t| {
+            t.spans()
+                .into_iter()
+                .map(|(a, c)| (a, c.hold, c.mark, c.drawing))
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// A drawing's number on its layer (1, 2…, as the timeline labels its cels).
+fn drawing_number(s: &State, layer: usize, drawing: u32) -> Option<usize> {
+    let t = s.sheet.tracks.get(layer)?;
+    t.drawings()
+        .iter()
+        .position(|d| *d == drawing)
+        .map(|i| i + 1)
+}
+
+/// A drawing's small picture in `r` (on white), kept in the atlas by drawing.
+fn thumb(f: &mut Frame, t: Option<&Thumb>, d: u32, r: Rect, radius: f32) {
+    put(f, Quad::rect(r.x, r.y, r.w, r.h, WHITE).radius(radius));
+    let Some(t) = t else {
+        return;
+    };
+    let k = (r.w / t.w as f32).min(r.h / t.h as f32);
+    let (w, h) = (k * t.w as f32, k * t.h as f32);
+    let at = Rect::new(r.x + (r.w - w) / 2.0, r.y + (r.h - h) / 2.0, w, h);
+    // (in the drawing run only, as every quad here)
+    if drawing() {
+        f.picture(&format!("strips/thumb/{d}"), t.w, t.h, &t.px, at);
+    }
 }
 
 // ---- Animate: the timeline ----
@@ -754,10 +779,21 @@ fn grid_area(f: &mut Frame, g: Rect, strip: Rect, s: &mut State) {
     let ruler = Rect::new(fx, g.y, fw, RULER_H);
     hit(s, "strips/ruler", ruler);
     let res = act(f, id("strips/ruler"), ruler);
+    let under = ((p.x - left) / cw).floor().max(0.0) as u32;
     if res.clicked {
-        let k = ((p.x - left) / cw).floor().max(0.0) as u32;
-        s.actions
-            .push(Action::GoToFrame(k.min(s.frames.saturating_sub(1))));
+        go_to(s, under.min(s.frames.saturating_sub(1)));
+    }
+    if res.context {
+        s.strips.menu_frame = under.min(s.frames.saturating_sub(1));
+        let items = ruler_menu(s, s.strips.menu_frame);
+        open_above(f, "strips/ruler-menu", &items, p.x, p.y, strip);
+    }
+    if let Some((a, b)) = s.sheet.loop_range {
+        let x = left + a as f32 * cw;
+        put(
+            f,
+            Quad::rect(x, g.y + RULER_H - 4.0, (b + 1 - a) as f32 * cw, 4.0, SUN).clip(clip),
+        );
     }
     for k in first..last {
         let fnum = k + 1;
@@ -805,6 +841,18 @@ fn grid_area(f: &mut Frame, g: Rect, strip: Rect, s: &mut State) {
         }
         let ny = name_r.y + name_r.h / 2.0;
         let badge = Rect::new(g.x + NAMES_W - 8.0 - 20.0, ny - 10.0, 20.0, 20.0);
+        // the row (a click picks the layer), then the eye on it (a press there is the eye's)
+        let lname = format!("strips/layer/{li}");
+        hit(s, &lname, name_r);
+        let res = act(f, id(&lname), name_r);
+        if res.clicked {
+            s.active_layer = li;
+        }
+        if res.context {
+            s.strips.menu_layer = li;
+            let items = layer_options(s, li);
+            open_above(f, "strips/layer-options", &items, p.x, p.y, strip);
+        }
         // the eye: hide or show the layer
         let eye = Rect::new(g.x + 6.0, ny - 12.0, 24.0, 24.0);
         let ename = format!("strips/eye/{li}");
@@ -844,29 +892,21 @@ fn grid_area(f: &mut Frame, g: Rect, strip: Rect, s: &mut State) {
         );
         let bl = text(f, &layer.kind.to_string(), 11.0, 700, ON_DARK);
         text_at(f, &bl, badge.x + (20.0 - bl.width) / 2.0, ny);
-        let lname = format!("strips/layer/{li}");
-        hit(s, &lname, name_r);
-        let res = act(f, id(&lname), name_r);
-        if res.clicked {
-            s.active_layer = li;
-        }
-        if res.context {
-            s.strips.menu_layer = li;
-            let items = layer_options(s, li);
-            open_above(f, "strips/layer-options", &items, p.x, p.y, strip);
-        }
 
         // the cels
-        let cel_spans: Vec<(u32, u32, Mark, String)> = if layer.kind == 'S' {
-            vec![(0, s.frames, Mark::None, "Static".into())]
-        } else {
-            spans(s, li)
-                .into_iter()
-                .enumerate()
-                .map(|(n, (a, h, m))| (a, h, m, (n + 1).to_string()))
-                .collect()
-        };
-        for (n, (start, hold, mark, label)) in cel_spans.into_iter().enumerate() {
+        let cel_spans: Vec<(u32, u32, Mark, u32, String)> = spans(s, li)
+            .into_iter()
+            .map(|(a, h, m, d)| {
+                let label = match (layer.kind, drawing_number(s, li, d)) {
+                    ('S', _) => "Static".to_string(),
+                    (_, Some(n)) => n.to_string(),
+                    _ => String::new(),
+                };
+                (a, h, m, d, label)
+            })
+            .collect();
+        for (n, (start, hold, mark, drawing, label)) in cel_spans.into_iter().enumerate() {
+            let blank = drawing == 0 && layer.kind != 'S';
             let cx = left + start as f32 * cw + 1.0;
             let w = hold as f32 * cw - 2.0;
             if cx + w < fx || cx > g.right() {
@@ -884,11 +924,17 @@ fn grid_area(f: &mut Frame, g: Rect, strip: Rect, s: &mut State) {
             let res = act(f, id(&cname), visible);
             let picked = li == s.active_layer && (start..start + hold).contains(&s.frame);
             let shown = match s.strips.show {
-                1 => mark != Mark::None,
+                1 => matches!(mark, Mark::Key | Mark::Breakdown),
                 2 => mark == Mark::Key,
                 _ => true,
             } || layer.kind == 'S';
-            let mut fill = if picked { CEL_PICKED } else { CEL };
+            let mut fill = if blank {
+                alpha(CEL, 0.0)
+            } else if picked {
+                CEL_PICKED
+            } else {
+                CEL
+            };
             if res.hovered {
                 fill = mix(fill, ON_DARK, 0.08);
             }
@@ -900,7 +946,7 @@ fn grid_area(f: &mut Frame, g: Rect, strip: Rect, s: &mut State) {
             let a = if shown { 1.0 } else { 0.35 };
             put(
                 f,
-                Quad::rect(cr.x, cr.y, cr.w, cr.h, alpha(fill, a))
+                Quad::rect(cr.x, cr.y, cr.w, cr.h, alpha(fill, fill[3] * a))
                     .radius(5.0)
                     .border(bw, alpha(bc, a))
                     .clip(clip),
@@ -910,6 +956,7 @@ fn grid_area(f: &mut Frame, g: Rect, strip: Rect, s: &mut State) {
             let badge = match mark {
                 Mark::Key => "K",
                 Mark::Breakdown => "B",
+                Mark::InBetween => "•",
                 Mark::None => "",
             };
             let bl = (!badge.is_empty()).then(|| text(f, badge, 9.0, 700, alpha(SUN, a)));
@@ -925,8 +972,7 @@ fn grid_area(f: &mut Frame, g: Rect, strip: Rect, s: &mut State) {
             }
             if res.clicked {
                 s.active_layer = li;
-                s.actions
-                    .push(Action::GoToFrame(start.min(s.frames.saturating_sub(1))));
+                go_to(s, start.min(s.frames.saturating_sub(1)));
             }
             if res.context {
                 s.active_layer = li;
@@ -973,31 +1019,60 @@ fn grid_area(f: &mut Frame, g: Rect, strip: Rect, s: &mut State) {
     }
     let items = frame_menu(s, s.strips.menu_layer, s.strips.menu_drawing);
     if let Some(p) = show_menu(f, "strips/frame", &items) {
+        // about the cel right-clicked: its layer and first frame
+        if let Some((a, ..)) = spans(s, s.strips.menu_layer).get(s.strips.menu_drawing) {
+            s.active_layer = s.strips.menu_layer;
+            go_to(s, *a);
+        }
         s.actions.push(Action::Other(p));
     }
+    let items = ruler_menu(s, s.strips.menu_frame);
+    if let Some(p) = show_menu(f, "strips/ruler-menu", &items) {
+        go_to(s, s.strips.menu_frame);
+        s.actions.push(Action::Other(p));
+    }
+}
+
+fn ruler_menu(s: &State, frame: u32) -> Vec<M> {
+    let range = match s.sheet.loop_range {
+        Some((a, b)) => format!("Frames {}–{} ×", a + 1, b + 1),
+        None => String::new(),
+    };
+    vec![
+        M::Head(format!("Frame {}", frame + 1)),
+        item(ops::LOOP_FROM, "In"),
+        item(ops::LOOP_TO, "Out"),
+        item(ops::CLEAR_LOOP, &range),
+        M::Sep,
+        item("Add a marker", ""),
+        item("Markers…", ""),
+        M::Sep,
+        item("Pin this frame", "light table"),
+        item("Unpin all", ""),
+    ]
 }
 
 fn frame_menu(s: &State, layer: usize, drawing: usize) -> Vec<M> {
     let name = s.layers.get(layer).map_or("", |l| l.name.as_str());
     let head = match spans(s, layer).get(drawing) {
-        Some((a, h, _)) if s.layers.get(layer).is_some_and(|l| l.kind == 'C') => format!(
-            "Drawing {} · {name} · frames {}–{}",
-            drawing + 1,
-            a + 1,
-            a + h
-        ),
+        Some((a, h, _, d)) if s.layers.get(layer).is_some_and(|l| l.kind == 'C') => {
+            match drawing_number(s, layer, *d) {
+                Some(n) => format!("Drawing {n} · {name} · frames {}–{}", a + 1, a + h),
+                None => format!("Blank · {name} · frames {}–{}", a + 1, a + h),
+            }
+        }
         _ => format!("Static · {name}"),
     };
     vec![
         M::Head(head),
-        item("Remove drawing", "⌫"),
-        item("Hold longer", "+1"),
-        item("Hold shorter", "−1"),
+        item(ops::REMOVE_DRAWING, "⌫"),
+        item(ops::HOLD_LONGER, "+1"),
+        item(ops::HOLD_SHORTER, "−1"),
         M::Sep,
-        item("Copy frames", "Alt+C"),
-        item("Paste frames", "Alt+V"),
+        item(ops::COPY_FRAMES, "Alt+C"),
+        item(ops::PASTE_FRAMES, "Alt+V"),
         item("Cycle…", ""),
-        item("Boil…", ""),
+        item(ops::BOIL, ""),
     ]
 }
 
@@ -1252,6 +1327,20 @@ fn playback_bar(f: &mut Frame, b: Rect, strip: Rect, s: &mut State) {
     hit(s, "strips/fps", r);
     menu_button(f, s, "strips/fps-menu", res, &fps_items(s), r, strip);
 
+    // the hint, before the zoom (when there's room)
+    let hint = text(
+        f,
+        "Right-click a frame, layer or the ruler for more",
+        11.0,
+        500,
+        MUTED,
+    );
+    let hx = zx - 2.0 * gap - hint.width;
+    if hx >= px + play_w + gap {
+        hit(s, "strips/hint", Rect::new(hx, cy - 8.0, hint.width, 16.0));
+        text_at(f, &hint, hx, cy);
+    }
+
     // the zoom: narrower, the slider, wider
     let mut x = zx;
     let small = Rect::new(x, cy - 13.0, 26.0, 26.0);
@@ -1338,9 +1427,14 @@ fn frame_strip(f: &mut Frame, r: Rect, s: &mut State) {
     let n = s.drawings as usize;
     let cells_w = n as f32 * 44.0 + n.saturating_sub(1) as f32 * 4.0;
     let mid_w = 36.0 + gap + cells_w + gap + 36.0;
-    let span = spans(s, s.active_layer)
-        .get(s.drawing as usize)
-        .map(|(a, h, _)| (a + 1, a + h));
+    let ds = layer_drawings(s);
+    // where the current drawing shows (its first exposure)
+    let span = ds.get(s.drawing as usize).and_then(|d| {
+        spans(s, s.active_layer)
+            .into_iter()
+            .find(|c| c.3 == *d)
+            .map(|(a, h, ..)| (a + 1, a + h))
+    });
     let here = text(f, &format!("Drawing {}", s.drawing + 1), 13.0, 700, ON_DARK);
     let frames_l = span.map(|(a, b)| text(f, &format!(" · frames {a}–{b}"), 13.0, 500, MUTED));
     let new_l = text(f, "New", 13.0, 600, WHITE);
@@ -1408,17 +1502,35 @@ fn frame_strip(f: &mut Frame, r: Rect, s: &mut State) {
         } else {
             ON_DARK
         };
-        let mut q = Quad::rect(c.x, c.y, c.w, c.h, fill).radius(8.0);
+        put(f, Quad::rect(c.x, c.y, c.w, c.h, fill).radius(8.0));
+        let d = ds.get(i).copied().unwrap_or(0);
+        thumb(f, s.sheet.thumbs.get(&d), d, c.inset(3.0), 6.0);
         if current {
-            q = q.border(3.0, CORAL);
+            put(
+                f,
+                Quad::rect(c.x, c.y, c.w, c.h, alpha(CORAL, 0.0))
+                    .radius(8.0)
+                    .border(3.0, CORAL),
+            );
         }
-        put(f, q);
-        let nl = text(f, &(i + 1).to_string(), 11.0, 700, INK);
-        text_at(f, &nl, c.x + (c.w - nl.width) / 2.0, cy);
+        let nl = text(f, &(i + 1).to_string(), 9.0, 700, INK);
+        put(
+            f,
+            Quad::rect(
+                c.x + 3.0,
+                c.bottom() - 3.0 - 12.0,
+                nl.width + 6.0,
+                12.0,
+                alpha(ON_DARK, 0.85),
+            )
+            .radius(4.0),
+        );
+        text_at(f, &nl, c.x + 6.0, c.bottom() - 9.0);
         if res.clicked && !current {
             s.drawing = i as u32;
-            s.actions
-                .push(Action::Other(format!("Go to drawing {}", i + 1)));
+            if let Some(fr) = first_frame(s, d) {
+                go_to(s, fr);
+            }
         }
         x += 44.0 + 4.0;
     }
@@ -1461,6 +1573,28 @@ fn frame_strip(f: &mut Frame, r: Rect, s: &mut State) {
     if let Some(p) = show_menu(f, "strips/onion-menu", &onion_menu(s)) {
         onion_picked(s, &p);
     }
+}
+
+/// Go to a frame: at once in the state (what the strips show follows it in this pass),
+/// and for the engine (which shows that frame's drawings).
+fn go_to(s: &mut State, frame: u32) {
+    s.frame = frame.min(s.frames.saturating_sub(1));
+    s.actions.push(Action::GoToFrame(s.frame));
+    frames::derive(s);
+}
+
+/// The active layer's drawings, in the order they first show.
+fn layer_drawings(s: &State) -> Vec<u32> {
+    s.sheet
+        .tracks
+        .get(s.active_layer)
+        .map(|t| t.drawings())
+        .unwrap_or_default()
+}
+
+/// The first frame a drawing of the active layer shows on.
+fn first_frame(s: &State, d: u32) -> Option<u32> {
+    s.sheet.tracks.get(s.active_layer)?.first_frame_of(d)
 }
 
 fn layer_pick(s: &State) -> Vec<M> {
@@ -1550,6 +1684,7 @@ fn to_colour(f: &mut Frame, r: Rect, s: &mut State) {
         .fold(0.0, f32::max);
     let name_w = text(f, &format!("Drawing {total}"), 12.0, 600, ON_DARK).width;
     let full_names = name_w + 4.0 + 12.0 + widest <= 104.0;
+    let ds = layer_drawings(s);
     let mut x = x0;
     for i in 0..total {
         if x + 120.0 > x1 {
@@ -1572,7 +1707,8 @@ fn to_colour(f: &mut Frame, r: Rect, s: &mut State) {
                 .border(2.0, if current { CORAL } else { alpha(CORAL, 0.0) }),
         );
         let th = Rect::new(c.x + 8.0, c.y + 8.0, 104.0, thumb_h);
-        thumbnail(f, th, s.to_colour[i]);
+        let d = ds.get(i).copied().unwrap_or(0);
+        thumb(f, s.sheet.thumbs.get(&d), d, th, 8.0);
         let ly = th.bottom() + 6.0 + 8.0;
         let (st, sc) = status_of(s.to_colour[i]);
         let sl = text(f, st, 11.0, 500, sc);
@@ -1591,8 +1727,9 @@ fn to_colour(f: &mut Frame, r: Rect, s: &mut State) {
         );
         if res.clicked && !current {
             s.drawing = i as u32;
-            s.actions
-                .push(Action::Other(format!("Go to drawing {}", i + 1)));
+            if let Some(fr) = first_frame(s, d) {
+                go_to(s, fr);
+            }
         }
         if res.context {
             s.strips.menu_drawing = i;
@@ -1611,8 +1748,11 @@ fn to_colour(f: &mut Frame, r: Rect, s: &mut State) {
             "Mark as done" => Some(ColourStatus::Done),
             _ => None,
         };
-        match (set, s.to_colour.get_mut(i)) {
-            (Some(st), Some(c)) => *c = st,
+        match (set, s.to_colour.get_mut(i), ds.get(i)) {
+            (Some(st), Some(c), Some(d)) => {
+                *c = st;
+                s.sheet.status.insert(*d, st);
+            }
             _ => s.actions.push(Action::Other(p)),
         }
     }
@@ -1628,64 +1768,6 @@ fn card_menu(s: &State, i: usize) -> Vec<M> {
         item("Mark as flatted", check(st == ColourStatus::Flatted)),
         item("Mark as done", check(st == ColourStatus::Done)),
     ]
-}
-
-/// The design's little figure (a head, a jacket), coloured as far as the drawing is.
-fn thumbnail(f: &mut Frame, r: Rect, st: ColourStatus) {
-    put(f, Quad::rect(r.x, r.y, r.w, r.h, WHITE).radius(8.0));
-    let clip = [r.x, r.y, r.right(), r.bottom()];
-    let k = r.h / 56.0;
-    let cx = r.x + r.w / 2.0;
-    let (skin, jacket) = match st {
-        ColourStatus::ToDo => (WHITE, WHITE),
-        _ => (SKIN, CORAL),
-    };
-    let hd = 30.0 * k;
-    put(
-        f,
-        Quad::rect(cx - hd / 2.0, r.y + 4.0 * k, hd, hd, skin)
-            .radius(hd / 2.0)
-            .border(1.6, INK)
-            .clip(clip),
-    );
-    if st == ColourStatus::Done {
-        // the shading the flats don't have yet
-        let sh = hd * 0.3;
-        put(
-            f,
-            Quad::rect(
-                cx + hd / 2.0 - sh - 2.0,
-                r.y + 4.0 * k + hd * 0.3,
-                sh,
-                hd * 0.5,
-                SKIN_SHADE,
-            )
-            .radius(sh / 2.0)
-            .clip(clip),
-        );
-    }
-    let jw = 40.0 * k;
-    let jy = r.y + 36.0 * k;
-    put(
-        f,
-        Quad::rect(cx - jw / 2.0, jy, jw, r.bottom() - jy + 8.0, jacket)
-            .radius(6.0 * k)
-            .border(1.6, INK)
-            .clip(clip),
-    );
-    if st == ColourStatus::Done {
-        put(
-            f,
-            Quad::rect(
-                cx + jw / 2.0 - 10.0 * k,
-                jy + 2.0,
-                8.0 * k,
-                r.bottom() - jy,
-                JACKET_SHADE,
-            )
-            .clip(clip),
-        );
-    }
 }
 
 // ---- Review: the review player ----
@@ -1870,6 +1952,7 @@ impl OpenAny for Frame<'_> {
         [
             "strips/layer-options",
             "strips/frame",
+            "strips/ruler-menu",
             "strips/onion-menu",
             "strips/show-menu",
             "strips/play-menu",
@@ -2217,7 +2300,11 @@ mod tests {
         assert_eq!(h.at("strips/drawing/0").h, 36.0);
         h.click("strips/drawing/5");
         assert_eq!(h.s.drawing, 5);
-        assert_eq!(h.take(), vec![Action::Other("Go to drawing 6".into())]);
+        assert_eq!(
+            h.take(),
+            vec![Action::GoToFrame(32)],
+            "drawing 6's first frame"
+        );
         // the layer: a click lists the layers to pick from
         h.click("strips/layer");
         assert!(h.ui.overlay_open());
@@ -2240,19 +2327,28 @@ mod tests {
             return;
         };
         let bar = h.at("strips/progress").w;
-        assert!((bar - 140.0 * 3.0 / 8.0).abs() < 0.01, "3 of 8 done");
+        assert!(
+            (bar - 140.0 * 3.0 / 6.0).abs() < 0.01,
+            "3 of Clean's 6 done"
+        );
         assert_eq!(h.at("strips/card/0").w, 120.0);
-        h.click("strips/card/6");
-        assert_eq!(h.s.drawing, 6);
-        assert_eq!(h.take(), vec![Action::Other("Go to drawing 7".into())]);
+        assert!(!h.has("strips/card/6"), "a card per drawing");
+        h.click("strips/card/4");
+        assert_eq!(h.s.drawing, 4);
+        assert_eq!(h.take(), vec![Action::GoToFrame(24)]);
         h.right_click("strips/card/5");
         assert!(h.ui.overlay_open());
         let r = h.at("strips/card/5");
         let items = card_menu(&h.s, 5);
         h.pick(&items, r.x + r.w / 2.0, r.y + r.h / 2.0, 5); // head, copy, sep, to do, flatted, done
         assert_eq!(h.s.to_colour[5], ColourStatus::Done);
+        assert_eq!(
+            h.s.sheet.status.get(&6),
+            Some(&ColourStatus::Done),
+            "on the sheet"
+        );
         let bar = h.at("strips/progress").w;
-        assert!((bar - 140.0 * 4.0 / 8.0).abs() < 0.01, "4 of 8 done");
+        assert!((bar - 140.0 * 4.0 / 6.0).abs() < 0.01, "4 of 6 done");
         assert!(h.settles());
     }
 
@@ -2305,5 +2401,138 @@ mod tests {
             h.pass();
             assert!(h.settles(), "{ws:?}");
         }
+    }
+
+    /// The strip with the engine behind it: each pass's actions carried out, as the window
+    /// does.
+    fn run(h: &mut H, e: &mut crate::shell::engine::Engine) {
+        for a in h.take() {
+            e.apply(&mut h.s, &a);
+        }
+        e.tick(&mut h.s, std::time::Instant::now());
+        e.picture(&h.s);
+        h.pass();
+    }
+
+    fn engine_for(h: &mut H) -> crate::shell::engine::Engine {
+        h.s.sheet.demo = false;
+        let mut e = crate::shell::engine::Engine::new(256, 128);
+        e.tick(&mut h.s, std::time::Instant::now());
+        h.pass();
+        e
+    }
+
+    #[test]
+    fn the_timeline_drives_the_layers_and_the_sheet() {
+        let Some(mut h) = H::new(Workspace::Animate) else {
+            return;
+        };
+        let mut e = engine_for(&mut h);
+        assert!(h.has("strips/hint"), "the hint shows at 1440 wide");
+        // + : a new layer, in the painter, above Clean and active
+        h.click("strips/new-layer");
+        run(&mut h, &mut e);
+        assert_eq!(e.painter.layers().len(), 5);
+        assert_eq!(h.s.layers.len(), 5);
+        assert_eq!(h.s.active_layer, 0);
+        assert!(h.has("strips/layer/4"), "a row for it");
+        // the eye hides Clean (now row 1) in the painter
+        h.click("strips/eye/1");
+        run(&mut h, &mut e);
+        let clean = h.s.sheet.tracks[1].layer;
+        let props = |e: &crate::shell::engine::Engine| {
+            e.painter
+                .layers()
+                .iter()
+                .find(|l| l.id == clean)
+                .unwrap()
+                .props
+                .clone()
+        };
+        assert!(!props(&e).visible);
+        // undo shows it again, and the eye follows
+        e.apply(&mut h.s, &Action::Undo);
+        run(&mut h, &mut e);
+        assert!(h.s.layers[1].visible);
+        // the New tray's New drawing: on the new layer, at the current frame (15)
+        h.click("strips/tray/New");
+        h.click("strips/tray/New/New drawing");
+        run(&mut h, &mut e);
+        assert_eq!(h.s.sheet.tracks[0].drawings().len(), 1);
+        assert!(h.has("strips/cel/0/1"), "a blank, then the new drawing");
+        // a right-click on Clean's drawing 3: Hold longer
+        h.right_click("strips/cel/1/2");
+        let r = h.at("strips/cel/1/2");
+        let items = frame_menu(&h.s, 1, 2);
+        h.pick(&items, r.x + r.w / 2.0, r.y + r.h / 2.0, 2);
+        run(&mut h, &mut e);
+        assert_eq!(h.s.sheet.tracks[1].cels[2].hold, 7, "held one longer");
+        assert_eq!(h.s.active_layer, 1);
+        assert_eq!(h.s.frame, 12, "on the drawing right-clicked");
+        // the ruler's menu: loop from frame 21
+        let r = h.at("strips/ruler");
+        let cw = h.s.frame_width;
+        let (x, y) = (r.x + 20.5 * cw, r.y + 10.0);
+        h.ui.pointer_moved(x, y);
+        h.pass();
+        h.ui.pointer_context();
+        h.pass();
+        h.pass();
+        assert!(h.ui.overlay_open(), "the ruler's menu");
+        let items = ruler_menu(&h.s, 20);
+        h.pick(&items, x, y, 1);
+        run(&mut h, &mut e);
+        assert_eq!(h.s.sheet.loop_range, Some((20, 48)));
+        // keys: N a new drawing, → the next frame, Enter plays
+        let key = |h: &mut H, name: &str| {
+            h.ui.key(pencilpilot_ui::ui::Key {
+                name: name.into(),
+                text: None,
+                ctrl: false,
+                shift: false,
+            });
+            h.pass();
+        };
+        let before = h.s.sheet.tracks[1].drawings().len();
+        key(&mut h, "n");
+        run(&mut h, &mut e);
+        assert_eq!(h.s.sheet.tracks[1].drawings().len(), before + 1);
+        let f = h.s.frame;
+        key(&mut h, "Right");
+        run(&mut h, &mut e);
+        assert_eq!(h.s.frame, f + 1);
+        key(&mut h, "Return");
+        run(&mut h, &mut e);
+        assert!(h.s.playing);
+        key(&mut h, "Return");
+        run(&mut h, &mut e);
+        assert!(!h.s.playing);
+        h.save("strips-timeline-engine");
+    }
+
+    #[test]
+    fn the_draw_strip_shows_the_drawings_thumbnails() {
+        let Some(mut h) = H::new(Workspace::Draw) else {
+            return;
+        };
+        h.s.sheet.demo = true;
+        let mut e = crate::shell::engine::Engine::new(480, 270);
+        // (thumbnails are made one a tick)
+        for _ in 0..32 {
+            e.tick(&mut h.s, std::time::Instant::now());
+        }
+        h.pass();
+        assert_eq!(h.s.sheet.thumbs.len(), 14, "a thumbnail per drawing");
+        let quads = h.ui.shown().len();
+        h.save("strips-draw-thumbs");
+        // one picture (one quad) for each of Clean's six drawings
+        h.s.sheet.thumbs.clear();
+        h.pass();
+        assert_eq!(h.ui.shown().len() + 6, quads);
+        // a click on drawing 2: its first frame
+        h.click("strips/drawing/1");
+        run(&mut h, &mut e);
+        assert_eq!(h.s.frame, 6);
+        assert!(h.settles());
     }
 }

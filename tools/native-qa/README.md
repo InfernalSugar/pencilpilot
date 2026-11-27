@@ -68,3 +68,35 @@ Two budget checks run through the library:
   reports no frame presented at all, so that setup can't be used.
 - **Memory:** PSS covers the process's CPU-side memory. GPU allocations in VRAM don't show in
   it.
+
+## The canvas (Phase 2 step 4)
+
+| File | What it does |
+|---|---|
+| `../../apps/native/tests/canvas_qa.rs` | Through the library: the view's maths (round trips at zoom 2 %–6400 %, turned, flipped, panned; zoom and turn keep the point under the pointer), a stroke through a 300 %, 30°, flipped view landing under the pointer (the engine's pixels), the view's keys and that they don't fire while typing, and moving a 1200 × 800 painted selection (time a step, lift, commit, undo). `PP_QA_OUT=<folder>` keeps the JSON and PNGs. |
+| `../../apps/native/tests/canvas_tools_qa.rs` | The tools through the engine, in document pixels: Fill (not beyond the closed area; closes 4 px gaps), the selection limiting painting and fill, Lasso with Shift/Alt, Transform (moved by the drag, handles scale and turn, Escape, undo/redo), Eyedropper, shapes, Text, the selection's and the canvas's menu items, and the Transform tool on 1200 × 800 of strokes (lift, drag step, commit). |
+| `../../apps/native/tests/canvas_frames_qa.rs` | Layers and frames at 1920 × 1080: strokes go to the active layer and the frame's drawing, held cels, hidden layers, onion skin (tinted, not painted in, not while playing), the sheet's edits, playback at 24 fps on simulated time, and how long showing another frame takes (scrubbing, onion on and off). |
+| `canvas_window.py` | The app in a window on its own headless mutter, driven through RemoteDesktop. It reads the app's `--stats` (each frame's oldest input, when it was handed over, when it was shown, the view, the state) and `--save-doc`. Scenarios: `view` (a real stroke at about 305 %, turned 30°, flipped, lands under the pointer; panning, zooming and turning paint nothing), `latency` (pen to screen and the rate while drawing at 165 and 60 Hz), `viewfps` (the rate while panning and zooming), `idle`, `memory` (PSS over 600 strokes, then undo), `playback` (24 fps against each frame's time), `transform` (Select and Transform on about 1400 × 930 of strokes: key to the frame shown for the lift and the commit, the rate and pen to screen while dragging). |
+
+```sh
+cargo test --release -p pencilpilot-native --test canvas_qa -- --include-ignored --test-threads 1
+python3 -I tools/native-qa/canvas_window.py target/release/pencilpilot target/native-qa/canvas-window [scenario …]
+```
+
+Measuring notes:
+- **Pen to screen** is given three ways: from the compositor's event time (`inputMs`), from when
+  the app received the event, and from when the frame was handed to the compositor. The
+  shown time is mutter's presentation feedback for its virtual monitor, not a real display's
+  scan-out.
+- **The rate** counts only the intervals where input was already waiting when the earlier
+  frame was shown, so pauses between strokes aren't counted as misses. A miss is an interval
+  over 1.5 display frames. A stall is input that waited over 2 frames to be drawn.
+- **The first frame of a stroke** counts from the oldest input it includes. The driver moves
+  the pointer to the stroke's start 20 ms before pressing, and that move needs no frame, so
+  the first frame after a pause reads about 20 ms long. `latencySteady` leaves out the first
+  two frames after a pause. `latency-continuous` is one 4 s stroke.
+- **Documents** are compared with the app's own starting document (the demo's drawings),
+  saved once per workspace (`baseline-<workspace>-doc.png`).
+- **RemoteDesktop** drops the input sent in about the first 0.2 s after a session starts,
+  the first key included. The driver waits and sends a Shift tap first. Relative motion
+  isn't accelerated: a 200 px middle-drag pans exactly 200 px.

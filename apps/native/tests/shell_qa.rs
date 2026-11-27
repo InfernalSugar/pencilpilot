@@ -137,6 +137,9 @@ impl Harness {
             shift: false,
         });
         self.pass();
+        // (since step 4 the canvas tools ask for "Escape" too; the window carries out and
+        // drops the actions each pass, so a reset drops them as well)
+        self.s.actions.clear();
     }
 
     /// A pass with input, as the window runs it: the pass, then one settling pass with no

@@ -3137,12 +3137,14 @@ dependencies = [
 name = "pencilpilot-native"
 version = "0.1.0"
 dependencies = [
+ "cosmic-text",
  "hokusai",
  "pencilpilot-brush",
  "pencilpilot-gpu",
  "pencilpilot-ui",
  "pencilpilot-window",
  "png",
+ "rayon",
 ]
 
 [[package]]

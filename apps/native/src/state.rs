@@ -148,6 +148,14 @@ pub struct State {
     pub can_redo: bool,
     /// what the interface asked for this pass, for the app to carry out
     pub actions: Vec<Action>,
+    /// how the document sits in the canvas card
+    pub view: crate::shell::view::View,
+    /// pixels being moved, shown over the document (from the engine)
+    pub moving: Option<crate::shell::view::Moving>,
+    /// the canvas tools' state the interface shows (`shell/engine/tools.rs`)
+    pub tooling: crate::shell::engine::tools::ToolsUi,
+    /// the cut's exposure sheet (`shell/engine/frames.rs`)
+    pub sheet: crate::shell::engine::frames::Sheet,
     /// each shell piece's own state (each defined in its piece's file)
     pub header: crate::shell::header::HeaderState,
     pub tools: crate::shell::tools::ToolsState,
@@ -224,16 +232,15 @@ impl State {
             playing: false,
             onion: true,
             frame_width: 22.0,
-            drawings: 8,
-            drawing: 3,
+            // (as the sheet has them: Clean's six drawings, frame 15 on drawing 3)
+            drawings: 6,
+            drawing: 2,
             to_colour: vec![
                 ColourStatus::Done,
                 ColourStatus::Done,
                 ColourStatus::Done,
                 ColourStatus::Flatted,
                 ColourStatus::Flatted,
-                ColourStatus::ToDo,
-                ColourStatus::ToDo,
                 ColourStatus::ToDo,
             ],
             notes: vec![
@@ -255,6 +262,10 @@ impl State {
             can_undo: false,
             can_redo: false,
             actions: Vec::new(),
+            view: Default::default(),
+            moving: None,
+            tooling: Default::default(),
+            sheet: crate::shell::engine::frames::Sheet::demo(),
             header: Default::default(),
             tools: Default::default(),
             panel: Default::default(),

@@ -13,11 +13,45 @@ const SETTINGS: &str =
     "M4 7h10M18 7h2M4 17h4M12 17h8M16 5a2 2 0 1 0 0.01 0ZM10 15a2 2 0 1 0 0.01 0Z";
 const CHIP: [f32; 4] = hex(0xF6F4EF);
 
-/// The card, under the drawing. Returns where the drawing goes inside it.
-pub fn card(f: &mut Frame, r: Rect) -> Rect {
+/// Around the document when it doesn't fill the card.
+const DESK: [f32; 4] = hex(0xECE9E2);
+
+/// The card and the document in it, through the view. Returns the document's area (the
+/// card inside its edge), where the view is measured from.
+pub fn card(f: &mut Frame, r: Rect, s: &mut State) -> Rect {
     let t = f.theme();
     f.put(Quad::rect(r.x, r.y, r.w, r.h, t.card).radius(24.0));
-    r.inset(12.0)
+    let inner = r.inset(12.0);
+    s.view.follow(inner);
+    let v = s.view;
+    // the whole card shows the view (the desk round the document), its corners rounded
+    f.put(
+        Quad::canvas(
+            [r.x, r.y, r.w, r.h],
+            v.inverse_affine(inner, 1.0),
+            [v.doc_w as f32, v.doc_h as f32],
+            DESK,
+            v.zoom >= 2.0,
+        )
+        .radius(24.0),
+    );
+    // pixels being moved, over the document (the GPU moves them; nothing is redrawn)
+    if let Some(mv) = s.moving
+        && let Some(map) = v.moving_affine(inner, 1.0, &mv)
+    {
+        f.put(
+            Quad::canvas(
+                [r.x, r.y, r.w, r.h],
+                map,
+                [mv.w as f32, mv.h as f32],
+                [0.0; 4],
+                v.zoom >= 2.0,
+            )
+            .radius(24.0)
+            .second(),
+        );
+    }
+    inner
 }
 
 /// What the pill says in each workspace: its title, its line, its button's name.
@@ -52,8 +86,15 @@ fn corner(s: &State) -> String {
             let n = s.notes.iter().filter(|n| n.frame == s.frame).count();
             format!("{n} note{} on this frame", if n == 1 { "" } else { "s" })
         }
-        Workspace::Draw if s.onion => "Onion skin: 1 before · 1 after".into(),
-        Workspace::Animate if s.onion => "Onion skin: 2 before · 1 after".into(),
+        Workspace::Draw | Workspace::Animate if s.onion => {
+            // as the engine shows it (frames::onion_entries)
+            let (before, after) = match s.strips.onion_range {
+                0 => (1, 1),
+                1 => (2, 1),
+                _ => (2, 2),
+            };
+            format!("Onion skin: {before} before · {after} after")
+        }
         _ => "Onion skin off".into(),
     }
 }
@@ -147,7 +188,15 @@ pub fn overlays(f: &mut Frame, card: Rect, s: &mut State) {
     }
     // right-click: the canvas menu; in Review, what to do with the frame being reviewed
     f.context_area(MENU, card);
+    // the tools' overlays, the selection's menu (instead of this one inside it), their keys
+    crate::shell::engine::tools::overlay::draw(f, card, s);
     let review = s.workspace == Workspace::Review;
+    let hints = s.tooling.clone();
+    let hint = |item: &str, fallback: &str| {
+        hints
+            .menu_hint(item)
+            .unwrap_or_else(|| fallback.to_string())
+    };
     let frame = s.frame + 1;
     let picked = f.menu(MENU, |m| {
         if review {
@@ -163,17 +212,53 @@ pub fn overlays(f: &mut Frame, card: Rect, s: &mut State) {
         m.item("Paste", "Ctrl+V");
         m.item("Select all", "Ctrl+A");
         m.separator();
-        m.item("Guides", "Grid · Perspective · Rulers ›");
-        m.item("Symmetry", "Off ›");
-        m.item("Snap to guides", "✓");
+        m.item("Guides", &hint("Guides", "Grid · Perspective · Rulers ›"));
+        m.item("Symmetry", &hint("Symmetry", "Off ›"));
+        m.item("Snap to guides", &hint("Snap to guides", "✓"));
         m.separator();
-        m.item("Rotate view", "›");
+        m.item("Rotate view", "15°");
         m.item("Flip view", "H");
         m.item("Reset view", "0");
         m.separator();
-        m.item("Record timelapse", "●");
+        m.item("Record timelapse", &hint("Record timelapse", "●"));
     });
-    if let Some(item) = picked {
+    if let Some(item) = picked
+        && !view_item(s, card, &item)
+    {
         s.actions.push(Action::Other(item));
     }
+    // the view's keys (not while typing): 0 fits, 1 is 100 %, H flips, + and − zoom
+    if !f.typing() {
+        for (key, item) in [
+            ("0", "Reset view"),
+            ("1", "Actual size"),
+            ("h", "Flip view"),
+            ("plus", "Zoom in"),
+            ("equal", "Zoom in"),
+            ("KP_Add", "Zoom in"),
+            ("minus", "Zoom out"),
+            ("KP_Subtract", "Zoom out"),
+        ] {
+            if f.take_key(key, false) {
+                view_item(s, card, item);
+            }
+        }
+    }
+}
+
+/// The view's menu items and keys. Returns whether `item` was one.
+pub fn view_item(s: &mut State, card: Rect, item: &str) -> bool {
+    let c = (card.x + card.w / 2.0, card.y + card.h / 2.0);
+    let card = card.inset(12.0);
+    match item {
+        "Reset view" => s.view.reset(card),
+        "Actual size" => s.view.set_zoom(card, 1.0),
+        "Flip view" => s.view.flip_view(card),
+        "Zoom in" => s.view.zoom_at(card, c, 1.25),
+        "Zoom out" => s.view.zoom_at(card, c, 0.8),
+        "Rotate view" | "Rotate right" => s.view.rotate_about(card, c, 15f32.to_radians()),
+        "Rotate left" => s.view.rotate_about(card, c, -15f32.to_radians()),
+        _ => return false,
+    }
+    true
 }

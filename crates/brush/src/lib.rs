@@ -2879,6 +2879,17 @@ impl Painter {
     /// selection) so they can be moved, scaled, rotated and flipped. Returns
     /// the lifted box `[x0, y0, x1, y1]` (empty if there's nothing to lift).
     pub fn transform_begin(&mut self) -> Vec<f32> {
+        self.transform_lift(true)
+    }
+
+    /// `transform_begin` for pixels shown moving elsewhere (on the GPU): the layer shows
+    /// without them, and they're not drawn back in until `transform_preview` (at commit).
+    /// Much quicker for a large area.
+    pub fn transform_begin_lifted(&mut self) -> Vec<f32> {
+        self.transform_lift(false)
+    }
+
+    fn transform_lift(&mut self, preview: bool) -> Vec<f32> {
         if self.transform.is_some() || self.stroking.is_some() || self.adjusting.is_some() {
             return Vec::new();
         }
@@ -2944,12 +2955,54 @@ impl Painter {
             cover: None,
             under: None,
         }));
-        self.transform_preview_h(H_IDENTITY);
+        if preview {
+            self.transform_preview_h(H_IDENTITY);
+        } else {
+            self.transform_show_base();
+        }
         vec![x0 as f32, y0 as f32, (x1 + 1) as f32, (y1 + 1) as f32]
     }
 
     pub fn transforming(&self) -> bool {
         self.transform.is_some()
+    }
+
+    /// A transform's lifted pixels as straight-alpha sRGB RGBA8, `w`×`h` from canvas (x, y):
+    /// for showing them moving (on the GPU) without redrawing the layer at every step.
+    pub fn transform_float(&self) -> Option<(Vec<u8>, i64, i64, usize, usize)> {
+        let t = self.transform.as_ref()?;
+        if t.fw == 0 || t.fh == 0 || t.float.len() != t.fw * t.fh {
+            return None;
+        }
+        let mut out = vec![0u8; t.fw * t.fh * 4];
+        for (i, p) in t.float.iter().enumerate() {
+            if p[3] == 0 {
+                continue;
+            }
+            let (c, a) = unpremul_srgb(*p);
+            out[i * 4] = (c[0] * 255.0).round() as u8;
+            out[i * 4 + 1] = (c[1] * 255.0).round() as u8;
+            out[i * 4 + 2] = (c[2] * 255.0).round() as u8;
+            out[i * 4 + 3] = (a * 255.0).round() as u8;
+        }
+        Some((out, t.fx0, t.fy0, t.fw, t.fh))
+    }
+
+    /// While a transform's lifted pixels are shown elsewhere: the layer without them (the
+    /// next `transform_preview` draws them in again).
+    pub fn transform_show_base(&mut self) -> bool {
+        let Some(t) = self.transform.as_mut() else {
+            return false;
+        };
+        let Some(li) = self.layers.iter().position(|l| l.id == t.layer) else {
+            return false;
+        };
+        let tiles = &mut self.layers[li].surface.tiles;
+        self.dirty.extend(tiles.keys().copied());
+        *tiles = t.base.clone();
+        self.dirty.extend(tiles.keys().copied());
+        t.last = None;
+        true
     }
 
     // pixel loops index tiles by (row, col) and map them to canvas coordinates
@@ -3138,23 +3191,38 @@ impl Painter {
         // what each piece draws, per canvas pixel of the new area (first piece wins)
         let (nw, nh) = ((now.2 - now.0 + 1) as usize, (now.3 - now.1 + 1) as usize);
         let mut drawn: Vec<Option<[u16; 4]>> = vec![None; nw * nh];
-        for p in &pieces {
-            let b = clip(p.bbox);
-            for cy in b.1..=b.3 {
-                for cx in b.0..=b.2 {
-                    let i = (cy - now.1) as usize * nw + (cx - now.0) as usize;
-                    if drawn[i].is_some() {
+        {
+            // rows are independent: on every core natively (the browser build: one by one)
+            let fill_row = |(ry, row): (usize, &mut [Option<[u16; 4]>])| {
+                let cy = now.1 + ry as i64;
+                for p in &pieces {
+                    let b = clip(p.bbox);
+                    if cy < b.1 || cy > b.3 {
                         continue;
                     }
-                    let Some((sx, sy)) = h_apply(p.inv, cx as f32 + 0.5, cy as f32 + 0.5) else {
-                        continue;
-                    };
-                    if sx < p.src.0 || sy < p.src.1 || sx > p.src.2 || sy > p.src.3 {
-                        continue;
+                    for cx in b.0..=b.2 {
+                        let i = (cx - now.0) as usize;
+                        if row[i].is_some() {
+                            continue;
+                        }
+                        let Some((sx, sy)) = h_apply(p.inv, cx as f32 + 0.5, cy as f32 + 0.5)
+                        else {
+                            continue;
+                        };
+                        if sx < p.src.0 || sy < p.src.1 || sx > p.src.2 || sy > p.src.3 {
+                            continue;
+                        }
+                        row[i] = Some(sample(sx, sy));
                     }
-                    drawn[i] = Some(sample(sx, sy));
                 }
+            };
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                use rayon::prelude::*;
+                drawn.par_chunks_mut(nw).enumerate().for_each(fill_row);
             }
+            #[cfg(target_arch = "wasm32")]
+            drawn.chunks_mut(nw).enumerate().for_each(fill_row);
         }
         t.cover = track.then(|| {
             (

@@ -122,3 +122,59 @@ fn widgets_react_and_idle_draws_nothing() {
         std::fs::write(format!("{dir}/widgets.ppm"), ppm).unwrap();
     }
 }
+
+/// A click that changes what an earlier part already drew shows complete in that same pass:
+/// two buttons lit by one choice; clicking the second unlights the first at once.
+#[test]
+fn a_click_shows_complete_in_its_own_pass() {
+    let gpu = match Gpu::new() {
+        Ok(g) => g,
+        Err(e @ (Error::NoLoader(_) | Error::NoDevice(_))) => return eprintln!("skipped: {e}"),
+        Err(e) => panic!("{e}"),
+    };
+    let mut r = Renderer2d::new(&gpu).unwrap();
+    let mut ui = Ui::new(1.0);
+    ui.text.wait_for_fonts();
+    let mut picked = 0usize;
+    const PATH: &str = "M4 12h16";
+    let build = |f: &mut Frame, picked: &mut usize| {
+        f.row(34.0, |f| {
+            for i in 0..2 {
+                if f.icon_button(&format!("b{i}"), PATH, "", *picked == i, false)
+                    .clicked
+                {
+                    *picked = i;
+                }
+            }
+        });
+    };
+    ui.pass(&mut r, 200.0, 60.0, |f| build(f, &mut picked));
+    // lit buttons are ink-filled squares; count them
+    let lit = |q: &[pencilpilot_gpu::Quad], ui: &Ui| {
+        let ink = ui.theme.ink;
+        q.iter()
+            .filter(|q| q.fill_rgba() == [ink[0], ink[1], ink[2], 1.0] && q.rect_xywh()[2] == 34.0)
+            .count()
+    };
+    assert_eq!(lit(ui.shown(), &ui), 1);
+    // click the second button (34 px squares from x 0)
+    ui.pointer_moved(51.0, 17.0);
+    ui.pointer_button(true);
+    ui.pass(&mut r, 200.0, 60.0, |f| build(f, &mut picked));
+    // the click is the release: its pass alone (no settling pass by hand)
+    ui.pointer_button(false);
+    ui.pass(&mut r, 200.0, 60.0, |f| build(f, &mut picked));
+    let shown = ui.shown().to_vec();
+    assert_eq!(picked, 1);
+    let ink = ui.theme.ink;
+    let lit_at: Vec<f32> = shown
+        .iter()
+        .filter(|q| q.fill_rgba() == [ink[0], ink[1], ink[2], 1.0] && q.rect_xywh()[2] == 34.0)
+        .map(|q| q.rect_xywh()[0])
+        .collect();
+    assert_eq!(
+        lit_at,
+        [42.0],
+        "the second button lit, the first not, in the click's own pass"
+    );
+}

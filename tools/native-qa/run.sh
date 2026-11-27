@@ -12,7 +12,8 @@
 #                   (default: $DESIGN_DIR/../artifact-type/dc-runtime.js)
 #   PLAYWRIGHT_DIR  a node_modules folder with @playwright/test (see render-design.mjs)
 #   DROP_CACHES     a command that drops the page cache, for a cold start (needs root)
-#   SKIP_HEADLESS=1 skip the windowed runs; SKIP_TESTS=1 skip the interaction tests
+#   SKIP_HEADLESS=1 skip the windowed runs; SKIP_TESTS=1 skip the interaction tests;
+#   SKIP_CANVAS=1 skip the canvas's (step 4) tests and windowed runs
 set -uo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
 here="$root/tools/native-qa"
@@ -51,5 +52,18 @@ if [ "${SKIP_HEADLESS:-0}" != 1 ]; then
   echo "== headless mutter: idle, startup, memory, frame rate"
   "$here/headless.sh" "$bin" "$out/headless" 2>>"$out/headless.err" | tail -40
   pgrep -f "mutter --headless --no-x11 --wayland-display pp-qa-" >/dev/null && echo "WARNING: a QA mutter is still running"
+fi
+if [ "${SKIP_CANVAS:-0}" != 1 ]; then
+  echo "== the canvas (step 4): library tests"
+  PP_QA_OUT="$out/canvas" \
+    cargo test --release -p pencilpilot-native --test canvas_qa --test canvas_tools_qa --test canvas_frames_qa -- --include-ignored --test-threads 1 \
+    >"$out/canvas-tests.txt" 2>&1
+  grep -E "^test |test result" "$out/canvas-tests.txt"
+  if [ "${SKIP_HEADLESS:-0}" != 1 ]; then
+    echo "== the canvas in a window on a headless mutter"
+    python3 -I "$here/canvas_window.py" "$bin" "$out/canvas-window" >"$out/canvas-window.log" 2>&1
+    echo "results: $out/canvas-window/canvas-window.json"
+    pgrep -f "mutter --headless --no-x11 --wayland-display pp-qa-canvas" >/dev/null && echo "WARNING: a QA mutter is still running"
+  fi
 fi
 echo "== done: $out"

@@ -670,6 +670,9 @@ pub const DRM_FORMAT_ARGB8888: u32 = u32::from_le_bytes(*b"AR24");
 pub struct Canvas {
     device: ash::Device,
     image: vk::Image,
+    view: vk::ImageView,
+    /// this picture, among every one made (a new one can get an old one's handles back)
+    pub(crate) serial: u64,
     memory: vk::DeviceMemory,
     staging: vk::Buffer,
     staging_memory: vk::DeviceMemory,
@@ -681,6 +684,8 @@ pub struct Canvas {
     /// the image has been given its first contents
     ready: bool,
 }
+
+static CANVAS_SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 impl Canvas {
     pub fn new(gpu: &Gpu, width: u32, height: u32) -> Result<Canvas> {
@@ -701,7 +706,9 @@ impl Canvas {
                         .samples(vk::SampleCountFlags::TYPE_1)
                         .tiling(vk::ImageTiling::OPTIMAL)
                         .usage(
-                            vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::TRANSFER_SRC,
+                            vk::ImageUsageFlags::TRANSFER_DST
+                                | vk::ImageUsageFlags::TRANSFER_SRC
+                                | vk::ImageUsageFlags::SAMPLED,
                         )
                         .initial_layout(vk::ImageLayout::UNDEFINED),
                     None,
@@ -721,6 +728,16 @@ impl Canvas {
                 .ctx("vkAllocateMemory")?;
             d.bind_image_memory(image, memory, 0)
                 .ctx("vkBindImageMemory")?;
+            let view = d
+                .create_image_view(
+                    &vk::ImageViewCreateInfo::default()
+                        .image(image)
+                        .view_type(vk::ImageViewType::TYPE_2D)
+                        .format(vk::Format::B8G8R8A8_UNORM)
+                        .subresource_range(COLOR_RANGE),
+                    None,
+                )
+                .ctx("vkCreateImageView")?;
             let size = width as u64 * height as u64 * 4;
             let staging = d
                 .create_buffer(
@@ -753,6 +770,8 @@ impl Canvas {
             Ok(Canvas {
                 device: d.clone(),
                 image,
+                view,
+                serial: CANVAS_SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                 memory,
                 staging,
                 staging_memory,
@@ -810,6 +829,7 @@ impl Drop for Canvas {
             self.device.unmap_memory(self.staging_memory);
             self.device.destroy_buffer(self.staging, None);
             self.device.free_memory(self.staging_memory, None);
+            self.device.destroy_image_view(self.view, None);
             self.device.destroy_image(self.image, None);
             self.device.free_memory(self.memory, None);
         }
