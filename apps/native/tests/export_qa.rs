@@ -12,6 +12,10 @@
 //! - Cancel stops FFmpeg and leaves no partial file; an FFmpeg that fails part way; no
 //!   FFmpeg at all (`ffmpeg_missing`, run with FFmpeg hidden: see run.sh).
 //!
+//! The system's own windows (file dialog, file manager) never open: every dialog is answered
+//! by `PENCILPILOT_DIALOG_ANSWER` (empty: cancelled) and `PENCILPILOT_NO_SYSTEM_WINDOWS` is
+//! set. Run it inside `env -u DISPLAY -u WAYLAND_DISPLAY dbus-run-session -- …` (as run.sh does).
+//!
 //! Ignored by a plain `cargo test`; run with `tools/native-qa/run.sh` or
 //! `cargo test --release -p pencilpilot-native --test export_qa -- --include-ignored --test-threads 1`.
 //! `PP_QA_FIXTURES` = the test projects (`tools/baseline/fixtures.py`); without them, or
@@ -87,6 +91,11 @@ fn init() {
         unsafe {
             std::env::set_var("XDG_CONFIG_HOME", d.join("config"));
             std::env::set_var("XDG_STATE_HOME", d.join("state"));
+            // never the system's own windows: a dialog not answered here is cancelled
+            std::env::set_var("PENCILPILOT_NO_SYSTEM_WINDOWS", "1");
+            if std::env::var_os("PENCILPILOT_DIALOG_ANSWER").is_none() {
+                std::env::set_var("PENCILPILOT_DIALOG_ANSWER", "");
+            }
         }
     });
 }

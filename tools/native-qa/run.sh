@@ -18,6 +18,12 @@
 #   PP_QA_FIXTURES  the test projects (tools/baseline/fixtures.py); without it they're built
 #                   into <out-dir>/fixtures, with their reference renders in <out-dir>/refs
 set -uo pipefail
+# Everything runs on a private D-Bus session with no display: the system's own windows (the
+# file dialog through the desktop portal, the file manager) can never reach a real screen.
+if [ -z "${PP_QA_PRIVATE_BUS:-}" ]; then
+  exec env -u DISPLAY -u WAYLAND_DISPLAY PP_QA_PRIVATE_BUS=1 PENCILPILOT_NO_SYSTEM_WINDOWS=1 \
+    PENCILPILOT_DIALOG_ANSWER= dbus-run-session -- "$0" "$@"
+fi
 root=$(cd "$(dirname "$0")/../.." && pwd)
 here="$root/tools/native-qa"
 out=$(realpath -m "${1:-$root/target/native-qa}")

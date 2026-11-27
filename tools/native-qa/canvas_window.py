@@ -30,7 +30,7 @@ BTN_LEFT, BTN_MIDDLE = 0x110, 0x112
 KEYSYM = {
     "0": 0x30, "1": 0x31, "plus": 0x2B, "minus": 0x2D, "equal": 0x3D, "h": 0x68,
     "space": 0x20, "Shift_L": 0xFFE1, "Control_L": 0xFFE3, "Escape": 0xFF1B, "z": 0x7A,
-    "Return": 0xFF0D, "m": 0x6D, "v": 0x76, "b": 0x62, "o": 0x6F, "s": 0x73, "e": 0x65,
+    "Return": 0xFF0D, "m": 0x6D, "v": 0x76, "b": 0x62, "o": 0x6F, "s": 0x73, "e": 0x65, "q": 0x71,
 }
 
 
@@ -66,10 +66,15 @@ class App:
     def __init__(self, binary, mutter, out, tag, secs, workspace="animate", args=(), env=None):
         self.stats = os.path.join(out, f"{tag}-stats.json")
         self.doc = os.path.join(out, f"{tag}-doc.png")
-        # recent files and recovery copies go to the run's folder, never the user's own
-        env = dict(os.environ, WAYLAND_DISPLAY=mutter.name,
-                   XDG_CONFIG_HOME=os.path.join(out, "xdg-config"),
-                   XDG_STATE_HOME=os.path.join(out, "xdg-state"), **(env or {}))
+        # recent files and recovery copies go to the run's folder, never the user's own;
+        # never the system's own windows (file dialog, file manager): dialogs are answered
+        # by PENCILPILOT_DIALOG_ANSWER only (empty: cancelled)
+        env = {**os.environ, "WAYLAND_DISPLAY": mutter.name,
+               "PENCILPILOT_NO_SYSTEM_WINDOWS": "1",
+               "PENCILPILOT_DIALOG_ANSWER": os.environ.get("PENCILPILOT_DIALOG_ANSWER", ""),
+               "XDG_CONFIG_HOME": os.path.join(out, "xdg-config"),
+               "XDG_STATE_HOME": os.path.join(out, "xdg-state"), **(env or {})}
+        env.pop("DISPLAY", None)
         self.launched_ns = mono_ns()
         self.p = subprocess.Popen(
             [binary, "--quit-after", str(secs), "--stats", self.stats, "--save-doc", self.doc,
@@ -842,12 +847,58 @@ def scenario_export_window(binary, out):
     return res
 
 
+def scenario_quit(binary, out):
+    """Ctrl+Q: with nothing unsaved the app closes at once; after a stroke it stays up
+    (asking "Save first?") until answered (Escape: Cancel keeps it running)."""
+    if not FIXTURES:
+        return {"skipped": "PP_QA_FIXTURES not set"}
+    import shutil
+    res = {}
+    for edited in (False, True):
+        m = Mutter(out, 165)
+        try:
+            copy = os.path.join(out, f"quit-{int(edited)}.ppstudio")
+            shutil.copy(os.path.join(FIXTURES, "drawings500.ppstudio"), copy)
+            app = App(binary, m, out, f"quit-{int(edited)}", 10, "draw",
+                      env={"PENCILPILOT_DIALOG_ANSWER": copy})
+            time.sleep(1.8)
+            inp = Input()
+            inp.to(560, 330)
+            inp.key("Control_L", True); inp.key("o"); inp.key("Control_L", False)
+            time.sleep(1.5)
+            if edited:
+                inp.drag(line((300, 300), (700, 340), 100), 0.002)
+                time.sleep(0.3)
+            t0 = time.monotonic()
+            inp.key("Control_L", True); inp.key("q"); inp.key("Control_L", False)
+            try:
+                app.p.wait(2.0)
+                exited = round(time.monotonic() - t0, 2)
+            except subprocess.TimeoutExpired:
+                exited = None
+            alive_after_escape = None
+            if exited is None:
+                inp.key("Escape")
+                time.sleep(0.5)
+                alive_after_escape = app.p.poll() is None
+            inp.stop()
+            app.p.wait()
+            res["edited" if edited else "clean"] = {
+                "exitedAfterS": exited, "aliveAfterEscape": alive_after_escape,
+                "fileUnchanged": os.path.getsize(copy) == os.path.getsize(os.path.join(FIXTURES, "drawings500.ppstudio"))}
+        finally:
+            m.stop()
+    res["pass"] = (res["clean"]["exitedAfterS"] is not None and res["edited"]["exitedAfterS"] is None
+                   and res["edited"]["aliveAfterEscape"] is True)
+    return res
+
+
 SCENARIOS = {
     "view": scenario_view, "latency": scenario_latency, "viewfps": scenario_viewfps,
     "idle": scenario_idle, "memory": scenario_memory, "playback": scenario_playback,
     "transform": scenario_transform, "turn": scenario_turn,
     "open-cli": scenario_open_cli, "open-menu": scenario_open_menu,
-    "export-window": scenario_export_window,
+    "export-window": scenario_export_window, "quit": scenario_quit,
     "latency-pauses": scenario_latency_pauses, "latency-continuous": scenario_latency_continuous,
 }
 

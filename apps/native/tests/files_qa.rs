@@ -12,6 +12,10 @@
 //!   small edit.
 //! - New, the unsaved marker, autosave, recent files.
 //!
+//! The system's own windows (file dialog, file manager) never open: every dialog is answered
+//! by `PENCILPILOT_DIALOG_ANSWER` (empty: cancelled) and `PENCILPILOT_NO_SYSTEM_WINDOWS` is
+//! set. Run it inside `env -u DISPLAY -u WAYLAND_DISPLAY dbus-run-session -- …` (as run.sh does).
+//!
 //! Ignored by a plain `cargo test`; run with `tools/native-qa/run.sh` or
 //! `cargo test --release -p pencilpilot-native --test files_qa -- --include-ignored --test-threads 1`.
 //! `PP_QA_FIXTURES` = the folder with `empty.ppstudio`, `layers20-4k.ppstudio` and
@@ -82,11 +86,25 @@ fn init() {
         unsafe {
             std::env::set_var("XDG_CONFIG_HOME", d.join("config"));
             std::env::set_var("XDG_STATE_HOME", d.join("state"));
+            // never the system's own windows: a dialog not answered here is cancelled
+            std::env::set_var("PENCILPILOT_NO_SYSTEM_WINDOWS", "1");
+            if std::env::var_os("PENCILPILOT_DIALOG_ANSWER").is_none() {
+                std::env::set_var("PENCILPILOT_DIALOG_ANSWER", "");
+            }
         }
     });
 }
 
+/// A new engine, as the app starts, with no recovery copies about (a recovery copy left
+/// by an earlier check is offered at start and holds up the File menu until answered).
 fn fresh() -> (Engine, State) {
+    init();
+    let _ = std::fs::remove_dir_all(out_dir().join("state/pencilpilot/recovery"));
+    fresh_keep()
+}
+
+/// A new engine, recovery copies left as they are.
+fn fresh_keep() -> (Engine, State) {
     init();
     let mut s = State::demo();
     s.onion = false;
@@ -94,6 +112,18 @@ fn fresh() -> (Engine, State) {
     e.tick(&mut s, Instant::now());
     let _ = e.picture(&s);
     (e, s)
+}
+
+/// The longest tick (with its picture) in `settle` since this was last reset, µs: what the
+/// window's loop would have been held up by.
+static TICK_MAX_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn tick_max_reset() {
+    TICK_MAX_US.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn tick_max_ms() -> f64 {
+    TICK_MAX_US.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1000.0
 }
 
 /// Ticks (and draws, as the shell does) until `done`, at most `limit`. The time it took.
@@ -105,8 +135,13 @@ fn settle(
 ) -> Option<Duration> {
     let t = Instant::now();
     loop {
+        let t1 = Instant::now();
         e.tick(s, Instant::now());
         let _ = e.picture(s);
+        TICK_MAX_US.fetch_max(
+            t1.elapsed().as_micros() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         if done(e, s) {
             return Some(t.elapsed());
         }
@@ -608,7 +643,10 @@ fn save_as(e: &mut Engine, s: &mut State, path: &Path) -> Duration {
     let t = Instant::now();
     file(e, s, files::SAVE_AS);
     settle(e, s, Duration::from_secs(120), |_, s| {
-        s.project.path.as_deref() == Some(path) && !s.project.unsaved && path.exists()
+        s.project.path.as_deref() == Some(path)
+            && !s.project.unsaved
+            && !s.project.saving
+            && path.exists()
     })
     .unwrap_or_else(|| {
         panic!(
@@ -624,8 +662,10 @@ fn save_as(e: &mut Engine, s: &mut State, path: &Path) -> Duration {
 fn save(e: &mut Engine, s: &mut State) -> Duration {
     let t = Instant::now();
     file(e, s, files::SAVE);
-    settle(e, s, Duration::from_secs(120), |_, s| !s.project.unsaved)
-        .unwrap_or_else(|| panic!("Save never finished: {:?}", s.project.note));
+    settle(e, s, Duration::from_secs(120), |_, s| {
+        !s.project.unsaved && !s.project.saving
+    })
+    .unwrap_or_else(|| panic!("Save never finished: {:?}", s.project.note));
     t.elapsed()
 }
 
@@ -804,6 +844,7 @@ fn save_after_a_small_edit() {
         })
         .expect("a stroke leaves unsaved changes");
         let mut saves = Vec::new();
+        let mut loop_max = Vec::new();
         let mut parts = Vec::new();
         for k in 0..3 {
             if k > 0 {
@@ -813,7 +854,9 @@ fn save_after_a_small_edit() {
                 })
                 .unwrap();
             }
+            tick_max_reset();
             saves.push(save(&mut e, &mut s).as_secs_f64() * 1000.0);
+            loop_max.push(tick_max_ms());
             parts.push(format!("{:?}", e.files.last_save));
         }
         let after = Project::open(&path).unwrap();
@@ -835,7 +878,7 @@ fn save_after_a_small_edit() {
             }
         }
         res.push(format!(
-            r#""{name}":{{"saveAsMs":{:.0},"saveAsTimes":{full_times:?},"saveAfterStrokeMs":{saves:.0?},"saveTimes":{parts:?},"drawingsChanged":{changed:?},"drawings":{}}}"#,
+            r#""{name}":{{"saveAsMs":{:.0},"saveAsTimes":{full_times:?},"saveAfterStrokeMs":{saves:.0?},"saveLoopTickMaxMs":{loop_max:.1?},"saveTimes":{parts:?},"drawingsChanged":{changed:?},"drawings":{}}}"#,
             full.as_secs_f64() * 1000.0,
             after.manifest.drawings.len()
         ));
@@ -1041,6 +1084,11 @@ fn autosave_recovery_copy() {
             Instant::now() + files::AUTOSAVE + Duration::from_secs(1),
         );
         let took = t.elapsed();
+        // (written on another thread)
+        settle(&mut e, &mut s, Duration::from_secs(30), |_, s| {
+            s.project.recovery.is_some()
+        });
+        let written = t.elapsed();
         let rec = s
             .project
             .recovery
@@ -1068,8 +1116,9 @@ fn autosave_recovery_copy() {
             "{name}: the recovery copy stays after saving"
         );
         res.push(format!(
-            r#""{name}":{{"autosaveBlocksLoopMs":{:.1},"recovery":{:?},"dueInS":{},"recoveryDrawings":{}}}"#,
+            r#""{name}":{{"autosaveBlocksLoopMs":{:.1},"writtenMs":{:.0},"recovery":{:?},"dueInS":{},"recoveryDrawings":{}}}"#,
             took.as_secs_f64() * 1000.0,
+            written.as_secs_f64() * 1000.0,
             rec.display().to_string(),
             due.map_or("null".into(), |d| d
                 .saturating_duration_since(Instant::now())
@@ -1300,4 +1349,123 @@ fn scrub_an_opened_project() {
         );
     }
     save_json("files-scrub.json", &format!("{{{}}}", res.join(",")));
+}
+
+/// After a crash (the engine dropped with a recovery copy written and changes unsaved), the
+/// next start offers the copy; Open brings back the project with the change, unsaved, as
+/// the original file (Save writes there and the copy goes); Discard deletes the copy; a copy
+/// older than its file isn't offered.
+#[test]
+#[ignore = "QA suite: tools/native-qa/run.sh"]
+fn recovery_offered_after_a_crash() {
+    let dir = need_fixtures!();
+    let path = out_dir().join("crash.ppstudio");
+    let mut log = Vec::new();
+    for answer_with in [files::RECOVER_OPEN, files::RECOVER_DISCARD] {
+        std::fs::copy(dir.join("drawings500.ppstudio"), &path).unwrap();
+        let rec = {
+            let (mut e, mut s) = fresh();
+            open(&mut e, &mut s, &path);
+            stroke(&mut e, &mut s, 460.0);
+            settle(&mut e, &mut s, Duration::from_millis(200), |_, s| {
+                s.project.unsaved
+            })
+            .unwrap();
+            e.tick(
+                &mut s,
+                Instant::now() + files::AUTOSAVE + Duration::from_secs(1),
+            );
+            settle(&mut e, &mut s, Duration::from_secs(30), |_, s| {
+                s.project.recovery.is_some()
+            })
+            .expect("a recovery copy");
+            s.project.recovery.clone().unwrap()
+            // (dropped here without saving: the crash)
+        };
+        // the next start
+        let (mut e, mut s) = fresh_keep();
+        for _ in 0..3 {
+            e.tick(&mut s, Instant::now());
+        }
+        let asked = format!(
+            "{:?}",
+            s.project.asking.as_ref().map(|q| (&q.title, &q.detail))
+        );
+        assert!(s.project.asking.is_some(), "no recovery offered at start");
+        let id = s.doc_id;
+        file(&mut e, &mut s, answer_with);
+        for _ in 0..5 {
+            e.tick(&mut s, Instant::now());
+        }
+        if answer_with == files::RECOVER_OPEN {
+            assert_ne!(s.doc_id, id, "Recovery: Open opened nothing");
+            assert_eq!(
+                s.project.path.as_deref(),
+                Some(path.as_path()),
+                "recovered as its own file"
+            );
+            assert!(
+                s.project.unsaved,
+                "a recovered project shows unsaved changes"
+            );
+            // the stroke is there: the drawing differs from the file's
+            let p = Project::open(&path).unwrap();
+            let got = native_frame(&mut e, &mut s, 0);
+            let want = reference(&p, 0, &mut HashMap::new());
+            assert!(
+                diff(&got, &want).max > 0,
+                "the recovered project lacks the stroke"
+            );
+            save(&mut e, &mut s);
+            assert!(
+                !rec.exists(),
+                "the copy stays after saving the recovered project"
+            );
+            log.push(format!(
+                "open: asked {asked}; path ok, unsaved, stroke back, copy gone after Save"
+            ));
+        } else {
+            assert!(!rec.exists(), "Discard kept the copy");
+            log.push(format!("discard: asked {asked}; copy deleted"));
+        }
+    }
+    // a copy older than its file: not offered
+    std::fs::copy(dir.join("drawings500.ppstudio"), &path).unwrap();
+    {
+        let (mut e, mut s) = fresh();
+        open(&mut e, &mut s, &path);
+        stroke(&mut e, &mut s, 470.0);
+        settle(&mut e, &mut s, Duration::from_millis(200), |_, s| {
+            s.project.unsaved
+        })
+        .unwrap();
+        e.tick(
+            &mut s,
+            Instant::now() + files::AUTOSAVE + Duration::from_secs(1),
+        );
+        settle(&mut e, &mut s, Duration::from_secs(30), |_, s| {
+            s.project.recovery.is_some()
+        })
+        .unwrap();
+    }
+    std::thread::sleep(Duration::from_millis(20));
+    // the file changed after (saved elsewhere, say)
+    let f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    f.set_modified(std::time::SystemTime::now()).unwrap();
+    let (mut e, mut s) = fresh_keep();
+    for _ in 0..3 {
+        e.tick(&mut s, Instant::now());
+    }
+    log.push(format!(
+        "older copy: asking {:?}",
+        s.project.asking.is_some()
+    ));
+    save_json("files-recovery.json", &format!("{log:?}"));
+    assert!(
+        s.project.asking.is_none(),
+        "a copy older than its file was offered"
+    );
 }
