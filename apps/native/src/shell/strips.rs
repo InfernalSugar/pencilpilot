@@ -266,10 +266,11 @@ fn keys(f: &mut Frame, s: &mut State) {
     if f.take_key("o", false) {
         s.onion = !s.onion;
     }
-    if f.take_key("Left", false) {
+    // (every press since the last pass: quick presses each step, none is lost)
+    while f.take_key("Left", false) {
         s.actions.push(Action::PreviousFrame);
     }
-    if f.take_key("Right", false) {
+    while f.take_key("Right", false) {
         s.actions.push(Action::NextFrame);
     }
     if f.take_key("Return", false) {

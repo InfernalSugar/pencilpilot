@@ -61,6 +61,11 @@ impl DrawingCopy {
         DrawingCopy(TileMap::new())
     }
 
+    /// A drawing's decoded tiles (as a frame store decodes them) as a copy.
+    pub fn from_decoded(tiles: Vec<((i32, i32), DecodedTile)>) -> DrawingCopy {
+        DrawingCopy(tiles.into_iter().map(|(k, t)| (k, t.0)).collect())
+    }
+
     /// Another part of the same drawing's tiles (see [`Painter::drawing_copy_tiles`]).
     pub fn absorb(&mut self, other: DrawingCopy) {
         self.0.extend(other.0);
@@ -4558,6 +4563,34 @@ impl Painter {
     /// tiles with paint; empty for an unknown drawing.
     pub fn drawing_tiles_packed(&self, drawing: u32) -> Vec<u8> {
         pack_tiles(self.drawing_tiles(drawing))
+    }
+
+    /// A copy of a layer's mask as it is (a memory copy; None: it has none), for another
+    /// painter ([`Painter::put_mask_copy`]).
+    pub fn mask_copy(&self, id: u32) -> Option<DrawingCopy> {
+        self.index_of(id)
+            .and_then(|i| self.layers[i].mask_surface())
+            .map(|m| DrawingCopy(copy_tiles(&m.tiles)))
+    }
+
+    /// Give a layer a copied mask, without an undo step. False if busy or no such layer.
+    pub fn put_mask_copy(&mut self, id: u32, mask: DrawingCopy) -> bool {
+        if !self.idle() {
+            return false;
+        }
+        let Some(idx) = self.index_of(id) else {
+            return false;
+        };
+        self.mark_layer(idx);
+        let l = &mut self.layers[idx];
+        l.set_editing(false);
+        l.mask = Some(UndoSurface {
+            tiles: mask.0,
+            ..UndoSurface::default()
+        });
+        self.unstyle(idx);
+        self.mark_layer(idx);
+        true
     }
 
     /// A layer's mask as packed tiles (as [`Painter::drawing_tiles_packed`]); empty when the

@@ -74,9 +74,11 @@ pub struct Spec {
     #[serde(default)]
     pub meta: Vec<(String, String)>,
     /// Videos: encode faster and with far less memory. MP4: x264's medium preset, sliced
-    /// threads, two B-frames and references, a 5-frame lookahead (4K from YUV: 26 ms a frame
-    /// and 0.67 GB, against 60 ms and 2 GB; files a few % bigger at the same quality). WebM:
-    /// no frames held back (VP9 `lag-in-frames` 0: 4K 0.86 GB, not 1.1)
+    /// threads, two B-frames and references, a 5-frame lookahead (past 1080p: one reference,
+    /// no B-frames or lookahead; 4K from YUV: 22 ms a frame and 0.33 GB in our exports,
+    /// against 60 ms and 2 GB; files bigger at the same quality). WebM:
+    /// no frames held back and four threads (VP9 `lag-in-frames` 0, `threads` 4: 1080p
+    /// 0.27 GB instead of 0.35, 4K 0.86 GB instead of 1.1)
     #[serde(default)]
     pub lean: bool,
     /// Videos: frames come as YUV 4:2:0 (BT.709, limited range: [`rgba_to_yuv420`]) rather
@@ -359,13 +361,20 @@ fn ffmpeg_args(spec: &Spec, out: &Path) -> Vec<String> {
         s => s.replace("{crf}", &crf),
     }));
     if lean {
-        a.extend([
-            "-x264-params".into(),
-            "sliced-threads=1:rc-lookahead=5:ref=2:bframes=2".into(),
-        ]);
+        // past 1080p every reference frame costs tens of MB: one, and none held back (4K:
+        // FFmpeg at 0.33 GB instead of 0.57, as fast, files about 40% bigger at the same
+        // quality)
+        let big = spec.width as u64 * spec.height as u64 > 2 * 1920 * 1080;
+        let p = if big {
+            "sliced-threads=1:rc-lookahead=0:ref=1:bframes=0"
+        } else {
+            "sliced-threads=1:rc-lookahead=5:ref=2:bframes=2"
+        };
+        a.extend(["-x264-params".into(), p.into()]);
     }
     if spec.lean && spec.format == Format::Webm {
-        a.extend(["-lag-in-frames".into(), "0".into()]);
+        // (all of libvpx's threads weigh on an app drawing at the display's rate: four)
+        a.extend(["-lag-in-frames", "0", "-threads", "4"].map(String::from));
     }
     // the pixels are sRGB: say so (BT.709 primaries are sRGB's)
     a.extend(
@@ -897,6 +906,9 @@ mod tests {
         s.lean = true;
         assert!(args(&s).contains("-x264-params sliced-threads=1:rc-lookahead=5:ref=2:bframes=2"));
         assert!(args(&s).contains("-preset medium"));
+        (s.width, s.height) = (3840, 2160);
+        assert!(args(&s).contains("-x264-params sliced-threads=1:rc-lookahead=0:ref=1:bframes=0"));
+        (s.width, s.height) = (8, 6);
         s.format = Format::Webm;
         s.quality = Quality::Good;
         assert!(args(&s).contains("-crf 33"));

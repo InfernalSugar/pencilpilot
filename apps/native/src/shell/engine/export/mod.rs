@@ -56,10 +56,10 @@ pub const SIZES: [(&str, u32); 5] = [
 
 /// Plan frames the window copies drawings for ahead of the renderer.
 const AHEAD: usize = 3;
-/// Tiles copied at once (512 kB): a big drawing is copied over several ticks.
-const COPY_TILES: usize = 16;
+/// Tiles copied at once (256 kB): a big drawing is copied over many ticks.
+const COPY_TILES: usize = 8;
 /// The most a tick spends copying drawings for the export (the window draws on).
-const TICK_BUDGET: Duration = Duration::from_millis(2);
+const TICK_BUDGET: Duration = Duration::from_micros(1500);
 /// How often the window looks at an export's progress.
 const POLL: Duration = Duration::from_millis(8);
 /// How often the dialog's progress moves: each change redraws the whole interface (with a
@@ -197,15 +197,28 @@ pub struct Plan {
 
 impl Plan {
     pub fn new(s: &State, first: u32, last: u32) -> Plan {
+        // each track's drawing on each frame, from its cels in one pass
+        let n = (last + 1).saturating_sub(first) as usize;
+        let tracks: Vec<(u32, Vec<u32>)> = s
+            .sheet
+            .tracks
+            .iter()
+            .filter(|t| t.layer != 0)
+            .map(|t| {
+                let mut v = vec![0u32; n];
+                for (at, c) in t.spans() {
+                    let a = at.max(first);
+                    let b = (at + c.hold).min(last + 1);
+                    for f in a..b {
+                        v[(f - first) as usize] = c.drawing;
+                    }
+                }
+                (t.layer, v)
+            })
+            .collect();
         let mut frames: Vec<PlanFrame> = Vec::new();
-        for f in first..=last {
-            let pairs: Vec<u32> = s
-                .sheet
-                .tracks
-                .iter()
-                .filter(|t| t.layer != 0)
-                .flat_map(|t| [t.layer, t.drawing_at(f)])
-                .collect();
+        for f in 0..n {
+            let pairs: Vec<u32> = tracks.iter().flat_map(|(l, v)| [*l, v[f]]).collect();
             match frames.last_mut() {
                 Some(p) if p.pairs == pairs => p.repeat += 1,
                 _ => frames.push(PlanFrame { pairs, repeat: 1 }),
@@ -276,6 +289,10 @@ pub struct Exporter {
     pub feed_total: Duration,
     /// each tick's copying of the last export (for checks)
     pub feed_ticks: Vec<Duration>,
+    /// the longest single step of it, and what it was; the longest whole tick, and start
+    pub step_max: (Duration, String),
+    pub tick_max: Duration,
+    pub start_took: Duration,
     /// when the dialog's progress last moved
     shown_at: Option<Instant>,
 }
@@ -431,7 +448,7 @@ fn start(e: &mut Engine, s: &mut State, path: PathBuf) {
         .map(|l| worker::LayerSetup {
             id: l.id,
             props: l.props.clone(),
-            mask: e.painter.mask_tiles_packed(l.id),
+            mask: e.painter.mask_copy(l.id),
         })
         .collect();
     let runs = static_runs(&layers, &plan);
@@ -456,6 +473,8 @@ fn start(e: &mut Engine, s: &mut State, path: PathBuf) {
     e.exporter.feed_max = Duration::ZERO;
     e.exporter.feed_total = Duration::ZERO;
     e.exporter.feed_ticks.clear();
+    e.exporter.step_max = (Duration::ZERO, String::new());
+    e.exporter.tick_max = Duration::ZERO;
     e.exporter.run = Some(Run {
         tx,
         plan,
@@ -491,7 +510,7 @@ fn static_runs(layers: &[worker::LayerSetup], plan: &Plan) -> Vec<Vec<u32>> {
             && p.blend == brush::Blend::Normal
             && p.adjust.is_none()
             && !p.style.any()
-            && l.mask.is_empty()
+            && l.mask.is_none()
         {
             run.push(l.id);
         } else if !run.is_empty() {
@@ -545,7 +564,32 @@ fn feed(e: &mut Engine) {
         let Some(&item) = r.pending.front() else {
             break;
         };
+        let ts = Instant::now();
         let msg = match item {
+            Item::Copy(d, merge) if !e.painter.has_drawing(d) => {
+                // kept compressed out of the painter: the export decodes it (the window only
+                // hands it over)
+                r.partial = None;
+                let src = worker::Source::Kept(match e.frames.store.job(d) {
+                    Some(j) => j,
+                    None => {
+                        r.pending.pop_front();
+                        let empty = worker::Source::Copy(None);
+                        let msg = match merge {
+                            Some(layer) => worker::Msg::Merge(layer, empty),
+                            None => worker::Msg::Drawing(d, empty),
+                        };
+                        if r.tx.send(msg).is_err() {
+                            break;
+                        }
+                        continue;
+                    }
+                });
+                match merge {
+                    Some(layer) => worker::Msg::Merge(layer, src),
+                    None => worker::Msg::Drawing(d, src),
+                }
+            }
             Item::Copy(d, merge) => {
                 let p = &e.painter;
                 let part = r.partial.get_or_insert_with(|| Partial {
@@ -563,7 +607,13 @@ fn feed(e: &mut Engine) {
                         edits: p.edits(),
                     };
                 }
-                let to = (part.at + COPY_TILES).min(part.keys.len());
+                // only into the renderer's memory: the window allocates none (with the
+                // export allocating on every core, a fresh page can take milliseconds)
+                let n = COPY_TILES.min(r.spare.len());
+                if n == 0 && part.at < part.keys.len() {
+                    break;
+                }
+                let to = (part.at + n).min(part.keys.len());
                 let had = r.spare.len();
                 part.copy
                     .absorb(p.drawing_copy_tiles(d, &part.keys[part.at..to], &mut r.spare));
@@ -572,12 +622,17 @@ fn feed(e: &mut Engine) {
                     .fetch_add(had - r.spare.len(), Ordering::Relaxed);
                 part.at = to;
                 if part.at < part.keys.len() {
+                    let took = ts.elapsed();
+                    if took > e.exporter.step_max.0 {
+                        e.exporter.step_max = (took, format!("part of {item:?}"));
+                    }
                     continue;
                 }
                 let copy = r.partial.take().map(|p| p.copy).filter(|c| !c.is_empty());
+                let src = worker::Source::Copy(copy);
                 match merge {
-                    Some(layer) => worker::Msg::Merge(layer, copy),
-                    None => worker::Msg::Drawing(d, copy),
+                    Some(layer) => worker::Msg::Merge(layer, src),
+                    None => worker::Msg::Drawing(d, src),
                 }
             }
             Item::Frame(i) => {
@@ -599,6 +654,10 @@ fn feed(e: &mut Engine) {
         if r.tx.send(msg).is_err() {
             break;
         }
+        let took = ts.elapsed();
+        if took > e.exporter.step_max.0 {
+            e.exporter.step_max = (took, format!("{item:?}"));
+        }
         if item == Item::Frame(r.plan.frames.len() - 1) {
             let _ = r.tx.send(worker::Msg::End);
         }
@@ -611,6 +670,13 @@ fn feed(e: &mut Engine) {
 
 /// Once a loop: an export's progress. Returns whether the interface should redraw.
 pub fn tick(e: &mut Engine, s: &mut State, _now: Instant) -> bool {
+    let t0 = Instant::now();
+    let r = tick_(e, s);
+    e.exporter.tick_max = e.exporter.tick_max.max(t0.elapsed());
+    r
+}
+
+fn tick_(e: &mut Engine, s: &mut State) -> bool {
     let before = s.export.clone();
     let progress = s.export_progress;
     if let Some(rx) = &e.exporter.looking
@@ -628,7 +694,11 @@ pub fn tick(e: &mut Engine, s: &mut State, _now: Instant) -> bool {
     {
         e.exporter.asked = None;
         match answer {
-            Some(p) => start(e, s, p),
+            Some(p) => {
+                let t = Instant::now();
+                start(e, s, p);
+                e.exporter.start_took = t.elapsed();
+            }
             None => s.export.status = Status::Idle,
         }
     }
