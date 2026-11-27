@@ -141,3 +141,35 @@ Each step is its own PR, with tests that need no window on the screen.
        and the system fonts joining), and none after.
    - **Screenshots:** `pencilpilot --render <workspace> --out x.png` draws any workspace off-screen,
      so checks need no window.
+
+## Phase 2 step 4: the canvas and its tools (2026-11-27)
+
+- **The document** (1920×1080 for now) is drawn by the GPU through a view: zoom at the pointer, pan
+  (the Hand, Space, the middle button), turn (Space+Shift, or Shift with the Hand), flip (H), fit (0),
+  100 % (1). From 200 % its pixels show as squares.
+- **Tools:** Fill (closing gaps), Select and Lasso (Shift adds, Alt takes away), Transform (move,
+  scale, turn), Eyedropper, Shape, Text; the selection and canvas menus; cut, copy and paste; guides,
+  snapping and symmetry; brush settings. A tap paints a dot.
+- **Moving pixels** happens on the GPU: the lifted pixels are a second picture, so a drag step
+  costs under a microsecond (it was 65–95 ms, the freeze in today's app). Putting them down takes
+  55–68 ms (budget 100 ms).
+- **Layers and frames:** layers follow the painter; an exposure sheet drives which drawing each
+  layer shows; onion skin; playback at the cut's rate (0 skipped frames); thumbnails in the strips.
+- **Drawing late:** each frame is drawn just before its refresh, with a margin measured from how
+  long frames take to make (the window crate's `Pacer`).
+- **Measured** on headless mutter (release; QA's suites and window scenarios):
+
+  | What | Budget | Measured |
+  |---|---|---|
+  | Pen to screen, 165 Hz, p99 | 10.06 ms | 9.8–9.9 ms for a continuous stroke; up to 10.8 ms between strokes |
+  | Pen to screen, 60 Hz, p99 | 20.67 ms | 20.5–20.6 ms continuous; 25–26 ms in runs with one late frame |
+  | Frame rate while drawing, panning, moving pixels | the display's | 165 / 60 fps, 0–1 missed |
+  | Frame rate while wheel-zooming | the display's | 162–163 fps at 165 Hz (about 1 % late wakes on a busy machine) |
+  | Idle | 0 frames | 0 |
+  | Scrubbing with onion skin, a frame change | under 6 ms | p95 1.2 ms |
+  | Memory, PSS | under 150 MiB | 53 MiB at rest, 121 MiB after 600 strokes |
+  | Startup | under 200 ms | 57 ms |
+
+- **Open, for the owner's check on a real display** (headless mutter's frame timing isn't a real
+  display's): the 60 Hz p99 with an occasional late frame, and wheel zoom's late frames. Pressing
+  V shows the box after 35 ms (the lift), against "the next frame".
