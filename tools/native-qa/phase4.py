@@ -290,8 +290,8 @@ class PrivatePW:
 
     def app_env(self):
         return {"PIPEWIRE_RUNTIME_DIR": self.dir, "PIPEWIRE_REMOTE": "pipewire-0",
-                "PIPEWIRE_CONFIG_DIR": self.client, "ALSA_CONFIG_PATH": self.alsa, "PULSE_SERVER": "unix:/nonexistent/pp-qa-no-pulse",
-                "PENCILPILOT_NO_SOUND": ""}
+                "PIPEWIRE_CONFIG_DIR": self.client, "ALSA_CONFIG_PATH": self.alsa,
+                "PULSE_SERVER": "unix:/nonexistent/pp-qa-no-pulse", **json.loads(os.environ.get("PP_QA_SOUND_ENV", "{}"))}
 
     def run(self, *cmd, timeout=10):
         return subprocess.run(list(cmd), env=self.env, capture_output=True, text=True, timeout=timeout)
@@ -767,14 +767,300 @@ def scenario_latency(binary, out):
     return res
 
 
+# ------------------------------------------------------------------------------------------
+# sound: in step with the picture, measured at a private null sink's sample clock
+
+def sound_run(binary, out, tag, hz, project, secs, actions=None):
+    """The app with `project`, its sound into a private PipeWire null sink recorded with the
+    sink's clock. `actions(inp)` drives it (default: Return, then `secs` of playing).
+    Returns (stats, onsets [(ns, peak)], key times, links, recording)."""
+    import numpy as np  # noqa: F401  (read_sinkclock needs it)
+    pw = PrivatePW(out)
+    m = cw.Mutter(out, hz)
+    try:
+        rec_path = os.path.join(pw.dir, "rec.bin")
+        rec = subprocess.Popen([sinkclock_bin(out), rec_path, str(secs + 14)], env=pw.env)
+        links_rec = pw.link_into("qa-sink:monitor", "qa-capture")
+        # (no PENCILPILOT_NO_SOUND here: the sound goes to the private sink)
+        e = pw.app_env()
+        app = cw.App(binary, m, out, tag, secs + 12, "animate", args=[project], env=e)
+        links_app = pw.link_into(None, "qa-sink", wait=6.0)
+        wait_opened(app)
+        # (a stream made only once Play is pressed is linked as it comes)
+        inp = cw.Input()
+        inp.to(560, 330)
+        time.sleep(0.2)
+        keys = []
+        if actions is None:
+            keys.append(cw.mono_ns())
+            inp.key("Return")
+            late = []
+            t_end = time.monotonic() + secs
+            while time.monotonic() < t_end:
+                if not links_app:
+                    links_app = pw.link_into(None, "qa-sink", wait=0.05)
+                    if links_app:
+                        late.append(cw.mono_ns())
+                time.sleep(0.05)
+            inp.key("Return")
+        else:
+            keys = actions(inp, pw)
+        t_stop = cw.mono_ns()
+        inp.stop()
+        st = app.wait()
+        rec.terminate()
+        rec.wait(5)
+        t, x = read_sinkclock(rec_path)
+        return {"stats": st, "onsets": onsets(t, x), "keys": keys, "stopNs": t_stop,
+                "links": {"recorder": links_rec, "app": links_app}, "t": t, "x": x, "exit": app.p.returncode}
+    finally:
+        m.stop()
+        pw.stop()
+
+
+def shown_at(st, frame, after_ns):
+    fr = sorted((f for f in st["frames"] if f["shownNs"] and f["drawnNs"] >= after_ns), key=lambda f: f["shownNs"])
+    return next((f["shownNs"] for f in fr if f["sheetFrame"] == frame), None)
+
+
+def sync_analyse(r, hz, fps=24, every_frames=12):
+    """Each click (one every `every_frames` scene frames, from frame 0) at the sink against the
+    first shown frame of its scene frame: the offset, its spread and drift; Play to the
+    first sound."""
+    st, ons, t_key = r["stats"], r["onsets"], r["keys"][0]
+    ons = [o for o in ons if t_key - 50e6 <= o[0] <= r["stopNs"]]
+    if not ons:
+        return {"sound": False, "links": r["links"], "exit": r["exit"]}
+    per = every_frames / fps * 1e9
+    offs, ts = [], []
+    for o, _ in ons:
+        k = round((o - ons[0][0]) / per)
+        shown = shown_at(st, k * every_frames, t_key)
+        if shown is None:
+            continue
+        offs.append((o - shown) / 1e6)
+        ts.append((o - ons[0][0]) / 1e9)
+    disp = 1000 / hz
+    res = {"sound": True, "clicks": len(ons), "matched": len(offs),
+           "playToFirstSoundMs": round((ons[0][0] - t_key) / 1e6, 1),
+           "playToFirstFrameChangeMs": None, "displayFrameMs": round(disp, 2), "exit": r["exit"]}
+    if offs:
+        mt, mo = statistics.fmean(ts), statistics.fmean(offs)
+        den = sum((t - mt) ** 2 for t in ts)
+        res.update({
+            "offsetMs": {"p50": round(statistics.median(offs), 2), "min": round(min(offs), 2),
+                         "max": round(max(offs), 2), "maxAbs": round(max(abs(v) for v in offs), 2)},
+            "withinOneDisplayFrame": sum(1 for v in offs if abs(v) <= disp) / len(offs),
+            "driftMsPerMin": round(sum((t - mt) * (o - mo) for t, o in zip(ts, offs)) / den * 60, 3) if den else None,
+            "spanS": round(ts[-1], 1),
+        })
+    return res
+
+
+def scenario_sync(binary, out):
+    """Sound in step with playback: sound-60s (640 x 360) for 10 s, PP_QA_RUNS times, at 165
+    and 60 Hz; budgets: offset within one display frame, Play to sound within 50 ms."""
+    res = {}
+    for name in ("sound-60s", "layers20-4k-60s-sound"):
+        for hz in (165, 60):
+            runs = []
+            for i in range(RUNS):
+                r = sound_run(binary, out, f"p4sync-{name}-{hz}-{i}", hz, os.path.join(FIX, f"{name}.ppstudio"), 10.0)
+                a = sync_analyse(r, hz)
+                a["load1"] = round(os.getloadavg()[0], 2)
+                runs.append(a)
+            res[f"{name}-{hz}"] = {"summary": {k: nested(runs, p) for k, p in (
+                ("offsetP50", ["offsetMs", "p50"]), ("offsetMaxAbs", ["offsetMs", "maxAbs"]),
+                ("playToFirstSound", ["playToFirstSoundMs"]), ("drift", ["driftMsPerMin"]))}, "runs": runs}
+    return res
+
+
+def scenario_sound_drift(binary, out):
+    """62 s of sound-60s and of 20 layers at 4K with the clicks (165 Hz; PP_QA_DRIFT_HZ)."""
+    hz = int(os.environ.get("PP_QA_DRIFT_HZ", "165"))
+    res = {}
+    for name in ("sound-60s", "layers20-4k-60s-sound"):
+        r = sound_run(binary, out, f"p4sdrift-{name}-{hz}", hz, os.path.join(FIX, f"{name}.ppstudio"), 62.0)
+        res[f"{name}-{hz}"] = sync_analyse(r, hz)
+    return res
+
+
+def scenario_sound_edges(binary, out):
+    """The sound project (two scenes, a negative start, a muted clip, an undecodable file),
+    the same with no sounds; scrubbing (a snippet a step); stop and play; switching cuts."""
+    import numpy as np
+    res = {}
+    hz = 165
+
+    def scrub(inp, pw):
+        keys = []
+        # frame 0 → 5 one tap at a time, 150 ms apart (the tone plays from frame -12)
+        for _ in range(5):
+            keys.append(cw.mono_ns())
+            inp.key("Right")
+            time.sleep(0.15)
+        time.sleep(0.5)
+        # play 1 s, stop, play again 1 s
+        keys.append(cw.mono_ns())
+        inp.key("Return")
+        time.sleep(1.0)
+        keys.append(cw.mono_ns())
+        inp.key("Return")
+        time.sleep(0.4)
+        keys.append(cw.mono_ns())
+        inp.key("Return")
+        time.sleep(1.0)
+        inp.key("Return")
+        time.sleep(0.3)
+        return keys
+
+    for name in ("sound", "sound-none"):
+        r = sound_run(binary, out, f"p4sedge-{name}", hz, os.path.join(FIX, f"{name}.ppstudio"), 6.0, scrub)
+        t, x = r["t"], r["x"]
+        a = np.abs(x).max(axis=1) if len(x) else np.zeros(0)
+        snippets = []
+        for k in r["keys"][:5]:
+            w = (t >= k) & (t < k + 400e6)
+            loud = np.nonzero(w & (a > 0.02))[0]
+            snippets.append(None if not len(loud) else {
+                "keyToSoundMs": round((t[loud[0]] - k) / 1e6, 1),
+                "soundMs": round((t[loud[-1]] - t[loud[0]]) / 1e6, 1)})
+        stop_k = r["keys"][6]
+        after_stop = (t >= stop_k + 100e6) & (t < stop_k + 350e6)
+        res[name] = {"exit": r["exit"], "links": len(r["links"]["app"]), "scrubSnippets": snippets,
+                     "loudAfterStop": float(a[after_stop].max()) if after_stop.any() else None,
+                     "peakOverall": float(a.max()) if len(a) else None,
+                     "lastFrame": r["stats"]["state"]["frame"]}
+    return res
+
+
+# ------------------------------------------------------------------------------------------
+# a video's sound against the mixdown today's app makes (audio.ts `mixdown`)
+
+def decode(path, rate=RATE):
+    """Any sound (or a video's sound) as float32 (n, 2) at `rate`; None if it has none or
+    doesn't decode. A mono file is on both sides, as Web Audio plays it."""
+    import numpy as np
+    p = subprocess.run(["ffmpeg", "-loglevel", "error", "-nostdin", "-i", path, "-vn", "-f", "f32le", "-ac", "2",
+                        "-ar", str(rate), "-"], capture_output=True)
+    if p.returncode != 0 or not p.stdout:
+        return None
+    return np.frombuffer(p.stdout, "<f4").reshape(-1, 2)
+
+
+def clip_parts(spec, fps):
+    """Each cut of the project's spec as a part (its scene's clips, its first scene frame,
+    its length): every cut one after another, as an export of the whole film plays them."""
+    parts = []
+    for sc in spec["scenes"]:
+        start = 0
+        for c in sc["cuts"]:
+            n = max(sum(e["length"] for e in cels) for cels in c["tracks"].values())
+            parts.append({"clips": sc.get("audio", []), "from": start, "frames": n})
+            start += n
+    return parts
+
+
+def contributions(spec, pics, fps=24, rate=RATE):
+    """Each clip's sound placed where the mixdown puts it (gain 1), over the whole film:
+    {(scene clip label): array (n, 2)}; and the total length in samples."""
+    import numpy as np
+    parts = clip_parts(spec, fps)
+    total = sum(p["frames"] for p in parts)
+    n = max(1, round(total / fps * rate))
+    out, t = {}, 0.0
+    cache = {}
+    for pi, p in enumerate(parts):
+        dur = p["frames"] / fps
+        for ci, c in enumerate(p["clips"]):
+            f = c["file"]
+            if f not in cache:
+                cache[f] = decode(os.path.join(pics, f), rate)
+            b = cache[f]
+            label = f"{f}@{c.get('start', 0)}"
+            if b is None:
+                out.setdefault(label, np.zeros((n, 2), np.float32))
+                continue
+            at = (p["from"] - c.get("start", 0)) / fps
+            offset, delay = max(0.0, at), max(0.0, -at)
+            play = min(dur - delay, len(b) / rate - offset)
+            buf = out.setdefault(label, np.zeros((n, 2), np.float32))
+            if play <= 0:
+                continue
+            s0, d0, k = round(offset * rate), round((t + delay) * rate), round(play * rate)
+            k = min(k, n - d0, len(b) - s0)
+            buf[d0:d0 + k] += b[s0:s0 + k]
+        t += dur
+    return out, n
+
+
+def audio_check(video, spec_path, pics):
+    """The video's sound decoded, aligned (cross-correlation), and fitted as a sum of the
+    clips' placed sounds (least squares): each clip's gain as heard (muted ones should be
+    0, the others their gain), the lag, and what's left over."""
+    import numpy as np
+    spec = json.load(open(spec_path))
+    got = decode(video)
+    if got is None:
+        return {"sound": False}
+    basis, n = contributions(spec, pics, spec.get("fps", 24))
+    names = list(basis)
+    want_gain = {}
+    for sc in spec["scenes"]:
+        for c in sc.get("audio", []):
+            want_gain[f"{c['file']}@{c.get('start', 0)}"] = 0.0 if c.get("muted") else c.get("gain", 1.0)
+    expected = sum(basis[k] * want_gain[k] for k in names)
+    m = min(len(got), len(expected))
+    # the lag: cross-correlation of the left channels over ±200 ms
+    a, b = got[:m, 0].astype(np.float64), expected[:m, 0].astype(np.float64)
+    lagmax = int(0.2 * RATE)
+    fa, fb = np.fft.rfft(a, 2 * m), np.fft.rfft(b, 2 * m)
+    cc = np.fft.irfft(fa * np.conj(fb))
+    cc = np.concatenate([cc[-lagmax:], cc[:lagmax + 1]])
+    lag = int(np.argmax(cc)) - lagmax
+    g = np.roll(got[:m], -lag, axis=0) if lag else got[:m]
+    err = g.reshape(-1) - expected[:m].reshape(-1)
+    full = g
+    # (the fit below 3 kHz, where lossy codecs keep the waveform)
+    def low(v):
+        f = np.fft.rfft(v, axis=0)
+        f[int(3000 / RATE * len(v)):] = 0
+        return np.fft.irfft(f, len(v), axis=0)
+    g = low(g.astype(np.float64))
+    cols = [low(basis[k][:m].astype(np.float64)).reshape(-1) for k in names]
+    A = np.stack(cols, 1).astype(np.float64)
+    used = [i for i in range(len(names)) if np.abs(A[:, i]).max() > 0]
+    gains = np.zeros(len(names))
+    if used:
+        sol, *_ = np.linalg.lstsq(A[:, used], g.reshape(-1).astype(np.float64), rcond=None)
+        gains[used] = sol
+    resid = g.reshape(-1) - A @ gains
+    pw_ = lambda v: float(np.mean(v.astype(np.float64) ** 2)) + 1e-20
+    return {
+        "sound": True, "seconds": round(len(got) / RATE, 3), "expectedSeconds": round(n / RATE, 3),
+        "lagMs": round(lag / RATE * 1000, 2),
+        "gains": {k: {"heard": round(float(gains[i]), 3), "want": want_gain[k]} for i, k in enumerate(names)},
+        "snrVsExpectedDb": round(10 * np.log10(pw_(expected[:m]) / pw_(err)), 1),
+        "fitResidualDb": round(10 * np.log10(pw_(g) / pw_(resid)), 1),
+        "rmsRatio": round(float(np.sqrt(pw_(full) / pw_(expected[:m]))), 3),
+        "peak": round(float(np.abs(got).max()), 3),
+    }
+
+
 SCENARIOS = {"play": scenario_play, "drift": scenario_drift, "play500": scenario_play500,
-             "scrub": scenario_scrub, "switch": scenario_switch, "latency": scenario_latency}
+             "scrub": scenario_scrub, "switch": scenario_switch, "latency": scenario_latency,
+             "sync": scenario_sync, "sound-drift": scenario_sound_drift, "sound-edges": scenario_sound_edges}
 
 
 def main():
     a = sys.argv[1:]
     if len(a) >= 2 and a[0] == "fixtures":
         return fixtures(os.path.realpath(a[1]))
+    if len(a) >= 3 and a[0] == "audio-check":
+        # audio-check <video> <fixtures dir> <project name>
+        pics = os.path.join(a[2], "pics")
+        print(json.dumps(audio_check(a[1], os.path.join(pics, f"{a[3]}.json"), pics), indent=1))
+        return
     if len(a) >= 3 and a[0] == "run":
         binary, out = os.path.realpath(a[1]), os.path.realpath(a[2])
         os.makedirs(out, exist_ok=True)
