@@ -354,7 +354,7 @@ fn show(e: &mut Engine, s: &State) -> bool {
         e.frames.showed = true;
         // (putting away waits for a pause: frame changes stay quick while scrubbing; unless
         // too much is held meanwhile)
-        if held_tiles(e) > HELD_TILES {
+        if held_tiles(e) > HELD_TILES || s.playing {
             trim(e, s);
         } else {
             e.frames.trim_at = Some(Instant::now() + TRIM_AFTER);
@@ -425,8 +425,8 @@ fn wanted(e: &Engine, s: &State) -> std::collections::HashSet<u32> {
 const AHEAD_TILES: usize = 2048;
 /// Drawings not wanted any more are put away this long after the last frame change, or at
 /// once past this many tiles held that the store has too.
-const TRIM_AFTER: Duration = Duration::from_millis(60);
-const HELD_TILES: usize = 4 * AHEAD_TILES;
+const TRIM_AFTER: Duration = Duration::from_millis(30);
+const HELD_TILES: usize = 2 * AHEAD_TILES;
 
 /// Tiles the painter holds of drawings not showing that the store has too.
 fn held_tiles(e: &Engine) -> usize {
@@ -1013,7 +1013,7 @@ pub fn tick(e: &mut Engine, s: &mut State, now: Instant) -> bool {
     }
     // (more asked for once this frame is drawn, not while: their decoding would slow it)
     prefetch(e, s, !shown);
-    if e.frames.trim_at.is_some_and(|t| now >= t) {
+    if e.frames.trim_at.is_some_and(|t| now >= t || s.playing) {
         e.frames.trim_at = None;
         trim(e, s);
     }
