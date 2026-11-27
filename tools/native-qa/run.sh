@@ -107,7 +107,7 @@ if [ "${SKIP_FILES:-0}" != 1 ]; then
     btn=$(python3 -c "import json;d=json.load(open('$out/files/export-button.json'));print(json.dumps(d['export']), json.dumps(d['webm']))" 2>/dev/null)
     PP_QA_FIXTURES="$fx" DROP_CACHES="${DROP_CACHES:-}" \
       PP_QA_EXPORT_BUTTON="${btn%% *}" PP_QA_WEBM_CHOICE="${btn##* }" \
-      python3 -I "$here/canvas_window.py" "$bin" "$out/files-window" open-cli open-menu export-window >"$out/files-window.log" 2>&1
+      python3 -I "$here/canvas_window.py" "$bin" "$out/files-window" open-cli open-menu quit scrub export-window >"$out/files-window.log" 2>&1
     echo "results: $out/files-window/canvas-window.json"
     pgrep -f "mutter --headless --no-x11 --wayland-display pp-qa-canvas" >/dev/null && echo "WARNING: a QA mutter is still running"
   fi

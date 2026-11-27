@@ -30,7 +30,7 @@ BTN_LEFT, BTN_MIDDLE = 0x110, 0x112
 KEYSYM = {
     "0": 0x30, "1": 0x31, "plus": 0x2B, "minus": 0x2D, "equal": 0x3D, "h": 0x68,
     "space": 0x20, "Shift_L": 0xFFE1, "Control_L": 0xFFE3, "Escape": 0xFF1B, "z": 0x7A,
-    "Return": 0xFF0D, "m": 0x6D, "v": 0x76, "b": 0x62, "o": 0x6F, "s": 0x73, "e": 0x65, "q": 0x71,
+    "Return": 0xFF0D, "m": 0x6D, "v": 0x76, "b": 0x62, "o": 0x6F, "s": 0x73, "e": 0x65, "q": 0x71, "Right": 0xFF53, "Left": 0xFF51,
 }
 
 
@@ -893,12 +893,67 @@ def scenario_quit(binary, out):
     return res
 
 
+def scenario_scrub(binary, out):
+    """Scrubbing an opened project in the window (Ctrl+O, then Right taps one display frame
+    apart through the cut, then Left back), at 165 and 60 Hz: each step from its key to the
+    first shown frame on that sheet frame, steps never shown, and the rate while stepping.
+    Budget: at the display's rate."""
+    if not FIXTURES:
+        return {"skipped": "PP_QA_FIXTURES not set"}
+    res = {}
+    for name, n in (("drawings500", 99), ("layers20-4k", 23)):
+        for hz in (165, 60):
+            m = Mutter(out, hz)
+            try:
+                path = os.path.join(FIXTURES, f"{name}.ppstudio")
+                app = App(binary, m, out, f"scrub-{name}-{hz}", 12 if name == "drawings500" else 9,
+                          "animate", env={"PENCILPILOT_DIALOG_ANSWER": path})
+                time.sleep(1.8)
+                inp = Input()
+                inp.to(560, 330)
+                inp.key("Control_L", True); inp.key("o"); inp.key("Control_L", False)
+                time.sleep(2.0)
+                period = 1 / hz
+                sent = []
+                for key in ("Right", "Left"):
+                    for _ in range(n):
+                        sent.append((mono_ns(), key))
+                        inp.key(key)
+                        time.sleep(period)
+                    time.sleep(0.5)
+                inp.stop()
+                st = app.wait()
+                fr = sorted((f for f in st["frames"] if f["shownNs"] and f["drawnNs"] >= sent[0][0]),
+                            key=lambda f: f["shownNs"])
+                # step k (1-based) going forward wants sheet frame k, back wants n - k
+                lat, missing = [], 0
+                for i, (t, key) in enumerate(sent):
+                    want = i + 1 if i < n else n - (i - n + 1)
+                    hit = next((f for f in fr if f["shownNs"] >= t and f["sheetFrame"] == want), None)
+                    if hit is None:
+                        missing += 1
+                    else:
+                        lat.append((hit["shownNs"] - t) / 1e6)
+                changes = [f for a, f in zip(fr, fr[1:]) if f["sheetFrame"] != a["sheetFrame"]]
+                gaps = [(b["shownNs"] - a["shownNs"]) / 1e6 for a, b in zip(changes, changes[1:])
+                        if b["shownNs"] - a["shownNs"] < 0.4e9]
+                res[f"{name}-{hz}"] = {
+                    "steps": len(sent), "neverShown": missing,
+                    "keyToShownMs": lat and {"p50": round(pct(lat, 0.5), 2), "p99": round(pct(lat, 0.99), 2), "max": round(max(lat), 2)},
+                    "frameChangeIntervalMs": gaps and {"p50": round(pct(gaps, 0.5), 2), "p99": round(pct(gaps, 0.99), 2), "max": round(max(gaps), 2)},
+                    "displayFrameMs": round(1000 / hz, 2), "budgetMs": round(1000 / hz + 4, 2),
+                    "lastSheetFrame": st["state"]["frame"]}
+            finally:
+                m.stop()
+    return res
+
+
 SCENARIOS = {
     "view": scenario_view, "latency": scenario_latency, "viewfps": scenario_viewfps,
     "idle": scenario_idle, "memory": scenario_memory, "playback": scenario_playback,
     "transform": scenario_transform, "turn": scenario_turn,
     "open-cli": scenario_open_cli, "open-menu": scenario_open_menu,
-    "export-window": scenario_export_window, "quit": scenario_quit,
+    "export-window": scenario_export_window, "quit": scenario_quit, "scrub": scenario_scrub,
     "latency-pauses": scenario_latency_pauses, "latency-continuous": scenario_latency_continuous,
 }
 
