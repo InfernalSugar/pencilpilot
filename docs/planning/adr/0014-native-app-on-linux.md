@@ -65,9 +65,23 @@ Each step is its own PR, with tests that need no window on the screen.
 1. ~~Our own Wayland client~~ (done, then replaced by the standard bindings).
 2. `crates/gpu`: a device on the GPU, and images exported as dmabufs (done). Explicit sync comes
    with step 3.
-3. The window: xdg-shell, scale (fractional too), resizing, frame timing and presentation
-   feedback, following the refresh rate.
-4. Input: pointer, keyboard (keymaps through a standard library), and the pen (tablet v2).
+3. `crates/window`: xdg-shell, scale (fractional too), resizing, frame pacing by the
+   compositor's frame callbacks, presentation feedback, following the refresh rate (done).
+   - **Checked** on headless mutter with two monitors (165 Hz and 60 Hz): 165.0 fps with no frame
+     skipped on the 165 Hz one. Moved to the 60 Hz one, the compositor reported 60.0 Hz and the
+     window drew at 60.0 fps. Maximising resized the frames.
+   - **Frames are handed over** once the GPU has finished them (a fence wait). Explicit sync,
+     which lets the compositor wait on the GPU instead, comes with the canvas, where its gain can
+     be measured.
+4. Input in `crates/window` (done): pointer (each compositor frame one moment), keyboard
+   (libxkbcommon, loaded at run time: the person's layouts, modifiers and text), and the pen
+   (tablet v2: pressure, tilt, rotation, distance, the eraser end, side buttons, per tool, with
+   the compositor's timestamps).
+   - **Tests:** recorded sequences cover a whole stroke, the eraser and buttons, leaving while
+     touching, a tap within one moment, and pointer moments and scrolls. A US keymap types "a",
+     "!" with Shift, and nothing for Ctrl+A.
+   - **The real pen:** `cargo run --release -p pencilpilot-window --example pen` opens a window
+     that darkens with pressure and prints what the pen reports.
 5. The first canvas: the brush engine (`crates/brush`) paints tiles, and the GPU composites and
    presents them.
    - **Measured in the baseline:** pen to screen, frame rate at 60/75/100/165 Hz, memory and power.
