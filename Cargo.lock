@@ -2981,6 +2981,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pencilpilot-window"
+version = "0.1.0"
+dependencies = [
+ "pencilpilot-gpu",
+ "wayland-client",
+ "wayland-protocols",
+]
+
+[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

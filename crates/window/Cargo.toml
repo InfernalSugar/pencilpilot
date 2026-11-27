@@ -1,0 +1,12 @@
+[package]
+name = "pencilpilot-window"
+description = "The native app's window on Wayland: sized, scaled, paced by the compositor's frames, following the refresh rate of the monitor it's on"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[dependencies]
+pencilpilot-gpu = { path = "../gpu" }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
