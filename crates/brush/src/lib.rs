@@ -2952,6 +2952,44 @@ impl Painter {
         self.transform.is_some()
     }
 
+    /// A transform's lifted pixels as straight-alpha sRGB RGBA8, `w`×`h` from canvas (x, y):
+    /// for showing them moving (on the GPU) without redrawing the layer at every step.
+    pub fn transform_float(&self) -> Option<(Vec<u8>, i64, i64, usize, usize)> {
+        let t = self.transform.as_ref()?;
+        if t.fw == 0 || t.fh == 0 || t.float.len() != t.fw * t.fh {
+            return None;
+        }
+        let mut out = vec![0u8; t.fw * t.fh * 4];
+        for (i, p) in t.float.iter().enumerate() {
+            if p[3] == 0 {
+                continue;
+            }
+            let (c, a) = unpremul_srgb(*p);
+            out[i * 4] = (c[0] * 255.0).round() as u8;
+            out[i * 4 + 1] = (c[1] * 255.0).round() as u8;
+            out[i * 4 + 2] = (c[2] * 255.0).round() as u8;
+            out[i * 4 + 3] = (a * 255.0).round() as u8;
+        }
+        Some((out, t.fx0, t.fy0, t.fw, t.fh))
+    }
+
+    /// While a transform's lifted pixels are shown elsewhere: the layer without them (the
+    /// next `transform_preview` draws them in again).
+    pub fn transform_show_base(&mut self) -> bool {
+        let Some(t) = self.transform.as_mut() else {
+            return false;
+        };
+        let Some(li) = self.layers.iter().position(|l| l.id == t.layer) else {
+            return false;
+        };
+        let tiles = &mut self.layers[li].surface.tiles;
+        self.dirty.extend(tiles.keys().copied());
+        *tiles = t.base.clone();
+        self.dirty.extend(tiles.keys().copied());
+        t.last = None;
+        true
+    }
+
     // pixel loops index tiles by (row, col) and map them to canvas coordinates
     #[allow(clippy::needless_range_loop)]
     /// Show the lifted pixels under matrix `m` (dest = a·x + c·y + e, b·x + d·y + f).

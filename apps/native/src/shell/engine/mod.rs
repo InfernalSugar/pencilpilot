@@ -19,6 +19,26 @@ use hokusai::BrushSetting;
 
 use crate::state::{Action, State, Tool};
 
+/// A transform's lifted pixels while they move: shown by the GPU over the document, so a
+/// drag costs no redrawing at all; drawn into the layer once, on [`Engine::float_end`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct Float {
+    /// straight RGBA8, `w`×`h`
+    pub rgba: Vec<u8>,
+    pub w: u32,
+    pub h: u32,
+    /// where its top-left was lifted from (document pixels)
+    pub at: (f32, f32),
+    /// where it goes: document → document, `dest = (a·x + c·y + e, b·x + d·y + f)` as
+    /// `[a, b, c, d, e, f]` (the painter's `transform_preview`'s matrix)
+    pub m: [f32; 6],
+    /// which lift this is (a new one each [`Engine::float_begin`]: the shell uploads `rgba`
+    /// once per lift)
+    pub lift: u64,
+}
+
+pub const IDENTITY: [f32; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+
 /// A pointer on the canvas, in document pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Sample {
@@ -74,6 +94,9 @@ pub struct Engine {
     pub tools: tools::Tools,
     /// layers, drawings, playback ([`frames`])
     pub frames: frames::Frames,
+    /// pixels being moved, shown by the GPU ([`Engine::float_begin`])
+    pub float: Option<Float>,
+    lifts: u64,
 }
 
 impl Engine {
@@ -84,6 +107,49 @@ impl Engine {
             last_ms: None,
             tools: tools::Tools::default(),
             frames: frames::Frames::default(),
+            float: None,
+            lifts: 0,
+        }
+    }
+
+    /// After `painter.transform_begin()`: the lifted pixels move on the GPU from now on
+    /// ([`Engine::float_move`]); the layer shows without them. False when nothing's lifted.
+    pub fn float_begin(&mut self) -> bool {
+        let Some((rgba, x, y, w, h)) = self.painter.transform_float() else {
+            return false;
+        };
+        self.painter.transform_show_base();
+        self.lifts += 1;
+        self.float = Some(Float {
+            rgba,
+            w: w as u32,
+            h: h as u32,
+            at: (x as f32, y as f32),
+            m: IDENTITY,
+            lift: self.lifts,
+        });
+        true
+    }
+
+    /// Moves the lifted pixels to `m` (see [`Float::m`]): nothing is redrawn but the screen.
+    pub fn float_move(&mut self, m: [f32; 6]) {
+        if let Some(f) = &mut self.float {
+            f.m = m;
+        }
+    }
+
+    /// Ends the move: `commit` draws the pixels into the layer where they are (one undo
+    /// step), otherwise they go back. Returns whether the picture changed.
+    pub fn float_end(&mut self, commit: bool) -> bool {
+        let Some(f) = self.float.take() else {
+            return false;
+        };
+        if commit {
+            self.painter.transform_preview(f.m);
+            self.painter.transform_commit()
+        } else {
+            self.painter.transform_cancel();
+            true
         }
     }
 
@@ -256,5 +322,66 @@ mod tests {
         let mut e2 = Engine::new(240, 80);
         stroke(&mut e2, &s, 60.0);
         assert!(ink(&e2, 45, 75) > thin * 2, "16 px paints wider than 4 px");
+    }
+
+    /// Moving a large painted area (the owner's freeze in today's app): lifting it once,
+    /// then each step of the drag only changes a matrix; the pixels land where it ends.
+    #[test]
+    fn moving_a_large_area_costs_nothing_per_step() {
+        use std::time::Instant;
+        let mut e = Engine::new(1920, 1080);
+        let (w, h) = (1920usize, 1080usize);
+        // 1200 × 800 of solid paint from (300, 100)
+        let mut cov = vec![0u8; w * h];
+        for y in 100..900 {
+            cov[y * w + 300..y * w + 1500].fill(255);
+        }
+        assert!(e.painter.fill_mask(&cov, [200, 30, 30], 1.0));
+        e.painter.flush();
+        let red = |e: &Engine, x: usize, y: usize| {
+            let p = &e.painter.rgba()[(y * w + x) * 4..][..3];
+            p[0] > 150 && p[1] < 80
+        };
+        assert!(red(&e, 305, 105));
+
+        let t = Instant::now();
+        assert!(!e.painter.transform_begin().is_empty());
+        assert!(e.float_begin());
+        let lift = t.elapsed();
+        let f = e.float.as_ref().unwrap();
+        assert_eq!((f.w, f.h, f.at), (1200, 800, (300.0, 100.0)));
+        e.painter.flush();
+        assert!(
+            !red(&e, 305, 105),
+            "while moving, the layer shows without the lifted paint"
+        );
+
+        // a drag: 200 steps
+        let t = Instant::now();
+        for i in 0..200 {
+            let k = i as f32 * 0.5;
+            e.float_move([1.0, 0.0, 0.0, 1.0, k, k / 2.0]);
+            e.painter.flush();
+        }
+        let per_step = t.elapsed() / 200;
+
+        let t = Instant::now();
+        e.float_move([1.0, 0.0, 0.0, 1.0, 100.0, 50.0]);
+        assert!(e.float_end(true));
+        e.painter.flush();
+        let commit = t.elapsed();
+        assert!(e.float.is_none());
+        assert!(red(&e, 405, 155), "the paint is where the drag left it");
+        assert!(!red(&e, 305, 105), "and not where it was");
+        assert!(
+            red(&e, 1595, 945) && !red(&e, 1605, 955),
+            "its far corner moved too"
+        );
+        // one undo puts it back
+        assert!(e.painter.undo());
+        e.painter.flush();
+        assert!(red(&e, 305, 105) && !red(&e, 1550, 920));
+        eprintln!("1200×800 move: lift {lift:?}, each drag step {per_step:?}, commit {commit:?}");
+        assert!(per_step.as_micros() < 1000, "a drag step: {per_step:?}");
     }
 }

@@ -31,6 +31,8 @@ pub fn id(name: &str) -> Id {
 
 /// How long the pointer rests on a widget before its tooltip shows.
 pub const TOOLTIP_DELAY: Duration = Duration::from_millis(500);
+/// How long input must have stopped before the system's fonts join (see [`Ui::pass`]).
+pub const FONTS_JOIN_WHEN_CALM: Duration = Duration::from_millis(400);
 
 /// The pointer, in logical pixels.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -164,6 +166,8 @@ pub struct Ui {
     icons: HashMap<(String, u32), Option<[f32; 4]>>,
     shown: Vec<Quad>,
     next_at: Option<Instant>,
+    /// the last input (the system's fonts join only once it's been calm for a while)
+    last_input: Instant,
     now: Instant,
 }
 
@@ -191,11 +195,19 @@ impl Ui {
             icons: HashMap::new(),
             shown: Vec::new(),
             next_at: None,
+            last_input: Instant::now(),
             now: Instant::now(),
         }
     }
 
+    /// Input that went elsewhere (a stroke on the canvas): the person is busy, so slow work
+    /// (the system's fonts joining) waits.
+    pub fn active(&mut self) {
+        self.last_input = Instant::now();
+    }
+
     pub fn pointer_moved(&mut self, x: f32, y: f32) {
+        self.last_input = Instant::now();
         self.pointer.x = x;
         self.pointer.y = y;
         self.pointer.inside = true;
@@ -205,6 +217,7 @@ impl Ui {
     }
     /// The primary button (left; a pen's tip).
     pub fn pointer_button(&mut self, down: bool) {
+        self.last_input = Instant::now();
         if down && !self.pointer.down {
             self.pointer.pressed = true;
         }
@@ -215,12 +228,15 @@ impl Ui {
     }
     /// The secondary button (right; a pen's side button) went down.
     pub fn pointer_context(&mut self) {
+        self.last_input = Instant::now();
         self.pointer.context = true;
     }
     pub fn scrolled(&mut self, dy: f32) {
+        self.last_input = Instant::now();
         self.pointer.scroll += dy;
     }
     pub fn key(&mut self, k: Key) {
+        self.last_input = Instant::now();
         self.keys.push(k);
     }
 
@@ -236,14 +252,41 @@ impl Ui {
 
     /// A pass: build the interface (logical size `w` × `h`) with `build`. Returns the quads
     /// (device pixels) when they differ from what's on screen, None when nothing would change.
+    ///
+    /// When the pass acted on input (a press, a release, a key, a scroll), it builds once
+    /// more with no new input before returning: a click that changed what an earlier part had
+    /// already drawn (the tab picked before, a tool's highlight) then shows complete, in this
+    /// frame, whoever drives the passes.
     pub fn pass(
         &mut self,
         r: &mut Renderer2d,
         w: f32,
         h: f32,
-        build: impl FnOnce(&mut Frame),
+        mut build: impl FnMut(&mut Frame),
     ) -> Option<Vec<Quad>> {
-        if self.text.poll_fonts() {
+        let p = self.pointer;
+        let input =
+            p.pressed || p.released || p.context || p.scroll != 0.0 || !self.keys.is_empty();
+        let first = self.pass_once(r, w, h, &mut build);
+        if !input {
+            return first;
+        }
+        self.pass_once(r, w, h, &mut build).or(first)
+    }
+
+    fn pass_once(
+        &mut self,
+        r: &mut Renderer2d,
+        w: f32,
+        h: f32,
+        build: &mut impl FnMut(&mut Frame),
+    ) -> Option<Vec<Quad>> {
+        // the system's fonts join when it's calm: joining lays every glyph out again, which
+        // mustn't land in the middle of a stroke
+        let calm = self.held.is_none()
+            && !self.pointer.down
+            && self.last_input.elapsed() >= FONTS_JOIN_WHEN_CALM;
+        if calm && self.text.poll_fonts() {
             // the atlas started over: icons go in again, and the screen is redrawn
             self.icons.clear();
             self.shown.clear();
@@ -323,7 +366,14 @@ impl Ui {
 
     /// When the next pass is due even without input (a tooltip about to show), if ever.
     pub fn next_pass_at(&self) -> Option<Instant> {
-        self.next_at
+        // while the system's fonts load: a look when it's calm, then every quarter second
+        let fonts = self.text.fonts_loading().then(|| {
+            (self.last_input + FONTS_JOIN_WHEN_CALM).max(self.now + Duration::from_millis(250))
+        });
+        match (self.next_at, fonts) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 }
 

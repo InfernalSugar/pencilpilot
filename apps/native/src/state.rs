@@ -150,6 +150,8 @@ pub struct State {
     pub actions: Vec<Action>,
     /// how the document sits in the canvas card
     pub view: crate::shell::view::View,
+    /// pixels being moved, shown over the document (from the engine)
+    pub moving: Option<crate::shell::view::Moving>,
     /// the canvas tools' state the interface shows (`shell/engine/tools.rs`)
     pub tooling: crate::shell::engine::tools::ToolsUi,
     /// the cut's exposure sheet (`shell/engine/frames.rs`)
@@ -262,6 +264,7 @@ impl State {
             can_redo: false,
             actions: Vec::new(),
             view: Default::default(),
+            moving: None,
             tooling: Default::default(),
             sheet: crate::shell::engine::frames::Sheet::demo(),
             header: Default::default(),

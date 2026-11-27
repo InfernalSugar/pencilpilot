@@ -173,6 +173,42 @@ impl View {
     }
 }
 
+/// Pixels being moved (a transform's lifted pixels), as the view shows them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Moving {
+    /// where its top-left was lifted from, document pixels
+    pub at: (f32, f32),
+    pub w: u32,
+    pub h: u32,
+    /// document → document: `dest = (a·x + c·y + e, b·x + d·y + f)` as `[a, b, c, d, e, f]`
+    pub m: [f32; 6],
+}
+
+impl View {
+    /// For the GPU: frame pixel → the moving pixels' own pixel (as [`View::inverse_affine`]);
+    /// None when the move can't be undone (squashed flat).
+    pub fn moving_affine(&self, card: Rect, scale: f32, mv: &Moving) -> Option<[f32; 6]> {
+        let [va, vb, vc, vd, vtx, vty] = self.inverse_affine(card, scale);
+        let [a, b, c, d, e, f] = mv.m;
+        // m as x' = a·x + c·y + e, y' = b·x + d·y + f; its inverse
+        let det = a * d - c * b;
+        if det.abs() < 1e-8 {
+            return None;
+        }
+        let (ia, ic, ib, id) = (d / det, -c / det, -b / det, a / det);
+        let (ie, if_) = (-(ia * e + ic * f), -(ib * e + id * f));
+        // source = inv(m) · (view⁻¹ · p) − at
+        Some([
+            ia * va + ic * vc,
+            ia * vb + ic * vd,
+            ib * va + id * vc,
+            ib * vb + id * vd,
+            ia * vtx + ic * vty + ie - mv.at.0,
+            ib * vtx + id * vty + if_ - mv.at.1,
+        ])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,5 +290,33 @@ mod tests {
         // flipped, the left edge shows on the right
         v.flip_view(CARD);
         assert!(v.to_screen(CARD, 0.0, 540.0).0 > 600.0);
+    }
+
+    #[test]
+    fn moving_pixels_follow_their_matrix_through_the_view() {
+        let mut v = View::default();
+        v.reset(CARD);
+        v.rotate_about(CARD, (500.0, 300.0), 0.4);
+        v.flip_view(CARD);
+        // lifted from (100, 50), moved by (30, −20) and turned a little
+        let (c, s) = (0.3f32.cos(), 0.3f32.sin());
+        let mv = Moving {
+            at: (100.0, 50.0),
+            w: 200,
+            h: 100,
+            m: [c, s, -s, c, 30.0, -20.0],
+        };
+        let scale = 1.5;
+        let map = v.moving_affine(CARD, scale, &mv).unwrap();
+        // the source pixel (120, 70) — local (20, 20) — lands at m·(120, 70) in the document
+        let (sx, sy) = (120.0, 70.0);
+        let dest = (c * sx - s * sy + 30.0, s * sx + c * sy - 20.0);
+        let p = v.to_screen(CARD, dest.0, dest.1);
+        let (x, y) = (p.0 * scale, p.1 * scale);
+        let got = (
+            map[0] * x + map[1] * y + map[4],
+            map[2] * x + map[3] * y + map[5],
+        );
+        assert!(near(got, (20.0, 20.0)), "{got:?}");
     }
 }

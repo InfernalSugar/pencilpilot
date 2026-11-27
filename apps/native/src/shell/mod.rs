@@ -161,6 +161,11 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut canvas: Option<Canvas> = None;
     let mut recs: Vec<FrameRec> = Vec::new();
+    let mut pacer =
+        pencilpilot_window::pace::Pacer::new(std::env::var_os("PP_DRAW_AT_ONCE").is_some());
+    let mut plan: Option<pencilpilot_window::pace::Plan> = None;
+    // the moving pixels' picture, and which lift it holds
+    let mut float_tex: Option<(Canvas, u64)> = None;
     let (mut oldest_input, mut events): (Option<(u32, u64)>, u32) = (None, 0);
     let mut eng: Option<engine::Engine> = None;
     let mut mark = 0;
@@ -203,6 +208,7 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
                 _ => None,
             };
             if let Some(t) = t {
+                ui.active();
                 events += 1;
                 oldest_input.get_or_insert((t, pencilpilot_window::clock::now_ns()));
             }
@@ -380,6 +386,29 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
                 _ => {}
             }
         }
+        // pixels being moved: the GPU shows them where they are now
+        if let Some(e) = &eng {
+            let now = e.float.as_ref().map(|f| crate::shell::view::Moving {
+                at: f.at,
+                w: f.w,
+                h: f.h,
+                m: f.m,
+            });
+            if now != s.moving {
+                s.moving = now;
+                dirty = true;
+            }
+            match (&e.float, &float_tex) {
+                (Some(f), Some((_, lift))) if *lift == f.lift => {}
+                (Some(f), _) => {
+                    let mut c = Canvas::new(&gpu, f.w.max(1), f.h.max(1))?;
+                    c.upload_all(&f.rgba);
+                    float_tex = Some((c, f.lift));
+                }
+                (None, Some(_)) => float_tex = None,
+                (None, None) => {}
+            }
+        }
         // time: playback
         if let Some(e) = &mut eng
             && e.tick(&mut s, std::time::Instant::now())
@@ -395,6 +424,7 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             canvas_dirty = true;
         }
         for p in win.take_presented() {
+            pacer.shown(&p);
             if let Some(r) = recs.iter_mut().rev().find(|r| r.frame == p.frame) {
                 r.shown_ns = Some(p.at_ns);
             }
@@ -404,18 +434,24 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
         if !win.wants_frame() || !(dirty || canvas_dirty) {
             continue;
         }
+        // drawn late: just before the refresh it's for, with the newest input
+        let now = pencilpilot_window::clock::now_ns();
+        if plan.is_none_or(|p| now > p.target) {
+            plan = pacer.plan(now);
+        }
+        if let Some(p) = plan
+            && now < p.draw_at
+        {
+            win.wait_until(p.draw_at)?;
+            continue;
+        }
         let (lw, lh) = win.logical_size();
         ui.scale = win.scale() as f32;
         let (w, h) = (lw as f32, lh as f32);
         let first = ui.pass(&mut r, w, h, |f| {
             (mark, canvas_rect) = build(f, &mut s, w, h);
         });
-        // a settling pass, with no new input: a click that changed what an earlier piece had
-        // already drawn shows now, not at the next input (it acts on nothing a second time)
-        let settled = ui.pass(&mut r, w, h, |f| {
-            (mark, canvas_rect) = build(f, &mut s, w, h);
-        });
-        let changed = first.or(settled);
+        let changed = first;
         dirty = false;
         // what the interface asked for
         for a in std::mem::take(&mut s.actions) {
@@ -456,8 +492,16 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
         }
         canvas_dirty = false;
         let img = win.acquire(&gpu)?;
-        r.draw_layered(&gpu, img, ui.theme.paper, ui.shown(), canvas.as_mut())?;
+        r.draw_canvases(
+            &gpu,
+            img,
+            ui.theme.paper,
+            ui.shown(),
+            canvas.as_mut(),
+            float_tex.as_mut().map(|(c, _)| c),
+        )?;
         let frame = win.present()?;
+        pacer.drawn(frame, plan.take());
         drawn += 1;
         recs.push(FrameRec {
             frame,
@@ -501,9 +545,12 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             .collect();
         let c = canvas_rect;
         let json = format!(
-            "{{\"seconds\": {:.3}, \"startupToFirstFrameMs\": {}, \"framesDrawn\": {drawn}, \"framesPresented\": {presented},\n \"view\": {{\"zoom\": {}, \"angle\": {}, \"flip\": {}, \"pan\": [{}, {}], \"docSize\": [{}, {}]}},\n \"canvasRect\": [{}, {}, {}, {}],\n \"state\": {{\"workspace\": {:?}, \"tool\": \"{:?}\", \"activeLayer\": {}, \"frame\": {}, \"playing\": {}, \"colour\": {:?}, \"layers\": [{}]}},\n \"frames\": [\n  {}\n ]}}\n",
+            "{{\"seconds\": {:.3}, \"startupToFirstFrameMs\": {}, \"framesDrawn\": {drawn}, \"framesPresented\": {presented}, \"drawingLate\": {}, \"marginMs\": {:.2}, \"framesLate\": {},\n \"view\": {{\"zoom\": {}, \"angle\": {}, \"flip\": {}, \"pan\": [{}, {}], \"docSize\": [{}, {}]}},\n \"canvasRect\": [{}, {}, {}, {}],\n \"state\": {{\"workspace\": {:?}, \"tool\": \"{:?}\", \"activeLayer\": {}, \"frame\": {}, \"playing\": {}, \"colour\": {:?}, \"layers\": [{}]}},\n \"frames\": [\n  {}\n ]}}\n",
             started.elapsed().as_secs_f64(),
             first_shown.map_or("null".into(), |v| format!("{v:.1}")),
+            pacer.drawing_late(),
+            pacer.margin_ms(),
+            pacer.late,
             v.zoom,
             v.angle,
             v.flip,
