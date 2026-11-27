@@ -99,6 +99,11 @@ pub struct Frames {
     history: (bool, bool, u32, u32),
     /// copied cels and the layer they're from
     clipboard: Option<(u32, Vec<Cel>)>,
+    /// a drawing painted on since the last tick
+    painted: Option<u32>,
+    /// what the last tick saw (when it's all the same and nothing is due, a tick does
+    /// nothing): the frame, the active layer, the layers' count
+    seen: (u32, usize, usize),
 }
 
 impl Frames {
@@ -690,6 +695,9 @@ fn other(e: &mut Engine, s: &mut State, name: &str, id: u32) -> Option<Option<u3
 
 /// Playback and the rest that moves with time. Returns whether the interface changed.
 pub fn tick(e: &mut Engine, s: &mut State, now: Instant) -> bool {
+    if idle(e, s) {
+        return false;
+    }
     let before = (
         s.layers.clone(),
         s.sheet.tracks.clone(),
@@ -758,17 +766,28 @@ pub fn tick(e: &mut Engine, s: &mut State, now: Instant) -> bool {
         }
         e.frames.history = h;
     }
-    if !e.is_stroking() && !s.playing {
-        let todo: Vec<u32> = e.frames.stale.iter().take(16).copied().collect();
-        for d in todo {
-            e.frames.stale.remove(&d);
-            let t = thumbs::of(&e.painter, d);
+    if !e.is_stroking() {
+        if let Some(d) = e.frames.painted.take() {
+            e.frames.mark(d);
+        }
+        // one thumbnail a tick (a frame), and none while playing
+        if !s.playing
+            && let Some(d) = e.frames.stale.pop_first()
+        {
+            let showing = e
+                .painter
+                .layers()
+                .iter()
+                .find(|l| e.painter.layer_drawing(l.id) == d)
+                .map(|l| l.id);
+            let t = thumbs::of(&e.painter, d, showing);
             if s.sheet.thumbs.get(&d) != Some(&t) {
                 s.sheet.thumbs.insert(d, t);
                 changed = true;
             }
         }
     }
+    e.frames.seen = (s.frame, s.active_layer, e.painter.layers().len());
     if show(e, s) {
         changed = true;
     }
@@ -782,6 +801,32 @@ pub fn tick(e: &mut Engine, s: &mut State, now: Instant) -> bool {
                 s.active_layer,
                 s.playing,
             )
+}
+
+/// Whether a tick has nothing to do: not playing, nothing pending, the interface's layers
+/// and frame as the last tick left them, the painter's history unchanged. (A few
+/// comparisons: no scans of the sheet or the drawings.)
+fn idle(e: &Engine, s: &State) -> bool {
+    let f = &e.frames;
+    f.ready
+        && !s.playing
+        && f.play.is_none()
+        && f.opacity.is_none()
+        && f.painted.is_none()
+        && f.stale.is_empty()
+        && f.seen == (s.frame, s.active_layer, e.painter.layers().len())
+        && history(e) == f.history
+        && f.last.len() == s.layers.len()
+        && f
+            .last
+            .iter()
+            .zip(&s.layers)
+            .zip(&s.sheet.tracks)
+            .all(|(((l, o), m), t)| l == m && *o == t.opacity)
+        && !f
+            .asked
+            .chunks(2)
+            .any(|p| p[1] == 0 && e.painter.layer_drawing(p[0]) != 0)
 }
 
 /// When [`tick`] next has something to do.
@@ -805,7 +850,11 @@ pub fn next_tick_at(e: &Engine, s: &State) -> Option<Instant> {
         let adopt = s.sheet.tracks.iter().any(|t| {
             f.asked.chunks(2).any(|p| p == [t.layer, 0]) && e.painter.layer_drawing(t.layer) != 0
         });
-        if (!f.stale.is_empty() && !s.playing) || adopt || history(e) != f.history {
+        if (!f.stale.is_empty() && !s.playing)
+            || f.painted.is_some()
+            || adopt
+            || history(e) != f.history
+        {
             at.push(now);
         }
     }
@@ -824,8 +873,9 @@ pub fn picture<'a>(e: &'a mut Engine, s: &State) -> Option<(&'a [u8], [u32; 4])>
     let (w, h) = (e.painter.width(), e.painter.height());
     let f = &mut e.frames;
     if d.is_some() && !f.showed && !s.playing && active != 0 {
-        // paint (a stroke, a fill): the active layer's drawing changed
-        f.mark(active);
+        // paint (a stroke, a fill): the active layer's drawing changed (its thumbnail is
+        // made again once the stroke ends)
+        f.painted = Some(active);
     }
     f.showed = false;
     let whole = [0, 0, w, h];

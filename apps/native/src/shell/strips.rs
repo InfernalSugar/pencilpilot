@@ -2547,8 +2547,10 @@ mod tests {
         };
         h.s.sheet.demo = true;
         let mut e = crate::shell::engine::Engine::new(480, 270);
-        e.tick(&mut h.s, std::time::Instant::now());
-        e.tick(&mut h.s, std::time::Instant::now());
+        // (thumbnails are made one a tick)
+        for _ in 0..32 {
+            e.tick(&mut h.s, std::time::Instant::now());
+        }
         h.pass();
         assert_eq!(h.s.sheet.thumbs.len(), 14, "a thumbnail per drawing");
         let quads = h.ui.shown().len();

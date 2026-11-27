@@ -12,7 +12,15 @@ const TILE: i64 = 64;
 
 /// A drawing as a `TW` × `TH` picture (straight RGBA8; transparent where it's empty). Each
 /// pixel averages its area, its coverage boosted so thin lines still show.
-pub fn of(p: &Painter, drawing: u32) -> Thumb {
+pub fn of(p: &Painter, drawing: u32, showing_on: Option<u32>) -> Thumb {
+    // showing on a layer: the painter's own thumbnail (it samples, and only painted tiles)
+    if let Some(layer) = showing_on {
+        return Thumb {
+            w: TW,
+            h: TH,
+            px: p.layer_thumbnail(layer, TW, TH),
+        };
+    }
     let (w, h) = (p.width() as i64, p.height() as i64);
     let n = (TW * TH) as usize;
     let mut sa = vec![0f32; n];
