@@ -161,6 +161,9 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut canvas: Option<Canvas> = None;
     let mut recs: Vec<FrameRec> = Vec::new();
+    let mut pacer =
+        pencilpilot_window::pace::Pacer::new(std::env::var_os("PP_DRAW_AT_ONCE").is_some());
+    let mut plan: Option<pencilpilot_window::pace::Plan> = None;
     // the moving pixels' picture, and which lift it holds
     let mut float_tex: Option<(Canvas, u64)> = None;
     let (mut oldest_input, mut events): (Option<(u32, u64)>, u32) = (None, 0);
@@ -205,6 +208,7 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
                 _ => None,
             };
             if let Some(t) = t {
+                ui.active();
                 events += 1;
                 oldest_input.get_or_insert((t, pencilpilot_window::clock::now_ns()));
             }
@@ -420,6 +424,7 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             canvas_dirty = true;
         }
         for p in win.take_presented() {
+            pacer.shown(&p);
             if let Some(r) = recs.iter_mut().rev().find(|r| r.frame == p.frame) {
                 r.shown_ns = Some(p.at_ns);
             }
@@ -427,6 +432,17 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             first_shown.get_or_insert(started.elapsed().as_secs_f64() * 1e3);
         }
         if !win.wants_frame() || !(dirty || canvas_dirty) {
+            continue;
+        }
+        // drawn late: just before the refresh it's for, with the newest input
+        let now = pencilpilot_window::clock::now_ns();
+        if plan.is_none_or(|p| now > p.target) {
+            plan = pacer.plan(now);
+        }
+        if let Some(p) = plan
+            && now < p.draw_at
+        {
+            win.wait_until(p.draw_at)?;
             continue;
         }
         let (lw, lh) = win.logical_size();
@@ -485,6 +501,7 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             float_tex.as_mut().map(|(c, _)| c),
         )?;
         let frame = win.present()?;
+        pacer.drawn(frame, plan.take());
         drawn += 1;
         recs.push(FrameRec {
             frame,
@@ -528,9 +545,12 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             .collect();
         let c = canvas_rect;
         let json = format!(
-            "{{\"seconds\": {:.3}, \"startupToFirstFrameMs\": {}, \"framesDrawn\": {drawn}, \"framesPresented\": {presented},\n \"view\": {{\"zoom\": {}, \"angle\": {}, \"flip\": {}, \"pan\": [{}, {}], \"docSize\": [{}, {}]}},\n \"canvasRect\": [{}, {}, {}, {}],\n \"state\": {{\"workspace\": {:?}, \"tool\": \"{:?}\", \"activeLayer\": {}, \"frame\": {}, \"playing\": {}, \"colour\": {:?}, \"layers\": [{}]}},\n \"frames\": [\n  {}\n ]}}\n",
+            "{{\"seconds\": {:.3}, \"startupToFirstFrameMs\": {}, \"framesDrawn\": {drawn}, \"framesPresented\": {presented}, \"drawingLate\": {}, \"marginMs\": {:.2}, \"framesLate\": {},\n \"view\": {{\"zoom\": {}, \"angle\": {}, \"flip\": {}, \"pan\": [{}, {}], \"docSize\": [{}, {}]}},\n \"canvasRect\": [{}, {}, {}, {}],\n \"state\": {{\"workspace\": {:?}, \"tool\": \"{:?}\", \"activeLayer\": {}, \"frame\": {}, \"playing\": {}, \"colour\": {:?}, \"layers\": [{}]}},\n \"frames\": [\n  {}\n ]}}\n",
             started.elapsed().as_secs_f64(),
             first_shown.map_or("null".into(), |v| format!("{v:.1}")),
+            pacer.drawing_late(),
+            pacer.margin_ms(),
+            pacer.late,
             v.zoom,
             v.angle,
             v.flip,
