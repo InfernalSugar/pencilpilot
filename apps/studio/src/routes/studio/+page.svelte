@@ -1877,9 +1877,11 @@
 		if (end === 'from' && playRange.to < frame) playRange = { from: frame, to: len - 1 };
 	}
 
-	// a new, empty canvas: a new timeline
+	// a new, empty canvas: a new timeline. Not while a project is opening: emptying the
+	// frame store then would land after the open filled it, and its drawings would be gone
+	// (a big project's open outlasts the canvas mounting)
 	$effect(() => {
-		if (!status || pending || timelineFor === canvasKey) return;
+		if (!status || pending || busy === 'opening' || timelineFor === canvasKey) return;
 		untrack(() => {
 			timeline = newTimeline(status!.layers.map((l) => ({ id: l.id, drawing: l.drawing })));
 			timelineFor = canvasKey;
