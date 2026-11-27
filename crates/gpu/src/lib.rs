@@ -47,6 +47,9 @@ impl<T> Ctx<T> for std::result::Result<T, vk::Result> {
 }
 
 /// The device extensions needed to hand images to the compositor.
+mod draw2d;
+pub use draw2d::{ATLAS_SIZE, Quad, Renderer2d};
+
 const DEVICE_EXTENSIONS: &[&CStr] = &[
     khr::external_memory_fd::NAME,
     ext::external_memory_dma_buf::NAME,
@@ -165,9 +168,12 @@ impl Gpu {
             .queue_family_index(family)
             .queue_priorities(&prio)];
         let ext_ptrs: Vec<_> = DEVICE_EXTENSIONS.iter().map(|e| e.as_ptr()).collect();
+        // dynamic rendering (Vulkan 1.3): the interface draws without render-pass objects
+        let mut v13 = vk::PhysicalDeviceVulkan13Features::default().dynamic_rendering(true);
         let dci = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queues)
-            .enabled_extension_names(&ext_ptrs);
+            .enabled_extension_names(&ext_ptrs)
+            .push_next(&mut v13);
         let device =
             unsafe { instance.create_device(physical, &dci, None) }.ctx("vkCreateDevice")?;
 
