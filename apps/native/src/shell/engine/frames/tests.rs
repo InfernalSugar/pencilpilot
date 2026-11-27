@@ -115,18 +115,17 @@ fn a_new_drawing_goes_after_the_current_one_and_holds() {
     let (mut e, mut s) = plain();
     // frame 15: Clean's drawing 3 (frames 13–18)
     go(&mut e, &mut s, 14);
-    s.strips.picked[3] = 2; // Hold on 3s
     assert!(apply(&mut e, &mut s, &Action::NewDrawing));
     assert_eq!(s.frame, 18, "on the new drawing, after drawing 3");
     let t = &s.sheet.tracks[0];
-    assert_eq!(t.cels[3].hold, 3);
-    assert_eq!(t.first_frame_of(4), Some(21), "drawing 4 moved along");
-    assert_eq!(s.frames, 51, "the cut is 3 frames longer");
+    assert_eq!(t.cels[3].hold, 6, "held as long as drawing 3");
+    assert_eq!(t.first_frame_of(4), Some(24), "drawing 4 moved along");
+    assert_eq!(s.frames, 54, "Clean (and so the cut) is 6 frames longer");
     assert_eq!(s.drawings, 7);
     stroke(&mut e, &mut s, 30.0);
     let n = ink(&shown(&mut e, &s), 20, 40);
     assert!(n > 100);
-    for f in 18..21 {
+    for f in 18..24 {
         go(&mut e, &mut s, f);
         assert_eq!(
             ink(&shown(&mut e, &s), 20, 40),
@@ -135,7 +134,7 @@ fn a_new_drawing_goes_after_the_current_one_and_holds() {
             f + 1
         );
     }
-    go(&mut e, &mut s, 21);
+    go(&mut e, &mut s, 24);
     assert_eq!(
         ink(&shown(&mut e, &s), 20, 40),
         0,
@@ -144,13 +143,40 @@ fn a_new_drawing_goes_after_the_current_one_and_holds() {
     // duplicate: a copy, after it
     go(&mut e, &mut s, 18);
     op(&mut e, &mut s, ops::DUPLICATE_DRAWING);
-    assert_eq!(s.frame, 21);
+    assert_eq!(s.frame, 24);
     assert_eq!(ink(&shown(&mut e, &s), 20, 40), n, "the copy has its lines");
     let (d1, d2) = (
         s.sheet.tracks[0].drawing_at(18),
-        s.sheet.tracks[0].drawing_at(21),
+        s.sheet.tracks[0].drawing_at(24),
     );
     assert_ne!(d1, d2, "its own drawing");
+}
+
+/// As the web app's New drawing (apps/studio TimelinePanel `addDrawing`): inside a hold,
+/// the new drawing goes after the whole exposure, held as long; past the layer's end it
+/// starts on the current frame, held one frame.
+#[test]
+fn a_new_drawing_inside_a_hold_follows_the_web_app() {
+    let (mut e, mut s) = plain();
+    go(&mut e, &mut s, 2); // frame 3, in drawing 1's six frames
+    assert!(apply(&mut e, &mut s, &Action::NewDrawing));
+    let t = &s.sheet.tracks[0];
+    let holds: Vec<(u32, u32)> = t.cels.iter().map(|c| (c.drawing, c.hold)).take(3).collect();
+    assert_eq!(holds[0], (1, 6), "drawing 1 keeps frames 1–6");
+    assert_eq!(holds[1].1, 6, "the new one: frames 7–12");
+    assert_eq!(holds[2], (2, 6), "drawing 2 moved to 13–18");
+    assert_eq!(s.frame, 6);
+    // past the end of a layer: on the current frame, one frame long
+    s.active_layer = 0;
+    let end = s.sheet.tracks[0].end();
+    go(&mut e, &mut s, end - 1);
+    assert!(apply(&mut e, &mut s, &Action::NewLayer));
+    go(&mut e, &mut s, 10);
+    assert!(apply(&mut e, &mut s, &Action::NewDrawing));
+    let t = &s.sheet.tracks[0];
+    assert_eq!(t.drawing_at(9), 0);
+    assert_ne!(t.drawing_at(10), 0);
+    assert_eq!(t.end(), 11, "one frame");
 }
 
 #[test]
@@ -543,5 +569,38 @@ fn the_demo_paints_its_drawings() {
     eprintln!(
         "a new drawing's picture, onion skin and all: {:?}",
         t.elapsed()
+    );
+}
+
+#[test]
+#[ignore = "timing, release: cargo test --release -p pencilpilot-native -- --ignored onion_timing --nocapture"]
+fn onion_timing() {
+    let mut s = State::demo();
+    let mut e = Engine::new(1920, 1080);
+    tick(&mut e, &mut s, Instant::now());
+    picture(&mut e, &s);
+    let mut times = Vec::new();
+    let mut parts = Vec::new();
+    for k in 0..96u32 {
+        let f = (k * 7) % 48;
+        let t = Instant::now();
+        apply(&mut e, &mut s, &Action::GoToFrame(f));
+        picture(&mut e, &s);
+        times.push(t.elapsed().as_secs_f64() * 1e3);
+        let t = Instant::now();
+        let ent = onion_entries(&s);
+        let _ = e.painter.onion_rgba(&ent, 1);
+        parts.push(t.elapsed().as_secs_f64() * 1e3);
+    }
+    times.sort_by(f64::total_cmp);
+    parts.sort_by(f64::total_cmp);
+    let p = |v: &[f64], q: f64| v[((v.len() - 1) as f64 * q) as usize];
+    eprintln!(
+        "frame change + picture with onion: p50 {:.2} ms, p95 {:.2} ms, max {:.2} ms; onion_rgba alone p50 {:.2} p95 {:.2}",
+        p(&times, 0.5),
+        p(&times, 0.95),
+        p(&times, 1.0),
+        p(&parts, 0.5),
+        p(&parts, 0.95)
     );
 }

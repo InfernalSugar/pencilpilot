@@ -11,6 +11,7 @@
 //! - [`thumbs`]: the drawings' small pictures for the strips; [`demo`]: the demo's drawings.
 
 mod demo;
+mod onion;
 pub mod sheet;
 mod thumbs;
 
@@ -84,7 +85,7 @@ pub struct Frames {
     showed: bool,
     /// the onion skin: its drawings, its picture, the picture with it underneath
     onion_key: Vec<u32>,
-    onion: Vec<u8>,
+    onion: onion::Onion,
     out: Vec<u8>,
     onion_shown: bool,
     /// the whole picture must go up next
@@ -101,6 +102,16 @@ pub struct Frames {
 }
 
 impl Frames {
+    /// A drawing changed: its thumbnail and onion skin are made again.
+    fn mark(&mut self, drawing: u32) {
+        self.stale.insert(drawing);
+        self.onion.forget(drawing);
+        // (the onion skin showing it is made again too)
+        if self.onion_key.chunks(3).any(|e| e[0] == drawing) {
+            self.onion_key.clear();
+        }
+    }
+
     /// The painter's id for the interface's layer `i`.
     fn id(&self, s: &State, i: usize) -> u32 {
         match s.sheet.tracks.get(i) {
@@ -277,7 +288,7 @@ fn sync(e: &mut Engine, s: &mut State) {
                         p[1] = d;
                     }
                 }
-                e.frames.stale.insert(d);
+                e.frames.mark(d);
             }
         }
     }
@@ -398,7 +409,6 @@ pub fn onion_entries(s: &State) -> Vec<u32> {
 pub fn apply(e: &mut Engine, s: &mut State, a: &Action) -> bool {
     ensure(e, s);
     let frame = s.frame;
-    let hold = s.strips.picked[3] as u32 + 1;
     let li = s.active_layer;
     let id = s.sheet.tracks.get(li).map_or(0, |t| t.layer);
     // a layer to make active once the layers follow the painter
@@ -406,7 +416,7 @@ pub fn apply(e: &mut Engine, s: &mut State, a: &Action) -> bool {
     let handled = match a {
         Action::NewDrawing => {
             let d = e.painter.new_drawing();
-            new_cel(s, Cel::new(d, hold, Mark::None))
+            new_cel(s, Cel::new(d, new_hold(s), Mark::None))
         }
         Action::Play => {
             let (a0, b) = play_range(s);
@@ -487,6 +497,19 @@ pub fn apply(e: &mut Engine, s: &mut State, a: &Action) -> bool {
     true
 }
 
+/// How long a new drawing is held, as the web app's New drawing has it: as long as the
+/// drawing it follows; past the layer's end, one frame (on a blank, the blank's rest).
+fn new_hold(s: &State) -> u32 {
+    let Some(t) = s.sheet.tracks.get(s.active_layer) else {
+        return 1;
+    };
+    match t.at(s.frame) {
+        Some((i, start)) if t.cels[i].drawing == 0 => t.cels[i].hold - (s.frame - start),
+        Some((i, _)) => t.cels[i].hold,
+        None => 1,
+    }
+}
+
 /// A cel on the active layer after the exposure on the current frame; the current frame
 /// goes to it. (A static layer's one drawing is replaced.)
 fn new_cel(s: &mut State, cel: Cel) -> bool {
@@ -526,11 +549,11 @@ fn other(e: &mut Engine, s: &mut State, name: &str, id: u32) -> Option<Option<u3
             } else {
                 (e.painter.new_drawing(), Mark::None)
             };
-            e.frames.stale.insert(d);
+            e.frames.mark(d);
             if let Some(st) = s.sheet.status.get(&cur).copied() {
                 s.sheet.status.insert(d, st);
             }
-            new_cel(s, Cel::new(d, hold, m));
+            new_cel(s, Cel::new(d, new_hold(s), m));
         }
         ops::BLANK_FRAME => {
             if t.kind != 'S' {
@@ -570,7 +593,7 @@ fn other(e: &mut Engine, s: &mut State, name: &str, id: u32) -> Option<Option<u3
                 // a drawing shows on one layer only: another layer gets copies
                 if from != id && c.drawing != 0 {
                     c.drawing = e.painter.copy_drawing(c.drawing);
-                    e.frames.stale.insert(c.drawing);
+                    e.frames.mark(c.drawing);
                 }
                 let t = s.sheet.tracks.get_mut(li)?;
                 f = t.insert_after(f, c);
@@ -589,7 +612,9 @@ fn other(e: &mut Engine, s: &mut State, name: &str, id: u32) -> Option<Option<u3
             if boils.contains(&0) {
                 return Some(None);
             }
-            e.frames.stale.extend(boils.iter().copied());
+            for b in &boils {
+                e.frames.mark(*b);
+            }
             // on twos, the drawing and its boils taking turns
             let cycle = [c.drawing, boils[0], boils[1]];
             let mut left = c.hold;
@@ -631,7 +656,7 @@ fn other(e: &mut Engine, s: &mut State, name: &str, id: u32) -> Option<Option<u3
             }
             nt.layer = copy;
             for (from, to) in &map {
-                e.frames.stale.insert(*to);
+                e.frames.mark(*to);
                 if let Some(st) = s.sheet.status.get(from).copied() {
                     s.sheet.status.insert(*to, st);
                 }
@@ -728,7 +753,7 @@ pub fn tick(e: &mut Engine, s: &mut State, now: Instant) -> bool {
     if h != e.frames.history {
         for d in [h.2, h.3, e.frames.history.2, e.frames.history.3] {
             if d != 0 {
-                e.frames.stale.insert(d);
+                e.frames.mark(d);
             }
         }
         e.frames.history = h;
@@ -800,7 +825,7 @@ pub fn picture<'a>(e: &'a mut Engine, s: &State) -> Option<(&'a [u8], [u32; 4])>
     let f = &mut e.frames;
     if d.is_some() && !f.showed && !s.playing && active != 0 {
         // paint (a stroke, a fill): the active layer's drawing changed
-        f.stale.insert(active);
+        f.mark(active);
     }
     f.showed = false;
     let whole = [0, 0, w, h];
@@ -819,10 +844,11 @@ pub fn picture<'a>(e: &'a mut Engine, s: &State) -> Option<(&'a [u8], [u32; 4])>
         return d.map(|r| (e.painter.rgba(), [r.x, r.y, r.w, r.h]));
     }
     let mut rect = d.map(|r| [r.x, r.y, r.w, r.h]);
-    if entries != f.onion_key || f.onion.is_empty() {
-        f.onion = e.painter.onion_rgba(&entries, 1);
+    if entries != f.onion_key || f.onion.px.is_empty() {
+        // only where the onion skin was or is now changes (and where the painter did)
+        let changed = f.onion.build(&e.painter, &entries);
         f.onion_key = entries;
-        rect = Some(whole);
+        rect = onion::union(rect, changed);
     }
     if !f.onion_shown || full || f.out.len() != (w * h * 4) as usize {
         f.out.resize((w * h * 4) as usize, 255);
@@ -830,36 +856,8 @@ pub fn picture<'a>(e: &'a mut Engine, s: &State) -> Option<(&'a [u8], [u32; 4])>
     }
     f.onion_shown = true;
     let r = rect?;
-    compose(&mut f.out, e.painter.rgba(), &f.onion, w, r);
+    onion::compose(&mut f.out, e.painter.rgba(), &f.onion.px, w, r);
     Some((&e.frames.out, r))
-}
-
-/// `out` = the picture with the onion skin multiplied under it, in `r`.
-fn compose(out: &mut [u8], pic: &[u8], onion: &[u8], w: u32, r: [u32; 4]) {
-    let [x, y, rw, rh] = r;
-    for row in y..y + rh {
-        let a = ((row * w + x) * 4) as usize;
-        let b = a + (rw * 4) as usize;
-        for ((o, p), n) in out[a..b]
-            .as_chunks_mut::<4>()
-            .0
-            .iter_mut()
-            .zip(pic[a..b].as_chunks::<4>().0)
-            .zip(onion[a..b].as_chunks::<4>().0)
-        {
-            let k = n[3] as u32;
-            if k == 0 {
-                o.copy_from_slice(p);
-                continue;
-            }
-            for c in 0..3 {
-                // p × (1 − k + k·tint), in 0–255 integers
-                let m = 255 * 255 - k * (255 - n[c] as u32);
-                o[c] = ((p[c] as u32 * m + 255 * 255 / 2) / (255 * 255)) as u8;
-            }
-            o[3] = 255;
-        }
-    }
 }
 
 #[cfg(test)]

@@ -976,7 +976,7 @@ fn grid_area(f: &mut Frame, g: Rect, strip: Rect, s: &mut State) {
             let a = if shown { 1.0 } else { 0.35 };
             put(
                 f,
-                Quad::rect(cr.x, cr.y, cr.w, cr.h, alpha(fill, a))
+                Quad::rect(cr.x, cr.y, cr.w, cr.h, alpha(fill, fill[3] * a))
                     .radius(5.0)
                     .border(bw, alpha(bc, a))
                     .clip(clip),
