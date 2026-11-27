@@ -3,7 +3,6 @@ use std::time::{Duration, Instant};
 
 use super::*;
 use crate::shell::engine::frames::{Cel, Mark, Sheet, Track};
-use crate::state::Layer;
 
 /// A folder of its own for a check's files.
 fn tmp(name: &str) -> PathBuf {
@@ -37,13 +36,16 @@ fn run_out(e: &mut Engine, s: &mut State, limit: Duration) {
 }
 
 /// A frame as the window's painter renders it (each layer's drawing on `frame`).
-fn engine_frame(e: &Engine, s: &State, frame: u32) -> Vec<u8> {
+fn engine_frame(e: &mut Engine, s: &State, frame: u32) -> Vec<u8> {
     let pairs: Vec<u32> = s
         .sheet
         .tracks
         .iter()
         .flat_map(|t| [t.layer, t.drawing_at(frame)])
         .collect();
+    // (drawings put away compressed come back first)
+    let ds: Vec<u32> = pairs.chunks(2).map(|c| c[1]).collect();
+    crate::shell::engine::frames::load_drawings(e, &ds);
     e.painter.render_frame(&pairs, 1, &[])
 }
 
@@ -298,7 +300,7 @@ fn mp4_decodes_back_to_the_window_frames() {
     start(&mut e, &mut s, out.clone());
     run_out(&mut e, &mut s, Duration::from_secs(120));
     assert_eq!(s.export.status, Status::Done(out.clone()));
-    let check = decode_check(&ff, &out, &e, &s, &[0, 20, 47], &d);
+    let check = decode_check(&ff, &out, &mut e, &s, &[0, 20, 47], &d);
     assert_eq!(check.frames, s.frames);
     assert!((check.seconds - s.frames as f64 / s.fps as f64).abs() < 0.05);
     for (f, psnr) in &check.psnr {
@@ -315,7 +317,14 @@ struct Decoded {
     psnr: Vec<(u32, f64)>,
 }
 
-fn decode_check(ff: &Path, video: &Path, e: &Engine, s: &State, at: &[u32], dir: &Path) -> Decoded {
+fn decode_check(
+    ff: &Path,
+    video: &Path,
+    e: &mut Engine,
+    s: &State,
+    at: &[u32],
+    dir: &Path,
+) -> Decoded {
     use std::process::Command;
     let probe = ff.with_file_name("ffprobe");
     let out = Command::new(&probe)
@@ -371,60 +380,19 @@ fn decode_check(ff: &Path, video: &Path, e: &Engine, s: &State, at: &[u32], dir:
 
 // ---- the measuring fixtures ----
 
-/// An engine with a project's first cut, as opening it would make it (until Open lands):
-/// its layers, drawings and exposures.
+/// An engine with a project opened, as File › Open opens it (its drawings put away
+/// compressed until wanted).
 pub fn engine_from(path: &Path) -> (Engine, State) {
-    let p = ppstudio::Project::open(path).unwrap();
-    let m = &p.manifest;
-    let (w, h) = (m.canvas.width, m.canvas.height);
-    let names: Vec<&String> = m.drawings.keys().collect();
-    let id_of = |d: &str| names.iter().position(|n| *n == d).unwrap() as u32 + 1;
-    let statics = &m.timeline.static_layers;
-    let cut = &m.timeline.scenes[0].cuts[0];
     let mut s = State::demo();
-    s.sheet = Sheet::default();
-    s.layers.clear();
-    s.frames = cut.length(statics);
-    s.fps = m.timeline.fps;
-    s.frame = 0;
-    s.active_layer = 0;
-    (s.view.doc_w, s.view.doc_h) = (w, h);
-    // top first
-    for l in m.layers.iter().rev() {
-        let kind = if statics.contains(&l.id) { 'S' } else { 'C' };
-        s.layers.push(Layer {
-            name: l.name.clone(),
-            visible: l.visible,
-            locked: false,
-            kind,
-        });
-        let cels = cut
-            .tracks
-            .get(&l.id)
-            .map(|t| {
-                t.iter()
-                    .map(|x| {
-                        let d = x.drawing.as_deref().map_or(0, id_of);
-                        Cel::new(d, x.length.max(1), Mark::None)
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        s.sheet.tracks.push(Track {
-            layer: 0,
-            kind,
-            opacity: l.opacity,
-            cels,
-        });
-    }
-    let mut e = Engine::new(w, h);
+    let mut e = Engine::new(s.view.doc_w, s.view.doc_h);
     e.tick(&mut s, Instant::now());
-    for (i, n) in names.iter().enumerate() {
-        let (rgba, _) = p.drawing(n).unwrap();
-        assert!(e.painter.put_drawing(i as u32 + 1, &rgba));
+    assert!(
+        crate::shell::engine::files::open_path(&mut e, &mut s, path),
+        "opening {path:?}"
+    );
+    for _ in 0..3 {
+        e.tick(&mut s, Instant::now());
     }
-    e.painter.flush();
-    e.tick(&mut s, Instant::now());
     (e, s)
 }
 
@@ -494,7 +462,9 @@ fn export_fixtures() {
         let _ = std::fs::remove_file(&video);
         s.export.format = format;
         let t0 = Instant::now();
+        let ts = Instant::now();
         start(&mut e, &mut s, video.clone());
+        e.exporter.start_took = ts.elapsed();
         let (mut rss_max, mut pss_max) = (rss0, pss0);
         let mut ticks = Vec::new();
         // as the window does: a tick, then a sleep until the export's next one
@@ -535,7 +505,7 @@ fn export_fixtures() {
             feeds.len()
         );
         let mid = s.frames / 2;
-        let check = decode_check(&real_ff, &video, &e, &s, &[0, mid, s.frames - 1], &out);
+        let check = decode_check(&real_ff, &video, &mut e, &s, &[0, mid, s.frames - 1], &out);
         let line = serde_line(&[
             ("fixture", name.to_string()),
             ("format", ext.to_string()),
@@ -596,6 +566,18 @@ fn export_fixtures() {
                 ),
             ),
             ("window_feed_ms", feed_q),
+            (
+                "window_export_tick_max_ms",
+                format!("{:.2}", e.exporter.tick_max.as_secs_f64() * 1e3),
+            ),
+            (
+                "window_step_max",
+                format!(
+                    "{:.2} ms {}",
+                    e.exporter.step_max.0.as_secs_f64() * 1e3,
+                    e.exporter.step_max.1
+                ),
+            ),
             ("rss_before_mb", format!("{:.0}", rss0 as f64 / 1024.0)),
             ("rss_peak_mb", format!("{:.0}", rss_max as f64 / 1024.0)),
             ("pss_before_mb", format!("{:.0}", pss0 as f64 / 1024.0)),
@@ -646,7 +628,7 @@ fn still_layers_are_merged_and_look_the_same() {
         .map(|l| worker::LayerSetup {
             id: l.id,
             props: l.props.clone(),
-            mask: Vec::new(),
+            mask: None,
         })
         .collect();
     let plan = Plan::new(&s, 0, s.frames - 1);
@@ -667,7 +649,7 @@ fn still_layers_are_merged_and_look_the_same() {
     );
     for (file, frame) in [("m_0001.png", 0), ("m_0024.png", 23)] {
         let (_, _, px) = read_png(&d.join(file));
-        let want = engine_frame(&e, &s, frame);
+        let want = engine_frame(&mut e, &s, frame);
         let worst = px
             .iter()
             .zip(&want)
@@ -677,4 +659,48 @@ fn still_layers_are_merged_and_look_the_same() {
         assert!(worst <= 2, "frame {frame}: off by up to {worst}");
     }
     let _ = std::fs::remove_dir_all(d);
+}
+
+/// Both fixtures, opened as File › Open opens them (drawings put away compressed), exported
+/// as PNGs: every frame is exactly the window's own render of it.
+#[test]
+#[ignore = "PP_FIXTURES=… cargo test --release -p pencilpilot-native -- --ignored fixtures_png_exact"]
+fn fixtures_png_exact() {
+    let dir = PathBuf::from(std::env::var("PP_FIXTURES").expect("PP_FIXTURES"));
+    for (name, last) in [("drawings500", 23), ("layers20-4k", 23)] {
+        let (mut e, mut s) = engine_from(&dir.join(format!("{name}.ppstudio")));
+        let kept = e.frames.store.drawings.len();
+        let out = tmp(name);
+        s.sheet.loop_range = Some((0, last));
+        s.export.loop_only = true;
+        s.export.format = Format::Png;
+        start(&mut e, &mut s, out.join("f.png"));
+        run_out(&mut e, &mut s, Duration::from_secs(300));
+        assert!(
+            matches!(s.export.status, Status::Done(_)),
+            "{:?}",
+            s.export.status
+        );
+        let mut off = 0;
+        for f in 0..=last {
+            let (_, _, px) = read_png(&out.join(format!("f_{:04}.png", f + 1)));
+            let want = engine_frame(&mut e, &s, f);
+            let worst = px
+                .iter()
+                .zip(&want)
+                .map(|(a, b)| (*a as i32 - *b as i32).abs())
+                .max()
+                .unwrap_or(255);
+            if px.len() != want.len() || worst > 0 {
+                off += 1;
+                eprintln!("{name} frame {f}: off by up to {worst}");
+            }
+        }
+        eprintln!(
+            "{name}: {} frames, {kept} drawings kept compressed at the start, {off} not exact",
+            last + 1
+        );
+        assert_eq!(off, 0);
+        let _ = std::fs::remove_dir_all(out);
+    }
 }
