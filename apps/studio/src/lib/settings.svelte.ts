@@ -16,6 +16,12 @@ import { BUILT_IN, cleanWorkspaces, copyOf, type Workspace } from './workspaces'
 /** light, dark, or as the system is set */
 export type Theme = 'light' | 'dark' | 'system';
 export type ExportQuality = 'best' | 'good' | 'small';
+/** the studio's layout: the new one (icon trays, workspace tabs, right-click menus) or the classic one */
+export type UiLayout = 'new' | 'classic';
+export const UI_LAYOUTS: { id: UiLayout; label: string }[] = [
+	{ id: 'new', label: 'New (preview)' },
+	{ id: 'classic', label: 'Classic' }
+];
 
 /** what the timeline and the side panel may be resized to (as the studio allows) */
 export const BOTTOM_MIN = 120;
@@ -47,6 +53,8 @@ export interface Settings {
 	/** the named layouts, and the one in use */
 	workspaces: Workspace[];
 	workspace: string;
+	/** the built-in workspaces offered so far (a new one is added once, see cleanWorkspaces) */
+	builtInsSeen: string[];
 	/** the reference pictures' place and size */
 	reference: RefLayout;
 	keys: Keymap;
@@ -68,6 +76,8 @@ export interface Settings {
 	shareRelay: string;
 
 	// ---- interface ----
+	/** the studio's layout: the new one (a preview), or the classic one */
+	uiLayout: UiLayout;
 	/** how big everything is (1 = as designed) */
 	uiScale: number;
 	/** the accent colour ('' = the theme's) */
@@ -189,6 +199,7 @@ export const DEFAULTS: Settings = {
 	layout: DEFAULT_LAYOUT,
 	workspaces: BUILT_IN.map(copyOf),
 	workspace: BUILT_IN[0].id,
+	builtInsSeen: BUILT_IN.map((w) => w.id),
 	reference: { shown: false, place: 'side', split: 0.35, float: { x: 80, y: 120, w: 360, h: 420 } },
 	keys: loadKeymap(null),
 	penPressure: true,
@@ -200,6 +211,7 @@ export const DEFAULTS: Settings = {
 	shareName: '',
 	shareRelay: '',
 
+	uiLayout: 'new',
 	uiScale: 1,
 	accent: '',
 	leftHanded: false,
@@ -295,7 +307,7 @@ export function cleanSettings(raw: unknown, legacy: { onion?: unknown } = {}): S
 	return {
 		theme: o.theme === 'dark' || o.theme === 'system' ? o.theme : 'light',
 		layout,
-		...cleanWorkspaces(o.workspaces, o.workspace, layout, cleanLayout),
+		...cleanWorkspaces(o.workspaces, o.workspace, layout, cleanLayout, o.builtInsSeen),
 		reference: cleanRef(o.reference),
 		keys: loadKeymap(o.keys),
 		penPressure: bool(o.penPressure, D.penPressure),
@@ -307,6 +319,7 @@ export function cleanSettings(raw: unknown, legacy: { onion?: unknown } = {}): S
 		shareName: typeof o.shareName === 'string' ? o.shareName.slice(0, 24) : '',
 		shareRelay: typeof o.shareRelay === 'string' ? o.shareRelay.slice(0, 200) : '',
 
+		uiLayout: o.uiLayout === 'classic' ? 'classic' : 'new',
 		uiScale: num(o.uiScale, D.uiScale, 0.75, 1.5),
 		accent: themed(o.accent),
 		leftHanded: bool(o.leftHanded, D.leftHanded),

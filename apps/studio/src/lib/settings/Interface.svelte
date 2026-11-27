@@ -1,11 +1,23 @@
 <script lang="ts">
 	/** Preferences: how the app looks and where things are. */
-	import { settings, tidySettings, UI_SCALES } from '../settings.svelte';
+	import { settings, tidySettings, UI_LAYOUTS, UI_SCALES } from '../settings.svelte';
 	import ColourPick from './ColourPick.svelte';
 	import './prefs.css';
 </script>
 
 <div class="pp-prefs" onchange={tidySettings}>
+	<label class="row">
+		<span>Layout</span>
+		<select bind:value={settings.uiLayout}>
+			{#each UI_LAYOUTS as l (l.id)}
+				<option value={l.id}>{l.label}</option>
+			{/each}
+		</select>
+		<small>
+			New: icon trays on the timeline, workspace tabs and right-click menus. Classic: every control
+			in view, as before.
+		</small>
+	</label>
 	<label class="row">
 		<span>Size of everything</span>
 		<select bind:value={settings.uiScale}>

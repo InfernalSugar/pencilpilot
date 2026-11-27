@@ -30,7 +30,8 @@ describe('workspaces', () => {
 			],
 			'gone',
 			DEFAULT_LAYOUT,
-			cleanLayout
+			cleanLayout,
+			BUILT_IN.map((w) => w.id)
 		);
 		expect(workspaces).toHaveLength(1);
 		expect(workspaces[0]).toMatchObject({
@@ -51,5 +52,21 @@ describe('workspaces', () => {
 		expect(freshId(list)).toBe('mine-2');
 		expect(freshName(list, 'Draw copy')).toBe('Draw copy 2');
 		expect(freshName(list, 'Paint')).toBe('Paint');
+	});
+
+	it('a built-in workspace that came later (Review) is added once to saved ones', () => {
+		const saved = [{ id: 'draw', name: 'Draw' }];
+		// settings from before Review: it is added
+		const before = cleanWorkspaces(saved, 'draw', DEFAULT_LAYOUT, cleanLayout);
+		expect(before.workspaces.map((w) => w.id)).toEqual(['draw', 'review']);
+		expect(before.builtInsSeen).toContain('review');
+		// deleted since: it stays deleted
+		const after = cleanWorkspaces(saved, 'draw', DEFAULT_LAYOUT, cleanLayout, before.builtInsSeen);
+		expect(after.workspaces.map((w) => w.id)).toEqual(['draw']);
+		// and through the settings
+		expect(cleanSettings({ workspaces: saved }).workspaces.map((w) => w.id)).toEqual([
+			'draw',
+			'review'
+		]);
 	});
 });
