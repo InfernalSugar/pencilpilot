@@ -305,6 +305,10 @@ impl Window {
         let now = clock::now_ns();
         if deadline_ns > now && clock::wait_readable(&guard.connection_fd(), deadline_ns - now) {
             guard.read().map_err(wl)?;
+        } else if deadline_ns <= now {
+            // (the time is past already: what's on the socket is still read, without
+            // waiting, or a loop whose deadlines are all past never hears the compositor)
+            let _ = guard.read();
         } else {
             drop(guard);
         }

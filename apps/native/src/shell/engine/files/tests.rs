@@ -741,7 +741,6 @@ fn fixtures_open_save_and_round_trip() {
         let t = Instant::now();
         let _ = e.picture(&s);
         let first_picture = t.elapsed().as_secs_f64() * 1e3;
-        let before = seen(&mut e, &s);
         let saved = fixtures.join(format!("{name}.native.ppstudio"));
         let t = Instant::now();
         assert!(save_to(&mut e, &mut s, &saved), "{}", s.project.note);
@@ -755,18 +754,8 @@ fn fixtures_open_save_and_round_trip() {
         assert!(save_to(&mut e, &mut s, &saved));
         let resave = t.elapsed().as_secs_f64() * 1e3;
         let st2 = e.files.last_save.clone().unwrap();
-        let before = Seen {
-            drawings: before
-                .drawings
-                .keys()
-                .map(|d| (*d, e.painter.drawing_rgba(*d)))
-                .collect(),
-            composite: {
-                e.painter.flush();
-                e.painter.rgba().to_vec()
-            },
-            ..before
-        };
+        // (what's open now, the stroke in it, against what the file opens as)
+        let before = seen(&mut e, &s);
         let (mut e2, mut s2) = engine();
         let t = Instant::now();
         assert!(open_path(&mut e2, &mut s2, &saved));

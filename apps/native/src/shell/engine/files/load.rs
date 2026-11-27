@@ -186,70 +186,68 @@ pub fn open(e: &mut Engine, s: &mut State, path: &Path) -> Result<(Doc, OpenTime
         }
     }
 
-    // ---- the tiles, read and decoded on every core (each stored tile once) ----
+    // ---- the tiles, read and decoded on every core, each straight into its drawing (no
+    // copies: a 4K project's tiles are hundreds of MB in the painter) ----
     let t = std::time::Instant::now();
-    let mut hashes: Vec<&str> = loads
+    let (cols, rows) = (w.div_ceil(64), h.div_ceil(64));
+    // every tile of every drawing: (drawing, tile ref, the first of its hash?)
+    let mut seen = std::collections::HashSet::new();
+    let jobs: Vec<(u32, &ppstudio::TileRef, bool)> = loads
         .iter()
-        .filter_map(|(_, n)| m.drawings.get(n))
-        .flat_map(|d| d.tiles.iter().map(|r| r.hash.as_str()))
+        .filter_map(|(id, n)| Some((*id, m.drawings.get(n)?)))
+        .flat_map(|(id, d)| {
+            d.tiles
+                .iter()
+                .filter(|r| r.x < cols && r.y < rows)
+                .map(move |r| (id, r))
+        })
+        .map(|(id, r)| (id, r, seen.insert(r.hash.as_str())))
         .collect();
-    hashes.sort_unstable();
-    hashes.dedup();
-    type Decoded<'a> = (&'a str, Option<DecodedTile>, Option<String>);
-    let decoded: Vec<Decoded> = hashes
+    times.tiles = seen.len();
+    drop(seen);
+    type Decoded = (
+        u32,
+        (i32, i32),
+        Option<DecodedTile>,
+        Option<(String, String)>,
+    );
+    let decoded: Vec<Decoded> = jobs
         .par_iter()
         .map_init(
             || (o.tiles(), vec![0u8; 64 * 64 * 4]),
-            |(o, back), h| -> Result<Decoded, String> {
-                let px = o.tile(h).map_err(|e| e.to_string())?;
+            |(o, back), &(id, r, first)| -> Result<Decoded, String> {
+                let px = o.tile(&r.hash).map_err(|e| e.to_string())?;
                 let t = brush::decode_tile(&px);
                 // what it is after a trip through the painter: when that's other bytes
                 // (colour under faint alpha), a save of it unchanged keeps the file's
-                let same = t.as_ref().and_then(|t| {
-                    brush::encode_tile(t, back);
-                    (back[..] != px[..]).then(|| ppstudio::tile_hash(back))
-                });
-                Ok((*h, t, same))
+                let same = match (&t, first) {
+                    (Some(t), true) => {
+                        brush::encode_tile(t, back);
+                        (back[..] != px[..]).then(|| (ppstudio::tile_hash(back), r.hash.clone()))
+                    }
+                    _ => None,
+                };
+                Ok((id, (r.x as i32, r.y as i32), t, same))
             },
         )
         .collect::<Result<_, _>>()?;
-    let mut same = HashMap::new();
-    let decoded: HashMap<&str, Option<DecodedTile>> = decoded
-        .into_iter()
-        .map(|(h, t, back)| {
-            if let Some(b) = back {
-                same.insert(b, h.to_string());
-            }
-            (h, t)
-        })
-        .collect();
-    times.tiles = decoded.len();
     times.tiles_ms = t.elapsed().as_secs_f64() * 1e3;
 
     // ---- a painter the file's size, with the drawings ----
     let t = std::time::Instant::now();
     let mut painter = Painter::new(w, h);
-    let (cols, rows) = (w.div_ceil(64), h.div_ceil(64));
-    // (each drawing's own copies made on every core: most of the time is the memory)
+    let mut same = HashMap::new();
     type Placed = Vec<((i32, i32), DecodedTile)>;
-    let placed: Vec<(u32, Placed)> = loads
-        .par_iter()
-        .filter_map(|(id, name)| {
-            let d = m.drawings.get(name)?;
-            let tiles = d
-                .tiles
-                .iter()
-                .filter(|r| r.x < cols && r.y < rows)
-                .filter_map(|r| {
-                    let t = decoded.get(r.hash.as_str())?.as_ref()?;
-                    Some(((r.x as i32, r.y as i32), t.clone()))
-                })
-                .collect();
-            Some((*id, tiles))
-        })
-        .collect();
-    drop(decoded);
-    for (id, tiles) in placed {
+    let mut by_drawing: HashMap<u32, Placed> = HashMap::new();
+    for (id, key, tile, back) in decoded {
+        if let Some((b, orig)) = back {
+            same.insert(b, orig);
+        }
+        if let Some(tile) = tile {
+            by_drawing.entry(id).or_default().push((key, tile));
+        }
+    }
+    for (id, tiles) in by_drawing {
         painter.put_drawing_decoded(id, tiles);
     }
     painter.reserve_drawings(next);

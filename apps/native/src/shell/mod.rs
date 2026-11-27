@@ -491,6 +491,8 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
         // the picture's changes go up to the GPU
         if let Some(e) = &mut eng
             && let Some(c) = &mut canvas
+            // (a document of another size: remade below, whole)
+            && (c.width, c.height) == (e.painter.width(), e.painter.height())
             && let Some((rgba, [x, y, w, h])) = e.picture(&s)
         {
             c.upload(rgba, x, y, w, h);
@@ -548,6 +550,8 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
         }
         if let Some(e) = &mut eng
             && let Some(c) = &mut canvas
+            // (a document of another size: remade below, whole)
+            && (c.width, c.height) == (e.painter.width(), e.painter.height())
             && let Some((rgba, [x, y, w, h])) = e.picture(&s)
         {
             c.upload(rgba, x, y, w, h);
@@ -583,7 +587,10 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             // set up (layers, drawings) before the first input reaches it
             e.tick(&mut s, std::time::Instant::now());
             let mut c = Canvas::new(&gpu, cw, ch)?;
-            c.upload_all(e.painter.rgba());
+            // (a project opened at startup, of another size: remade below)
+            if (cw, ch) == (e.painter.width(), e.painter.height()) {
+                c.upload_all(e.painter.rgba());
+            }
             canvas = Some(c);
             eng = Some(e);
         }
@@ -621,6 +628,7 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             }
             if let Some(e) = &mut eng
                 && let Some(c) = &mut canvas
+                && (c.width, c.height) == (e.painter.width(), e.painter.height())
                 && let Some((rgba, [x, y, w, h])) = e.picture(&s)
             {
                 c.upload(rgba, x, y, w, h);
