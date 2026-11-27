@@ -180,6 +180,13 @@ pub fn build(f: &mut Frame, r: Rect, s: &mut State) {
         .copied()
         .filter(|t| !s.tools.hidden.contains(t))
         .collect();
+    // the tools' keys (a focused text field takes letters first, so typing never switches)
+    for &tool in &shown {
+        let key = tool_info(tool).1;
+        if key.len() == 1 && f.take_key(key, false) {
+            s.tool = tool;
+        }
+    }
     for tool in shown {
         let b = Rect::new(x, y, BUTTON, BUTTON);
         y += STEP;
@@ -726,6 +733,28 @@ mod tests {
             assert_eq!((sw.w, sw.h), (40.0, 40.0));
         }
         assert!(h.idle(), "idle: nothing drawn");
+    }
+
+    #[test]
+    fn tool_keys_pick_tools() {
+        let Some(mut h) = Harness::new() else { return };
+        h.pass();
+        h.key("e", Some("e"));
+        h.pass();
+        assert_eq!(h.s.tool, Tool::Eraser, "E picks the eraser");
+        h.key("i", Some("i"));
+        h.pass();
+        assert_eq!(h.s.tool, Tool::Eyedropper, "I picks the eyedropper");
+        h.key("b", Some("b"));
+        h.pass();
+        assert_eq!(h.s.tool, Tool::Brush, "B picks the brush");
+        // a tool the workspace doesn't show isn't picked by its key
+        h.s.workspace = Workspace::Colour;
+        h.pass();
+        h.key("v", Some("v"));
+        h.pass();
+        assert_ne!(h.s.tool, Tool::Transform, "Colour has no Transform");
+        assert!(h.idle());
     }
 
     #[test]
