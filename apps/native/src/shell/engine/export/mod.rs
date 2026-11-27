@@ -393,6 +393,10 @@ fn file_stem(cut: &str) -> String {
 
 /// Opens the folder a file is in, in the file manager (on the person's click).
 fn show_in_folder(p: &std::path::Path) {
+    // (only the app run by its owner opens the file manager: never a check or a test)
+    if !crate::shell::dialog::system_windows_allowed() {
+        return;
+    }
     let Some(dir) = p.parent() else { return };
     let opener = if cfg!(target_os = "macos") {
         "open"
