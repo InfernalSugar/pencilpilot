@@ -948,12 +948,88 @@ def scenario_scrub(binary, out):
     return res
 
 
+def tree_pss_kib(pid):
+    """PSS of a process and all its descendants (FFmpeg included), and FFmpeg's share."""
+    kids = {}
+    for d in os.listdir("/proc"):
+        if d.isdigit():
+            try:
+                with open(f"/proc/{d}/stat") as f:
+                    kids.setdefault(int(f.read().rsplit(")", 1)[1].split()[1]), []).append(int(d))
+            except (OSError, ValueError, IndexError):
+                pass
+    tot, ff, todo = 0, 0, [pid]
+    while todo:
+        p = todo.pop()
+        todo.extend(kids.get(p, []))
+        try:
+            with open(f"/proc/{p}/smaps_rollup") as f:
+                v = next((int(l.split()[1]) for l in f if l.startswith("Pss:")), 0)
+            with open(f"/proc/{p}/comm") as f:
+                is_ff = "ffmpeg" in f.read()
+        except OSError:
+            continue
+        tot += v
+        ff += v if is_ff else 0
+    return tot, ff
+
+
+def scenario_export_memory(binary, out):
+    """The whole app's peak memory while exporting MP4 (the app and FFmpeg, PSS sampled every
+    20 ms), from 20 layers at 4K and 500 drawings opened with Ctrl+O. Budget: under 1 GB."""
+    if not FIXTURES:
+        return {"skipped": "PP_QA_FIXTURES not set"}
+    import shutil
+    res = {}
+    for name in ("layers20-4k", "drawings500"):
+        m = Mutter(out, 165)
+        try:
+            copy = os.path.join(out, f"expmem-{name}.ppstudio")
+            shutil.copy(os.path.join(FIXTURES, f"{name}.ppstudio"), copy)
+            mp4 = copy[:-len(".ppstudio")] + ".mp4"
+            if os.path.exists(mp4):
+                os.remove(mp4)
+            app = App(binary, m, out, f"expmem-{name}", 20, "animate",
+                      env={"PENCILPILOT_DIALOG_ANSWER": copy})
+            time.sleep(1.8)
+            inp = Input()
+            inp.to(560, 330)
+            inp.key("Control_L", True); inp.key("o"); inp.key("Control_L", False)
+            time.sleep(2.0)
+            before = tree_pss_kib(app.p.pid)[0]
+            inp.key("Control_L", True); inp.key("e"); inp.key("Control_L", False)
+            time.sleep(0.5)
+            inp.to(*EXPORT_BUTTON)
+            time.sleep(0.05)
+            inp.button(BTN_LEFT, True); time.sleep(0.03); inp.button(BTN_LEFT, False)
+            t0 = time.monotonic()
+            peak, peak_ff, last_size, still = 0, 0, -1, 0
+            while time.monotonic() - t0 < 15:
+                tot, ff = tree_pss_kib(app.p.pid)
+                peak, peak_ff = max(peak, tot), max(peak_ff, ff)
+                size = os.path.getsize(mp4) if os.path.exists(mp4) else -1
+                still = still + 1 if size == last_size and size > 0 and ff == 0 else 0
+                last_size = size
+                if still > 25:
+                    break
+                time.sleep(0.02)
+            took = round(time.monotonic() - t0, 2)
+            inp.stop()
+            app.p.wait()
+            res[name] = {"beforeMiB": round(before / 1024), "peakTreeMiB": round(peak / 1024),
+                         "peakFfmpegMiB": round(peak_ff / 1024), "exportS": took,
+                         "mp4Bytes": last_size, "budgetMiB": 1024, "pass": 0 < peak < 1024 * 1024}
+        finally:
+            m.stop()
+    return res
+
+
 SCENARIOS = {
     "view": scenario_view, "latency": scenario_latency, "viewfps": scenario_viewfps,
     "idle": scenario_idle, "memory": scenario_memory, "playback": scenario_playback,
     "transform": scenario_transform, "turn": scenario_turn,
     "open-cli": scenario_open_cli, "open-menu": scenario_open_menu,
-    "export-window": scenario_export_window, "quit": scenario_quit, "scrub": scenario_scrub,
+    "export-window": scenario_export_window, "quit": scenario_quit, "scrub": scenario_scrub, "export-memory": scenario_export_memory,
     "latency-pauses": scenario_latency_pauses, "latency-continuous": scenario_latency_continuous,
 }
 

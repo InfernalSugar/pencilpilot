@@ -101,15 +101,17 @@ fn init() {
 }
 
 /// One tick as the window runs it: asleep until the engine's next tick is due (at most
-/// `cap`), then tick and draw.
-fn window_tick(e: &mut Engine, s: &mut State, cap: Duration) {
+/// `cap`), then tick and draw. How long the tick and the picture took (not the sleep).
+fn window_tick(e: &mut Engine, s: &mut State, cap: Duration) -> Duration {
     let now = Instant::now();
     let due = e.next_tick_at(s).unwrap_or(now + cap).min(now + cap);
     if due > now {
         std::thread::sleep(due - now);
     }
+    let t = Instant::now();
     e.tick(s, Instant::now());
     let _ = e.picture(s);
+    t.elapsed()
 }
 
 /// A test project opened through File › Open.
@@ -277,9 +279,8 @@ fn export(
     let (mut tick_max, mut ticks) = (0f64, 0);
     let mut total = 0;
     loop {
-        let t1 = Instant::now();
-        window_tick(e, s, Duration::from_millis(16));
-        tick_max = tick_max.max(t1.elapsed().as_secs_f64() * 1000.0);
+        let work = window_tick(e, s, Duration::from_millis(16));
+        tick_max = tick_max.max(work.as_secs_f64() * 1000.0);
         ticks += 1;
         match &s.export.status {
             Status::Running { done, total: n } => {

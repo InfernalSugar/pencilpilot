@@ -65,7 +65,7 @@ fi
 if [ "${SKIP_CANVAS:-0}" != 1 ]; then
   echo "== the canvas (step 4): library tests"
   PP_QA_OUT="$out/canvas" \
-    cargo test --release -p pencilpilot-native --test canvas_qa --test canvas_tools_qa --test canvas_frames_qa -- --include-ignored --test-threads 1 \
+    cargo test --release --no-fail-fast -p pencilpilot-native --test canvas_qa --test canvas_tools_qa --test canvas_frames_qa -- --include-ignored --test-threads 1 \
     >"$out/canvas-tests.txt" 2>&1
   grep -E "^test |test result" "$out/canvas-tests.txt"
   if [ "${SKIP_HEADLESS:-0}" != 1 ]; then
@@ -87,7 +87,7 @@ if [ "${SKIP_FILES:-0}" != 1 ]; then
   done
   PP_QA_FIXTURES="$fx" PP_QA_REFS="$refs" PP_QA_OUT="$out/files" \
     PP_QA_DROP_CACHES="${DROP_CACHES:-}" \
-    cargo test --release -p pencilpilot-native --test files_qa --test export_qa -- --include-ignored --test-threads 1 \
+    cargo test --release --no-fail-fast -p pencilpilot-native --test files_qa --test export_qa -- --include-ignored --test-threads 1 \
     >"$out/files-tests.txt" 2>&1
   grep -E "^test |test result" "$out/files-tests.txt"
   # one project per process for memory
@@ -107,7 +107,7 @@ if [ "${SKIP_FILES:-0}" != 1 ]; then
     btn=$(python3 -c "import json;d=json.load(open('$out/files/export-button.json'));print(json.dumps(d['export']), json.dumps(d['webm']))" 2>/dev/null)
     PP_QA_FIXTURES="$fx" DROP_CACHES="${DROP_CACHES:-}" \
       PP_QA_EXPORT_BUTTON="${btn%% *}" PP_QA_WEBM_CHOICE="${btn##* }" \
-      python3 -I "$here/canvas_window.py" "$bin" "$out/files-window" open-cli open-menu quit scrub export-window >"$out/files-window.log" 2>&1
+      python3 -I "$here/canvas_window.py" "$bin" "$out/files-window" open-cli open-menu quit scrub export-memory export-window >"$out/files-window.log" 2>&1
     echo "results: $out/files-window/canvas-window.json"
     pgrep -f "mutter --headless --no-x11 --wayland-display pp-qa-canvas" >/dev/null && echo "WARNING: a QA mutter is still running"
   fi
