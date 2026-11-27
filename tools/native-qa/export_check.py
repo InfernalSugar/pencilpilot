@@ -103,20 +103,42 @@ def check_stream(path, ref_dir):
     return info
 
 
-def check_gif(path, ref_dir):
+def check_gif(path, ref_dir, fps=None):
+    """A GIF keeps a held frame as one frame shown longer: each reference frame is compared
+    with the GIF frame showing at its time (frame i at i / fps; fps from the project's
+    renders' count over the GIF's length unless given). Transparent pixels are seen over
+    white, as the references are."""
     im = Image.open(path)
-    n, durs = 0, []
+    transparency = im.info.get("transparency") is not None
+    frames, durs = [], []
     while True:
-        durs.append(im.info.get("duration"))
-        n += 1
+        durs.append(im.info.get("duration") or 0)
+        rgba = np.asarray(im.convert("RGBA")).astype(np.float64)
+        a = rgba[..., 3:4] / 255
+        frames.append(np.round(rgba[..., :3] * a + 255 * (1 - a)).astype(np.uint8))
         try:
             im.seek(im.tell() + 1)
         except EOFError:
             break
-    info = check_stream(path, ref_dir)
-    info.update({"pilFrames": n, "frameMs": sorted(set(durs)), "totalMs": sum(d or 0 for d in durs),
-                 "loop": im.info.get("loop")})
-    return info
+    rs = refs(ref_dir)
+    total = sum(durs)
+    fps = fps or (len(rs) * 1000 / total if total else 24)
+    starts = np.cumsum([0] + durs[:-1])
+    per = []
+    for i, r in enumerate(rs):
+        # the middle of the output frame (GIF delays are rounded to hundredths)
+        t = (i + 0.5) * 1000 / fps
+        k = int(np.searchsorted(starts, t, side="right") - 1)
+        ref, _ = ref_rgb(r, frames[0].shape[1], frames[0].shape[0])
+        psnr, mad, mx = compare(frames[k], ref)
+        per.append({"frame": i + 1, "gifFrame": k + 1, "psnr": psnr, "mad": mad, "max": mx})
+    return {"gifFrames": len(frames), "refFrames": len(rs), "frameMs": sorted(set(durs)), "totalMs": total,
+            "seconds": round(total / 1000, 3), "loop": im.info.get("loop"),
+            "transparency": transparency,
+            "width": frames[0].shape[1], "height": frames[0].shape[0],
+            "psnrMin": min(p["psnr"] for p in per), "madMax": max(p["mad"] for p in per),
+            "exact": all(p["max"] == 0 for p in per),
+            "worst": min(per, key=lambda p: p["psnr"]), "perFrame": per}
 
 
 def check_pngseq(d, ref_dir):

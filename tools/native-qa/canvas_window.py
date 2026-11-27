@@ -30,7 +30,7 @@ BTN_LEFT, BTN_MIDDLE = 0x110, 0x112
 KEYSYM = {
     "0": 0x30, "1": 0x31, "plus": 0x2B, "minus": 0x2D, "equal": 0x3D, "h": 0x68,
     "space": 0x20, "Shift_L": 0xFFE1, "Control_L": 0xFFE3, "Escape": 0xFF1B, "z": 0x7A,
-    "Return": 0xFF0D, "m": 0x6D, "v": 0x76, "b": 0x62,
+    "Return": 0xFF0D, "m": 0x6D, "v": 0x76, "b": 0x62, "o": 0x6F, "s": 0x73, "e": 0x65,
 }
 
 
@@ -707,7 +707,11 @@ def scenario_open_cli(binary, out):
                 app = App(binary, m, out, f"open-{name}-{k}", 4, "animate", args=[path])
                 time.sleep(3.0)
                 pss = app.pss_kib()
-                st = app.wait()
+                try:
+                    st = app.wait()
+                except OSError:
+                    runs.append({"cold": cold, "exit": app.p.returncode, "crashed": True})
+                    continue
                 f = first_doc_frame(st)
                 runs.append({
                     "cold": cold,
@@ -718,12 +722,123 @@ def scenario_open_cli(binary, out):
                     "layers": len(st["state"]["layers"]),
                     "pssMiB": pss and round(pss / 1024, 1),
                 })
-            warm = [r["openedShownMs"] for r in runs if not r["cold"] and r["openedShownMs"]]
+            warm = [r["openedShownMs"] for r in runs if not r["cold"] and r.get("openedShownMs")]
             res[name] = {"runs": runs, "warmMedianMs": warm and sorted(warm)[len(warm) // 2],
                          "budgetMs": 400,
-                         "pass": bool(warm) and all(r["openedShownMs"] and r["openedShownMs"] < 400 for r in runs)}
+                         "pass": bool(warm) and all(r.get("openedShownMs") and r["openedShownMs"] < 400 for r in runs)}
     finally:
         m.stop()
+    return res
+
+
+def scenario_open_menu(binary, out):
+    """Ctrl+O with the dialog answered at once (PENCILPILOT_DIALOG_ANSWER): from the key to
+    the first shown frame with the project (docGen raised), for each test project, and
+    whether the app survives it."""
+    if not FIXTURES:
+        return {"skipped": "PP_QA_FIXTURES not set"}
+    res = {}
+    for name in ("empty", "drawings500", "layers20-4k"):
+        m = Mutter(out, 165)
+        try:
+            path = os.path.join(FIXTURES, f"{name}.ppstudio")
+            app = App(binary, m, out, f"openmenu-{name}", 6, "animate",
+                      env={"PENCILPILOT_DIALOG_ANSWER": path})
+            time.sleep(1.8)
+            inp = Input()
+            inp.to(560, 330)
+            time.sleep(0.2)
+            inp.key("Control_L", True)
+            t0 = mono_ns()
+            inp.key("o")
+            inp.key("Control_L", False)
+            time.sleep(2.5)
+            inp.stop()
+            app.p.wait()
+            code = app.p.returncode
+            st = json.load(open(app.stats)) if os.path.exists(app.stats) else None
+            f = st and first_doc_frame(st)
+            res[name] = {"exit": code, "stats": st is not None,
+                         "keyToShownMs": f and f["shownNs"] and round((f["shownNs"] - t0) / 1e6, 1),
+                         "doc": f and f.get("doc"),
+                         "layers": st and len(st["state"]["layers"])}
+        finally:
+            m.stop()
+    return res
+
+
+EXPORT_BUTTON = tuple(json.loads(os.environ.get("PP_QA_EXPORT_BUTTON", "[1166, 430]")))
+WEBM_CHOICE = tuple(json.loads(os.environ.get("PP_QA_WEBM_CHOICE", "[0, 0]")))
+
+
+def scenario_export_window(binary, out):
+    """The window while an export runs (drawings500, MP4 and WebM at 1080p), at 165 and 60 Hz:
+    the project opened with Ctrl+O, Ctrl+E, the dialog's Export button clicked
+    (PP_QA_EXPORT_BUTTON: its window point, from export_qa's export_button_position), then
+    strokes on the canvas while it exports: the rate, pen to screen, the export's own time
+    (frames carrying progress), and frames drawn once it's over (idle: none)."""
+    if not FIXTURES:
+        return {"skipped": "PP_QA_FIXTURES not set"}
+    import shutil
+    res = {}
+    for fmt_key, label in (("mp4", "MP4"), ("webm", "WebM")):
+        for hz in (165, 60):
+            m = Mutter(out, hz)
+            try:
+                # (one answer serves every dialog: Open reads the copy, and the export then
+                # writes over it, which is fine for a copy)
+                copy = os.path.join(out, f"export-{fmt_key}-{hz}.ppstudio")
+                shutil.copy(os.path.join(FIXTURES, "drawings500.ppstudio"), copy)
+                app = App(binary, m, out, f"export-{fmt_key}-{hz}", 16, "draw",
+                          env={"PENCILPILOT_DIALOG_ANSWER": copy})
+                time.sleep(1.8)
+                inp = Input()
+                inp.to(560, 330)
+                inp.key("Control_L", True); inp.key("o"); inp.key("Control_L", False)
+                time.sleep(2.0)
+                inp.key("Control_L", True); inp.key("e"); inp.key("Control_L", False)
+                time.sleep(0.5)
+                if fmt_key == "webm":
+                    # the format row: WebM is the second choice (found by looking, below)
+                    inp.to(*WEBM_CHOICE)
+                    inp.button(BTN_LEFT, True); time.sleep(0.03); inp.button(BTN_LEFT, False)
+                    time.sleep(0.2)
+                inp.to(*EXPORT_BUTTON)
+                time.sleep(0.05)
+                inp.button(BTN_LEFT, True); time.sleep(0.03); inp.button(BTN_LEFT, False)
+                t_click = mono_ns()
+                time.sleep(0.15)
+                k = 0
+                while mono_ns() - t_click < 2.2e9:
+                    y = 200 + (k % 12) * 15
+                    inp.drag(line((200, y), (700, y + 30), 150), 0.002)
+                    k += 1
+                t_draw_end = mono_ns()
+                time.sleep(6.0)
+                t_idle0 = mono_ns()
+                time.sleep(3.0)
+                t_idle1 = mono_ns()
+                inp.stop()
+                st = app.wait()
+                fr = st["frames"]
+                exp = [f for f in fr if f.get("export")]
+                during = frame_numbers(st, t_click, t_draw_end)
+                inputs = sorted((f for f in during if f["events"] and f["shownNs"]), key=lambda f: f["shownNs"])
+                last = exp[-1] if exp else None
+                after = [f for f in fr if t_idle0 <= f["drawnNs"] <= t_idle1]
+                res[f"{fmt_key}-{hz}"] = {
+                    "strokes": k,
+                    "exportFrames": len(exp),
+                    "exportProgressLast": last and last["export"],
+                    "exportSeenMs": exp and round((exp[-1]["drawnNs"] - exp[0]["drawnNs"]) / 1e6),
+                    "exportOverlapsStrokes": bool(exp) and exp[0]["drawnNs"] < t_draw_end,
+                    "rate": rate(during, hz), "latency": latency(inputs),
+                    "budgetMs": round(1000 / hz + 4, 2),
+                    "idleFramesAfter3s": len(after),
+                    "outputBytes": os.path.getsize(copy),
+                }
+            finally:
+                m.stop()
     return res
 
 
@@ -731,7 +846,8 @@ SCENARIOS = {
     "view": scenario_view, "latency": scenario_latency, "viewfps": scenario_viewfps,
     "idle": scenario_idle, "memory": scenario_memory, "playback": scenario_playback,
     "transform": scenario_transform, "turn": scenario_turn,
-    "open-cli": scenario_open_cli,
+    "open-cli": scenario_open_cli, "open-menu": scenario_open_menu,
+    "export-window": scenario_export_window,
     "latency-pauses": scenario_latency_pauses, "latency-continuous": scenario_latency_continuous,
 }
 
