@@ -4432,8 +4432,9 @@ impl Painter {
             .map(|t| DrawingCopy(copy_tiles(t)))
     }
 
-    /// The tiles a drawing has paint in (sorted): to copy a big drawing a part at a time
-    /// ([`Painter::drawing_copy_tiles`]).
+    /// Where a drawing has tiles (column, row), sorted; none for an unknown drawing. To
+    /// copy a big drawing a part at a time ([`Painter::drawing_copy_tiles`]), or with
+    /// [`Painter::drawing_tile_rgba`] to read one a tile at a time (on many threads at once).
     pub fn drawing_tile_keys(&self, drawing: u32) -> Vec<(i32, i32)> {
         let mut k: Vec<(i32, i32)> = self
             .drawing_tiles(drawing)
@@ -4699,15 +4700,6 @@ impl Painter {
             self.cels.insert(drawing, tiles);
         }
         true
-    }
-
-    /// Where a drawing has tiles (column, row), in no particular order; none for an
-    /// unknown drawing. With [`Painter::drawing_tile_rgba`], a drawing read a tile at a
-    /// time (on many threads at once, say).
-    pub fn drawing_tile_keys(&self, drawing: u32) -> Vec<(i32, i32)> {
-        self.drawing_tiles(drawing)
-            .map(|t| t.keys().copied().collect())
-            .unwrap_or_default()
     }
 
     /// One of a drawing's tiles as straight-alpha sRGB RGBA8 (64×64, 16 384 bytes) into
