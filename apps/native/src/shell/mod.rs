@@ -181,8 +181,7 @@ struct FrameRec {
     /// when the compositor asked for it, from when it was meant to start, ns (negative:
     /// before)
     asked_ns: i64,
-    /// the document it showed: its size, and which document (it goes up each time the
-    /// document is replaced: a project opened, a new one)
+    /// the document it showed: its size, and which one (`State::doc_id`)
     doc: (u32, u32),
     doc_gen: u32,
     /// an export running then: frames done, of how many
@@ -209,7 +208,6 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut canvas: Option<Canvas> = None;
     let mut recs: Vec<FrameRec> = Vec::new();
-    let mut doc_gen = 0u32;
     // what the input since the last frame did: moved the view / reached the engine
     let (mut view_moved, mut drew) = (false, false);
     let mut pacer =
@@ -602,7 +600,6 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             }
             canvas = Some(c);
             resized = true;
-            doc_gen += 1;
             // the interface (the view's quad) catches up next pass
             dirty = true;
         }
@@ -658,7 +655,7 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             pass_ns,
             asked_ns: asked as i64 - work_from as i64,
             doc: (s.view.doc_w, s.view.doc_h),
-            doc_gen,
+            doc_gen: s.doc_id,
             export: s.export_progress,
             shown_ns: None,
         });
