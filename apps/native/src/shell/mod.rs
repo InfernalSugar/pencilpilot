@@ -613,9 +613,15 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
         if new_canvas {
             s.view.reset(canvas_rect);
             let mut e = engine::Engine::new(cw, ch);
-            // set up (layers, drawings) before the first input reaches it
+            // set up (layers, drawings) before the first input reaches it; this may open a
+            // project (the file named at start), so the picture takes the painter's size
             e.tick(&mut s, std::time::Instant::now());
-            let mut c = Canvas::new(&gpu, cw, ch)?;
+            let (pw, ph) = (e.painter.width(), e.painter.height());
+            if (pw, ph) != (cw, ch) {
+                (s.view.doc_w, s.view.doc_h) = (pw, ph);
+                s.view.reset(canvas_rect);
+            }
+            let mut c = Canvas::new(&gpu, pw, ph)?;
             c.upload_all(e.painter.rgba());
             canvas = Some(c);
             eng = Some(e);

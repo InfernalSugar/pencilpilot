@@ -302,8 +302,10 @@ impl Window {
         let Some(guard) = self.queue.prepare_read() else {
             return Ok(self.queue.dispatch_pending(&mut self.st).map_err(wl)? > 0);
         };
-        let now = clock::now_ns();
-        if deadline_ns > now && clock::wait_readable(&guard.connection_fd(), deadline_ns - now) {
+        // (a deadline already past still reads what has arrived: a caller with work due
+        // all the time mustn't starve the compositor's events, frame callbacks included)
+        let wait = deadline_ns.saturating_sub(clock::now_ns());
+        if clock::wait_readable(&guard.connection_fd(), wait) {
             guard.read().map_err(wl)?;
         } else {
             drop(guard);
