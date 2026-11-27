@@ -63,13 +63,14 @@ class Mutter:
 
 
 class App:
-    def __init__(self, binary, mutter, out, tag, secs, workspace="animate"):
+    def __init__(self, binary, mutter, out, tag, secs, workspace="animate", args=(), env=None):
         self.stats = os.path.join(out, f"{tag}-stats.json")
         self.doc = os.path.join(out, f"{tag}-doc.png")
-        env = dict(os.environ, WAYLAND_DISPLAY=mutter.name)
+        env = dict(os.environ, WAYLAND_DISPLAY=mutter.name, **(env or {}))
+        self.launched_ns = mono_ns()
         self.p = subprocess.Popen(
             [binary, "--quit-after", str(secs), "--stats", self.stats, "--save-doc", self.doc,
-             "--workspace", workspace], env=env)
+             "--workspace", workspace, *args], env=env)
         self.t0 = time.monotonic()
 
     def pss_kib(self):
@@ -666,10 +667,68 @@ def scenario_turn(binary, out):
     return res
 
 
+# ------------------------------------------------------------------------------------------
+# files and export (Phase 2 step 5)
+
+FIXTURES = os.environ.get("PP_QA_FIXTURES", "")
+DROP_CACHES = os.environ.get("DROP_CACHES", "")
+
+
+def first_doc_frame(st, gen=1):
+    """The first frame drawn showing document generation `gen` (docGen: raised on every Open
+    and New)."""
+    for f in st["frames"]:
+        if f.get("docGen", 0) >= gen:
+            return f
+    return None
+
+
+def scenario_open_cli(binary, out):
+    """`pencilpilot <project>`: from the launch to the first shown frame with the project
+    (docGen 1), warm (3 runs) and cold (DROP_CACHES first), for each test project; PSS 3 s in.
+    Budget: open under 400 ms (start under 200 ms warm, 500 ms cold)."""
+    if not FIXTURES:
+        return {"skipped": "PP_QA_FIXTURES not set"}
+    res = {}
+    m = Mutter(out, 165)
+    try:
+        for name in ("empty", "layers20-4k", "drawings500"):
+            path = os.path.join(FIXTURES, f"{name}.ppstudio")
+            runs = []
+            for k in range(4):
+                cold = k == 0 and bool(DROP_CACHES)
+                if k == 0 and not cold:
+                    continue
+                if cold:
+                    subprocess.run(["sh", "-c", DROP_CACHES], check=False)
+                app = App(binary, m, out, f"open-{name}-{k}", 4, "animate", args=[path])
+                time.sleep(3.0)
+                pss = app.pss_kib()
+                st = app.wait()
+                f = first_doc_frame(st)
+                runs.append({
+                    "cold": cold,
+                    "firstFrameMs": st.get("startupToFirstFrameMs"),
+                    "openedShownMs": f and f["shownNs"] and round((f["shownNs"] - app.launched_ns) / 1e6, 1),
+                    "openedDrawnMs": f and round((f["drawnNs"] - app.launched_ns) / 1e6, 1),
+                    "doc": f and f.get("doc"),
+                    "layers": len(st["state"]["layers"]),
+                    "pssMiB": pss and round(pss / 1024, 1),
+                })
+            warm = [r["openedShownMs"] for r in runs if not r["cold"] and r["openedShownMs"]]
+            res[name] = {"runs": runs, "warmMedianMs": warm and sorted(warm)[len(warm) // 2],
+                         "budgetMs": 400,
+                         "pass": bool(warm) and all(r["openedShownMs"] and r["openedShownMs"] < 400 for r in runs)}
+    finally:
+        m.stop()
+    return res
+
+
 SCENARIOS = {
     "view": scenario_view, "latency": scenario_latency, "viewfps": scenario_viewfps,
     "idle": scenario_idle, "memory": scenario_memory, "playback": scenario_playback,
     "transform": scenario_transform, "turn": scenario_turn,
+    "open-cli": scenario_open_cli,
     "latency-pauses": scenario_latency_pauses, "latency-continuous": scenario_latency_continuous,
 }
 
