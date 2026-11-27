@@ -1,0 +1,161 @@
+   Compiling pencilpilot-native v0.1.0 (/home/infernalsugar/Drive/Projects/pp-shell-qa-run/apps/native)
+    Finished `release` profile [optimized] target(s) in 18.69s
+     Running tests/shell_qa.rs (target/release/build/pencilpilot-native/ccd5243f7a9f3783/out/shell_qa-ccd5243f7a9f3783)
+
+running 19 tests
+test a_click_shows_complete_on_the_next_frame ... ok
+test animate_strip_main_controls ... FAILED
+test colour_strip_picks_drawings ... ok
+test draw_strip_main_controls ... ok
+test header_has_undo_redo_draw_together_and_export ... ok
+test header_menus_open_and_their_items_ask_for_actions ... ok
+test idle_draws_nothing_in_every_workspace ... ok
+test layout_matches_the_design_regions ... FAILED
+test nothing_is_due_while_idle ... ok
+test panel_content_reacts ... ok
+test panel_tabs_three_where_the_design_has_them ... ok
+test review_strip_main_controls ... ok
+test right_click_menus_where_the_design_has_them ... FAILED
+test save_the_frames_around_a_workspace_click ... ok
+test shell_builds_at_other_sizes ... ok
+test tool_column_has_the_designs_tools_in_order_and_picks_them ... ok
+test tool_keys_pick_tools ... ok
+test undo_and_redo_follow_can_undo_and_can_redo ... ok
+test workspace_tabs_switch_every_workspace_in_the_designs_order ... FAILED
+
+failures:
+
+---- animate_strip_main_controls stdout ----
+
+thread 'animate_strip_main_controls' (1814373) panicked at apps/native/tests/shell_qa.rs:929:5:
+Animate timeline: missing New layer
+clicks did: {
+    "action:GoToFrame(0)": 654,
+    "action:GoToFrame(1)": 9,
+    "action:GoToFrame(10)": 6,
+    "action:GoToFrame(11)": 9,
+    "action:GoToFrame(12)": 258,
+    "action:GoToFrame(13)": 9,
+    "action:GoToFrame(14)": 6,
+    "action:GoToFrame(15)": 9,
+    "action:GoToFrame(16)": 9,
+    "action:GoToFrame(17)": 9,
+    "action:GoToFrame(18)": 54,
+    "action:GoToFrame(19)": 9,
+    "action:GoToFrame(2)": 6,
+    "action:GoToFrame(20)": 9,
+    "action:GoToFrame(21)": 9,
+    "action:GoToFrame(22)": 6,
+    "action:GoToFrame(23)": 9,
+    "action:GoToFrame(24)": 372,
+    "action:GoToFrame(25)": 9,
+    "action:GoToFrame(26)": 6,
+    "action:GoToFrame(27)": 9,
+    "action:GoToFrame(28)": 9,
+    "action:GoToFrame(29)": 9,
+    "action:GoToFrame(3)": 9,
+    "action:GoToFrame(30)": 6,
+    "action:GoToFrame(31)": 9,
+    "action:GoToFrame(32)": 141,
+    "action:GoToFrame(33)": 9,
+    "action:GoToFrame(34)": 6,
+    "action:GoToFrame(35)": 9,
+    "action:GoToFrame(36)": 108,
+    "action:GoToFrame(37)": 9,
+    "action:GoToFrame(38)": 6,
+    "action:GoToFrame(39)": 9,
+    "action:GoToFrame(4)": 9,
+    "action:GoToFrame(40)": 9,
+    "action:GoToFrame(41)": 9,
+    "action:GoToFrame(42)": 6,
+    "action:GoToFrame(43)": 9,
+    "action:GoToFrame(44)": 9,
+    "action:GoToFrame(45)": 9,
+    "action:GoToFrame(46)": 6,
+    "action:GoToFrame(47)": 90,
+    "action:GoToFrame(5)": 9,
+    "action:GoToFrame(6)": 54,
+    "action:GoToFrame(7)": 9,
+    "action:GoToFrame(8)": 9,
+    "action:GoToFrame(9)": 9,
+    "action:NextFrame": 16,
+    "action:Other(\"Flip\")": 16,
+    "action:Other(\"Pin this frame\")": 16,
+    "action:Play": 20,
+    "action:PreviousFrame": 12,
+    "active_layer=1": 438,
+    "active_layer=2": 438,
+    "active_layer=3": 452,
+    "frame_width=11.0": 4,
+    "frame_width=14.0": 4,
+    "frame_width=16.0": 20,
+    "frame_width=19.0": 4,
+    "frame_width=25.0": 4,
+    "frame_width=27.0": 4,
+    "frame_width=28.0": 12,
+    "frame_width=30.0": 4,
+    "frame_width=33.0": 4,
+    "frame_width=36.0": 4,
+    "frame_width=38.0": 4,
+    "frame_width=41.0": 4,
+    "frame_width=44.0": 4,
+    "frame_width=8.0": 8,
+    "onion=false": 16,
+    "overlay": 108,
+    "strips=StripsState { open_tray: None, picked: [0, 1, 0, 1, 0, 0], e": 16,
+    "strips=StripsState { open_tray: Some(0), picked: [0, 1, 0, 1, 0, 0]": 28,
+    "strips=StripsState { open_tray: Some(1), picked: [0, 1, 0, 1, 0, 0]": 28,
+    "strips=StripsState { open_tray: Some(2), picked: [0, 1, 0, 1, 0, 0]": 24,
+    "strips=StripsState { open_tray: Some(3), picked: [0, 1, 0, 1, 0, 0]": 32,
+    "strips=StripsState { open_tray: Some(4), picked: [0, 1, 0, 1, 0, 0]": 28,
+    "strips=StripsState { open_tray: Some(5), picked: [0, 1, 0, 1, 0, 0]": 28,
+}
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- layout_matches_the_design_regions stdout ----
+
+thread 'layout_matches_the_design_regions' (1814705) panicked at apps/native/tests/shell_qa.rs:394:5:
+17 differences:
+Animate canvas.w = 1000 (design 1007.5, -7.5)
+Animate panel.x = 1104 (design 1111.5, -7.5)
+Animate panel.w = 320 (design 312.5, +7.5)
+Draw canvas.w = 1000 (design 1007.5, -7.5)
+Draw panel.x = 1104 (design 1111.5, -7.5)
+Draw panel.w = 320 (design 312.5, +7.5)
+Colour tools.h = 646 (design 651, -5)
+Colour canvas.w = 1000 (design 1007.5, -7.5)
+Colour canvas.h = 646 (design 651, -5)
+Colour panel.x = 1104 (design 1111.5, -7.5)
+Colour panel.w = 320 (design 312.5, +7.5)
+Colour panel.h = 646 (design 651, -5)
+Colour strip.y = 742 (design 747, -5)
+Colour strip.h = 142 (design 137, +5)
+Review canvas.w = 1076 (design 1083.5, -7.5)
+Review panel.x = 1104 (design 1111.5, -7.5)
+Review panel.w = 320 (design 312.5, +7.5)
+
+---- right_click_menus_where_the_design_has_them stdout ----
+
+thread 'right_click_menus_where_the_design_has_them' (1814914) panicked at apps/native/tests/shell_qa.rs:1051:5:
+Animate: right-click on the canvas opens nothing
+Draw: right-click on the canvas opens nothing
+Colour: right-click on the canvas opens nothing
+Review: right-click on the canvas opens nothing
+
+---- workspace_tabs_switch_every_workspace_in_the_designs_order stdout ----
+
+thread 'workspace_tabs_switch_every_workspace_in_the_designs_order' (1815015) panicked at apps/native/tests/shell_qa.rs:523:5:
+Draw tab's middle at x 686 (design 591, +95)
+Animate tab's middle at x 604 (design 673.5, -70)
+tab order ["Animate", "Draw", "Colour", "Review"] (design ["Draw", "Animate", "Colour", "Review"])
+
+
+failures:
+    animate_strip_main_controls
+    layout_matches_the_design_regions
+    right_click_menus_where_the_design_has_them
+    workspace_tabs_switch_every_workspace_in_the_designs_order
+
+test result: FAILED. 15 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 323.51s
+
+error: test failed, to rerun pass `-p pencilpilot-native --test shell_qa`

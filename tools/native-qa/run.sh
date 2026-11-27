@@ -22,7 +22,7 @@ cd "$root"
 
 echo "== build"
 cargo build --release -p pencilpilot-native 2>&1 | tail -1
-bin="$root/target/release/pencilpilot"
+bin="${CARGO_TARGET_DIR:-$root/target}/release/pencilpilot"
 
 echo "== native renders"
 for ws in animate draw colour review; do

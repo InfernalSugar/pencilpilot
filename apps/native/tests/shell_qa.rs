@@ -139,6 +139,14 @@ impl Harness {
         self.pass();
     }
 
+    /// A pass with input, as the window runs it: the pass, then one settling pass with no
+    /// new input. Whether either drew.
+    fn input_pass(&mut self) -> bool {
+        let first = self.pass();
+        let settled = self.pass();
+        first || settled
+    }
+
     fn key(&mut self, name: &str, text: &str) -> bool {
         self.ui.key(Key {
             name: name.into(),
@@ -146,24 +154,24 @@ impl Harness {
             ctrl: false,
             shift: false,
         });
-        self.pass()
+        self.input_pass()
     }
 
-    /// A left click at (x, y): returns whether the pass the button came up in drew.
+    /// A left click at (x, y): returns whether the passes the button came up in drew.
     fn click(&mut self, x: f32, y: f32) -> bool {
         self.ui.pointer_moved(x, y);
-        self.pass();
+        self.input_pass();
         self.ui.pointer_button(true);
-        self.pass();
+        self.input_pass();
         self.ui.pointer_button(false);
-        self.pass()
+        self.input_pass()
     }
 
     fn right_click(&mut self, x: f32, y: f32) -> bool {
         self.ui.pointer_moved(x, y);
-        self.pass();
+        self.input_pass();
         self.ui.pointer_context();
-        self.pass()
+        self.input_pass()
     }
 
     /// What a click (or right-click) at (x, y) does, from a clean start; then everything is
@@ -177,6 +185,15 @@ impl Harness {
             self.click(x, y);
         }
         let mut effects = diff(&before, &self.s);
+        let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+        for a in &self.s.actions {
+            *counts.entry(format!("{a:?}")).or_default() += 1;
+        }
+        for (a, n) in counts {
+            if n > 1 {
+                effects.insert(format!("DUPLICATE action:{a} x{n}"));
+            }
+        }
         if self.ui.overlay_open() {
             effects.insert("overlay".into());
         }
@@ -289,6 +306,8 @@ fn diff(a: &State, b: &State) -> BTreeSet<String> {
         colour,
         colour_name,
         palette,
+        palette_name,
+        cut_name,
         brush,
         brush_size,
         panel_tab,
@@ -504,9 +523,10 @@ fn workspace_tabs_switch_every_workspace_in_the_designs_order() {
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
 
-/// The budget: a click shows on the next display frame. The pass the click lands in must
-/// draw its result, and the pass after (no input) must have nothing left to draw: otherwise
-/// the window, which only draws again on input, keeps showing a half-updated frame.
+/// The budget: a click shows on the next display frame. The window runs a pass and one
+/// settling pass for each input, then presents; the pass after that (no input) must have
+/// nothing left to draw: otherwise the window, which only draws again on input, keeps showing
+/// a half-updated frame. A click must also ask for each action once.
 #[test]
 #[ignore = "QA suite: tools/native-qa/run.sh"]
 fn a_click_shows_complete_on_the_next_frame() {
@@ -528,6 +548,14 @@ fn a_click_shows_complete_on_the_next_frame() {
         }
         for (name, rect) in areas {
             for p in h.sweep(rect, 12.0, false) {
+                if let Some(d) = p.effects.iter().find(|e| e.starts_with("DUPLICATE")) {
+                    problems.push(format!(
+                        "{} {name}: click at ({:.0}, {:.0}) → {d}",
+                        w.name(),
+                        p.x,
+                        p.y
+                    ));
+                }
                 if p.stale {
                     problems.push(format!(
                         "{} {name}: click at ({:.0}, {:.0}) → {:?}: the next idle pass still drew",
@@ -545,7 +573,7 @@ fn a_click_shows_complete_on_the_next_frame() {
 }
 
 /// Pictures for the report (`PP_SAVE` = a folder): the frame a workspace tab click produces,
-/// and the frame the next pass (no input) produces.
+/// and the frame the settling pass after it (no input) produces: what the window presents.
 #[test]
 #[ignore = "QA suite: tools/native-qa/run.sh"]
 fn save_the_frames_around_a_workspace_click() {
@@ -582,8 +610,8 @@ fn save_the_frames_around_a_workspace_click() {
             shell::build(f, s, W, H);
         })
         .unwrap_or_else(|| h.ui.shown().to_vec());
-    h.save(&click, &format!("{dir}/click-frame-animate-to-draw.png"));
-    h.save(&next, &format!("{dir}/next-frame-animate-to-draw.png"));
+    h.save(&click, &format!("{dir}/animate-to-draw-click-pass.png"));
+    h.save(&next, &format!("{dir}/animate-to-draw-settling-pass.png"));
 }
 
 #[test]

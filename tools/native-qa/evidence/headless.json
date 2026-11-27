@@ -1,0 +1,38 @@
+{
+  "idle165": {
+    "seconds": 6.066,
+    "startupToFirstFrameMs": 26.2,
+    "framesDrawn": 3,
+    "framesPresented": 2
+  },
+  "pssKiB": {
+    "at2s": 25521.0,
+    "at5s": 25530.0
+  },
+  "rssKiB": {
+    "at2s": 54792.0,
+    "at5s": 54792.0
+  },
+  "startupWarmMs": {
+    "runs": [
+      26.1,
+      21.9,
+      24.0,
+      24.0,
+      35.2
+    ],
+    "median": 24.0
+  },
+  "startupColdMs": 110.2,
+  "fpsWhileHovering": {
+    "165": 155.3,
+    "60": 60.7
+  },
+  "budgets": {
+    "idleFramesAfterStartup": "0 (at most 2 counted: the first, and one when system fonts join)",
+    "startupWarmMs": 200,
+    "startupColdMs": 500,
+    "memoryMiB": 150,
+    "fps": "the display's rate"
+  }
+}

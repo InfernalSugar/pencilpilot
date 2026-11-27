@@ -12,7 +12,7 @@ SKIP_HEADLESS=1 tools/native-qa/run.sh                               # no window
 
 Results go to `target/native-qa/` (or the folder given): `native/`, `design/`, `compare/`
 (side-by-side and difference images, `compare.md`), `frames/`, `tests.txt`, `sweeps.log`,
-`headless/headless.json`. The findings so far are in [`REPORT.md`](REPORT.md).
+`headless/headless.json`. The combined shell's run is kept in [`evidence/`](evidence/).
 
 ## What's in it
 
