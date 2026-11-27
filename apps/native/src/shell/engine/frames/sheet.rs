@@ -104,13 +104,25 @@ impl Track {
 
     /// The drawings in the order they first show (no blanks, each once).
     pub fn drawings(&self) -> Vec<u32> {
+        // (a set alongside: a track of hundreds of drawings stays linear)
+        let mut seen = std::collections::HashSet::with_capacity(self.cels.len());
         let mut v: Vec<u32> = Vec::new();
         for c in &self.cels {
-            if c.drawing != 0 && !v.contains(&c.drawing) {
+            if c.drawing != 0 && seen.insert(c.drawing) {
                 v.push(c.drawing);
             }
         }
         v
+    }
+
+    /// Each drawing's number on the track (1, 2… in the order they first show): one pass,
+    /// for labelling every cel.
+    pub fn drawing_numbers(&self) -> std::collections::HashMap<u32, usize> {
+        self.drawings()
+            .into_iter()
+            .enumerate()
+            .map(|(i, d)| (d, i + 1))
+            .collect()
     }
 
     /// The first frame a drawing shows on.

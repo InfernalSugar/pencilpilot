@@ -20,6 +20,9 @@ pencilpilot-export = { path = "../../crates/export" }
 png = "0.18"
 cosmic-text = "0.19"
 rayon = "1"
+# project files (.ppstudio)
+pencilpilot-ppstudio = { path = "../../crates/ppstudio" }
+serde_json = "1"
 # the desktop portal (the system file dialog), over D-Bus
 zbus = "5"
 # (an export runs at a lower priority than the window)
