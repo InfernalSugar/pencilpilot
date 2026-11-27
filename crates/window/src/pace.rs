@@ -172,6 +172,19 @@ impl Pacer {
         self.targets.retain(|&f, _| f > p.frame);
     }
 
+    /// About how long from starting a frame to its being shown, ns (0: no refresh known).
+    pub fn show_delay_ns(&self, now: u64) -> u64 {
+        match self.plan(now) {
+            Some(_) => self.margin_ns(),
+            None => self.refresh_ns as u64,
+        }
+    }
+
+    /// The refresh period, ns (0: not known yet).
+    pub fn refresh_ns(&self) -> u64 {
+        self.refresh_ns as u64
+    }
+
     /// Whether frames may be drawn late (false: always at once).
     pub fn drawing_late(&self) -> bool {
         !self.at_once

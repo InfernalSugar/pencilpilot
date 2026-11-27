@@ -421,7 +421,8 @@ fn flips_cut_copy_paste_clear_and_fill_selection() {
     assert!(ink_box(&e).is_none());
     other(&mut e, &mut s, "Paste");
     assert_eq!(s.tool, Tool::Transform);
-    assert!(s.tooling.transform.is_some());
+    assert!(s.tooling.transform.is_some() && e.float.is_some());
+    assert!(ink_box(&e).is_none(), "floating: not on the layer yet");
     other(&mut e, &mut s, "Transform: commit");
     assert_eq!(ink_box(&e).unwrap(), b0);
     // fill selection
@@ -665,4 +666,57 @@ fn clear_then_undo_and_paste_restore_the_exact_layer() {
     }
     let l2 = e.painter.layer_rgba(e.painter.active_layer());
     assert_eq!(diff(&l0, &l2), 0, "pasting in place");
+}
+
+#[test]
+fn a_pasted_copy_moves_on_its_own_and_undo_takes_only_it() {
+    let (mut e, mut s) = engine();
+    block(&mut e, &mut s, [40.0, 40.0, 120.0, 100.0]);
+    let original = e.painter.layer_rgba(e.painter.active_layer());
+    let source = painted(&e, [40, 40, 120, 100]);
+    let all = painted(&e, [0, 0, 400, 300]);
+    s.tool = Tool::Select;
+    drag(&mut e, &mut s, (30.0, 30.0), (130.0, 110.0));
+    other(&mut e, &mut s, "Copy");
+    other(&mut e, &mut s, "Paste");
+    // the copy moves; the original stays
+    drag(&mut e, &mut s, (80.0, 70.0), (280.0, 170.0));
+    assert_eq!(
+        painted(&e, [40, 40, 120, 100]),
+        source,
+        "the original stays while moving"
+    );
+    other(&mut e, &mut s, "Transform: commit");
+    assert_eq!(
+        painted(&e, [40, 40, 120, 100]),
+        source,
+        "the original stays"
+    );
+    let copy = painted(&e, [240, 140, 320, 200]);
+    assert!(
+        (copy as i64 - source as i64).abs() <= source as i64 / 50,
+        "{copy} vs {source}"
+    );
+    // undo takes only the pasted copy
+    assert!(e.painter.undo());
+    assert_eq!(painted(&e, [240, 140, 320, 200]), 0);
+    let now = e.painter.layer_rgba(e.painter.active_layer());
+    let diff = original
+        .chunks(4)
+        .zip(now.chunks(4))
+        .filter(|(a, b)| (a[3] as i32 - b[3] as i32).abs() > 2)
+        .count();
+    assert_eq!(diff, 0, "the layer as it was before the paste");
+    // Escape lets go of a paste without putting it down
+    other(&mut e, &mut s, "Paste");
+    other(&mut e, &mut s, "Escape");
+    assert!(e.float.is_none() && s.tooling.transform.is_none());
+    assert_eq!(painted(&e, [0, 0, 400, 300]), all);
+    // and a brush stroke while it floats puts it down first (the engine's rule)
+    other(&mut e, &mut s, "Paste");
+    s.tool = Tool::Brush;
+    e.pointer(&mut s, Phase::Down, at(300.0, 250.0));
+    e.pointer(&mut s, Phase::Up, at(310.0, 250.0));
+    assert!(e.float.is_none());
+    assert!(painted(&e, [40, 40, 120, 100]) >= source);
 }
