@@ -141,6 +141,13 @@ struct FrameRec {
     drawn_ns: u64,
     /// the timeline frame it showed
     sheet_frame: u32,
+    /// how long it took to make, from when it was meant to start to handing it over, ns;
+    /// of that, the GPU's part (a buffer to draw in, drawing), ns
+    work_ns: u64,
+    gpu_ns: u64,
+    /// of the rest: waking after its time, and the interface's pass, ns
+    wake_ns: u64,
+    pass_ns: u64,
     /// when it reached the screen, ns
     shown_ns: Option<u64>,
 }
@@ -463,14 +470,17 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
         // (from when it was meant to start: waking late under load counts too)
-        let work_from = plan.map_or(pencilpilot_window::clock::now_ns(), |p| p.draw_at);
+        let woke = pencilpilot_window::clock::now_ns();
+        let work_from = plan.map_or(woke, |p| p.draw_at.min(woke));
         let (lw, lh) = win.logical_size();
         ui.scale = win.scale() as f32;
         let (w, h) = (lw as f32, lh as f32);
+        let pass_from = pencilpilot_window::clock::now_ns();
         let first = ui.pass(&mut r, w, h, |f| {
             (mark, canvas_rect) = build(f, &mut s, w, h);
         });
         let changed = first;
+        let pass_ns = pencilpilot_window::clock::now_ns().saturating_sub(pass_from);
         dirty = false;
         // what the interface asked for
         for a in std::mem::take(&mut s.actions) {
@@ -512,6 +522,7 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
         canvas_dirty = false;
+        let gpu_from = pencilpilot_window::clock::now_ns();
         let img = win.acquire(&gpu)?;
         r.draw_canvases(
             &gpu,
@@ -522,11 +533,12 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             float_tex.as_mut().map(|(c, _)| c),
         )?;
         let frame = win.present()?;
+        let work_ns = pencilpilot_window::clock::now_ns().saturating_sub(work_from);
         pacer.drawn(
             frame,
             plan.take(),
             // (only frames input asked for: the startup's say nothing about drawing)
-            (events > 0).then(|| pencilpilot_window::clock::now_ns().saturating_sub(work_from)),
+            (events > 0).then_some(work_ns),
         );
         drawn += 1;
         recs.push(FrameRec {
@@ -535,6 +547,10 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             events: std::mem::take(&mut events),
             drawn_ns: pencilpilot_window::clock::now_ns(),
             sheet_frame: s.frame,
+            work_ns,
+            gpu_ns: pencilpilot_window::clock::now_ns().saturating_sub(gpu_from),
+            wake_ns: woke.saturating_sub(work_from),
+            pass_ns,
             shown_ns: None,
         });
     }
@@ -548,14 +564,18 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             .iter()
             .map(|r| {
                 format!(
-                    "{{\"frame\": {}, \"inputMs\": {}, \"receivedNs\": {}, \"events\": {}, \"drawnNs\": {}, \"shownNs\": {}, \"sheetFrame\": {}}}",
+                    "{{\"frame\": {}, \"inputMs\": {}, \"receivedNs\": {}, \"events\": {}, \"drawnNs\": {}, \"shownNs\": {}, \"sheetFrame\": {}, \"workNs\": {}, \"gpuNs\": {}, \"wakeNs\": {}, \"passNs\": {}}}",
                     r.frame,
                     opt(r.input.map(|i| i.0 as u64)),
                     opt(r.input.map(|i| i.1)),
                     r.events,
                     r.drawn_ns,
                     opt(r.shown_ns),
-                    r.sheet_frame
+                    r.sheet_frame,
+                    r.work_ns,
+                    r.gpu_ns,
+                    r.wake_ns,
+                    r.pass_ns
                 )
             })
             .collect();
