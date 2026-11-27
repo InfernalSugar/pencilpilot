@@ -80,9 +80,34 @@ def fixtures(out):
     long["scenes"][0]["audio"] = [{"file": "clicks.wav", "start": 0}]
     build_spec(root, long, os.path.join(pics, "layers20-4k-60s-sound.json"),
                os.path.join(out, "layers20-4k-60s-sound.ppstudio"))
+    # very many layers: 40 at 1080p, each its own drawing in a band of its own, blend modes in
+    # turn, every fifth clipped (more than a GPU compositor might hold at once)
+    many = many_layers(pics)
+    build_spec(root, many, os.path.join(pics, "layers40.json"), os.path.join(out, "layers40.ppstudio"))
     # the sound projects: 640 x 360, a frame number drawn on every frame
     for name, s in sound_projects(pics).items():
         build_spec(root, s, os.path.join(pics, f"{name}.json"), os.path.join(out, f"{name}.ppstudio"))
+
+
+def many_layers(pics, n=40, w=1920, h=1080):
+    from PIL import Image, ImageDraw
+    blends = ["normal", "multiply", "screen", "overlay", "darken", "lighten", "add"]
+    layers, tracks = [], {}
+    for i in range(n):
+        f = f"many-{i}.png"
+        if not os.path.exists(os.path.join(pics, f)):
+            img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+            g = ImageDraw.Draw(img)
+            y = int(i * h / n)
+            g.rectangle([40 + i * 20, y, w - 40, y + int(h / n * 3)],
+                        fill=((i * 53) % 256, (i * 97) % 256, (i * 151) % 256, 120 + (i * 7) % 136))
+            img.save(os.path.join(pics, f))
+        name = f"L{i + 1}"
+        layers.append({"name": name, "blend": blends[i % 7], "opacity": 0.5 + (i % 5) / 10,
+                       "clip": i % 5 == 4})
+        tracks[name] = [{"image": f, "length": 12}]
+    return {"width": w, "height": h, "fps": 24, "layers": layers,
+            "scenes": [{"name": "Scene 1", "cuts": [{"name": "Cut 1", "tracks": tracks}]}]}
 
 
 def build_spec(root, spec, spec_path, target):
