@@ -9,6 +9,10 @@ use pencilpilot_ui::ui::{Frame, Rect};
 
 use crate::state::State;
 
+/// This piece's own state (anything it needs that the rest of the app doesn't).
+#[derive(Debug, Clone, Default)]
+pub struct StripsState {}
+
 pub fn build(f: &mut Frame, r: Rect, s: &mut State) {
     let t = f.theme();
     f.put(Quad::rect(r.x, r.y, r.w, r.h, t.dark).radius(22.0));

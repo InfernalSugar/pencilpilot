@@ -143,6 +143,11 @@ pub struct State {
     pub can_redo: bool,
     /// what the interface asked for this pass, for the app to carry out
     pub actions: Vec<Action>,
+    /// each shell piece's own state (each defined in its piece's file)
+    pub header: crate::shell::header::HeaderState,
+    pub tools: crate::shell::tools::ToolsState,
+    pub panel: crate::shell::panel::PanelState,
+    pub strips: crate::shell::strips::StripsState,
 }
 
 impl State {
@@ -241,6 +246,10 @@ impl State {
             can_undo: true,
             can_redo: false,
             actions: Vec::new(),
+            header: Default::default(),
+            tools: Default::default(),
+            panel: Default::default(),
+            strips: Default::default(),
         }
     }
 }

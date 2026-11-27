@@ -5,6 +5,10 @@ use pencilpilot_ui::ui::{Frame, Kind, Rect};
 
 use crate::state::{Action, State, Workspace};
 
+/// This piece's own state (anything it needs that the rest of the app doesn't).
+#[derive(Debug, Clone, Default)]
+pub struct HeaderState {}
+
 pub fn build(f: &mut Frame, r: Rect, s: &mut State) {
     f.row_in(r, 12.0, |f| {
         f.heading("PencilPilot");

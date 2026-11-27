@@ -4,10 +4,12 @@
 //!   pencilpilot --render animate --out a.png     a workspace drawn off-screen, as PNG
 //!               [--size 1440x900] [--scale 1]    (no window anywhere: for checks)
 //!   pencilpilot --pen-check [--replay 10] …      Phase 1's pen check (see pencheck.rs)
+//!   pencilpilot --quit-after 5 --stats s.json    the app, closing after 5 s and saving how
+//!                                                it ran (startup, frames shown): for checks
 
 mod pencheck;
-mod shell;
-mod state;
+
+use pencilpilot_native::{shell, state};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let a: Vec<String> = std::env::args().skip(1).collect();
@@ -34,5 +36,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let out = val("--out").unwrap_or_else(|| format!("{ws}.png"));
         return shell::render_png(&mut s, w, h, scale, &out);
     }
-    shell::run_window()
+    let quit_after = val("--quit-after").and_then(|v| v.parse::<f64>().ok());
+    let stats = val("--stats");
+    shell::run_window(quit_after, stats.as_deref())
 }

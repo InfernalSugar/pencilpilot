@@ -93,9 +93,18 @@ pub fn render_png(
     Ok(())
 }
 
-/// The shell in a window.
-pub fn run_window() -> Result<(), Box<dyn std::error::Error>> {
+/// The shell in a window. With `quit_after`, it closes after that many seconds; with
+/// `stats`, it saves how it ran there as JSON (startup to the first frame shown, frames
+/// presented): for checks on a headless display.
+pub fn run_window(
+    quit_after: Option<f64>,
+    stats: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
     use pencilpilot_window::{InputEvent, PointerEvent, Window};
+    let started = std::time::Instant::now();
+    let mut first_shown: Option<f64> = None;
+    let mut presented = 0u64;
+    let mut drawn = 0u64;
     let gpu = Gpu::new()?;
     let mut win = Window::new(&gpu, "PencilPilot")?;
     let mut r = Renderer2d::new(&gpu)?;
@@ -105,9 +114,14 @@ pub fn run_window() -> Result<(), Box<dyn std::error::Error>> {
     let mut mark = 0;
     let mut canvas_rect = Rect::default();
     let mut dirty = true;
-    while win.is_open() {
+    let deadline = quit_after.map(|s| started + std::time::Duration::from_secs_f64(s));
+    while win.is_open() && deadline.is_none_or(|d| std::time::Instant::now() < d) {
         if !win.wants_frame() || !dirty {
-            match ui.next_pass_at() {
+            let next = match (ui.next_pass_at(), deadline) {
+                (Some(a), Some(d)) => Some(a.min(d)),
+                (a, d) => a.or(d),
+            };
+            match next {
                 Some(at) => {
                     let ns = at
                         .saturating_duration_since(std::time::Instant::now())
@@ -173,7 +187,10 @@ pub fn run_window() -> Result<(), Box<dyn std::error::Error>> {
                 _ => {}
             }
         }
-        win.take_presented();
+        for _ in win.take_presented() {
+            presented += 1;
+            first_shown.get_or_insert(started.elapsed().as_secs_f64() * 1e3);
+        }
         if !win.wants_frame() || !dirty {
             continue;
         }
@@ -220,6 +237,15 @@ pub fn run_window() -> Result<(), Box<dyn std::error::Error>> {
             canvas.as_mut().map(|c| (c, at)),
         )?;
         win.present()?;
+        drawn += 1;
+    }
+    if let Some(path) = stats {
+        let json = format!(
+            "{{\"seconds\": {:.3}, \"startupToFirstFrameMs\": {}, \"framesDrawn\": {drawn}, \"framesPresented\": {presented}}}\n",
+            started.elapsed().as_secs_f64(),
+            first_shown.map_or("null".into(), |v| format!("{v:.1}"))
+        );
+        std::fs::write(path, json)?;
     }
     Ok(())
 }

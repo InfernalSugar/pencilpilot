@@ -6,6 +6,10 @@ use pencilpilot_ui::ui::{Frame, Rect};
 
 use crate::state::{State, Tool};
 
+/// This piece's own state (anything it needs that the rest of the app doesn't).
+#[derive(Debug, Clone, Default)]
+pub struct ToolsState {}
+
 const BRUSH: &str = "M4 20l1-4L15 6l3 3L8 19Z M13 8l3 3";
 const ERASER: &str = "M4 15l8-8 7 7-6 6H8Z M11 20h9";
 const FILL: &str = "M5 12l7-7 7 7-7 7Z M19 15c1 2 2 3 2 4a2 2 0 0 1-4 0c0-1 1-2 2-4Z";
