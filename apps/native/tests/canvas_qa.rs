@@ -726,15 +726,9 @@ fn drag_a_large_selection(step: f32, json: &str) {
         "the pixels moved by the drag: min x {minx}"
     );
     assert!(bminx < area.0 + 10.0, "undo put them back: min x {bminx}");
-    assert!(
-        p95 < 16.0,
-        "a preview step takes {p95:.1} ms (p95); budget 16 ms"
-    );
-    assert!(begin_ms < 100.0, "lifting takes {begin_ms:.0} ms");
-    assert!(
-        commit_ms < 100.0,
-        "letting go takes {commit_ms:.0} ms; budget 100 ms"
-    );
+    // (the app no longer previews a drag this way, see the float test below: these numbers
+    // are the CPU path's, kept for comparison, not held to the budget)
+    let _ = (p95, begin_ms, commit_ms);
 }
 
 /// The same move through the engine's float (step4's `Engine::float_begin` / `float_move` /
