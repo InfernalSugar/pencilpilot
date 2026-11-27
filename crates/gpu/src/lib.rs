@@ -670,6 +670,7 @@ pub const DRM_FORMAT_ARGB8888: u32 = u32::from_le_bytes(*b"AR24");
 pub struct Canvas {
     device: ash::Device,
     image: vk::Image,
+    view: vk::ImageView,
     memory: vk::DeviceMemory,
     staging: vk::Buffer,
     staging_memory: vk::DeviceMemory,
@@ -701,7 +702,9 @@ impl Canvas {
                         .samples(vk::SampleCountFlags::TYPE_1)
                         .tiling(vk::ImageTiling::OPTIMAL)
                         .usage(
-                            vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::TRANSFER_SRC,
+                            vk::ImageUsageFlags::TRANSFER_DST
+                                | vk::ImageUsageFlags::TRANSFER_SRC
+                                | vk::ImageUsageFlags::SAMPLED,
                         )
                         .initial_layout(vk::ImageLayout::UNDEFINED),
                     None,
@@ -721,6 +724,16 @@ impl Canvas {
                 .ctx("vkAllocateMemory")?;
             d.bind_image_memory(image, memory, 0)
                 .ctx("vkBindImageMemory")?;
+            let view = d
+                .create_image_view(
+                    &vk::ImageViewCreateInfo::default()
+                        .image(image)
+                        .view_type(vk::ImageViewType::TYPE_2D)
+                        .format(vk::Format::B8G8R8A8_UNORM)
+                        .subresource_range(COLOR_RANGE),
+                    None,
+                )
+                .ctx("vkCreateImageView")?;
             let size = width as u64 * height as u64 * 4;
             let staging = d
                 .create_buffer(
@@ -753,6 +766,7 @@ impl Canvas {
             Ok(Canvas {
                 device: d.clone(),
                 image,
+                view,
                 memory,
                 staging,
                 staging_memory,
@@ -810,6 +824,7 @@ impl Drop for Canvas {
             self.device.unmap_memory(self.staging_memory);
             self.device.destroy_buffer(self.staging, None);
             self.device.free_memory(self.staging_memory, None);
+            self.device.destroy_image_view(self.view, None);
             self.device.destroy_image(self.image, None);
             self.device.free_memory(self.memory, None);
         }

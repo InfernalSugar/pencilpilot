@@ -13,11 +13,29 @@ const SETTINGS: &str =
     "M4 7h10M18 7h2M4 17h4M12 17h8M16 5a2 2 0 1 0 0.01 0ZM10 15a2 2 0 1 0 0.01 0Z";
 const CHIP: [f32; 4] = hex(0xF6F4EF);
 
-/// The card, under the drawing. Returns where the drawing goes inside it.
-pub fn card(f: &mut Frame, r: Rect) -> Rect {
+/// Around the document when it doesn't fill the card.
+const DESK: [f32; 4] = hex(0xECE9E2);
+
+/// The card and the document in it, through the view. Returns the document's area (the
+/// card inside its edge), where the view is measured from.
+pub fn card(f: &mut Frame, r: Rect, s: &mut State) -> Rect {
     let t = f.theme();
     f.put(Quad::rect(r.x, r.y, r.w, r.h, t.card).radius(24.0));
-    r.inset(12.0)
+    let inner = r.inset(12.0);
+    s.view.follow(inner);
+    let v = s.view;
+    // the whole card shows the view (the desk round the document), its corners rounded
+    f.put(
+        Quad::canvas(
+            [r.x, r.y, r.w, r.h],
+            v.inverse_affine(inner, 1.0),
+            [v.doc_w as f32, v.doc_h as f32],
+            DESK,
+            v.zoom >= 2.0,
+        )
+        .radius(24.0),
+    );
+    inner
 }
 
 /// What the pill says in each workspace: its title, its line, its button's name.

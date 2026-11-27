@@ -4,6 +4,9 @@
 //   kind 2: a colour picture from the atlas (premultiplied), faded by the fill's alpha
 //   kind 3: a rounded rectangle filled with a gradient from `fill` to `border_color`,
 //           along the direction in uv.xy (1, 0: left to right; 0, 1: top to bottom)
+//   kind 4: the canvas, through a map from frame pixels to canvas pixels (uv: a b c d;
+//           border_color: tx ty, then the canvas's size), `fill` outside it; params.y = 1
+//           shows canvas pixels as squares. The canvas is straight RGBA.
 // Colours are premultiplied; blending is "over".
 
 struct Push {
@@ -13,6 +16,7 @@ var<immediate> pc: Push; // (Vulkan push constants)
 
 @group(0) @binding(0) var atlas: texture_2d<f32>;
 @group(0) @binding(1) var samp: sampler;
+@group(0) @binding(2) var canvas: texture_2d<f32>;
 
 struct Quad {
     @location(0) rect: vec4<f32>,         // x, y, w, h (pixels)
@@ -34,6 +38,8 @@ struct Out {
     @location(6) px: vec2<f32>,
     @location(7) clip: vec4<f32>,
     @location(8) uv_dir: vec2<f32>,
+    @location(9) map: vec4<f32>,
+    @location(10) map_t: vec4<f32>,
 }
 
 @vertex
@@ -54,6 +60,8 @@ fn vs(@builtin(vertex_index) vi: u32, q: Quad) -> Out {
     o.px = p;
     o.clip = q.clip;
     o.uv_dir = q.uv.xy;
+    o.map = q.uv;
+    o.map_t = q.border_color;
     return o;
 }
 
@@ -69,6 +77,25 @@ fn fs(i: Out) -> @location(0) vec4<f32> {
         discard;
     }
     let kind = i.params.w;
+    if (kind == 4.0) {
+        let size = i.map_t.zw;
+        let c = vec2<f32>(
+            i.map.x * i.px.x + i.map.y * i.px.y + i.map_t.x,
+            i.map.z * i.px.x + i.map.w * i.px.y + i.map_t.y,
+        );
+        // its rounded corners (params.x)
+        let cover = clamp(0.5 - round_box(i.local, i.half_size, min(i.params.x, min(i.half_size.x, i.half_size.y))), 0.0, 1.0);
+        if (c.x < 0.0 || c.y < 0.0 || c.x >= size.x || c.y >= size.y) {
+            return i.fill * cover;
+        }
+        var t: vec4<f32>;
+        if (i.params.y == 1.0) {
+            t = textureLoad(canvas, vec2<i32>(floor(c)), 0);
+        } else {
+            t = textureSampleLevel(canvas, samp, c / size, 0.0);
+        }
+        return vec4<f32>(t.rgb * t.a, t.a) * cover;
+    }
     if (kind == 1.0) {
         return i.fill * textureSampleLevel(atlas, samp, i.uv, 0.0).a;
     }
