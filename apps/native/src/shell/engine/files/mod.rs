@@ -12,6 +12,7 @@
 //! `~/.config`, `~/.local/state`), deleted once the project is saved or its changes let go.
 
 pub mod load;
+pub mod popup;
 mod recent;
 pub mod save;
 #[cfg(test)]
@@ -22,7 +23,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use brush::Painter;
-use pencilpilot_ui::ui::{Frame, Kind, Rect};
+use pencilpilot_ui::ui::{Kind, Rect};
+
+pub use popup::Question;
 
 use super::Engine;
 use super::frames::{Cel, Mark, Sheet, Track};
@@ -40,6 +43,12 @@ pub const OPEN_RECENT: &str = "Open recent: ";
 pub const CONFIRM_SAVE: &str = "Save first: Save";
 pub const CONFIRM_DISCARD: &str = "Save first: Don't save";
 pub const CONFIRM_CANCEL: &str = "Save first: Cancel";
+/// The File menu's Quit (Ctrl+Q), and the window's close button.
+pub const QUIT: &str = "Quit";
+/// "Recover your unsaved changes?"'s answers.
+pub const RECOVER_OPEN: &str = "Recovery: Open";
+pub const RECOVER_DISCARD: &str = "Recovery: Discard";
+pub const RECOVER_LATER: &str = "Recovery: Later";
 
 /// A recovery copy is written this long after the first unsaved change, and again as long
 /// after each.
@@ -62,9 +71,6 @@ pub struct Doc {
     pub had_scenes: bool,
     /// the painter's layer ids → the file's
     pub layer_ids: HashMap<u32, u32>,
-    /// a tile's hash after a trip through the painter → the file's for it (where they
-    /// differ: an unchanged tile is saved as the file had it)
-    pub same: HashMap<String, String>,
 }
 
 impl Default for Doc {
@@ -77,7 +83,6 @@ impl Default for Doc {
             scene_name: "Scene 1".into(),
             had_scenes: false,
             layer_ids: HashMap::new(),
-            same: HashMap::new(),
         }
     }
 }
@@ -98,6 +103,7 @@ pub enum Then {
     New,
     Open,
     OpenPath(PathBuf),
+    Quit,
 }
 
 /// What the file dialog was asked for.
@@ -159,7 +165,47 @@ pub struct Files {
     /// how the last open and save went (for checks)
     pub last_open: Option<load::OpenTimes>,
     pub last_save: Option<save::SaveTimes>,
+    /// a save being written on another thread, and the next one asked for meanwhile
+    saving: Option<Saving>,
+    queued: Option<(PathBuf, Option<Then>)>,
+    /// a recovery copy offered, and the file it's a copy of (none: never saved)
+    offer: Option<(PathBuf, Option<PathBuf>)>,
 }
+
+/// A save being written on another thread.
+#[derive(Debug)]
+struct Saving {
+    rx: std::sync::mpsc::Receiver<Written>,
+    path: PathBuf,
+    /// a recovery copy (not the project's file)
+    recovery: bool,
+    then: Option<Then>,
+    /// the history count and the sheet it saved (changes made since stay unsaved)
+    edits: u64,
+    snapshot: Snapshot,
+    doc_id: u32,
+    /// how long the window's part took (ms), and when it started
+    times: save::SaveTimes,
+    started: Instant,
+}
+
+/// What the writing thread hands back.
+struct Written {
+    result: Result<(), String>,
+    /// the file the save copied from (back for the next save)
+    source: Option<Source>,
+    manifest: Option<ppstudio::Manifest>,
+}
+
+impl std::fmt::Debug for Written {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Written")
+            .field("result", &self.result)
+            .finish_non_exhaustive()
+    }
+}
+
+type Source = ppstudio::Opened<std::io::BufReader<std::fs::File>>;
 
 /// What the interface shows of the project (in [`State::project`]): its name, path, whether
 /// it has unsaved changes, recent files…
@@ -174,16 +220,18 @@ pub struct ProjectUi {
     pub unsaved: bool,
     /// recent files, newest first (at most ten)
     pub recent: Vec<PathBuf>,
-    /// "Save first?" is showing: its question
-    pub asking: Option<String>,
+    /// a question showing (Save first?, Recover?)
+    pub asking: Option<Question>,
+    /// a save being written
+    pub saving: bool,
     /// what went wrong last (shown under the title until the next file action)
     pub note: String,
     /// where the last recovery copy went
     pub recovery: Option<PathBuf>,
     /// a file to open once the engine is up (`pencilpilot path.ppstudio`)
     pub startup: Option<PathBuf>,
-    /// where "Save first?"'s buttons are (Save, Don't save, Cancel), when it shows
-    pub ask_buttons: [Rect; 3],
+    /// where the question's buttons are, when it shows (in its `buttons` order)
+    pub ask_buttons: Vec<Rect>,
 }
 
 impl Default for ProjectUi {
@@ -199,7 +247,8 @@ impl Default for ProjectUi {
             note: String::new(),
             recovery: None,
             startup: None,
-            ask_buttons: [Rect::default(); 3],
+            ask_buttons: Vec::new(),
+            saving: false,
         }
     }
 }
@@ -210,7 +259,13 @@ impl ProjectUi {
         if !self.note.is_empty() {
             return self.note.clone();
         }
-        let saved = if self.unsaved { "unsaved" } else { "saved" };
+        let saved = if self.saving {
+            "saving…"
+        } else if self.unsaved {
+            "unsaved"
+        } else {
+            "saved"
+        };
         format!("{} · {cut} · {saved}", self.scene)
     }
 }
@@ -349,6 +404,28 @@ pub fn apply(e: &mut Engine, s: &mut State, a: &Action) -> bool {
             s.project.asking = None;
             e.files.then = None;
         }
+        QUIT => {
+            if s.project.asking.is_none() {
+                first(e, s, Then::Quit);
+            }
+        }
+        RECOVER_OPEN => {
+            s.project.asking = None;
+            if let Some((rec, of)) = e.files.offer.take() {
+                recover(e, s, &rec, of);
+            }
+        }
+        RECOVER_DISCARD => {
+            s.project.asking = None;
+            if let Some((rec, _)) = e.files.offer.take() {
+                let _ = std::fs::remove_file(rec.with_extension("path"));
+                let _ = std::fs::remove_file(rec);
+            }
+        }
+        RECOVER_LATER => {
+            s.project.asking = None;
+            e.files.offer = None;
+        }
         _ => return false,
     }
     true
@@ -360,7 +437,21 @@ fn first(e: &mut Engine, s: &mut State, then: Then) {
         return;
     }
     if s.project.unsaved {
-        s.project.asking = Some(format!("Save the changes to {} first?", s.project.name));
+        let title = if then == Then::Quit {
+            format!("Save the changes to {} before quitting?", s.project.name)
+        } else {
+            format!("Save the changes to {} first?", s.project.name)
+        };
+        s.project.asking = Some(Question {
+            title,
+            detail: "Your changes are lost if you don’t save them.".into(),
+            buttons: vec![
+                ("Save".into(), CONFIRM_SAVE.into(), Kind::Primary),
+                ("Don’t save".into(), CONFIRM_DISCARD.into(), Kind::Secondary),
+                ("Cancel".into(), CONFIRM_CANCEL.into(), Kind::Ghost),
+            ],
+            dismiss: CONFIRM_CANCEL.into(),
+        });
         e.files.then = Some(then);
     } else {
         carry_out(e, s, then);
@@ -384,19 +475,25 @@ fn carry_out(e: &mut Engine, s: &mut State, then: Then) {
         Then::OpenPath(p) => {
             open_path(e, s, &p);
         }
+        // (a save still being written finishes first)
+        Then::Quit => match &mut e.files.saving {
+            Some(sv) if sv.then.is_none() => sv.then = Some(Then::Quit),
+            Some(_) => {}
+            None => s.quit_now = true,
+        },
     }
+}
+
+/// The window asks to close: at once with nothing unsaved, else "Save first?" (Save:
+/// closes once saved; Don't save: closes; Cancel: stays). [`State::quit_now`] says when.
+pub fn quit_requested(e: &mut Engine, s: &mut State) {
+    apply(e, s, &Action::File(QUIT.into()));
 }
 
 /// Save to the project's file (Save as… when it has none), then `then`.
 fn save_then(e: &mut Engine, s: &mut State, then: Option<Then>) {
     match s.project.path.clone() {
-        Some(p) => {
-            if save_to(e, s, &p)
-                && let Some(t) = then
-            {
-                carry_out(e, s, t);
-            }
-        }
+        Some(p) => start_save(e, s, &p, then),
         None => ask_save_as(e, s, then),
     }
 }
@@ -474,6 +571,10 @@ pub fn new(e: &mut Engine, s: &mut State) {
 
 /// Opens `path` (an error shows under the title; nothing else changes then).
 pub fn open_path(e: &mut Engine, s: &mut State, path: &Path) -> bool {
+    open_file(e, s, path, true)
+}
+
+fn open_file(e: &mut Engine, s: &mut State, path: &Path, listed: bool) -> bool {
     match load::open(e, s, path) {
         Ok((doc, times)) => {
             s.project.scene = doc.scene_name.clone();
@@ -484,7 +585,9 @@ pub fn open_path(e: &mut Engine, s: &mut State, path: &Path) -> bool {
             s.project.note.clear();
             s.project.recovery = None;
             mark_saved(e, s);
-            s.project.recent = recent::add(path);
+            if listed {
+                s.project.recent = recent::add(path);
+            }
             true
         }
         Err(err) => {
@@ -499,42 +602,174 @@ fn stem(path: &Path) -> String {
         .map_or_else(|| "Untitled".into(), |n| n.to_string_lossy().into_owned())
 }
 
-/// Saves to `path`; it's the project's file from then on. False (and why, under the
-/// title) if it couldn't.
-pub fn save_to(e: &mut Engine, s: &mut State, path: &Path) -> bool {
+/// Starts saving to `path` (it's the project's file once saved), then `then`. What must
+/// be read from the painter is read now (only changed tiles: fast); the file is written on
+/// another thread ([`tick`] takes the answer). A save asked for while one is written
+/// waits for it (the last one asked for).
+pub fn start_save(e: &mut Engine, s: &mut State, path: &Path, then: Option<Then>) {
+    if e.files.saving.is_some() {
+        e.files.queued = Some((path.to_path_buf(), then));
+        return;
+    }
+    write_in_background(e, s, path, then, false);
+}
+
+/// The window's part of a save (or a recovery copy): the project made; its writing handed
+/// to another thread.
+fn write_in_background(
+    e: &mut Engine,
+    s: &mut State,
+    path: &Path,
+    then: Option<Then>,
+    recovery: bool,
+) {
+    let started = Instant::now();
     settle(e, s);
     let mut doc = std::mem::take(&mut e.files.doc);
-    let res = save::write(e, s, &mut doc, path);
-    let ok = match res {
-        Ok((p, times)) => {
-            match std::fs::File::open(path)
-                .map_err(|e| e.to_string())
-                .and_then(|f| {
-                    ppstudio::Opened::read(std::io::BufReader::new(f)).map_err(|e| e.to_string())
-                }) {
-                Ok(o) => {
-                    doc.source = Some(o);
-                    doc.base = Some(p.manifest);
-                }
-                Err(err) => s.project.note = format!("Saved, but couldn’t read it back: {err}"),
+    let made = save::project(e, s, &mut doc);
+    let thumb = save::thumbnail(e);
+    let source = doc.source.take();
+    e.files.doc = doc;
+    let (mut p, times) = match made {
+        Ok(x) => x,
+        Err(err) => {
+            e.files.doc.source = source;
+            s.project.note = format!("Couldn’t save: {err}");
+            return;
+        }
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    let to = path.to_path_buf();
+    let original = s.project.path.clone();
+    std::thread::spawn(move || {
+        p.thumbnail = save::png(&thumb);
+        let mut source = source;
+        let result = p.save_from(&to, source.as_mut()).map_err(|e| e.to_string());
+        if recovery {
+            // (which file it's a copy of: for offering it at the next start)
+            let of = original.map(|p| p.to_string_lossy().into_owned());
+            let _ = std::fs::write(to.with_extension("path"), of.unwrap_or_default());
+        }
+        // saved: the next save copies from the new file
+        let source = match (&result, recovery) {
+            (Ok(()), false) => std::fs::File::open(&to)
+                .ok()
+                .and_then(|f| ppstudio::Opened::read(std::io::BufReader::new(f)).ok())
+                .or(source),
+            _ => source,
+        };
+        let _ = tx.send(Written {
+            result,
+            source,
+            manifest: Some(p.manifest),
+        });
+    });
+    e.files.saving = Some(Saving {
+        rx,
+        path: path.to_path_buf(),
+        recovery,
+        then,
+        edits: e.painter.history_changes(),
+        snapshot: Snapshot::of(s),
+        doc_id: s.doc_id,
+        times: save::SaveTimes {
+            window_ms: started.elapsed().as_secs_f64() * 1e3,
+            ..times
+        },
+        started,
+    });
+    s.project.saving = !recovery;
+}
+
+/// A save written: the project's file from now on (or why not, under the title).
+fn finish_save(e: &mut Engine, s: &mut State, sv: Saving, w: Written) -> bool {
+    s.project.saving = false;
+    if sv.doc_id != s.doc_id {
+        // (another document was opened meanwhile)
+        return w.result.is_ok();
+    }
+    if w.source.is_some() {
+        e.files.doc.source = w.source;
+    }
+    let mut times = sv.times;
+    times.write_ms = sv.started.elapsed().as_secs_f64() * 1e3 - times.window_ms;
+    e.files.last_save = Some(times);
+    match w.result {
+        Ok(()) if sv.recovery => {
+            s.project.recovery = Some(sv.path);
+            true
+        }
+        Ok(()) => {
+            if w.manifest.is_some() {
+                e.files.doc.base = w.manifest;
             }
-            e.files.last_save = Some(times);
+            drop_recovery(s);
+            s.project.name = stem(&sv.path);
+            s.project.path = Some(sv.path.clone());
+            s.project.recent = recent::add(&sv.path);
+            // what was saved is what it had when the save started
+            e.files.saved_edits = sv.edits;
+            e.files.saved = Some(sv.snapshot);
+            e.files.unsaved_since = None;
+            e.files.autosaved = None;
+            s.project.unsaved = false;
+            if let Some(t) = sv.then {
+                carry_out(e, s, t);
+            }
             true
         }
         Err(err) => {
             s.project.note = format!("Couldn’t save: {err}");
             false
         }
-    };
-    e.files.doc = doc;
-    if ok {
-        drop_recovery(s);
-        s.project.name = stem(path);
-        s.project.path = Some(path.to_path_buf());
-        mark_saved(e, s);
-        s.project.recent = recent::add(path);
     }
-    ok
+}
+
+/// A save written by now, taken (waiting `wait` at most for it).
+fn take_written(e: &mut Engine, s: &mut State, wait: Option<Duration>) -> Option<bool> {
+    let sv = e.files.saving.as_ref()?;
+    let w = match wait {
+        Some(d) => sv.rx.recv_timeout(d).ok(),
+        None => sv.rx.try_recv().ok(),
+    };
+    let w = match w {
+        Some(w) => w,
+        None if matches!(
+            sv.rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
+        ) =>
+        {
+            Written {
+                result: Err("the save stopped".into()),
+                source: None,
+                manifest: None,
+            }
+        }
+        None => return None,
+    };
+    let sv = e.files.saving.take()?;
+    let ok = finish_save(e, s, sv, w);
+    if let Some((p, then)) = e.files.queued.take() {
+        start_save(e, s, &p, then);
+    }
+    Some(ok)
+}
+
+/// Waits for a save being written, and takes it (for checks).
+pub fn wait_for_save(e: &mut Engine, s: &mut State) {
+    while e.files.saving.is_some() {
+        take_written(e, s, Some(Duration::from_secs(60)));
+    }
+}
+
+/// Saves to `path` and waits for it (for checks; the interface saves with
+/// [`start_save`]). False (and why, under the title) if it couldn't.
+pub fn save_to(e: &mut Engine, s: &mut State, path: &Path) -> bool {
+    while e.files.saving.is_some() {
+        take_written(e, s, Some(Duration::from_secs(60)));
+    }
+    write_in_background(e, s, path, None, false);
+    take_written(e, s, Some(Duration::from_secs(600))).unwrap_or(false)
 }
 
 /// Where the open project's recovery copy goes.
@@ -561,26 +796,74 @@ pub fn recovery_path(s: &State) -> PathBuf {
 
 fn drop_recovery(s: &mut State) {
     if let Some(p) = s.project.recovery.take() {
+        let _ = std::fs::remove_file(p.with_extension("path"));
         let _ = std::fs::remove_file(p);
     }
 }
 
-/// The recovery copy, written now (never over the project's own file).
+#[cfg(test)]
+thread_local! {
+    /// (checks: only the one about it is offered recovery copies; checks run side by side)
+    pub static OFFER_RECOVERY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn offers_recovery() -> bool {
+    #[cfg(test)]
+    return OFFER_RECOVERY.with(|o| o.get());
+    #[cfg(not(test))]
+    true
+}
+
+/// The recovery copy, written on another thread (never over the project's own file).
 fn autosave(e: &mut Engine, s: &mut State) {
     let path = recovery_path(s);
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let mut doc = std::mem::take(&mut e.files.doc);
-    let res = save::project(e, s, &mut doc).and_then(|(p, _)| {
-        p.save_from(&path, doc.source.as_mut())
-            .map_err(|e| e.to_string())
-    });
-    e.files.doc = doc;
-    match res {
-        Ok(()) => s.project.recovery = Some(path),
-        Err(err) => s.project.note = format!("Couldn’t keep a recovery copy: {err}"),
+    write_in_background(e, s, &path, None, true);
+}
+
+/// The newest recovery copy newer than its file (or of a project never saved), to offer.
+fn find_recovery() -> Option<(PathBuf, Option<PathBuf>)> {
+    let dir = recent::state_dir().join("recovery");
+    let mut found: Vec<(std::time::SystemTime, PathBuf, Option<PathBuf>)> = Vec::new();
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let rec = entry.path();
+        if rec.extension().is_none_or(|x| x != "ppstudio") {
+            continue;
+        }
+        let Ok(when) = entry.metadata().and_then(|m| m.modified()) else {
+            continue;
+        };
+        let of = std::fs::read_to_string(rec.with_extension("path"))
+            .ok()
+            .filter(|p| !p.trim().is_empty())
+            .map(|p| PathBuf::from(p.trim()));
+        let newer = match &of {
+            Some(p) => std::fs::metadata(p)
+                .and_then(|m| m.modified())
+                .map_or(true, |t| when > t),
+            None => true,
+        };
+        if newer {
+            found.push((when, rec, of));
+        }
     }
+    found.sort_by_key(|(t, ..)| *t);
+    found.pop().map(|(_, r, o)| (r, o))
+}
+
+/// Opens a recovery copy as the project it's a copy of, its changes unsaved (a save goes
+/// to that project's file; the copy goes once saved).
+fn recover(e: &mut Engine, s: &mut State, rec: &Path, of: Option<PathBuf>) {
+    if !open_file(e, s, rec, false) {
+        return;
+    }
+    s.project.name = of.as_deref().map_or_else(|| "Untitled".into(), stem);
+    s.project.path = of;
+    s.project.recovery = Some(rec.to_path_buf());
+    s.project.unsaved = true;
+    e.files.unsaved_since = Some(Instant::now());
 }
 
 /// Once a loop: answers from the file dialog, unsaved changes, autosave. Returns whether
@@ -590,6 +873,40 @@ pub fn tick(e: &mut Engine, s: &mut State, now: Instant) -> bool {
     if !e.files.started {
         e.files.started = true;
         s.project.recent = recent::load();
+        // changes not saved last time, kept in a recovery copy: offered
+        if let Some((rec, of)) = find_recovery().filter(|_| offers_recovery()) {
+            let name = of.as_deref().map_or_else(|| "Untitled".into(), stem);
+            let when = std::fs::metadata(&rec)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .map_or_else(String::new, |d| {
+                    let m = d.as_secs() / 60;
+                    match m {
+                        0 => " a moment ago".into(),
+                        1..=59 => format!(" {m} min ago"),
+                        _ => format!(" {} h ago", m / 60),
+                    }
+                });
+            s.project.asking = Some(Question {
+                title: format!("Recover your unsaved changes to {name}?"),
+                detail: format!("A copy was kept{when}, newer than the project’s file."),
+                buttons: vec![
+                    (
+                        "Open the recovered copy".into(),
+                        RECOVER_OPEN.into(),
+                        Kind::Primary,
+                    ),
+                    ("Discard".into(), RECOVER_DISCARD.into(), Kind::Secondary),
+                ],
+                dismiss: RECOVER_LATER.into(),
+            });
+            e.files.offer = Some((rec, of));
+        }
+        changed = true;
+    }
+    // a save written
+    if take_written(e, s, None).is_some() {
         changed = true;
     }
     if let Some(p) = s.project.startup.take() {
@@ -608,11 +925,7 @@ pub fn tick(e: &mut Engine, s: &mut State, now: Instant) -> bool {
                 if p.extension().is_none_or(|x| x != "ppstudio") {
                     p.as_mut_os_string().push(".ppstudio");
                 }
-                if save_to(e, s, &p)
-                    && let Some(t) = then
-                {
-                    carry_out(e, s, t);
-                }
+                start_save(e, s, &p, then);
             }
             // cancelled
             (_, None) => {}
@@ -636,6 +949,7 @@ pub fn tick(e: &mut Engine, s: &mut State, now: Instant) -> bool {
     // the recovery copy
     if let Some(at) = autosave_at(e, s)
         && now >= at
+        && e.files.saving.is_none()
         && !e.is_stroking()
         && e.float.is_none()
         && !e.painter.transforming()
@@ -668,108 +982,13 @@ pub fn next_tick_at(e: &Engine, s: &State) -> Option<Instant> {
         .dialog
         .as_ref()
         .map(|_| now + Duration::from_millis(50));
-    [dialog, autosave_at(e, s)].into_iter().flatten().min()
-}
-
-/// "Save first?" pop-up's name.
-pub const ASK_POPUP: &str = "files/save-first";
-
-/// A pill button at `rect` (drawn by hand, so its place is known): true when clicked.
-fn pill(f: &mut Frame, name: &str, rect: Rect, text: &str, kind: Kind) -> bool {
-    use pencilpilot_gpu::Quad;
-    use pencilpilot_ui::text::Style;
-    use pencilpilot_ui::theme::alpha;
-    let t = f.theme();
-    let fg = if kind == Kind::Primary {
-        t.on_coral
-    } else {
-        t.ink
-    };
-    let laid = f.lay_out(text, &Style::body(t.text, fg).weight(600), None);
-    let res = f.interact(pencilpilot_ui::ui::id(name), rect);
-    let base = match kind {
-        Kind::Primary => t.coral,
-        Kind::Secondary => t.line,
-        Kind::Ghost => alpha(t.line, 0.0),
-    };
-    let fill = if res.held || res.hovered {
-        crate::shell::header::mix(base, t.ink, if res.held { 0.18 } else { 0.08 })
-    } else {
-        base
-    };
-    f.put(Quad::rect(rect.x, rect.y, rect.w, rect.h, fill).radius(rect.h / 2.0));
-    f.put_text(
-        &laid,
-        rect.x + (rect.w - laid.width) / 2.0,
-        rect.y + (rect.h - laid.height) / 2.0,
-    );
-    res.clicked
-}
-
-/// The "Save first?" pop-up (Save, Don't save, Cancel), centred over `r`, while the
-/// project asks it. Escape, or closing it with a click outside, cancels. Its buttons'
-/// places go in [`ProjectUi::ask_buttons`].
-pub fn ask_popup(f: &mut Frame, r: Rect, s: &mut State) {
-    use pencilpilot_ui::text::Style;
-    // (its state between passes: 0 not showing, 1 showing, 2 answered: the engine has yet
-    // to take the answer)
-    let Some(q) = s.project.asking.clone() else {
-        if f.value(ASK_POPUP, 0.0) != 0.0 {
-            f.set_value(ASK_POPUP, 0.0);
-        }
-        return;
-    };
-    let state = f.value(ASK_POPUP, 0.0);
-    if state == 2.0 {
-        return;
-    }
-    if !f.is_open(ASK_POPUP) {
-        if state == 1.0 {
-            // closed by a click outside: cancelled
-            f.set_value(ASK_POPUP, 2.0);
-            s.actions.push(Action::File(CONFIRM_CANCEL.into()));
-            return;
-        }
-        f.open(ASK_POPUP, 0.0, 0.0);
-        f.set_value(ASK_POPUP, 1.0);
-    }
-    let t = f.theme();
-    let (w, h) = (460.0, 168.0);
-    let card = Rect::new(r.x + (r.w - w) / 2.0, r.y + r.h * 0.3, w, h);
-    // the buttons, right to left along the bottom
-    let labels = [
-        ("files/ask/save", "Save", Kind::Primary),
-        ("files/ask/discard", "Don’t save", Kind::Secondary),
-        ("files/ask/cancel", "Cancel", Kind::Ghost),
-    ];
-    let mut rects = [Rect::default(); 3];
-    let mut x = card.right() - 24.0;
-    for (i, (_, text, _)) in labels.iter().enumerate() {
-        let lw = f
-            .lay_out(text, &Style::body(t.text, t.ink).weight(600), None)
-            .width
-            + 36.0;
-        x -= lw;
-        rects[i] = Rect::new(x, card.bottom() - 24.0 - 44.0, lw, 44.0);
-        x -= 8.0;
-    }
-    s.project.ask_buttons = rects;
-    let mut picked = None;
-    f.popup_at(ASK_POPUP, card, 20.0, 24.0, 1.0, |f| {
-        f.heading(&q);
-        f.label("Your changes are lost if you don’t save them.");
-        for (i, (name, text, kind)) in labels.iter().enumerate() {
-            if pill(f, name, rects[i], text, *kind) {
-                picked = Some([CONFIRM_SAVE, CONFIRM_DISCARD, CONFIRM_CANCEL][i]);
-            }
-        }
-    });
-    if f.take_key("Escape", false) {
-        picked = Some(CONFIRM_CANCEL);
-    }
-    if let Some(p) = picked {
-        f.set_value(ASK_POPUP, 2.0);
-        f.close();
-        s.actions.push(Action::File(p.into()));
-    }
+    let saving = e
+        .files
+        .saving
+        .as_ref()
+        .map(|_| now + Duration::from_millis(10));
+    [dialog, saving, autosave_at(e, s)]
+        .into_iter()
+        .flatten()
+        .min()
 }
