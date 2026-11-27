@@ -263,7 +263,7 @@ impl State {
             actions: Vec::new(),
             view: Default::default(),
             tooling: Default::default(),
-            sheet: Default::default(),
+            sheet: crate::shell::engine::frames::Sheet::demo(),
             header: Default::default(),
             tools: Default::default(),
             panel: Default::default(),
