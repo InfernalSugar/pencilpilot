@@ -19,8 +19,8 @@ pub struct LayerSetup {
     /// the window painter's id (the plan's pairs name it)
     pub id: u32,
     pub props: LayerProps,
-    /// its mask, packed (empty: none)
-    pub mask: Vec<u8>,
+    /// its mask, copied (None: it has none)
+    pub mask: Option<DrawingCopy>,
 }
 
 /// What to write.
@@ -73,6 +73,8 @@ pub struct Shared {
     pub spare: Mutex<TileBuffers>,
     pub offered: AtomicUsize,
     pub used: AtomicUsize,
+    /// the renderer is done (the tiles' thread stops)
+    pub rendered_all: AtomicBool,
 }
 
 /// The window's spare tiles: topped up below LOW, kept to at most HIGH (32 MB).
@@ -158,7 +160,21 @@ pub fn spawn(job: Job) -> (mpsc::Sender<Msg>, Arc<Shared>, mpsc::Receiver<Outcom
         spare: Mutex::new(TileBuffers::default()),
         offered: AtomicUsize::new(0),
         used: AtomicUsize::new(0),
+        rendered_all: AtomicBool::new(false),
     });
+    // the window's tile memory, kept topped up on a thread of its own (the renderer is busy
+    // for a whole frame at a time)
+    let sh = shared.clone();
+    std::thread::Builder::new()
+        .name("export-tiles".into())
+        .spawn(move || {
+            lower_priority();
+            while !sh.rendered_all.load(Ordering::Relaxed) && !sh.cancel.load(Ordering::Relaxed) {
+                sh.top_up();
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        })
+        .expect("a thread");
     let started = Instant::now();
     // the shrink the painter can do itself (a whole fraction of the document), and the size
     // it renders at
@@ -221,6 +237,7 @@ pub fn spawn(job: Job) -> (mpsc::Sender<Msg>, Arc<Shared>, mpsc::Receiver<Outcom
                 layers,
                 runs,
             );
+            sh.rendered_all.store(true, Ordering::Relaxed);
             let _ = out_tx.send(Out::Done(stats, err));
         })
         .expect("a thread");
@@ -265,8 +282,8 @@ fn render(
             p.add_layer(&l.props.name)
         };
         p.set_layer_props(id, l.props.clone(), false);
-        if !l.mask.is_empty() {
-            p.put_mask_tiles(id, &l.mask);
+        if let Some(m) = l.mask {
+            p.put_mask_copy(id, m);
         }
         ids.insert(l.id, id);
         props.insert(l.id, l.props);
@@ -283,7 +300,6 @@ fn render(
         if sh.cancel.load(Ordering::Relaxed) {
             return (st, None);
         }
-        sh.top_up();
         let msg = match rx.recv_timeout(Duration::from_millis(4)) {
             Ok(m) => m,
             Err(mpsc::RecvTimeoutError::Timeout) => continue,

@@ -494,7 +494,9 @@ fn export_fixtures() {
         let _ = std::fs::remove_file(&video);
         s.export.format = format;
         let t0 = Instant::now();
+        let ts = Instant::now();
         start(&mut e, &mut s, video.clone());
+        e.exporter.start_took = ts.elapsed();
         let (mut rss_max, mut pss_max) = (rss0, pss0);
         let mut ticks = Vec::new();
         // as the window does: a tick, then a sleep until the export's next one
@@ -596,6 +598,18 @@ fn export_fixtures() {
                 ),
             ),
             ("window_feed_ms", feed_q),
+            (
+                "window_export_tick_max_ms",
+                format!("{:.2}", e.exporter.tick_max.as_secs_f64() * 1e3),
+            ),
+            (
+                "window_step_max",
+                format!(
+                    "{:.2} ms {}",
+                    e.exporter.step_max.0.as_secs_f64() * 1e3,
+                    e.exporter.step_max.1
+                ),
+            ),
             ("rss_before_mb", format!("{:.0}", rss0 as f64 / 1024.0)),
             ("rss_peak_mb", format!("{:.0}", rss_max as f64 / 1024.0)),
             ("pss_before_mb", format!("{:.0}", pss0 as f64 / 1024.0)),
@@ -646,7 +660,7 @@ fn still_layers_are_merged_and_look_the_same() {
         .map(|l| worker::LayerSetup {
             id: l.id,
             props: l.props.clone(),
-            mask: Vec::new(),
+            mask: None,
         })
         .collect();
     let plan = Plan::new(&s, 0, s.frames - 1);

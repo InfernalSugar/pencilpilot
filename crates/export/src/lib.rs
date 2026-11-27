@@ -76,7 +76,8 @@ pub struct Spec {
     /// Videos: encode faster and with far less memory. MP4: x264's medium preset, sliced
     /// threads, two B-frames and references, a 5-frame lookahead (4K from YUV: 26 ms a frame
     /// and 0.67 GB, against 60 ms and 2 GB; files a few % bigger at the same quality). WebM:
-    /// no frames held back (VP9 `lag-in-frames` 0: 4K 0.86 GB, not 1.1)
+    /// no frames held back and four threads (VP9 `lag-in-frames` 0, `threads` 4: 1080p
+    /// 0.27 GB instead of 0.35, 4K 0.86 GB instead of 1.1)
     #[serde(default)]
     pub lean: bool,
     /// Videos: frames come as YUV 4:2:0 (BT.709, limited range: [`rgba_to_yuv420`]) rather
@@ -365,7 +366,8 @@ fn ffmpeg_args(spec: &Spec, out: &Path) -> Vec<String> {
         ]);
     }
     if spec.lean && spec.format == Format::Webm {
-        a.extend(["-lag-in-frames".into(), "0".into()]);
+        // (all of libvpx's threads weigh on an app drawing at the display's rate: four)
+        a.extend(["-lag-in-frames", "0", "-threads", "4"].map(String::from));
     }
     // the pixels are sRGB: say so (BT.709 primaries are sRGB's)
     a.extend(

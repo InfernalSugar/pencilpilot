@@ -4560,6 +4560,34 @@ impl Painter {
         pack_tiles(self.drawing_tiles(drawing))
     }
 
+    /// A copy of a layer's mask as it is (a memory copy; None: it has none), for another
+    /// painter ([`Painter::put_mask_copy`]).
+    pub fn mask_copy(&self, id: u32) -> Option<DrawingCopy> {
+        self.index_of(id)
+            .and_then(|i| self.layers[i].mask_surface())
+            .map(|m| DrawingCopy(copy_tiles(&m.tiles)))
+    }
+
+    /// Give a layer a copied mask, without an undo step. False if busy or no such layer.
+    pub fn put_mask_copy(&mut self, id: u32, mask: DrawingCopy) -> bool {
+        if !self.idle() {
+            return false;
+        }
+        let Some(idx) = self.index_of(id) else {
+            return false;
+        };
+        self.mark_layer(idx);
+        let l = &mut self.layers[idx];
+        l.set_editing(false);
+        l.mask = Some(UndoSurface {
+            tiles: mask.0,
+            ..UndoSurface::default()
+        });
+        self.unstyle(idx);
+        self.mark_layer(idx);
+        true
+    }
+
     /// A layer's mask as packed tiles (as [`Painter::drawing_tiles_packed`]); empty when the
     /// layer has no mask (a mask that shows everything is a count of 0).
     pub fn mask_tiles_packed(&self, id: u32) -> Vec<u8> {
