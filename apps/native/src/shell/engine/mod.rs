@@ -39,6 +39,17 @@ pub struct Float {
 
 pub const IDENTITY: [f32; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
 
+/// Where a stroke started, and whether it has moved since.
+#[derive(Debug, Clone, Copy)]
+struct Tap {
+    x: f32,
+    y: f32,
+    pressure: f32,
+    tilt: (f32, f32),
+    size: f32,
+    moved: bool,
+}
+
 /// A pointer on the canvas, in document pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Sample {
@@ -90,9 +101,8 @@ pub struct Engine {
     pub painter: Painter,
     stroking: Option<hokusai::Brush>,
     last_ms: Option<u32>,
-    /// where the stroke started, its pressure and tilt, the brush size, and whether it has
-    /// moved since (a tap paints a dot)
-    tap: Option<(f32, f32, f32, (f32, f32), f32, bool)>,
+    /// how the stroke started (a tap paints a dot)
+    tap: Option<Tap>,
     /// the other tools' state ([`tools`])
     pub tools: tools::Tools,
     /// layers, drawings, playback ([`frames`])
@@ -283,7 +293,14 @@ impl Engine {
             .stroke_to(&b, x, y, pressure, tilt.0, tilt.1, 0.004);
         self.stroking = Some(b);
         self.last_ms = Some(ms);
-        self.tap = Some((x, y, pressure, tilt, s.brush_size, false));
+        self.tap = Some(Tap {
+            x,
+            y,
+            pressure,
+            tilt,
+            size: s.brush_size,
+            moved: false,
+        });
     }
 
     pub fn moved(&mut self, x: f32, y: f32, pressure: f32, tilt: (f32, f32), ms: u32) {
@@ -293,9 +310,9 @@ impl Engine {
         });
         self.last_ms = Some(ms);
         if let Some(t) = &mut self.tap
-            && ((x - t.0).abs() > 0.5 || (y - t.1).abs() > 0.5)
+            && ((x - t.x).abs() > 0.5 || (y - t.y).abs() > 0.5)
         {
-            t.5 = true;
+            t.moved = true;
         }
         self.painter
             .stroke_to(b, x, y, pressure, tilt.0, tilt.1, dt);
@@ -305,11 +322,20 @@ impl Engine {
         if let Some(b) = self.stroking.take() {
             // a tap: a dot where it landed (a brush lays down nothing without moving), a
             // little there and back
-            if let Some((x, y, p, t, size, false)) = self.tap {
-                let d = (size / 4.0).max(0.6);
+            if let Some(t) = self.tap
+                && !t.moved
+            {
+                let d = (t.size / 4.0).max(0.6);
                 for (dx, dy) in [(d, 0.0), (-d, d * 0.5), (0.0, 0.0)] {
-                    self.painter
-                        .stroke_to(&b, x + dx, y + dy, p, t.0, t.1, 0.01);
+                    self.painter.stroke_to(
+                        &b,
+                        t.x + dx,
+                        t.y + dy,
+                        t.pressure,
+                        t.tilt.0,
+                        t.tilt.1,
+                        0.01,
+                    );
                 }
             }
             self.painter.end_stroke(&b);
