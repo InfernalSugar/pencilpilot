@@ -33,11 +33,32 @@ impl Asked {
     }
 }
 
+/// Whether the app may open the system's own windows (its file dialog, the file manager).
+static SYSTEM_WINDOWS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Lets the app open the system's own windows. Only the app run by its owner does this
+/// (`main.rs`, a normal start): tests, checks (`--quit-after`, `--stats`) and anything using
+/// the library never open a window on the owner's screen, whatever bus they reach.
+pub fn allow_system_windows() {
+    SYSTEM_WINDOWS.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// See [`allow_system_windows`]; `PENCILPILOT_NO_SYSTEM_WINDOWS` forbids them anyway.
+pub fn system_windows_allowed() -> bool {
+    SYSTEM_WINDOWS.load(std::sync::atomic::Ordering::Relaxed)
+        && std::env::var_os("PENCILPILOT_NO_SYSTEM_WINDOWS").is_none()
+}
+
 /// Opens the dialog (on another thread) and returns at once.
 pub fn ask(a: Ask) -> Asked {
     let (tx, rx) = mpsc::channel();
     if let Some(v) = std::env::var_os("PENCILPILOT_DIALOG_ANSWER") {
         let _ = tx.send((!v.is_empty()).then(|| PathBuf::from(v)));
+        return Asked { rx };
+    }
+    if !system_windows_allowed() {
+        // (a check or a test: no window on anyone's screen; as if cancelled)
+        let _ = tx.send(None);
         return Asked { rx };
     }
     std::thread::spawn(move || {
@@ -202,5 +223,14 @@ mod tests {
         });
         assert_eq!(a.answer(), Some(None), "empty: cancelled");
         unsafe { std::env::remove_var("PENCILPILOT_DIALOG_ANSWER") };
+        // no answer given, and the system's windows not allowed (as in every test): cancelled
+        // at once, no dialog
+        let a = ask(Ask {
+            title: "Open".into(),
+            save: false,
+            name: None,
+            filters: vec![],
+        });
+        assert_eq!(a.answer(), Some(None));
     }
 }

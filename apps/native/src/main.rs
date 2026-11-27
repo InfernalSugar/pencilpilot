@@ -47,6 +47,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         None => None,
     };
+    // the system's own windows (file dialog, file manager) only for a normal start, never for
+    // a check (which closes itself or records how it ran)
+    let check = a.iter().any(|x| x == "--quit-after" || x == "--stats");
+    if !check {
+        shell::dialog::allow_system_windows();
+    }
     shell::run_window(shell::RunOptions {
         quit_after: val("--quit-after").and_then(|v| v.parse::<f64>().ok()),
         stats: val("--stats"),
