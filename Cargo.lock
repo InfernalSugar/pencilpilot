@@ -3336,6 +3336,7 @@ name = "pencilpilot-export"
 version = "0.1.0"
 dependencies = [
  "gif",
+ "libc",
  "png",
  "serde",
 ]
@@ -3383,9 +3384,13 @@ name = "pencilpilot-native"
 version = "0.1.0"
 dependencies = [
  "cosmic-text",
+ "gif",
  "hokusai",
+ "libc",
  "pencilpilot-brush",
+ "pencilpilot-export",
  "pencilpilot-gpu",
+ "pencilpilot-ppstudio",
  "pencilpilot-ui",
  "pencilpilot-window",
  "png",

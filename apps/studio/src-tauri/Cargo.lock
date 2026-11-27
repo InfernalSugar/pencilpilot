@@ -3432,6 +3432,7 @@ name = "pencilpilot-export"
 version = "0.1.0"
 dependencies = [
  "gif",
+ "libc",
  "png",
  "serde",
 ]

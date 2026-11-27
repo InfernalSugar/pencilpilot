@@ -56,9 +56,60 @@ fn copy_tiles(tiles: &TileMap) -> TileMap {
 pub struct DrawingCopy(TileMap);
 
 impl DrawingCopy {
+    /// No paint.
+    pub fn empty() -> DrawingCopy {
+        DrawingCopy(TileMap::new())
+    }
+
+    /// Another part of the same drawing's tiles (see [`Painter::drawing_copy_tiles`]).
+    pub fn absorb(&mut self, other: DrawingCopy) {
+        self.0.extend(other.0);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     /// Bytes its tiles' pixels take.
     pub fn bytes(&self) -> usize {
         self.0.len() * std::mem::size_of::<TilePixels>()
+    }
+
+    /// `over` laid on this one with `opacity` and `blend`, as merging a layer down does
+    /// (layers that always show the same drawings, merged once for an export). Its tiles
+    /// are taken where nothing's under them (a bottom layer costs nothing).
+    pub fn merge(&mut self, over: DrawingCopy, opacity: f32, blend: Blend) {
+        let plain = opacity >= 1.0 && blend == Blend::Normal;
+        let mut laid = Vec::new();
+        for (k, t) in over.0 {
+            match self.0.get(&k) {
+                None if plain => {
+                    self.0.insert(k, t);
+                }
+                _ => laid.push((k, t)),
+            }
+        }
+        for (k, _) in &laid {
+            self.0.entry(*k).or_insert_with(empty_tile);
+        }
+        let over: HashMap<TileKey, Box<TilePixels>> = laid.into_iter().collect();
+        let lay = |k: &TileKey, t: &mut Box<TilePixels>| {
+            let Some(o) = over.get(k) else { return };
+            for (row, orow) in t.iter_mut().zip(o.iter()) {
+                for (px, op) in row.iter_mut().zip(orow.iter()) {
+                    if op[3] != 0 {
+                        *px = merge_pixel(*px, *op, opacity, blend);
+                    }
+                }
+            }
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use rayon::prelude::*;
+            self.0.par_iter_mut().for_each(|(k, t)| lay(k, t));
+        }
+        #[cfg(target_arch = "wasm32")]
+        self.0.iter_mut().for_each(|(k, t)| lay(k, t));
     }
 }
 
@@ -4330,6 +4381,37 @@ impl Painter {
         self.drawing_tiles(drawing)
             .filter(|t| !t.is_empty())
             .map(|t| DrawingCopy(copy_tiles(t)))
+    }
+
+    /// The tiles a drawing has paint in (sorted): to copy a big drawing a part at a time
+    /// ([`Painter::drawing_copy_tiles`]).
+    pub fn drawing_tile_keys(&self, drawing: u32) -> Vec<(i32, i32)> {
+        let mut k: Vec<(i32, i32)> = self
+            .drawing_tiles(drawing)
+            .map(|t| t.keys().copied().collect())
+            .unwrap_or_default();
+        k.sort_unstable();
+        k
+    }
+
+    /// A copy of some of a drawing's tiles (those it has of `keys`), as
+    /// [`Painter::drawing_copy`] copies them all.
+    pub fn drawing_copy_tiles(&self, drawing: u32, keys: &[(i32, i32)]) -> DrawingCopy {
+        let Some(tiles) = self.drawing_tiles(drawing) else {
+            return DrawingCopy::empty();
+        };
+        // (on this thread alone: a part is small, and other threads may be busy)
+        DrawingCopy(
+            keys.iter()
+                .filter_map(|k| tiles.get(k).map(|t| (*k, t.clone())))
+                .collect(),
+        )
+    }
+
+    /// Counts changes to the history (new edits, undo, redo): a drawing copied a part at a
+    /// time is copied again if it moved meanwhile.
+    pub fn edits(&self) -> u64 {
+        self.edits
     }
 
     /// Keep a copied drawing here (as one not showing), replacing one with that id. Not

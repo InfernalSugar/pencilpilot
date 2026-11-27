@@ -10,3 +10,6 @@ version.workspace = true
 serde = { version = "1", features = ["derive"] }
 png = "0.18"
 gif = "0.14"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
