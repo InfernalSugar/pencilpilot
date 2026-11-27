@@ -671,6 +671,7 @@ fn header_menus_open_and_their_items_ask_for_actions() {
 fn header_has_undo_redo_draw_together_and_export() {
     let Some(mut h) = Harness::new() else { return };
     h.at(Workspace::Animate);
+    h.s.can_undo = true;
     h.s.can_redo = true;
     let hd = h.regions().header;
     let right = Rect::new(hd.right() - 420.0, hd.y + hd.h / 2.0 - 2.0, 420.0, 4.0);

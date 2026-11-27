@@ -145,11 +145,20 @@ pub fn overlays(f: &mut Frame, card: Rect, s: &mut State) {
             }
         }
     }
-    // right-click: the canvas menu (on the pages that draw)
-    if s.workspace != Workspace::Review {
-        f.context_area(MENU, card);
-    }
+    // right-click: the canvas menu; in Review, what to do with the frame being reviewed
+    f.context_area(MENU, card);
+    let review = s.workspace == Workspace::Review;
+    let frame = s.frame + 1;
     let picked = f.menu(MENU, |m| {
+        if review {
+            m.head(&format!("Frame {frame}"));
+            m.item("Add a note here", "N");
+            m.item("Copy a link to this frame", "");
+            m.separator();
+            m.item("Hide note pins", "");
+            m.item("Reset view", "0");
+            return;
+        }
         m.head("Canvas");
         m.item("Paste", "Ctrl+V");
         m.item("Select all", "Ctrl+A");
