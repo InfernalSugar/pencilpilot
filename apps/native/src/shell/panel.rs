@@ -412,44 +412,23 @@ fn colour_field(f: &mut Frame, body: Rect, s: &mut State) {
     );
 }
 
-/// The saturation/value field at `hue`: the hue, white fading out to the right, black
-/// fading in to the bottom (fine strips: quads have no gradients), with rounded corners.
+/// The saturation/value field at `hue`: white to the hue left to right, then clear to black
+/// top to bottom (two gradients, as the design's CSS), with rounded corners.
 fn draw_field(f: &mut Frame, r: Rect, hue: f32) {
-    let t = f.theme();
     let radius = 18.0;
-    f.put(Quad::rect(r.x, r.y, r.w, r.h, hsv_to_rgb(hue, 1.0, 1.0)).radius(radius));
-    let step = 2.0;
-    let n = (r.w / step).ceil() as usize;
-    for i in 0..n {
-        let x = r.x + i as f32 * step;
-        let a = 1.0 - (i as f32 + 0.5) / n as f32;
-        f.put(Quad::rect(
-            x,
-            r.y,
-            step.min(r.right() - x),
-            r.h,
-            alpha(hex(0xFFFFFF), a),
-        ));
-    }
-    let n = (r.h / step).ceil() as usize;
-    for i in 0..n {
-        let y = r.y + i as f32 * step;
-        let a = (i as f32 + 0.5) / n as f32;
-        f.put(Quad::rect(
-            r.x,
-            y,
-            r.w,
-            step.min(r.bottom() - y),
-            alpha(hex(0x000000), a),
-        ));
-    }
-    // the corners: a card-coloured frame whose inside edge is the field's rounded edge
-    // (8 px reach the square corners: 18 × (√2 − 1) ≈ 7.5, and stay inside the card)
-    let b = 8.0;
+    let pure = hsv_to_rgb(hue, 1.0, 1.0);
+    f.put(Quad::gradient(r.x, r.y, r.w, r.h, hex(0xFFFFFF), pure, (1.0, 0.0)).radius(radius));
     f.put(
-        Quad::rect(r.x - b, r.y - b, r.w + 2.0 * b, r.h + 2.0 * b, [0.0; 4])
-            .radius(radius + b)
-            .border(b, t.card),
+        Quad::gradient(
+            r.x,
+            r.y,
+            r.w,
+            r.h,
+            alpha(hex(0x000000), 0.0),
+            hex(0x000000),
+            (0.0, 1.0),
+        )
+        .radius(radius),
     );
 }
 

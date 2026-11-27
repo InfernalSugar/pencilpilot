@@ -2,6 +2,8 @@
 //   kind 0: a rounded rectangle (fill, border, soft shadow), its edges smoothed by distance
 //   kind 1: a glyph mask from the atlas (its alpha), in the fill colour
 //   kind 2: a colour picture from the atlas (premultiplied), faded by the fill's alpha
+//   kind 3: a rounded rectangle filled with a gradient from `fill` to `border_color`,
+//           along the direction in uv.xy (1, 0: left to right; 0, 1: top to bottom)
 // Colours are premultiplied; blending is "over".
 
 struct Push {
@@ -31,6 +33,7 @@ struct Out {
     @location(5) params: vec4<f32>,
     @location(6) px: vec2<f32>,
     @location(7) clip: vec4<f32>,
+    @location(8) uv_dir: vec2<f32>,
 }
 
 @vertex
@@ -50,6 +53,7 @@ fn vs(@builtin(vertex_index) vi: u32, q: Quad) -> Out {
     o.params = q.params;
     o.px = p;
     o.clip = q.clip;
+    o.uv_dir = q.uv.xy;
     return o;
 }
 
@@ -73,6 +77,13 @@ fn fs(i: Out) -> @location(0) vec4<f32> {
     }
     let r = min(i.params.x, min(i.half_size.x, i.half_size.y));
     let d = round_box(i.local, i.half_size, r);
+    if (kind == 3.0) {
+        // where along the direction this pixel is, 0 to 1 across the rectangle
+        let dir = i.uv_dir;
+        let span = abs(dir.x) * i.half_size.x + abs(dir.y) * i.half_size.y;
+        let t = clamp((dot(i.local, dir) / max(span, 0.0001)) * 0.5 + 0.5, 0.0, 1.0);
+        return mix(i.fill, i.border_color, t) * clamp(0.5 - d, 0.0, 1.0);
+    }
     let blur = i.params.z;
     if (blur > 0.0) {
         // a soft shadow: fades over `blur` pixels either side of the edge

@@ -111,6 +111,29 @@ impl Quad {
         }
         self
     }
+    /// A rectangle filled with a gradient from `from` to `to` (straight RGBA), along
+    /// (dx, dy): (1, 0) runs left to right, (0, 1) top to bottom. Takes `radius`, not a
+    /// border or shadow.
+    pub fn gradient(
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        from: [f32; 4],
+        to: [f32; 4],
+        dir: (f32, f32),
+    ) -> Quad {
+        let len = (dir.0 * dir.0 + dir.1 * dir.1).sqrt().max(1e-6);
+        Quad {
+            rect: [x, y, w, h],
+            fill: premul(from),
+            border_color: premul(to),
+            uv: [dir.0 / len, dir.1 / len, 0.0, 0.0],
+            params: [0.0, 0.0, 0.0, 3.0],
+            clip: NO_CLIP,
+        }
+    }
+
     /// Only inside this rectangle (x0, y0, x1, y1).
     pub fn clip(mut self, c: [f32; 4]) -> Quad {
         self.clip = c;

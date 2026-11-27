@@ -168,3 +168,51 @@ fn the_canvas_sits_between_the_layers() {
         "the canvas where nothing is above it"
     );
 }
+
+#[test]
+fn gradients_run_the_way_they_are_told() {
+    let Some(gpu) = gpu() else { return };
+    let (w, h) = (200u32, 100u32);
+    let frame = DmabufImage::new(&gpu, w, h, &[]).unwrap();
+    let mut r = Renderer2d::new(&gpu).unwrap();
+    let clear = [0.0, 0.0, 0.0, 0.0];
+    let quads = [
+        // a colour field: white to coral left to right, then clear to black top to bottom
+        Quad::gradient(0.0, 0.0, 200.0, 100.0, WHITE, CORAL, (1.0, 0.0)),
+        Quad::gradient(
+            0.0,
+            0.0,
+            200.0,
+            100.0,
+            [0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+            (0.0, 1.0),
+        ),
+    ];
+    r.draw(&gpu, &frame, PAPER, &quads).unwrap();
+    let _ = clear;
+    let px = gpu.read_back(&frame).unwrap();
+    let at = |x: u32, y: u32| {
+        let i = ((y * w + x) * 4) as usize;
+        [px[i + 2] as i32, px[i + 1] as i32, px[i] as i32]
+    };
+    let near =
+        |a: [i32; 3], b: [i32; 3], tol: i32| a.iter().zip(b).all(|(x, y)| (x - y).abs() <= tol);
+    assert!(
+        near(at(0, 0), [255, 255, 255], 4),
+        "top-left: white {:?}",
+        at(0, 0)
+    );
+    assert!(
+        near(at(199, 0), [232, 73, 47], 4),
+        "top-right: coral {:?}",
+        at(199, 0)
+    );
+    let mid = at(100, 0);
+    assert!(near(mid, [244, 164, 151], 6), "top-middle: halfway {mid:?}");
+    assert!(
+        near(at(100, 99), [0, 0, 0], 6),
+        "bottom: black {:?}",
+        at(100, 99)
+    );
+}
