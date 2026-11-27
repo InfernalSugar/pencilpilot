@@ -1151,3 +1151,5 @@ fn text_cancel(e: &mut Engine, s: &mut State) {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod ui_tests;

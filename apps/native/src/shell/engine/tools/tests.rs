@@ -579,3 +579,85 @@ fn brush_settings_change_what_the_brush_paints() {
         "pressure off: full size at light pressure ({wide} vs {thin})"
     );
 }
+
+#[test]
+fn moving_the_whole_layer_keeps_its_pixels_intact() {
+    let (mut e, mut s) = engine();
+    ring(&mut e, &mut s, [40.0, 40.0, 140.0, 120.0]);
+    block(&mut e, &mut s, [60.0, 60.0, 90.0, 80.0]);
+    let before = e.painter.layer_rgba(e.painter.active_layer());
+    // (after a copy, clear and paste in place, as the keys do)
+    for a in ["Select all", "Copy", "Clear", "Paste in place", "Escape"] {
+        other(&mut e, &mut s, a);
+    }
+    s.tool = Tool::Transform;
+    other(&mut e, &mut s, "Transform");
+    drag(&mut e, &mut s, (90.0, 80.0), (190.0, 130.0));
+    other(&mut e, &mut s, "Transform: commit");
+    let after = e.painter.layer_rgba(e.painter.active_layer());
+    let w = 400usize;
+    let mut wrong = 0;
+    for y in 0..250usize {
+        for x in 0..300usize {
+            let a = before[(y * w + x) * 4 + 3];
+            let b = after[((y + 50) * w + x + 100) * 4 + 3];
+            if (a as i32 - b as i32).abs() > 8 {
+                wrong += 1;
+            }
+        }
+    }
+    assert_eq!(wrong, 0, "every pixel moved by (100, 50)");
+}
+
+/// The picture shown (the composite) agrees with the layer: every pixel the layer has
+/// solid is dark on screen, every one it hasn't is paper.
+fn picture_matches_layer(e: &mut Engine) -> usize {
+    e.painter.flush();
+    let l = e.painter.layer_rgba(e.painter.active_layer());
+    let c = e.painter.rgba();
+    l.chunks(4)
+        .zip(c.chunks(4))
+        .filter(|(l, c)| (l[3] > 200 && c[0] > 100) || (l[3] == 0 && c[0] < 200))
+        .count()
+}
+
+#[test]
+fn the_picture_follows_transforms_clears_and_undos() {
+    let mut s = State::demo();
+    let mut e = Engine::new(1920, 1080);
+    block(&mut e, &mut s, [300.0, 200.0, 700.0, 500.0]);
+    e.painter.flush();
+    for a in ["Select all", "Copy", "Clear"] {
+        other(&mut e, &mut s, a);
+    }
+    assert_eq!(picture_matches_layer(&mut e), 0, "after clear");
+    e.painter.undo();
+    assert_eq!(picture_matches_layer(&mut e), 0, "after undoing the clear");
+    other(&mut e, &mut s, "Escape");
+    s.tool = Tool::Transform;
+    other(&mut e, &mut s, "Transform");
+    e.painter.flush();
+    drag(&mut e, &mut s, (500.0, 350.0), (800.0, 450.0));
+    other(&mut e, &mut s, "Transform: commit");
+    assert_eq!(picture_matches_layer(&mut e), 0, "after a transform");
+}
+
+#[test]
+fn clear_then_undo_and_paste_restore_the_exact_layer() {
+    let mut s = State::demo();
+    let mut e = Engine::new(1920, 1080);
+    block(&mut e, &mut s, [300.0, 200.0, 700.0, 500.0]);
+    let l0 = e.painter.layer_rgba(e.painter.active_layer());
+    s.tool = Tool::Select;
+    drag(&mut e, &mut s, (200.0, 100.0), (800.0, 600.0));
+    other(&mut e, &mut s, "Clear");
+    e.painter.undo();
+    let l1 = e.painter.layer_rgba(e.painter.active_layer());
+    let diff = |a: &[u8], b: &[u8]| a.chunks(4).zip(b.chunks(4)).filter(|(a, b)| (a[3] as i32 - b[3] as i32).abs() > 2).count();
+    assert_eq!(diff(&l0, &l1), 0, "undoing a clear");
+    for a in ["Copy", "Clear", "Paste in place"] {
+        other(&mut e, &mut s, a);
+    }
+    let l2 = e.painter.layer_rgba(e.painter.active_layer());
+    assert_eq!(diff(&l0, &l2), 0, "pasting in place");
+}
