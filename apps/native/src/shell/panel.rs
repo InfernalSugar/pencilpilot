@@ -1070,6 +1070,8 @@ fn menus(f: &mut Frame, s: &mut State) {
             for (text, hint) in &items {
                 if text == "-" {
                     m.separator();
+                } else if text.starts_with("Delete") {
+                    m.danger(text, hint);
                 } else {
                     m.item(text, hint);
                 }
