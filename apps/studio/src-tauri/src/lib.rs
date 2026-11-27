@@ -502,6 +502,16 @@ fn bench_report(app: AppHandle, report: String) {
     }
 }
 
+/// The baseline's exports (tools/baseline): with `PP_BENCH_EXPORT_DIR` set, exports go to
+/// that folder without asking, so the measurement never opens a save dialog. Unset (always,
+/// outside the baseline): None, and the app asks as usual.
+#[tauri::command]
+fn bench_export_dir() -> Option<String> {
+    std::env::var("PP_BENCH_EXPORT_DIR")
+        .ok()
+        .filter(|d| !d.is_empty())
+}
+
 /// Host a drawing-together session: the invite to share, who's here.
 #[tauri::command]
 async fn share_host(
@@ -689,6 +699,7 @@ pub fn run() {
             data_folder,
             bench_echo,
             bench_report,
+            bench_export_dir,
             frames_put,
             frames_get,
             frames_retain,

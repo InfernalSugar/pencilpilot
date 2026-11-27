@@ -29,6 +29,10 @@ const OUT = path.resolve(opt('out', 'baseline.json'));
 const HZ = +opt('hz', 60);
 const DISPLAY = opt('display', `pp-bench-${HZ}`);
 const REFRESH_ONLY = flag('refresh-only');
+// which groups to run (default: all but the long session)
+const ONLY = opt('only', null)?.split(',');
+const want = (g) => (ONLY ? ONLY.includes(g) : g !== 'session');
+const SESSION_MIN = +opt('session-minutes', 30);
 const QUICK = flag('quick');
 const COLD = flag('cold');
 const PORT = 4471;
@@ -202,6 +206,8 @@ function startDriver() {
 	const env = { ...process.env, WAYLAND_DISPLAY: DISPLAY, GDK_BACKEND: 'wayland' };
 	delete env.DISPLAY;
 	delete env.PP_BENCH;
+	// exports go here without a save dialog (the app's bench_export_dir)
+	env.PP_BENCH_EXPORT_DIR = path.join(path.dirname(OUT), 'exports');
 	// the app's data, settings and caches stay out of the person's own
 	for (const [k, d] of [
 		['XDG_DATA_HOME', 'data'],
@@ -275,7 +281,7 @@ class App {
 	runAsync(fn, ...args) {
 		const script = `const done = arguments[arguments.length - 1];
 			Promise.resolve((${fn})(...Array.prototype.slice.call(arguments, 0, -1)))
-				.then((v) => done({ ok: v }), (e) => done({ err: String(e && e.stack || e) }));`;
+				.then((v) => done({ ok: v }), (e) => done({ err: String(e && e.message) + " | " + String(e && e.stack) }));`;
 		return wd('POST', `/session/${this.id}/execute/async`, { script, args }).then((r) => {
 			if (r?.err) throw new Error(r.err);
 			return r?.ok;
@@ -681,6 +687,542 @@ async function refresh() {
 	return out;
 }
 
+// ---- more scenarios (the budgets' "still to measure") ----
+
+/** in the page: a button by the start of its label (aria-label, title or text) */
+function clickLabel(prefix) {
+	const lab = (e) =>
+		(e.getAttribute('aria-label') || e.title || e.textContent || '').trim().replace(/\s+/g, ' ');
+	const b = [...document.querySelectorAll('button,[role=tab],[role=menuitem]')].find((x) =>
+		lab(x).startsWith(prefix)
+	);
+	if (!b) return false;
+	b.click();
+	return true;
+}
+
+/** in the page: pick a brush by its name in the Brushes panel; the size shown after */
+async function pickBrush(name, bigger) {
+	const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+	const lab = (e) =>
+		(e.getAttribute('aria-label') || e.title || e.textContent || '').trim().replace(/\s+/g, ' ');
+	[...document.querySelectorAll('[role=tab]')].find((t) => lab(t).startsWith('Brushes'))?.click();
+	await wait(400);
+	// the panel shows a category at a time: search for it instead
+	const search = document.querySelector('input[type=search]');
+	if (search) {
+		search.value = name;
+		search.dispatchEvent(new Event('input', { bubbles: true }));
+		await wait(500);
+	}
+	const b = [...document.querySelectorAll('button')].find((x) => lab(x).startsWith(`${name} ·`));
+	if (!b) throw new Error(`no brush ${name}`);
+	b.click();
+	await wait(300);
+	for (let i = 0; i < bigger; i++) {
+		window.dispatchEvent(
+			new KeyboardEvent('keydown', { key: ']', code: 'BracketRight', bubbles: true })
+		);
+		await wait(30);
+	}
+	await wait(300);
+	const size = [...document.querySelectorAll('*')]
+		.map((e) => e.childElementCount === 0 && e.textContent.trim())
+		.find((t) => t && /^\d+(\.\d+)?\s*(px|%)$/.test(t));
+	return size ?? null;
+}
+
+/** in the page: Ctrl+wheel zooms at the pointer, then the plain wheel pans; frame times */
+async function panZoom(cfg) {
+	const vp = document.querySelector('.viewport');
+	const r = vp.getBoundingClientRect();
+	const raf = window.__ppb.orig;
+	const frames = [];
+	let looping = true;
+	raf(function loop(t) {
+		frames.push(t);
+		if (looping) raf(loop);
+	});
+	const wheel = (dy, dx, ctrl, x, y) =>
+		vp.dispatchEvent(
+			new WheelEvent('wheel', {
+				deltaY: dy,
+				deltaX: dx,
+				deltaMode: 0,
+				ctrlKey: ctrl,
+				clientX: x,
+				clientY: y,
+				bubbles: true,
+				cancelable: true
+			})
+		);
+	const wait = (ms) => new Promise((res) => setTimeout(res, ms));
+	const cx = r.left + r.width / 2;
+	const cy = r.top + r.height / 2;
+	const zoomFrames = [];
+	const panFrames = [];
+	// zoom in and out around moving points, a notch every 16 ms (a fast wheel / trackpad)
+	let t0 = performance.now();
+	for (let i = 0; performance.now() - t0 < cfg.seconds * 500; i++) {
+		const dir = Math.floor(i / 20) % 2 ? 1 : -1;
+		wheel(
+			dir * 40,
+			0,
+			true,
+			cx + Math.sin(i / 10) * r.width * 0.3,
+			cy + Math.cos(i / 13) * r.height * 0.3
+		);
+		await wait(16);
+	}
+	const mid = frames.length;
+	// zoomed in: pan around
+	for (let i = 0; i < 10; i++) wheel(-40, 0, true, cx, cy);
+	await wait(300);
+	const panStart = frames.length;
+	t0 = performance.now();
+	for (let i = 0; performance.now() - t0 < cfg.seconds * 500; i++) {
+		wheel(Math.sin(i / 15) * 60, Math.cos(i / 15) * 60, false, cx, cy);
+		await wait(16);
+	}
+	await wait(200);
+	looping = false;
+	const iv = (a) => a.slice(1).map((t, k) => t - a[k]);
+	zoomFrames.push(...iv(frames.slice(0, mid)));
+	panFrames.push(...iv(frames.slice(panStart)));
+	return { zoomFrames, panFrames };
+}
+
+/** in the page: drag along the timeline's ruler and back (the mouse); the frames shown */
+async function scrub(cfg) {
+	const ruler = document.querySelector('.ruler');
+	const readout = document.querySelector('[data-testid="frame"]');
+	const length = +/of (\d+)/.exec(readout.parentElement.textContent)[1];
+	const ticks = [...ruler.querySelectorAll('.tick')];
+	const last = ticks[Math.min(length, ticks.length) - 1].getBoundingClientRect();
+	const r = ruler.getBoundingClientRect();
+	const x0 = r.left + 4;
+	const x1 = last.left + last.width / 2;
+	const y = r.top + r.height / 2;
+	const raf = window.__ppb.orig;
+	const ev = (t, x) =>
+		ruler.dispatchEvent(
+			new PointerEvent(t, {
+				pointerId: 1,
+				pointerType: 'mouse',
+				isPrimary: true,
+				bubbles: true,
+				cancelable: true,
+				clientX: x,
+				clientY: y,
+				button: t === 'pointermove' ? -1 : 0,
+				buttons: t === 'pointerup' ? 0 : 1
+			})
+		);
+	const frames = [];
+	const shown = [];
+	let looping = true;
+	let lastShown = readout.textContent;
+	raf(function loop(t) {
+		frames.push(t);
+		if (readout.textContent !== lastShown) {
+			lastShown = readout.textContent;
+			shown.push(t);
+		}
+		if (looping) raf(loop);
+	});
+	const wait = (ms) => new Promise((res) => setTimeout(res, ms));
+	ev('pointerdown', x0);
+	const t0 = performance.now();
+	const ms = cfg.seconds * 1000;
+	let asked = 0;
+	let lastF = -1;
+	while (performance.now() - t0 < ms) {
+		const u = (performance.now() - t0) / ms;
+		const k = u < 0.5 ? u * 2 : 2 - u * 2; // there and back
+		const x = x0 + (x1 - x0) * k;
+		ev('pointermove', x);
+		const f = Math.round(k * (length - 1));
+		if (f !== lastF) (asked++, (lastF = f));
+		await wait(8);
+	}
+	ev('pointerup', x0);
+	await wait(300);
+	looping = false;
+	const iv = frames.slice(1).map((t, i) => t - frames[i]);
+	return { framesAsked: asked, framesShown: shown.length, intervals: iv, length };
+}
+
+/** in the page: many short strokes on a new line layer, as fast as they go */
+async function manyStrokes(n) {
+	const wait = (ms) => new Promise((res) => setTimeout(res, ms));
+	const lab = (e) =>
+		(e.getAttribute('aria-label') || e.title || e.textContent || '').trim().replace(/\s+/g, ' ');
+	const click = (p) =>
+		[...document.querySelectorAll('button')].find((x) => lab(x).startsWith(p))?.click();
+	click('Layers');
+	await wait(200);
+	click('New line layer');
+	await wait(400);
+	click('Brush (B)');
+	await wait(200);
+	const vp = document.querySelector('.viewport');
+	const r = vp.getBoundingClientRect();
+	const ev = (type, x, y, p) =>
+		vp.dispatchEvent(
+			new PointerEvent(type, {
+				pointerId: 7,
+				pointerType: 'pen',
+				isPrimary: true,
+				bubbles: true,
+				cancelable: true,
+				clientX: x,
+				clientY: y,
+				pressure: p,
+				button: type === 'pointermove' ? -1 : 0,
+				buttons: type === 'pointerup' ? 0 : 1
+			})
+		);
+	// a shirt's worth of hatching in the middle of the canvas
+	const t0 = performance.now();
+	for (let s = 0; s < n; s++) {
+		const cx = r.left + r.width * (0.3 + 0.4 * ((s * 0.618) % 1));
+		const cy = r.top + r.height * (0.3 + 0.4 * ((s * 0.382) % 1));
+		const a = (s * 2.4) % Math.PI;
+		ev('pointerdown', cx, cy, 0.5);
+		for (let i = 1; i <= 12; i++)
+			ev('pointermove', cx + Math.cos(a) * i * 4, cy + Math.sin(a) * i * 4, 0.3 + 0.05 * i);
+		ev('pointerup', cx + Math.cos(a) * 48, cy + Math.sin(a) * 48, 0);
+		if (s % 50 === 49) await wait(0);
+	}
+	await wait(1000);
+	return { strokes: n, drawMs: performance.now() - t0 };
+}
+
+/** in the page: select everything, Transform (V), drag it, then commit by picking the brush */
+async function moveStrokes(cfg) {
+	const wait = (ms) => new Promise((res) => setTimeout(res, ms));
+	const lab = (e) =>
+		(e.getAttribute('aria-label') || e.title || e.textContent || '').trim().replace(/\s+/g, ' ');
+	const click = (p) =>
+		[...document.querySelectorAll('button')].find((x) => lab(x).startsWith(p))?.click();
+	const raf = window.__ppb.orig;
+	const nextFrame = () => new Promise((res) => raf(() => res(performance.now())));
+	const vp = document.querySelector('.viewport');
+	const r = vp.getBoundingClientRect();
+	// select all (Ctrl+A), then the Transform tool
+	window.dispatchEvent(
+		new KeyboardEvent('keydown', { key: 'a', code: 'KeyA', ctrlKey: true, bubbles: true })
+	);
+	await wait(300);
+	let t = performance.now();
+	click('Transform (V)');
+	const liftMs = (await nextFrame()) - t;
+	await wait(500);
+	const frames = [];
+	let looping = true;
+	raf(function loop(tt) {
+		frames.push(tt);
+		if (looping) raf(loop);
+	});
+	const ev = (type, x, y) =>
+		vp.dispatchEvent(
+			new PointerEvent(type, {
+				pointerId: 1,
+				pointerType: 'mouse',
+				isPrimary: true,
+				bubbles: true,
+				cancelable: true,
+				clientX: x,
+				clientY: y,
+				button: type === 'pointermove' ? -1 : 0,
+				buttons: type === 'pointerup' ? 0 : 1
+			})
+		);
+	const cx = r.left + r.width / 2;
+	const cy = r.top + r.height / 2;
+	ev('pointerdown', cx, cy);
+	const t0 = performance.now();
+	while (performance.now() - t0 < cfg.seconds * 1000) {
+		const u = (performance.now() - t0) / (cfg.seconds * 1000);
+		ev('pointermove', cx + 300 * u, cy + 120 * Math.sin(u * Math.PI));
+		await wait(8);
+	}
+	t = performance.now();
+	ev('pointerup', cx + 300, cy);
+	const releaseMs = (await nextFrame()) - t;
+	looping = false;
+	await wait(300);
+	// leaving the tool keeps the move (the strokes follow, as editable strokes)
+	t = performance.now();
+	click('Brush (B)');
+	const commitMs = (await nextFrame()) - t;
+	await wait(500);
+	const iv = frames.slice(1).map((x, i) => x - frames[i]);
+	return { liftMs, releaseMs, commitMs, dragIntervals: iv };
+}
+
+/** in the page: how long from a click to the frame that shows its result */
+async function clicks(rounds) {
+	const wait = (ms) => new Promise((res) => setTimeout(res, ms));
+	const lab = (e) =>
+		(e.getAttribute('aria-label') || e.title || e.textContent || '').trim().replace(/\s+/g, ' ');
+	const find = (p) =>
+		[...document.querySelectorAll('button,[role=tab]')].find((x) => lab(x).startsWith(p));
+	const raf = window.__ppb.orig;
+	const shown = () => new Promise((res) => raf(() => raf(() => res(performance.now()))));
+	const steps = [
+		['tool: eraser', 'Eraser (E)'],
+		['tool: brush', 'Brush (B)'],
+		['panel: brushes', 'Brushes'],
+		['panel: layers', 'Layers'],
+		['onion skin on/off', 'Onion skin:'],
+		['next frame', 'Next frame'],
+		['previous frame', 'Previous frame'],
+		['menu: file', 'File'],
+		['menu: close', 'File']
+	];
+	const out = {};
+	for (let k = 0; k < rounds; k++) {
+		for (const [name, p] of steps) {
+			const b = find(p);
+			if (!b) continue;
+			await wait(120);
+			const t = performance.now();
+			b.click();
+			const handlerMs = performance.now() - t;
+			const ms = (await shown()) - t;
+			(out[name] ??= { handler: [], shown: [] }).handler.push(handlerMs);
+			out[name].shown.push(ms);
+		}
+	}
+	return out;
+}
+
+/** in the page: export the animation (the baseline's folder, no dialog); when it's done */
+async function exportAnim(cfg) {
+	const wait = (ms) => new Promise((res) => setTimeout(res, ms));
+	const lab = (e) =>
+		(e.getAttribute('aria-label') || e.title || e.textContent || '').trim().replace(/\s+/g, ' ');
+	const btn = (p) => [...document.querySelectorAll('button')].find((x) => lab(x).startsWith(p));
+	btn('Export')?.click();
+	await wait(300);
+	btn('Animation…')?.click();
+	await wait(800);
+	const dialog = [...document.querySelectorAll('h2')]
+		.find((h) => h.textContent.includes('Export the animation'))
+		?.closest('[role=dialog], dialog, .dialog, section, div');
+	const select = dialog?.querySelector('select');
+	if (select && cfg.format && [...select.options].some((o) => o.value === cfg.format)) {
+		select.value = cfg.format;
+		select.dispatchEvent(new Event('change', { bubbles: true }));
+		await wait(200);
+	}
+	const go = document.querySelector('button.go');
+	if (!go || go.disabled) throw new Error('the Export button is missing or off (no ffmpeg?)');
+	const t0 = performance.now();
+	go.click();
+	// exporting: the top Export button says so until it's done
+	await wait(300);
+	while (true) {
+		const top = [...document.querySelectorAll('button')].find((b) =>
+			/^(Export|Exporting…)$/.test(b.textContent.trim())
+		);
+		if (top?.textContent.trim() === 'Export' && !document.querySelector('button.go')) break;
+		if (performance.now() - t0 > 600_000) throw new Error('export took over 10 minutes');
+		await wait(50);
+	}
+	return { ms: performance.now() - t0 };
+}
+
+async function brushes(ref) {
+	const out = {};
+	const list = [
+		['Airbrush (Revoy)', 0],
+		['Oil brush', 0],
+		['Blend+paint', 0],
+		['Water diffuser', 0]
+	];
+	for (const [name, bigger] of list) {
+		const app = await App.launch();
+		await app.until(homeReady);
+		await app.maximise();
+		await openStudio(app, `new=1920x1080&fps=24`);
+		await sleep(1000);
+		const size = await app.runAsync(pickBrush, name, bigger);
+		const key = bigger ? `${name}, bigger` : name;
+		log(`brush: ${key} (${size ?? 'size ?'})`);
+		const d = await draw(
+			app,
+			ref,
+			{ hz: 240, strokes: QUICK ? 3 : 6, strokeSeconds: 1 },
+			`brush-${key.replace(/\W+/g, '-')}.png`
+		);
+		out[key] = { size, ...d };
+		await app.quit();
+	}
+	return out;
+}
+
+async function panAndZoom(ref) {
+	const app = await App.launch([project('layers20-4k')]);
+	await app.until(homeReady);
+	await app.maximise();
+	await openRecent(app, project('layers20-4k'), 24);
+	await sleep(2000);
+	log('pan and zoom on 20 layers at 4K');
+	const s = sampler(app.pid);
+	const r = await app.runAsync(panZoom, { seconds: QUICK ? 4 : 10 });
+	const m = s.stop();
+	await app.quit();
+	const vs = pct(r.zoomFrames.concat(r.panFrames), 50);
+	return {
+		...delta(m, ref),
+		zoomFrameMs: dist(r.zoomFrames),
+		zoomMissed: r.zoomFrames.filter((x) => x > vs * 1.5).length,
+		panFrameMs: dist(r.panFrames),
+		panMissed: r.panFrames.filter((x) => x > vs * 1.5).length
+	};
+}
+
+async function scrubbing(ref) {
+	const out = {};
+	for (const [name, frames] of [
+		['drawings500', 100],
+		['layers20-4k', 24]
+	]) {
+		const app = await App.launch([project(name)]);
+		await app.until(homeReady);
+		await app.maximise();
+		await openRecent(app, project(name), frames);
+		await sleep(2000);
+		log(`scrubbing ${name}`);
+		const s = sampler(app.pid);
+		const r = await app.runAsync(scrub, { seconds: QUICK ? 3 : 6 });
+		const m = s.stop();
+		const vs = pct(r.intervals, 50);
+		out[name] = {
+			...delta(m, ref),
+			framesAsked: r.framesAsked,
+			framesShown: r.framesShown,
+			frameMs: dist(r.intervals),
+			missed: r.intervals.filter((x) => x > vs * 1.5).length
+		};
+		await app.quit();
+	}
+	return out;
+}
+
+async function strokesMove(ref) {
+	const out = {};
+	for (const n of QUICK ? [500] : [500, 2000]) {
+		const app = await App.launch();
+		await app.until(homeReady);
+		await app.maximise();
+		await openStudio(app, `new=1920x1080&fps=24`);
+		await sleep(1000);
+		log(`moving ${n} strokes: drawing them`);
+		const made = await app.runAsync(manyStrokes, n);
+		log(`moving ${n} strokes (drawn in ${r2(made.drawMs)} ms)`);
+		const s = sampler(app.pid);
+		const r = await app.runAsync(moveStrokes, { seconds: 2 });
+		const m = s.stop();
+		await app.screenshot(path.join(path.dirname(OUT), `move-${n}.png`)).catch(() => {});
+		const vs = 1000 / HZ;
+		out[`${n} strokes`] = {
+			...delta(m, ref),
+			drawStrokesMs: r2(made.drawMs),
+			liftMs: r2(r.liftMs),
+			dragFrameMs: dist(r.dragIntervals),
+			dragMissed: r.dragIntervals.filter((x) => x > vs * 1.5).length,
+			releaseMs: r2(r.releaseMs),
+			commitMs: r2(r.commitMs)
+		};
+		await app.quit();
+	}
+	return out;
+}
+
+async function clickToResult() {
+	const app = await App.launch([project('layers20-4k')]);
+	await app.until(homeReady);
+	await app.maximise();
+	await openRecent(app, project('layers20-4k'), 24);
+	await sleep(2000);
+	log('click to result');
+	const r = await app.runAsync(clicks, QUICK ? 3 : 10);
+	await app.quit();
+	const out = {};
+	for (const [k, v] of Object.entries(r))
+		out[k] = { handlerMs: dist(v.handler), shownMs: dist(v.shown) };
+	return out;
+}
+
+async function exporting(ref) {
+	const out = {};
+	const dir = path.join(path.dirname(OUT), 'exports');
+	fs.rmSync(dir, { recursive: true, force: true });
+	fs.mkdirSync(dir, { recursive: true });
+	for (const [name, frames] of [
+		['layers20-4k', 24],
+		['drawings500', 100]
+	]) {
+		const app = await App.launch([project(name)]);
+		await app.until(homeReady);
+		await app.maximise();
+		await openRecent(app, project(name), frames);
+		await sleep(2000);
+		log(`exporting ${name} as MP4`);
+		const s = sampler(app.pid);
+		const r = await app.runAsync(exportAnim, { format: 'mp4' });
+		const m = s.stop();
+		const file = fs.readdirSync(dir).find((f) => f.startsWith(name) && f.endsWith('.mp4'));
+		out[name] = {
+			...delta(m, ref),
+			frames,
+			ms: r2(r.ms),
+			msPerFrame: r2(r.ms / frames),
+			fileMB: file ? r2(fs.statSync(path.join(dir, file)).size / 1e6) : null
+		};
+		log(`exported ${name}: ${out[name].ms} ms`);
+		await app.quit();
+	}
+	return out;
+}
+
+/** a long session: draw, play and scrub on 20 layers at 4K over and over; memory as it goes */
+async function session(minutes) {
+	const app = await App.launch([project('layers20-4k')]);
+	await app.until(homeReady);
+	await app.maximise();
+	await openRecent(app, project('layers20-4k'), 24);
+	await sleep(3000);
+	log(`a ${minutes}-minute session`);
+	const mem = () => r2(tree(app.pid).reduce((a, p) => a + pssKB(p.pid), 0) / 1024);
+	const points = [[0, mem()]];
+	const t0 = performance.now();
+	let rounds = 0;
+	while (performance.now() - t0 < minutes * 60_000) {
+		await app.runAsync(penStrokes, { hz: 240, strokes: 2, strokeSeconds: 1 });
+		await app.runAsync(playFor, 4);
+		await app.runAsync(scrub, { seconds: 2 });
+		rounds++;
+		points.push([r2((performance.now() - t0) / 60_000), mem()]);
+	}
+	await app.quit();
+	const firstHalf = points.filter(([t]) => t <= minutes / 2).map(([, m]) => m);
+	const second = points.filter(([t]) => t > minutes / 2).map(([, m]) => m);
+	const avg = (a) => a.reduce((x, y) => x + y, 0) / Math.max(1, a.length);
+	return {
+		minutes,
+		rounds,
+		startMB: points[1]?.[1] ?? points[0][1],
+		endMB: points.at(-1)[1],
+		maxMB: Math.max(...points.map(([, m]) => m)),
+		secondHalfMinusFirstHalfMB: r2(avg(second) - avg(firstHalf)),
+		points
+	};
+}
+
 async function main() {
 	if (REFRESH_ONLY) {
 		headless();
@@ -694,10 +1236,23 @@ async function main() {
 	await sleep(1500);
 	startDriver();
 	await sleep(1000);
-	const idleSecs = QUICK ? 10 : 30;
 	const ref = await systemIdle('before', QUICK ? 10 : 20);
 	report.results.machineIdle = ref;
 
+	if (want('core')) await core(ref);
+	if (want('brushes')) report.results.brushes = await brushes(ref);
+	if (want('panzoom')) report.results.panZoom = await panAndZoom(ref);
+	if (want('scrub')) report.results.scrub = await scrubbing(ref);
+	if (want('strokes')) report.results.moveStrokes = await strokesMove(ref);
+	if (want('clicks')) report.results.clickToResult = await clickToResult();
+	if (want('export')) report.results.export = await exporting(ref);
+	if (want('session')) report.results.session = await session(SESSION_MIN);
+
+	report.results.machineIdleAfter = await systemIdle('after', QUICK ? 10 : 20);
+}
+
+async function core(ref) {
+	const idleSecs = QUICK ? 10 : 30;
 	report.results.startup = await startup();
 
 	// an empty canvas: idle, drawing
@@ -772,8 +1327,6 @@ async function main() {
 		);
 		await app.quit();
 	}
-
-	report.results.machineIdleAfter = await systemIdle('after', QUICK ? 10 : 20);
 }
 
 const stopAll = () => {
