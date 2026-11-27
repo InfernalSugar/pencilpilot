@@ -578,10 +578,44 @@ def scenario_transform(binary, out):
     return res
 
 
+def scenario_turn(binary, out):
+    """Shift-drag turns the view in Review (no drawing tool there); with the Brush in Draw,
+    Shift-drag paints (Shift is the tools'), Space+Shift-drag turns."""
+    res = {}
+    m = Mutter(out, 165)
+    try:
+        for tag, ws, space in (("review-shift", "review", False), ("draw-shift", "draw", False),
+                               ("draw-space-shift", "draw", True)):
+            app = App(binary, m, out, f"turn-{tag}", 5, ws)
+            time.sleep(1.8)
+            inp = Input()
+            c = (500.0, 330.0)
+            inp.to(*c)
+            if space:
+                inp.key("space", True)
+            inp.key("Shift_L", True)
+            time.sleep(0.05)
+            inp.drag(arc(c, 150, 0, math.radians(40), 40), 0.005)
+            inp.key("Shift_L", False)
+            if space:
+                inp.key("space", False)
+            time.sleep(0.1)
+            inp.stop()
+            st = app.wait()
+            res[tag] = {"angleDeg": round(math.degrees(st["view"]["angle"]), 2),
+                        "inkPx": int(len(ink(app.doc)[0]))}
+    finally:
+        m.stop()
+    res["pass"] = (res["review-shift"]["angleDeg"] != 0 and res["review-shift"]["inkPx"] == 0
+                   and res["draw-shift"]["angleDeg"] == 0 and res["draw-shift"]["inkPx"] > 0
+                   and res["draw-space-shift"]["angleDeg"] != 0 and res["draw-space-shift"]["inkPx"] == 0)
+    return res
+
+
 SCENARIOS = {
     "view": scenario_view, "latency": scenario_latency, "viewfps": scenario_viewfps,
     "idle": scenario_idle, "memory": scenario_memory, "playback": scenario_playback,
-    "transform": scenario_transform,
+    "transform": scenario_transform, "turn": scenario_turn,
 }
 
 
