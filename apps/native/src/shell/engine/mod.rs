@@ -548,3 +548,57 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod stroke_end_timing {
+    use super::*;
+    use crate::state::{State, Workspace};
+    use std::time::Instant;
+
+    /// What a stroke's start and end cost the frame they land in (tick and picture).
+    #[test]
+    #[ignore = "timing: cargo test --release -- --ignored stroke_end --nocapture"]
+    fn stroke_end_costs() {
+        let mut s = State::demo();
+        s.workspace = Workspace::Draw;
+        let mut e = Engine::new(1920, 1080);
+        e.tick(&mut s, Instant::now());
+        let _ = e.picture(&s);
+        let at = |x: f32, ms: u32| Sample {
+            x,
+            y: 500.0,
+            pressure: 0.8,
+            tilt: (0.0, 0.0),
+            ms,
+        };
+        for round in 0..5 {
+            let t = Instant::now();
+            e.pointer(&mut s, Phase::Down, at(300.0, 0));
+            let down = t.elapsed();
+            let t = Instant::now();
+            e.tick(&mut s, Instant::now());
+            let _ = e.picture(&s);
+            let down_frame = t.elapsed();
+            let mut mid = std::time::Duration::ZERO;
+            for i in 1..60 {
+                e.pointer(&mut s, Phase::Move, at(300.0 + i as f32 * 8.0, i * 4));
+                let t = Instant::now();
+                e.tick(&mut s, Instant::now());
+                let _ = e.picture(&s);
+                mid = mid.max(t.elapsed());
+            }
+            let t = Instant::now();
+            e.pointer(&mut s, Phase::Up, at(780.0, 240));
+            let up = t.elapsed();
+            let t = Instant::now();
+            e.tick(&mut s, Instant::now());
+            let tick = t.elapsed();
+            let t = Instant::now();
+            let _ = e.picture(&s);
+            let pic = t.elapsed();
+            eprintln!(
+                "round {round}: down {down:?}, its frame {down_frame:?}, slowest mid frame {mid:?}, up {up:?}, tick after {tick:?}, picture after {pic:?}"
+            );
+        }
+    }
+}
