@@ -6,6 +6,7 @@ use pencilpilot_ui::text::{Laid, Style};
 use pencilpilot_ui::theme::{alpha, hex};
 use pencilpilot_ui::ui::{Frame, Rect, id};
 
+use crate::shell::engine::files;
 use crate::state::{Action, State, Workspace};
 
 /// The mark's pencil, Undo's and Redo's arrows.
@@ -17,11 +18,11 @@ const FILE_MENU: &str = "header/file";
 const VIEW_MENU: &str = "header/view";
 
 /// The File menu: (item, shortcut); an empty item is a separator. Each item is pushed as
-/// [`Action::File`] with its text.
+/// [`Action::File`] with its text. The recent files go after Open… (each pushed as
+/// [`files::OPEN_RECENT`] and its path).
 pub const FILE_ITEMS: &[(&str, &str)] = &[
     ("New…", "Ctrl+N"),
     ("Open…", "Ctrl+O"),
-    ("Open recent", "›"),
     ("", ""),
     ("Save", "Ctrl+S"),
     ("Save as…", "Ctrl+Shift+S"),
@@ -100,6 +101,26 @@ pub fn build(f: &mut Frame, r: Rect, s: &mut State) {
     let cy = r.y + r.h / 2.0;
     let mut l = HeaderLayout::default();
     let label = |c| Style::body(14.0, c).weight(600);
+    // the project's name, and where it is and whether it's saved
+    s.header.title = s.project.name.clone();
+    s.header.subtitle = s.project.subtitle(&s.cut_name);
+    // the File menu's shortcuts (not while typing)
+    if !f.typing() {
+        let shift_s = f
+            .keys()
+            .iter()
+            .any(|k| k.ctrl && k.shift && k.name.eq_ignore_ascii_case("s"));
+        for (key, item) in [
+            ("n", files::NEW),
+            ("o", files::OPEN),
+            ("s", if shift_s { files::SAVE_AS } else { files::SAVE }),
+            ("q", files::QUIT),
+        ] {
+            if f.take_key(key, true) {
+                s.actions.push(Action::File(item.into()));
+            }
+        }
+    }
 
     // ---- left: the mark, the title, File and View ----
     l.mark = Rect::new(r.x, cy - 22.0, 44.0, 44.0);
@@ -197,6 +218,8 @@ pub fn build(f: &mut Frame, r: Rect, s: &mut State) {
     }
 
     // ---- the menus (overlays) ----
+    let recent = s.project.recent.clone();
+    let mut recent_picked = Vec::new();
     let picked = f.menu(FILE_MENU, |m| {
         for (text, hint) in FILE_ITEMS {
             if text.is_empty() {
@@ -204,9 +227,30 @@ pub fn build(f: &mut Frame, r: Rect, s: &mut State) {
             } else {
                 m.item(text, hint);
             }
+            // the recent files, after Open…
+            if *text == "Open…" && !recent.is_empty() {
+                m.separator();
+                m.head("Recent");
+                for p in &recent {
+                    let name = p
+                        .file_stem()
+                        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+                    let dir = p
+                        .parent()
+                        .and_then(|d| d.file_name())
+                        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+                    recent_picked.push((m.item(&name, &dir), p.clone()));
+                }
+            }
         }
     });
-    if let Some(item) = picked {
+    if let Some((_, p)) = recent_picked.iter().find(|(k, _)| k.get()) {
+        s.actions.push(Action::File(format!(
+            "{}{}",
+            files::OPEN_RECENT,
+            p.to_string_lossy()
+        )));
+    } else if let Some(item) = picked {
         s.actions.push(Action::File(item));
     }
     let onion = s.onion;
@@ -227,6 +271,8 @@ pub fn build(f: &mut Frame, r: Rect, s: &mut State) {
         None => {}
     }
     s.header.layout = l;
+    // "Save first?" (New or Open with unsaved changes), over the window
+    files::popup::build(f, Rect::new(r.x, r.y, r.w, r.w * 0.6), s);
 }
 
 /// A text button in the nav (File, View): it opens its menu under it, and closes it when
@@ -495,6 +541,143 @@ mod tests {
         h.s.actions.clear();
         h.click_in(l.export);
         assert_eq!(h.s.actions, vec![Action::File("Export…".into())]);
+        assert!(h.idle());
+    }
+
+    fn ctrl(h: &mut Harness, name: &str, shift: bool) {
+        h.ui.key(pencilpilot_ui::ui::Key {
+            name: name.into(),
+            text: None,
+            ctrl: true,
+            shift,
+        });
+        h.pass();
+    }
+
+    /// The title and the line under it follow the project; Ctrl+N, Ctrl+O, Ctrl+S and
+    /// Ctrl+Shift+S push the File menu's items; the recent files are in the menu.
+    #[test]
+    fn the_project_in_the_header_and_its_shortcuts() {
+        let Some(mut h) = Harness::new() else { return };
+        h.s.project.name = "Fox chase".into();
+        h.s.project.unsaved = true;
+        h.pass();
+        assert_eq!(h.s.header.title, "Fox chase");
+        assert_eq!(h.s.header.subtitle, "Scene 1 · Cut 2 · unsaved");
+        h.s.project.unsaved = false;
+        h.pass();
+        assert_eq!(h.s.header.subtitle, "Scene 1 · Cut 2 · saved");
+        for (k, shift, item) in [
+            ("n", false, files::NEW),
+            ("o", false, files::OPEN),
+            ("s", false, files::SAVE),
+            ("S", true, files::SAVE_AS),
+            ("q", false, files::QUIT),
+        ] {
+            ctrl(&mut h, k, shift);
+            assert_eq!(h.s.actions, vec![Action::File(item.into())], "{k}");
+            h.s.actions.clear();
+        }
+        // the recent files, under Open…
+        h.s.project.recent = vec![
+            "/home/a/films/fox.ppstudio".into(),
+            "/home/a/old/crow.ppstudio".into(),
+        ];
+        let file = h.s.header.layout.file;
+        h.click_in(file);
+        h.pass();
+        h.save("header-file-menu-recent");
+        let top = file.bottom() + 6.0;
+        // New, Open…, a separator, the "Recent" head, then the files
+        let crow = top + 6.0 + 32.0 * 2.0 + 9.0 + 26.0 + 32.0 + 16.0;
+        h.click(file.x + 60.0, crow);
+        assert_eq!(
+            h.s.actions,
+            vec![Action::File(format!(
+                "{}/home/a/old/crow.ppstudio",
+                files::OPEN_RECENT
+            ))]
+        );
+        h.s.actions.clear();
+        // and the items after them where they were, moved down
+        h.click_in(file);
+        h.pass();
+        let save = item_y(top, FILE_ITEMS, "Save") + 9.0 + 26.0 + 64.0;
+        h.click(file.x + 60.0, save);
+        assert_eq!(h.s.actions, vec![Action::File("Save".into())]);
+        assert!(h.idle());
+    }
+
+    fn save_first() -> files::Question {
+        use pencilpilot_ui::ui::Kind;
+        files::Question {
+            title: "Save the changes to Ember first?".into(),
+            detail: "Your changes are lost if you don’t save them.".into(),
+            buttons: vec![
+                ("Save".into(), files::CONFIRM_SAVE.into(), Kind::Primary),
+                (
+                    "Don’t save".into(),
+                    files::CONFIRM_DISCARD.into(),
+                    Kind::Secondary,
+                ),
+                ("Cancel".into(), files::CONFIRM_CANCEL.into(), Kind::Ghost),
+            ],
+            dismiss: files::CONFIRM_CANCEL.into(),
+        }
+    }
+
+    /// "Save first?": Escape or a click outside cancels; its buttons answer.
+    #[test]
+    fn save_first_asks_and_answers() {
+        let Some(mut h) = Harness::new() else { return };
+        h.s.project.asking = Some(save_first());
+        h.pass();
+        h.pass();
+        assert!(h.ui.overlay_open(), "the pop-up shows");
+        h.save("header-save-first");
+        h.key("Escape", None);
+        h.pass();
+        assert_eq!(
+            h.s.actions,
+            vec![Action::File(files::CONFIRM_CANCEL.into())]
+        );
+        h.s.actions.clear();
+        // (the engine clears the question; ask again) a click outside cancels too
+        h.s.project.asking = None;
+        h.pass();
+        h.s.project.asking = Some(save_first());
+        h.pass();
+        h.pass();
+        assert!(h.ui.overlay_open());
+        h.click(20.0, 880.0);
+        h.pass();
+        assert_eq!(
+            h.s.actions,
+            vec![Action::File(files::CONFIRM_CANCEL.into())]
+        );
+        h.s.actions.clear();
+        h.s.project.asking = None;
+        h.pass();
+        // the buttons: Save, Don't save, Cancel along the bottom of the card
+        for (i, answer) in [
+            files::CONFIRM_SAVE,
+            files::CONFIRM_DISCARD,
+            files::CONFIRM_CANCEL,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            h.s.project.asking = Some(save_first());
+            h.pass();
+            h.pass();
+            let r = h.s.project.ask_buttons[i];
+            h.click_in(r);
+            assert_eq!(h.s.actions, vec![Action::File(answer.into())], "button {i}");
+            assert!(!h.ui.overlay_open());
+            h.s.actions.clear();
+            h.s.project.asking = None;
+            h.pass();
+        }
         assert!(h.idle());
     }
 

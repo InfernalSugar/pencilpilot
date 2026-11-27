@@ -30,6 +30,9 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+mod opened;
+pub use opened::{Opened, Tiles, tile_hash};
+
 /// The `format` field of every manifest.
 pub const FORMAT: &str = "ppstudio";
 /// The newest version this crate reads and the one it writes.

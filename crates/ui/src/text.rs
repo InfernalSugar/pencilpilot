@@ -124,6 +124,22 @@ pub struct Text {
     display: String,
     /// the system's fonts, loading
     pending: Option<std::sync::mpsc::Receiver<cosmic_text::fontdb::Database>>,
+    /// text laid out this pass and the one before ([`Text::new_pass`]): the same text in the
+    /// same style isn't shaped again while it stays on screen
+    laid: HashMap<LaidKey, Laid>,
+    laid_before: HashMap<LaidKey, Laid>,
+}
+
+/// What a layout depends on: the text, the style (floats by their bits), the wrap width.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct LaidKey {
+    text: String,
+    font: Font,
+    size: u32,
+    weight: u16,
+    color: [u32; 4],
+    line_height: u32,
+    max_width: Option<u32>,
 }
 
 impl Default for Text {
@@ -174,6 +190,8 @@ impl Text {
             body,
             display,
             pending: None,
+            laid: HashMap::new(),
+            laid_before: HashMap::new(),
         }
     }
 
@@ -203,6 +221,39 @@ impl Text {
     /// Lay `text` out in `style`, wrapped at `max_width` (device pixels; None: a line per
     /// paragraph). New glyphs go into the renderer's atlas.
     pub fn lay_out(
+        &mut self,
+        r: &mut Renderer2d,
+        text: &str,
+        style: &Style,
+        max_width: Option<f32>,
+    ) -> Laid {
+        let key = LaidKey {
+            text: text.to_string(),
+            font: style.font,
+            size: style.size.to_bits(),
+            weight: style.weight,
+            color: style.color.map(f32::to_bits),
+            line_height: style.line_height.to_bits(),
+            max_width: max_width.map(f32::to_bits),
+        };
+        if let Some(l) = self.laid.get(&key) {
+            return l.clone();
+        }
+        if let Some(l) = self.laid_before.remove(&key) {
+            self.laid.insert(key, l.clone());
+            return l;
+        }
+        let l = self.shape(r, text, style, max_width);
+        self.laid.insert(key, l.clone());
+        l
+    }
+
+    /// A new pass begins: layouts not used in the pass before are let go.
+    pub fn new_pass(&mut self) {
+        self.laid_before = std::mem::take(&mut self.laid);
+    }
+
+    fn shape(
         &mut self,
         r: &mut Renderer2d,
         text: &str,

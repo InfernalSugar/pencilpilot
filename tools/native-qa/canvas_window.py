@@ -30,7 +30,7 @@ BTN_LEFT, BTN_MIDDLE = 0x110, 0x112
 KEYSYM = {
     "0": 0x30, "1": 0x31, "plus": 0x2B, "minus": 0x2D, "equal": 0x3D, "h": 0x68,
     "space": 0x20, "Shift_L": 0xFFE1, "Control_L": 0xFFE3, "Escape": 0xFF1B, "z": 0x7A,
-    "Return": 0xFF0D, "m": 0x6D, "v": 0x76, "b": 0x62,
+    "Return": 0xFF0D, "m": 0x6D, "v": 0x76, "b": 0x62, "o": 0x6F, "s": 0x73, "e": 0x65, "q": 0x71, "Right": 0xFF53, "Left": 0xFF51,
 }
 
 
@@ -63,13 +63,22 @@ class Mutter:
 
 
 class App:
-    def __init__(self, binary, mutter, out, tag, secs, workspace="animate"):
+    def __init__(self, binary, mutter, out, tag, secs, workspace="animate", args=(), env=None):
         self.stats = os.path.join(out, f"{tag}-stats.json")
         self.doc = os.path.join(out, f"{tag}-doc.png")
-        env = dict(os.environ, WAYLAND_DISPLAY=mutter.name)
+        # recent files and recovery copies go to the run's folder, never the user's own;
+        # never the system's own windows (file dialog, file manager): dialogs are answered
+        # by PENCILPILOT_DIALOG_ANSWER only (empty: cancelled)
+        env = {**os.environ, "WAYLAND_DISPLAY": mutter.name,
+               "PENCILPILOT_NO_SYSTEM_WINDOWS": "1",
+               "PENCILPILOT_DIALOG_ANSWER": os.environ.get("PENCILPILOT_DIALOG_ANSWER", ""),
+               "XDG_CONFIG_HOME": os.path.join(out, "xdg-config"),
+               "XDG_STATE_HOME": os.path.join(out, "xdg-state"), **(env or {})}
+        env.pop("DISPLAY", None)
+        self.launched_ns = mono_ns()
         self.p = subprocess.Popen(
             [binary, "--quit-after", str(secs), "--stats", self.stats, "--save-doc", self.doc,
-             "--workspace", workspace], env=env)
+             "--workspace", workspace, *args], env=env)
         self.t0 = time.monotonic()
 
     def pss_kib(self):
@@ -666,10 +675,361 @@ def scenario_turn(binary, out):
     return res
 
 
+# ------------------------------------------------------------------------------------------
+# files and export (Phase 2 step 5)
+
+FIXTURES = os.environ.get("PP_QA_FIXTURES", "")
+DROP_CACHES = os.environ.get("DROP_CACHES", "")
+
+
+def first_doc_frame(st, gen=1):
+    """The first frame drawn showing document generation `gen` (docGen: raised on every Open
+    and New)."""
+    for f in st["frames"]:
+        if f.get("docGen", 0) >= gen:
+            return f
+    return None
+
+
+def scenario_open_cli(binary, out):
+    """`pencilpilot <project>`: from the launch to the first shown frame with the project
+    (docGen 1), warm (3 runs) and cold (DROP_CACHES first), for each test project; PSS 3 s in.
+    Budget: open under 400 ms (start under 200 ms warm, 500 ms cold)."""
+    if not FIXTURES:
+        return {"skipped": "PP_QA_FIXTURES not set"}
+    res = {}
+    m = Mutter(out, 165)
+    try:
+        for name in ("empty", "layers20-4k", "drawings500"):
+            path = os.path.join(FIXTURES, f"{name}.ppstudio")
+            runs = []
+            for k in range(4):
+                cold = k == 0 and bool(DROP_CACHES)
+                if k == 0 and not cold:
+                    continue
+                if cold:
+                    subprocess.run(["sh", "-c", DROP_CACHES], check=False)
+                app = App(binary, m, out, f"open-{name}-{k}", 4, "animate", args=[path])
+                time.sleep(3.0)
+                pss = app.pss_kib()
+                try:
+                    st = app.wait()
+                except OSError:
+                    runs.append({"cold": cold, "exit": app.p.returncode, "crashed": True})
+                    continue
+                f = first_doc_frame(st)
+                runs.append({
+                    "cold": cold,
+                    "firstFrameMs": st.get("startupToFirstFrameMs"),
+                    "openedShownMs": f and f["shownNs"] and round((f["shownNs"] - app.launched_ns) / 1e6, 1),
+                    "openedDrawnMs": f and round((f["drawnNs"] - app.launched_ns) / 1e6, 1),
+                    "doc": f and f.get("doc"),
+                    "layers": len(st["state"]["layers"]),
+                    "pssMiB": pss and round(pss / 1024, 1),
+                })
+            warm = [r["openedShownMs"] for r in runs if not r["cold"] and r.get("openedShownMs")]
+            res[name] = {"runs": runs, "warmMedianMs": warm and sorted(warm)[len(warm) // 2],
+                         "budgetMs": 400,
+                         "pass": bool(warm) and all(r.get("openedShownMs") and r["openedShownMs"] < 400 for r in runs)}
+    finally:
+        m.stop()
+    return res
+
+
+def scenario_open_menu(binary, out):
+    """Ctrl+O with the dialog answered at once (PENCILPILOT_DIALOG_ANSWER): from the key to
+    the first shown frame with the project (docGen raised), for each test project, and
+    whether the app survives it."""
+    if not FIXTURES:
+        return {"skipped": "PP_QA_FIXTURES not set"}
+    res = {}
+    for name in ("empty", "drawings500", "layers20-4k"):
+        m = Mutter(out, 165)
+        try:
+            path = os.path.join(FIXTURES, f"{name}.ppstudio")
+            app = App(binary, m, out, f"openmenu-{name}", 6, "animate",
+                      env={"PENCILPILOT_DIALOG_ANSWER": path})
+            time.sleep(1.8)
+            inp = Input()
+            inp.to(560, 330)
+            time.sleep(0.2)
+            inp.key("Control_L", True)
+            t0 = mono_ns()
+            inp.key("o")
+            inp.key("Control_L", False)
+            time.sleep(2.5)
+            inp.stop()
+            app.p.wait()
+            code = app.p.returncode
+            st = json.load(open(app.stats)) if os.path.exists(app.stats) else None
+            f = st and first_doc_frame(st)
+            res[name] = {"exit": code, "stats": st is not None,
+                         "keyToShownMs": f and f["shownNs"] and round((f["shownNs"] - t0) / 1e6, 1),
+                         "doc": f and f.get("doc"),
+                         "layers": st and len(st["state"]["layers"])}
+        finally:
+            m.stop()
+    return res
+
+
+EXPORT_BUTTON = tuple(json.loads(os.environ.get("PP_QA_EXPORT_BUTTON", "[1166, 430]")))
+WEBM_CHOICE = tuple(json.loads(os.environ.get("PP_QA_WEBM_CHOICE", "[0, 0]")))
+
+
+def scenario_export_window(binary, out):
+    """The window while an export runs (drawings500, MP4 and WebM at 1080p), at 165 and 60 Hz:
+    the project opened with Ctrl+O, Ctrl+E, the dialog's Export button clicked
+    (PP_QA_EXPORT_BUTTON: its window point, from export_qa's export_button_position), then
+    strokes on the canvas while it exports: the rate, pen to screen, the export's own time
+    (frames carrying progress), and frames drawn once it's over (idle: none)."""
+    if not FIXTURES:
+        return {"skipped": "PP_QA_FIXTURES not set"}
+    import shutil
+    res = {}
+    for fmt_key, label in (("mp4", "MP4"), ("webm", "WebM")):
+        for hz in (165, 60):
+            m = Mutter(out, hz)
+            try:
+                # (one answer serves every dialog: Open reads the copy, and the export then
+                # writes over it, which is fine for a copy)
+                copy = os.path.join(out, f"export-{fmt_key}-{hz}.ppstudio")
+                shutil.copy(os.path.join(FIXTURES, "drawings500.ppstudio"), copy)
+                app = App(binary, m, out, f"export-{fmt_key}-{hz}", 16, "draw",
+                          env={"PENCILPILOT_DIALOG_ANSWER": copy})
+                time.sleep(1.8)
+                inp = Input()
+                inp.to(560, 330)
+                inp.key("Control_L", True); inp.key("o"); inp.key("Control_L", False)
+                time.sleep(2.0)
+                inp.key("Control_L", True); inp.key("e"); inp.key("Control_L", False)
+                time.sleep(0.5)
+                if fmt_key == "webm":
+                    # the format row: WebM is the second choice (found by looking, below)
+                    inp.to(*WEBM_CHOICE)
+                    inp.button(BTN_LEFT, True); time.sleep(0.03); inp.button(BTN_LEFT, False)
+                    time.sleep(0.2)
+                inp.to(*EXPORT_BUTTON)
+                time.sleep(0.05)
+                inp.button(BTN_LEFT, True); time.sleep(0.03); inp.button(BTN_LEFT, False)
+                t_click = mono_ns()
+                time.sleep(0.15)
+                k = 0
+                while mono_ns() - t_click < 2.2e9:
+                    y = 200 + (k % 12) * 15
+                    inp.drag(line((200, y), (700, y + 30), 150), 0.002)
+                    k += 1
+                t_draw_end = mono_ns()
+                time.sleep(6.0)
+                t_idle0 = mono_ns()
+                time.sleep(3.0)
+                t_idle1 = mono_ns()
+                inp.stop()
+                st = app.wait()
+                fr = st["frames"]
+                exp = [f for f in fr if f.get("export")]
+                during = frame_numbers(st, t_click, t_draw_end)
+                inputs = sorted((f for f in during if f["events"] and f["shownNs"]), key=lambda f: f["shownNs"])
+                last = exp[-1] if exp else None
+                after = [f for f in fr if t_idle0 <= f["drawnNs"] <= t_idle1]
+                res[f"{fmt_key}-{hz}"] = {
+                    "strokes": k,
+                    "exportFrames": len(exp),
+                    "exportProgressLast": last and last["export"],
+                    "exportSeenMs": exp and round((exp[-1]["drawnNs"] - exp[0]["drawnNs"]) / 1e6),
+                    "exportOverlapsStrokes": bool(exp) and exp[0]["drawnNs"] < t_draw_end,
+                    "rate": rate(during, hz), "latency": latency(inputs),
+                    "budgetMs": round(1000 / hz + 4, 2),
+                    "idleFramesAfter3s": len(after),
+                    "outputBytes": os.path.getsize(copy),
+                }
+            finally:
+                m.stop()
+    return res
+
+
+def scenario_quit(binary, out):
+    """Ctrl+Q: with nothing unsaved the app closes at once; after a stroke it stays up
+    (asking "Save first?") until answered (Escape: Cancel keeps it running)."""
+    if not FIXTURES:
+        return {"skipped": "PP_QA_FIXTURES not set"}
+    import shutil
+    res = {}
+    for edited in (False, True):
+        m = Mutter(out, 165)
+        try:
+            copy = os.path.join(out, f"quit-{int(edited)}.ppstudio")
+            shutil.copy(os.path.join(FIXTURES, "drawings500.ppstudio"), copy)
+            app = App(binary, m, out, f"quit-{int(edited)}", 10, "draw",
+                      env={"PENCILPILOT_DIALOG_ANSWER": copy})
+            time.sleep(1.8)
+            inp = Input()
+            inp.to(560, 330)
+            inp.key("Control_L", True); inp.key("o"); inp.key("Control_L", False)
+            time.sleep(1.5)
+            if edited:
+                inp.drag(line((300, 300), (700, 340), 100), 0.002)
+                time.sleep(0.3)
+            t0 = time.monotonic()
+            inp.key("Control_L", True); inp.key("q"); inp.key("Control_L", False)
+            try:
+                app.p.wait(2.0)
+                exited = round(time.monotonic() - t0, 2)
+            except subprocess.TimeoutExpired:
+                exited = None
+            alive_after_escape = None
+            if exited is None:
+                inp.key("Escape")
+                time.sleep(0.5)
+                alive_after_escape = app.p.poll() is None
+            inp.stop()
+            app.p.wait()
+            res["edited" if edited else "clean"] = {
+                "exitedAfterS": exited, "aliveAfterEscape": alive_after_escape,
+                "fileUnchanged": os.path.getsize(copy) == os.path.getsize(os.path.join(FIXTURES, "drawings500.ppstudio"))}
+        finally:
+            m.stop()
+    res["pass"] = (res["clean"]["exitedAfterS"] is not None and res["edited"]["exitedAfterS"] is None
+                   and res["edited"]["aliveAfterEscape"] is True)
+    return res
+
+
+def scenario_scrub(binary, out):
+    """Scrubbing an opened project in the window (Ctrl+O, then Right taps one display frame
+    apart through the cut, then Left back), at 165 and 60 Hz: each step from its key to the
+    first shown frame on that sheet frame, steps never shown, and the rate while stepping.
+    Budget: at the display's rate."""
+    if not FIXTURES:
+        return {"skipped": "PP_QA_FIXTURES not set"}
+    res = {}
+    for name, n in (("drawings500", 99), ("layers20-4k", 23)):
+        for hz in (165, 60):
+            m = Mutter(out, hz)
+            try:
+                path = os.path.join(FIXTURES, f"{name}.ppstudio")
+                app = App(binary, m, out, f"scrub-{name}-{hz}", 12 if name == "drawings500" else 9,
+                          "animate", env={"PENCILPILOT_DIALOG_ANSWER": path})
+                time.sleep(1.8)
+                inp = Input()
+                inp.to(560, 330)
+                inp.key("Control_L", True); inp.key("o"); inp.key("Control_L", False)
+                time.sleep(2.0)
+                period = 1 / hz
+                sent = []
+                for key in ("Right", "Left"):
+                    for _ in range(n):
+                        sent.append((mono_ns(), key))
+                        inp.key(key)
+                        time.sleep(period)
+                    time.sleep(0.5)
+                inp.stop()
+                st = app.wait()
+                fr = sorted((f for f in st["frames"] if f["shownNs"] and f["drawnNs"] >= sent[0][0]),
+                            key=lambda f: f["shownNs"])
+                # step k (1-based) going forward wants sheet frame k, back wants n - k
+                lat, missing = [], 0
+                for i, (t, key) in enumerate(sent):
+                    want = i + 1 if i < n else n - (i - n + 1)
+                    hit = next((f for f in fr if f["shownNs"] >= t and f["sheetFrame"] == want), None)
+                    if hit is None:
+                        missing += 1
+                    else:
+                        lat.append((hit["shownNs"] - t) / 1e6)
+                changes = [f for a, f in zip(fr, fr[1:]) if f["sheetFrame"] != a["sheetFrame"]]
+                gaps = [(b["shownNs"] - a["shownNs"]) / 1e6 for a, b in zip(changes, changes[1:])
+                        if b["shownNs"] - a["shownNs"] < 0.4e9]
+                res[f"{name}-{hz}"] = {
+                    "steps": len(sent), "neverShown": missing,
+                    "keyToShownMs": lat and {"p50": round(pct(lat, 0.5), 2), "p99": round(pct(lat, 0.99), 2), "max": round(max(lat), 2)},
+                    "frameChangeIntervalMs": gaps and {"p50": round(pct(gaps, 0.5), 2), "p99": round(pct(gaps, 0.99), 2), "max": round(max(gaps), 2)},
+                    "displayFrameMs": round(1000 / hz, 2), "budgetMs": round(1000 / hz + 4, 2),
+                    "lastSheetFrame": st["state"]["frame"]}
+            finally:
+                m.stop()
+    return res
+
+
+def tree_pss_kib(pid):
+    """PSS of a process and all its descendants (FFmpeg included), and FFmpeg's share."""
+    kids = {}
+    for d in os.listdir("/proc"):
+        if d.isdigit():
+            try:
+                with open(f"/proc/{d}/stat") as f:
+                    kids.setdefault(int(f.read().rsplit(")", 1)[1].split()[1]), []).append(int(d))
+            except (OSError, ValueError, IndexError):
+                pass
+    tot, ff, todo = 0, 0, [pid]
+    while todo:
+        p = todo.pop()
+        todo.extend(kids.get(p, []))
+        try:
+            with open(f"/proc/{p}/smaps_rollup") as f:
+                v = next((int(l.split()[1]) for l in f if l.startswith("Pss:")), 0)
+            with open(f"/proc/{p}/comm") as f:
+                is_ff = "ffmpeg" in f.read()
+        except OSError:
+            continue
+        tot += v
+        ff += v if is_ff else 0
+    return tot, ff
+
+
+def scenario_export_memory(binary, out):
+    """The whole app's peak memory while exporting MP4 (the app and FFmpeg, PSS sampled every
+    20 ms), from 20 layers at 4K and 500 drawings opened with Ctrl+O. Budget: under 1 GB."""
+    if not FIXTURES:
+        return {"skipped": "PP_QA_FIXTURES not set"}
+    import shutil
+    res = {}
+    for name in ("layers20-4k", "drawings500"):
+        m = Mutter(out, 165)
+        try:
+            copy = os.path.join(out, f"expmem-{name}.ppstudio")
+            shutil.copy(os.path.join(FIXTURES, f"{name}.ppstudio"), copy)
+            mp4 = copy[:-len(".ppstudio")] + ".mp4"
+            if os.path.exists(mp4):
+                os.remove(mp4)
+            app = App(binary, m, out, f"expmem-{name}", 20, "animate",
+                      env={"PENCILPILOT_DIALOG_ANSWER": copy})
+            time.sleep(1.8)
+            inp = Input()
+            inp.to(560, 330)
+            inp.key("Control_L", True); inp.key("o"); inp.key("Control_L", False)
+            time.sleep(2.0)
+            before = tree_pss_kib(app.p.pid)[0]
+            inp.key("Control_L", True); inp.key("e"); inp.key("Control_L", False)
+            time.sleep(0.5)
+            inp.to(*EXPORT_BUTTON)
+            time.sleep(0.05)
+            inp.button(BTN_LEFT, True); time.sleep(0.03); inp.button(BTN_LEFT, False)
+            t0 = time.monotonic()
+            peak, peak_ff, last_size, still = 0, 0, -1, 0
+            while time.monotonic() - t0 < 15:
+                tot, ff = tree_pss_kib(app.p.pid)
+                peak, peak_ff = max(peak, tot), max(peak_ff, ff)
+                size = os.path.getsize(mp4) if os.path.exists(mp4) else -1
+                still = still + 1 if size == last_size and size > 0 and ff == 0 else 0
+                last_size = size
+                if still > 25:
+                    break
+                time.sleep(0.02)
+            took = round(time.monotonic() - t0, 2)
+            inp.stop()
+            app.p.wait()
+            res[name] = {"beforeMiB": round(before / 1024), "peakTreeMiB": round(peak / 1024),
+                         "peakFfmpegMiB": round(peak_ff / 1024), "exportS": took,
+                         "mp4Bytes": last_size, "budgetMiB": 1024, "pass": 0 < peak < 1024 * 1024}
+        finally:
+            m.stop()
+    return res
+
+
 SCENARIOS = {
     "view": scenario_view, "latency": scenario_latency, "viewfps": scenario_viewfps,
     "idle": scenario_idle, "memory": scenario_memory, "playback": scenario_playback,
     "transform": scenario_transform, "turn": scenario_turn,
+    "open-cli": scenario_open_cli, "open-menu": scenario_open_menu,
+    "export-window": scenario_export_window, "quit": scenario_quit, "scrub": scenario_scrub, "export-memory": scenario_export_memory,
     "latency-pauses": scenario_latency_pauses, "latency-continuous": scenario_latency_continuous,
 }
 

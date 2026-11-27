@@ -199,3 +199,29 @@ Each step is its own PR, with tests that need no window on the screen.
 - **Left for the owner's check on a real display:** pen to screen with the Huion on a real
   monitor (headless mutter's input goes through its remote-desktop interface, about 1.5 ms of
   the event-time figures above).
+
+## Phase 2 step 5: files and export (2026-11-27)
+
+- **Projects:** Open, Save, Save as, New, recent files, opening from the command line, an unsaved
+  marker, autosave to a recovery copy (offered back at the next start), Quit and the window's close
+  asking to save first. `.ppstudio` both ways with the current app; a save re-encodes only the
+  tiles that changed and runs off the window thread. Drawings not showing are kept compressed (the
+  file's own tile bytes when unchanged).
+- **Export:** MP4, WebM (FFmpeg), GIF and PNG sequences from a dialog, rendered on their own
+  threads and pool; the window copies at most a few hundred kilobytes a tick.
+- **The system's own windows** (the portal's file dialog, the file manager) open only for a normal
+  start of the app: never in tests or checks (they had reached the owner's screen once).
+- **Measured** (release, headless mutter, private D-Bus):
+
+  | What | Budget | Measured |
+  |---|---|---|
+  | Open, launch to shown (warm / cold) | under 400 ms | 4K 179 / 311 ms, 500 drawings 91 / 210 ms |
+  | Memory with a project open | under 600 / 700 MiB | 360 / 148 MiB |
+  | Export MP4, a frame | 30 ms at 1080p, 100 ms at 4K | 15–18 ms, 47–48 ms |
+  | Export peak, whole process | under 1 GB | 1080p MP4 ≈ 0.48 GB, 4K MP4 ≈ 0.85 GB |
+  | The window while exporting (165 Hz) | the display's rate | 160–163 fps |
+
+- **Open:** scrubbing at 165 Hz (a frame change costs ~12 ms at 1080p, ~49 ms at 4K: layers are
+  composited on the CPU — the next step moves that to the GPU); pen to screen while an export runs
+  (p99 ~16 ms at 165 Hz); 4K WebM peaks ~1.5 GB (libvpx); 4K MP4 files are ~40 % larger at the same
+  quality (the encoder settings that keep the export under 1 GB).

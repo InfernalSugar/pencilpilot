@@ -295,6 +295,7 @@ impl Ui {
             self.pictures.clear();
             self.shown.clear();
         }
+        self.text.new_pass();
         self.now = Instant::now();
         self.next_at = None;
         // Escape closes what's open

@@ -51,6 +51,122 @@ fn copy_tiles(tiles: &TileMap) -> TileMap {
     #[cfg(target_arch = "wasm32")]
     tiles.clone()
 }
+
+/// A drawing's tiles copied out of a painter ([`Painter::drawing_copy`]), for another.
+pub struct DrawingCopy(TileMap);
+
+impl DrawingCopy {
+    /// No paint.
+    pub fn empty() -> DrawingCopy {
+        DrawingCopy(TileMap::new())
+    }
+
+    /// A drawing's decoded tiles (as a frame store decodes them) as a copy.
+    pub fn from_decoded(tiles: Vec<((i32, i32), DecodedTile)>) -> DrawingCopy {
+        DrawingCopy(tiles.into_iter().map(|(k, t)| (k, t.0)).collect())
+    }
+
+    /// Another part of the same drawing's tiles (see [`Painter::drawing_copy_tiles`]).
+    pub fn absorb(&mut self, other: DrawingCopy) {
+        self.0.extend(other.0);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Bytes its tiles' pixels take.
+    pub fn bytes(&self) -> usize {
+        self.0.len() * std::mem::size_of::<TilePixels>()
+    }
+
+    /// `over` laid on this one with `opacity` and `blend`, as merging a layer down does
+    /// (layers that always show the same drawings, merged once for an export). Its tiles
+    /// are taken where nothing's under them (a bottom layer costs nothing).
+    pub fn merge(&mut self, over: DrawingCopy, opacity: f32, blend: Blend) -> TileBuffers {
+        let plain = opacity >= 1.0 && blend == Blend::Normal;
+        let mut laid = Vec::new();
+        for (k, t) in over.0 {
+            match self.0.get(&k) {
+                None if plain => {
+                    self.0.insert(k, t);
+                }
+                _ => laid.push((k, t)),
+            }
+        }
+        for (k, _) in &laid {
+            self.0.entry(*k).or_insert_with(empty_tile);
+        }
+        let over: HashMap<TileKey, Box<TilePixels>> = laid.into_iter().collect();
+        let lay = |k: &TileKey, t: &mut Box<TilePixels>| {
+            let Some(o) = over.get(k) else { return };
+            for (row, orow) in t.iter_mut().zip(o.iter()) {
+                for (px, op) in row.iter_mut().zip(orow.iter()) {
+                    if op[3] != 0 {
+                        *px = merge_pixel(*px, *op, opacity, blend);
+                    }
+                }
+            }
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use rayon::prelude::*;
+            self.0.par_iter_mut().for_each(|(k, t)| lay(k, t));
+        }
+        #[cfg(target_arch = "wasm32")]
+        self.0.iter_mut().for_each(|(k, t)| lay(k, t));
+        // (the tiles laid on others are free for more copies)
+        TileBuffers(over.into_values().collect())
+    }
+
+    /// Its tiles' memory, for more copies.
+    pub fn into_buffers(self) -> TileBuffers {
+        TileBuffers(self.0.into_values().collect())
+    }
+}
+
+/// Tiles' memory to copy drawings into ([`Painter::drawing_copy_tiles`]): made, and touched,
+/// on one thread so that copying into it on another (the window's) costs no page faults
+/// (with the whole process allocating, a fault can wait milliseconds).
+#[derive(Default)]
+pub struct TileBuffers(Vec<Box<TilePixels>>);
+
+impl TileBuffers {
+    /// `n` tiles, every page of them touched now.
+    pub fn allocate(n: usize) -> TileBuffers {
+        TileBuffers(
+            (0..n)
+                .map(|_| {
+                    let mut t = empty_tile();
+                    let p = t.as_mut_ptr() as *mut u8;
+                    for off in (0..std::mem::size_of::<TilePixels>()).step_by(4096) {
+                        // SAFETY: inside the tile's own allocation
+                        unsafe { std::ptr::write_volatile(p.add(off), 0) };
+                    }
+                    t
+                })
+                .collect(),
+        )
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn append(&mut self, mut other: TileBuffers) {
+        self.0.append(&mut other.0);
+    }
+
+    /// At most `n` of them kept (the rest let go).
+    pub fn truncate(&mut self, n: usize) {
+        self.0.truncate(n);
+    }
+}
+
 /// Tiles as they were before an edit. `None` = the tile did not exist.
 type Snapshot = HashMap<TileKey, Option<Box<TilePixels>>>;
 
@@ -4312,6 +4428,79 @@ impl Painter {
         }
     }
 
+    /// A copy of a drawing's tiles as they are (no conversion: a memory copy, on every
+    /// core natively), to hand to another painter on another thread (an export renders
+    /// with its own). `None` for an empty or unknown drawing.
+    pub fn drawing_copy(&self, drawing: u32) -> Option<DrawingCopy> {
+        self.drawing_tiles(drawing)
+            .filter(|t| !t.is_empty())
+            .map(|t| DrawingCopy(copy_tiles(t)))
+    }
+
+    /// Where a drawing has tiles (column, row), sorted; none for an unknown drawing. To
+    /// copy a big drawing a part at a time ([`Painter::drawing_copy_tiles`]), or with
+    /// [`Painter::drawing_tile_rgba`] to read one a tile at a time (on many threads at once).
+    pub fn drawing_tile_keys(&self, drawing: u32) -> Vec<(i32, i32)> {
+        let mut k: Vec<(i32, i32)> = self
+            .drawing_tiles(drawing)
+            .map(|t| t.keys().copied().collect())
+            .unwrap_or_default();
+        k.sort_unstable();
+        k
+    }
+
+    /// A copy of some of a drawing's tiles (those it has of `keys`), as
+    /// [`Painter::drawing_copy`] copies them all.
+    /// The copies go into `spare`'s memory while it lasts.
+    pub fn drawing_copy_tiles(
+        &self,
+        drawing: u32,
+        keys: &[(i32, i32)],
+        spare: &mut TileBuffers,
+    ) -> DrawingCopy {
+        let Some(tiles) = self.drawing_tiles(drawing) else {
+            return DrawingCopy::empty();
+        };
+        // (on this thread alone: a part is small, and other threads may be busy)
+        DrawingCopy(
+            keys.iter()
+                .filter_map(|k| {
+                    let t = tiles.get(k)?;
+                    let copy = match spare.0.pop() {
+                        Some(mut b) => {
+                            *b = **t;
+                            b
+                        }
+                        None => t.clone(),
+                    };
+                    Some((*k, copy))
+                })
+                .collect(),
+        )
+    }
+
+    /// A kept drawing taken out (not showing; the export's own painter lets go of what it's
+    /// done with this way, to reuse the memory).
+    pub fn take_drawing_copy(&mut self, drawing: u32) -> Option<DrawingCopy> {
+        self.cels.remove(&drawing).map(DrawingCopy)
+    }
+
+    /// Counts changes to the history (new edits, undo, redo): a drawing copied a part at a
+    /// time is copied again if it moved meanwhile.
+    pub fn edits(&self) -> u64 {
+        self.edits
+    }
+
+    /// Keep a copied drawing here (as one not showing), replacing one with that id. Not
+    /// an undo step; [`Painter::forget_drawing`] lets go of it.
+    pub fn put_drawing_copy(&mut self, drawing: u32, copy: DrawingCopy) {
+        if drawing == 0 {
+            return;
+        }
+        self.next_drawing = self.next_drawing.max(drawing + 1);
+        self.cels.insert(drawing, copy.0);
+    }
+
     /// Whether a drawing has no paint.
     pub fn drawing_empty(&self, drawing: u32) -> bool {
         self.drawing_tiles(drawing).is_none_or(|t| t.is_empty())
@@ -4374,6 +4563,34 @@ impl Painter {
     /// tiles with paint; empty for an unknown drawing.
     pub fn drawing_tiles_packed(&self, drawing: u32) -> Vec<u8> {
         pack_tiles(self.drawing_tiles(drawing))
+    }
+
+    /// A copy of a layer's mask as it is (a memory copy; None: it has none), for another
+    /// painter ([`Painter::put_mask_copy`]).
+    pub fn mask_copy(&self, id: u32) -> Option<DrawingCopy> {
+        self.index_of(id)
+            .and_then(|i| self.layers[i].mask_surface())
+            .map(|m| DrawingCopy(copy_tiles(&m.tiles)))
+    }
+
+    /// Give a layer a copied mask, without an undo step. False if busy or no such layer.
+    pub fn put_mask_copy(&mut self, id: u32, mask: DrawingCopy) -> bool {
+        if !self.idle() {
+            return false;
+        }
+        let Some(idx) = self.index_of(id) else {
+            return false;
+        };
+        self.mark_layer(idx);
+        let l = &mut self.layers[idx];
+        l.set_editing(false);
+        l.mask = Some(UndoSurface {
+            tiles: mask.0,
+            ..UndoSurface::default()
+        });
+        self.unstyle(idx);
+        self.mark_layer(idx);
+        true
     }
 
     /// A layer's mask as packed tiles (as [`Painter::drawing_tiles_packed`]); empty when the
@@ -4487,6 +4704,83 @@ impl Painter {
             self.cels.insert(drawing, tiles);
         }
         true
+    }
+
+    /// Load a drawing from tiles decoded ahead of time ([`decode_tile`], on any thread),
+    /// replacing it if it exists. Not an undo step. False if busy.
+    pub fn put_drawing_decoded(
+        &mut self,
+        drawing: u32,
+        tiles: Vec<((i32, i32), DecodedTile)>,
+    ) -> bool {
+        if drawing == 0 || !self.idle() {
+            return false;
+        }
+        let tiles: TileMap = tiles.into_iter().map(|(k, t)| (k, t.0)).collect();
+        self.next_drawing = self.next_drawing.max(drawing + 1);
+        if let Some(idx) = self.layers.iter().position(|l| l.drawing == drawing) {
+            let l = &mut self.layers[idx];
+            let keys: Vec<TileKey> = l
+                .surface
+                .tiles
+                .keys()
+                .chain(tiles.keys())
+                .copied()
+                .collect();
+            l.surface.tiles = tiles;
+            l.surface.dirty.extend(keys);
+        } else {
+            self.cels.insert(drawing, tiles);
+        }
+        true
+    }
+
+    /// One of a drawing's tiles as straight-alpha sRGB RGBA8 (64×64, 16 384 bytes) into
+    /// `out`. False if there's no such tile or nothing in it.
+    pub fn drawing_tile_rgba(&self, drawing: u32, key: (i32, i32), out: &mut [u8]) -> bool {
+        let ts = TILE_SIZE;
+        let Some(px) = self.drawing_tiles(drawing).and_then(|t| t.get(&key)) else {
+            return false;
+        };
+        if out.len() != ts * ts * 4 {
+            return false;
+        }
+        let mut any = false;
+        for (row, line) in px.iter().enumerate() {
+            for (col, p) in line.iter().enumerate() {
+                let i = (row * ts + col) * 4;
+                if p[3] == 0 {
+                    out[i..i + 4].fill(0);
+                    continue;
+                }
+                any = true;
+                let (c, a) = unpremul_srgb(*p);
+                out[i] = (c[0] * 255.0).round() as u8;
+                out[i + 1] = (c[1] * 255.0).round() as u8;
+                out[i + 2] = (c[2] * 255.0).round() as u8;
+                out[i + 3] = (a * 255.0).round() as u8;
+            }
+        }
+        any
+    }
+
+    /// Take a kept drawing (one not showing on any layer) out of the painter, its tiles
+    /// as they are (to keep elsewhere, and put back with [`Painter::put_drawing_decoded`]).
+    /// None if it's showing or unknown.
+    pub fn take_drawing(&mut self, drawing: u32) -> Option<Vec<((i32, i32), DecodedTile)>> {
+        let tiles = self.cels.remove(&drawing)?;
+        Some(
+            tiles
+                .into_iter()
+                .map(|(k, t)| (k, DecodedTile(t)))
+                .collect(),
+        )
+    }
+
+    /// Changes to the history so far (new edits, undo, redo): a different number, the
+    /// layers or drawings may have changed.
+    pub fn history_changes(&self) -> u64 {
+        self.edits
     }
 
     /// Whether the engine holds a drawing's pixels (showing or kept).
@@ -4992,6 +5286,26 @@ impl Painter {
             })
             .collect();
         let (ow, oh) = (w.div_ceil(k), h.div_ceil(k));
+        if k == 1 {
+            // full size: the tiles straight in (no sums: a 4K frame's would be 130 MB)
+            let mut out = vec![255u8; w * h * 4];
+            for t in done {
+                let tw = (t.x1 - t.x0) as usize;
+                for (row, y) in (t.y0..t.y1).enumerate() {
+                    let o = (y as usize * w + t.x0 as usize) * 4;
+                    let dst = &mut out[o..o + tw * 4];
+                    for (d, px) in dst
+                        .as_chunks_mut::<4>()
+                        .0
+                        .iter_mut()
+                        .zip(&t.px[row * tw..(row + 1) * tw])
+                    {
+                        d[..3].copy_from_slice(px);
+                    }
+                }
+            }
+            return out;
+        }
         let mut sum = vec![[0u32; 4]; ow * oh];
         for t in done {
             let tw = (t.x1 - t.x0) as usize;
@@ -5706,6 +6020,98 @@ pub(crate) fn pack_tiles(tiles: Option<&TileMap>) -> Vec<u8> {
     out
 }
 
+/// A tile ready for the painter ([`Painter::put_drawing_decoded`]).
+#[derive(Clone)]
+pub struct DecodedTile(Box<TilePixels>);
+
+impl DecodedTile {
+    /// Bytes in [`DecodedTile::to_bytes`].
+    pub const BYTES: usize = TILE_SIZE * TILE_SIZE * 8;
+
+    /// The painter's own pixels, as bytes (premultiplied 15-bit, little-endian): kept
+    /// elsewhere and put back with [`DecodedTile::from_bytes`], nothing changes (no
+    /// rounding, unlike going through RGBA8).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(Self::BYTES);
+        for row in self.0.iter() {
+            for p in row {
+                for c in p {
+                    out.extend_from_slice(&c.to_le_bytes());
+                }
+            }
+        }
+        out
+    }
+
+    /// Back from [`DecodedTile::to_bytes`] (None: the wrong size).
+    pub fn from_bytes(b: &[u8]) -> Option<DecodedTile> {
+        if b.len() != Self::BYTES {
+            return None;
+        }
+        let mut t = empty_tile();
+        let ts = TILE_SIZE;
+        for (k, px) in b.as_chunks::<8>().0.iter().enumerate() {
+            t[k / ts][k % ts] = [
+                u16::from_le_bytes([px[0], px[1]]),
+                u16::from_le_bytes([px[2], px[3]]),
+                u16::from_le_bytes([px[4], px[5]]),
+                u16::from_le_bytes([px[6], px[7]]),
+            ];
+        }
+        Some(DecodedTile(t))
+    }
+}
+
+/// A 64×64 tile of straight-alpha sRGB RGBA8 (16 384 bytes, as the project file keeps
+/// them) made ready for the painter: the slow part of loading a drawing, done on any
+/// thread. None if it's the wrong size or has nothing in it.
+pub fn decode_tile(rgba: &[u8]) -> Option<DecodedTile> {
+    let ts = TILE_SIZE;
+    if rgba.len() != ts * ts * 4 {
+        return None;
+    }
+    // (the sRGB curve of each 8-bit value, looked up: the same numbers premul_fix15 makes,
+    // without three powf a pixel)
+    static LINEAR: std::sync::OnceLock<[f32; 256]> = std::sync::OnceLock::new();
+    let lin = LINEAR.get_or_init(|| {
+        std::array::from_fn(|v| hokusai::color::srgb_to_linear((v as f32 / 255.0).clamp(0.0, 1.0)))
+    });
+    let one = hokusai::fix15::FIX15_ONE as f32;
+    let mut t = empty_tile();
+    let mut any = false;
+    for (k, px) in rgba.as_chunks::<4>().0.iter().enumerate() {
+        if px[3] == 0 {
+            continue;
+        }
+        any = true;
+        let a = (px[3] as f32 / 255.0).clamp(0.0, 1.0);
+        let f = |v: u8| (lin[v as usize] * a * one).round() as u16;
+        t[k / ts][k % ts] = [f(px[0]), f(px[1]), f(px[2]), (a * one).round() as u16];
+    }
+    any.then_some(DecodedTile(t))
+}
+
+/// A decoded tile back as straight-alpha sRGB RGBA8 (16 384 bytes into `out`), as the
+/// painter would give it ([`Painter::drawing_tile_rgba`]): what a tile looks like after a
+/// trip through the painter.
+pub fn encode_tile(t: &DecodedTile, out: &mut [u8]) {
+    let ts = TILE_SIZE;
+    for (row, line) in t.0.iter().enumerate() {
+        for (col, p) in line.iter().enumerate() {
+            let i = (row * ts + col) * 4;
+            if p[3] == 0 {
+                out[i..i + 4].fill(0);
+                continue;
+            }
+            let (c, a) = unpremul_srgb(*p);
+            out[i] = (c[0] * 255.0).round() as u8;
+            out[i + 1] = (c[1] * 255.0).round() as u8;
+            out[i + 2] = (c[2] * 255.0).round() as u8;
+            out[i + 3] = (a * 255.0).round() as u8;
+        }
+    }
+}
+
 /// Tiles packed as [`pack_tiles`] makes them, back (None if the bytes don't add up).
 pub(crate) fn unpack_tiles(packed: &[u8]) -> Option<TileMap> {
     let ts = TILE_SIZE;
@@ -5734,6 +6140,32 @@ pub(crate) fn unpack_tiles(packed: &[u8]) -> Option<TileMap> {
         tiles.insert((tx, ty), t);
     }
     Some(tiles)
+}
+
+#[cfg(test)]
+mod decode_tile_tests {
+    use super::*;
+
+    /// The quick decoding gives what premul_fix15 gives, for every value and alpha.
+    #[test]
+    fn decode_tile_matches_premul_fix15() {
+        let mut px = vec![0u8; TILE_SIZE * TILE_SIZE * 4];
+        for a in 0..=255u32 {
+            for (k, p) in px.chunks_mut(4).enumerate() {
+                let v = ((k as u32 * 7 + a) % 256) as u8;
+                p.copy_from_slice(&[v, 255 - v, v / 2, a as u8]);
+            }
+            let Some(t) = decode_tile(&px) else {
+                assert_eq!(a, 0);
+                continue;
+            };
+            for (k, p) in px.chunks(4).enumerate() {
+                let c = [p[0], p[1], p[2]].map(|v| v as f32 / 255.0);
+                let want = premul_fix15(c, p[3] as f32 / 255.0);
+                assert_eq!(t.0[k / TILE_SIZE][k % TILE_SIZE], want, "{p:?}");
+            }
+        }
+    }
 }
 
 #[cfg(test)]

@@ -8,11 +8,14 @@
 //!   frame shows each layer's drawing exposed there (`show_drawings`), so strokes land on
 //!   it; painting a blank frame starts a drawing there; playback moves the frame on time;
 //!   the onion skin is laid under the picture.
-//! - [`thumbs`]: the drawings' small pictures for the strips; [`demo`]: the demo's drawings.
+//! - [`thumbs`]: the drawings' small pictures for the strips; [`demo`]: the demo's drawings;
+//! - [`store`]: drawings not showing, kept compressed out of the painter ([`load_drawings`]
+//!   brings them back, [`trim`] puts away what isn't wanted).
 
 mod demo;
 mod onion;
 pub mod sheet;
+pub mod store;
 mod thumbs;
 
 use std::collections::{BTreeSet, HashMap};
@@ -104,7 +107,21 @@ pub struct Frames {
     /// what the last tick saw (when it's all the same and nothing is due, a tick does
     /// nothing): the frame, the active layer, the layers' count
     seen: (u32, usize, usize),
+    /// drawings not showing, kept compressed ([`store`])
+    pub store: store::Store,
+    /// the painter's history count when last seen (an edit: that drawing's kept copy is
+    /// out of date)
+    edits_seen: u64,
+    /// the next and previous frames' drawings, being decoded on another thread
+    prefetch: Option<(Vec<u32>, std::sync::mpsc::Receiver<Prefetched>)>,
+    /// when to put away drawings not wanted any more
+    trim_at: Option<Instant>,
+    /// drawings around the frame are to be asked for ahead (next tick)
+    ahead_due: bool,
 }
+
+/// Drawings decoded ahead (on another thread).
+type Prefetched = Vec<(u32, Vec<((i32, i32), brush::DecodedTile)>)>;
 
 impl Frames {
     /// A drawing changed: its thumbnail and onion skin are made again.
@@ -330,12 +347,197 @@ fn show(e: &mut Engine, s: &State) -> bool {
         e.frames.asked = pairs;
         return false;
     }
+    let wanted: Vec<u32> = pairs.chunks(2).map(|p| p[1]).collect();
+    load_drawings(e, &wanted);
     if e.painter.show_drawings(&pairs) {
         e.frames.asked = pairs;
         e.frames.showed = true;
+        // (putting away waits for a pause: frame changes stay quick while scrubbing; unless
+        // too much is held meanwhile)
+        if held_tiles(e) > HELD_TILES || s.playing {
+            trim(e, s);
+        } else {
+            e.frames.trim_at = Some(Instant::now() + TRIM_AFTER);
+        }
         return true;
     }
     false
+}
+
+/// Drawings brought back into the painter from the store (those it hasn't), decoded on
+/// every core.
+pub fn load_drawings(e: &mut Engine, drawings: &[u32]) {
+    use rayon::prelude::*;
+    let mut missing: Vec<u32> = drawings
+        .iter()
+        .copied()
+        .filter(|&d| {
+            d != 0 && !e.painter.has_drawing(d) && e.frames.store.drawings.contains_key(&d)
+        })
+        .collect();
+    missing.sort_unstable();
+    missing.dedup();
+    if missing.is_empty() {
+        return;
+    }
+    let st = &e.frames.store;
+    let back: Prefetched = store::pool().install(|| {
+        missing
+            .par_iter()
+            .filter_map(|&d| Some((d, st.decode(d)?)))
+            .collect()
+    });
+    for (d, tiles) in back {
+        e.painter.put_drawing_decoded(d, tiles);
+    }
+}
+
+impl Engine {
+    /// A drawing's pixels (straight RGBA8, document size), wherever it is: brought back into
+    /// the painter if it was put away ([`store`]). For anything reading drawings not
+    /// showing (exporting, checks).
+    pub fn drawing_rgba(&mut self, d: u32) -> Vec<u8> {
+        load_drawings(self, &[d]);
+        self.painter.drawing_rgba(d)
+    }
+
+    /// Whether a drawing has no paint, wherever it is.
+    pub fn drawing_empty(&mut self, d: u32) -> bool {
+        load_drawings(self, &[d]);
+        self.painter.drawing_empty(d)
+    }
+}
+
+/// The drawings the painter must hold now: those showing, the onion skin's, and those its
+/// undo history changes (an undo on another frame changes them in place).
+fn wanted(e: &Engine, s: &State) -> std::collections::HashSet<u32> {
+    let mut keep: std::collections::HashSet<u32> =
+        e.painter.history_drawings().into_iter().collect();
+    keep.extend(e.frames.asked.chunks(2).map(|p| p[1]));
+    if s.onion && !s.playing {
+        keep.extend(onion_entries(s).chunks(3).map(|e| e[0]));
+    }
+    keep.extend(neighbours(e, s));
+    keep
+}
+
+/// Tiles of drawings brought in ahead, at most (64 MB in the painter).
+const AHEAD_TILES: usize = 2048;
+/// Drawings not wanted any more are put away this long after the last frame change, or at
+/// once past this many tiles held that the store has too.
+const TRIM_AFTER: Duration = Duration::from_millis(30);
+const HELD_TILES: usize = 2 * AHEAD_TILES;
+
+/// Tiles the painter holds of drawings not showing that the store has too.
+fn held_tiles(e: &Engine) -> usize {
+    e.painter
+        .kept_drawings()
+        .iter()
+        .map(|d| e.frames.store.tiles_of(*d))
+        .sum()
+}
+
+/// The drawings of the frames around this one, nearest first (ahead only while playing):
+/// brought in ahead, on other threads, so going there needn't wait. The next and previous
+/// frames' always; farther ones while they fit in [`AHEAD_TILES`].
+fn neighbours(e: &Engine, s: &State) -> Vec<u32> {
+    let n = s.frames.max(1);
+    let steps: Vec<i64> = if s.playing {
+        (1..=8).collect()
+    } else {
+        vec![1, -1, 2, -2, 3, -3, 4, 5]
+    };
+    let mut v: Vec<u32> = Vec::new();
+    let mut tiles = 0;
+    for (i, k) in steps.into_iter().enumerate() {
+        let f = (s.frame as i64 + k).rem_euclid(n as i64) as u32;
+        let here: Vec<u32> = s
+            .sheet
+            .tracks
+            .iter()
+            .map(|t| t.drawing_at(f))
+            .filter(|d| *d != 0 && !v.contains(d))
+            .collect();
+        let cost: usize = here.iter().map(|d| e.frames.store.tiles_of(*d)).sum();
+        if i >= 2 && tiles + cost > AHEAD_TILES {
+            break;
+        }
+        tiles += cost;
+        v.extend(here);
+    }
+    v
+}
+
+/// Drawings decoded ahead arrive; more are asked for. Whether some arrived.
+fn prefetch(e: &mut Engine, s: &State, more: bool) -> bool {
+    let mut arrived = false;
+    if let Some((_, rx)) = &e.frames.prefetch {
+        match rx.try_recv() {
+            Ok(done) => {
+                for (d, tiles) in done {
+                    // (still wanted, still as kept: not changed meanwhile)
+                    if !e.painter.has_drawing(d) && e.frames.store.drawings.contains_key(&d) {
+                        e.painter.put_drawing_decoded(d, tiles);
+                        arrived = true;
+                    }
+                }
+                e.frames.prefetch = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
+            Err(_) => e.frames.prefetch = None,
+        }
+    }
+    if e.is_stroking() || !more {
+        e.frames.ahead_due = !more;
+        return arrived;
+    }
+    e.frames.ahead_due = false;
+    let jobs: Vec<store::Job> = neighbours(e, s)
+        .into_iter()
+        .filter(|d| !e.painter.has_drawing(*d))
+        .filter_map(|d| e.frames.store.job(d))
+        .collect();
+    if !jobs.is_empty() {
+        let ds = jobs.iter().map(|j| j.d).collect();
+        let (tx, rx) = std::sync::mpsc::channel();
+        store::ahead_pool().spawn(move || {
+            let done: Prefetched = jobs.iter().map(|j| (j.d, j.decode())).collect();
+            let _ = tx.send(done);
+        });
+        e.frames.prefetch = Some((ds, rx));
+    }
+    arrived
+}
+
+/// Drawings the painter holds but nothing wants now go to the store (compressed; those
+/// already kept there, unchanged, are just let go).
+pub fn trim(e: &mut Engine, s: &State) {
+    use rayon::prelude::*;
+    if e.is_stroking() || e.painter.transforming() || e.float.is_some() {
+        return;
+    }
+    // (changed since they were kept: the painter's is the one)
+    for d in e.painter.history_drawings() {
+        e.frames.store.drawings.remove(&d);
+    }
+    let keep = wanted(e, s);
+    let mut pack = Vec::new();
+    for d in e.painter.kept_drawings() {
+        if keep.contains(&d) {
+            continue;
+        }
+        if e.frames.store.drawings.contains_key(&d) {
+            e.painter.forget_drawing(d);
+        } else if let Some(t) = e.painter.take_drawing(d) {
+            pack.push((d, t));
+        }
+    }
+    let packed: Vec<(u32, std::sync::Arc<store::Kept>)> = store::pool().install(|| {
+        pack.into_par_iter()
+            .map(|(d, t)| (d, std::sync::Arc::new(store::Store::pack(t))))
+            .collect()
+    });
+    e.frames.store.drawings.extend(packed);
 }
 
 /// Where playback is `n` frames after `from` in `a..=b`, and whether it stopped there.
@@ -593,6 +795,8 @@ fn other(e: &mut Engine, s: &mut State, name: &str, id: u32) -> Option<Option<u3
         }
         ops::PASTE_FRAMES => {
             let (from, cels) = e.frames.clipboard.clone()?;
+            let ds: Vec<u32> = cels.iter().map(|c| c.drawing).collect();
+            load_drawings(e, &ds);
             let mut f = frame;
             for mut c in cels {
                 // a drawing shows on one layer only: another layer gets copies
@@ -644,6 +848,9 @@ fn other(e: &mut Engine, s: &mut State, name: &str, id: u32) -> Option<Option<u3
             e.painter.delete_layer(id);
         }
         ops::DUPLICATE_LAYER => {
+            let ds = t.drawings();
+            load_drawings(e, &ds);
+            let t = s.sheet.tracks.get_mut(li)?;
             let copy = e.painter.duplicate_layer(id);
             if copy == 0 {
                 return Some(None);
@@ -756,6 +963,14 @@ pub fn tick(e: &mut Engine, s: &mut State, now: Instant) -> bool {
     {
         e.painter.commit_layer_props(id, b);
     }
+    // an edit: the drawing's kept copy is out of date
+    let hc = e.painter.history_changes();
+    if hc != e.frames.edits_seen {
+        e.frames.edits_seen = hc;
+        for d in [e.painter.undo_drawing(), e.painter.redo_drawing()] {
+            e.frames.store.drawings.remove(&d);
+        }
+    }
     // thumbnails
     let h = history(e);
     if h != e.frames.history {
@@ -774,6 +989,7 @@ pub fn tick(e: &mut Engine, s: &mut State, now: Instant) -> bool {
         if !s.playing
             && let Some(d) = e.frames.stale.pop_first()
         {
+            load_drawings(e, &[d]);
             let showing = e
                 .painter
                 .layers()
@@ -785,11 +1001,21 @@ pub fn tick(e: &mut Engine, s: &mut State, now: Instant) -> bool {
                 s.sheet.thumbs.insert(d, t);
                 changed = true;
             }
+            if showing.is_none() {
+                trim(e, s);
+            }
         }
     }
     e.frames.seen = (s.frame, s.active_layer, e.painter.layers().len());
-    if show(e, s) {
+    let shown = show(e, s);
+    if shown {
         changed = true;
+    }
+    // (more asked for once this frame is drawn, not while: their decoding would slow it)
+    prefetch(e, s, !shown);
+    if e.frames.trim_at.is_some_and(|t| now >= t || s.playing) {
+        e.frames.trim_at = None;
+        trim(e, s);
     }
     changed
         || before
@@ -809,6 +1035,9 @@ pub fn tick(e: &mut Engine, s: &mut State, now: Instant) -> bool {
 fn idle(e: &Engine, s: &State) -> bool {
     let f = &e.frames;
     f.ready
+        && f.prefetch.is_none()
+        && f.trim_at.is_none()
+        && !f.ahead_due
         && !s.playing
         && f.play.is_none()
         && f.opacity.is_none()
@@ -844,6 +1073,14 @@ pub fn next_tick_at(e: &Engine, s: &State) -> Option<Instant> {
     }
     if let Some((_, _, t)) = &f.opacity {
         at.push(*t + OPACITY_SETTLES);
+    }
+    // decoding ahead: its results are picked up at the next tick; while playing that's the next
+    // frame's own (no extra wakes between frames), otherwise every few milliseconds
+    if (f.prefetch.is_some() || f.ahead_due) && !s.playing {
+        at.push(now + Duration::from_millis(4));
+    }
+    if let Some(t) = f.trim_at {
+        at.push(t);
     }
     if !e.is_stroking() {
         let adopt = s.sheet.tracks.iter().any(|t| {
@@ -884,6 +1121,11 @@ pub fn picture<'a>(e: &'a mut Engine, s: &State) -> Option<(&'a [u8], [u32; 4])>
     } else {
         Vec::new()
     };
+    if !entries.is_empty() && entries != f.onion_key {
+        let ds: Vec<u32> = entries.chunks(3).map(|x| x[0]).collect();
+        load_drawings(e, &ds);
+    }
+    let f = &mut e.frames;
     if entries.is_empty() {
         f.onion_key.clear();
         let was = std::mem::take(&mut f.onion_shown);

@@ -154,6 +154,19 @@ pub struct State {
     pub moving: Option<crate::shell::view::Moving>,
     /// the canvas tools' state the interface shows (`shell/engine/tools.rs`)
     pub tooling: crate::shell::engine::tools::ToolsUi,
+    /// the open project on disk (`shell/engine/files.rs`)
+    pub project: crate::shell::engine::files::ProjectUi,
+    /// the export dialog and progress (`shell/engine/export.rs`)
+    pub export: crate::shell::engine::export::ExportUi,
+    /// time to close the app (a Quit asked and answered: set by the files part, or at once
+    /// when nothing handles Quit)
+    pub quit_now: bool,
+    /// which document is open: goes up each time one replaces another (a project opened, a
+    /// new one; set by the files part)
+    pub doc_id: u32,
+    /// an export running: frames done and how many in all (set by the export, for the
+    /// window's `--stats` too)
+    pub export_progress: Option<(u32, u32)>,
     /// the cut's exposure sheet (`shell/engine/frames.rs`)
     pub sheet: crate::shell::engine::frames::Sheet,
     /// each shell piece's own state (each defined in its piece's file)
@@ -265,6 +278,11 @@ impl State {
             view: Default::default(),
             moving: None,
             tooling: Default::default(),
+            project: Default::default(),
+            export: Default::default(),
+            export_progress: None,
+            doc_id: 0,
+            quit_now: false,
             sheet: crate::shell::engine::frames::Sheet::demo(),
             header: Default::default(),
             tools: Default::default(),
