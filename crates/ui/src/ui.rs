@@ -339,12 +339,65 @@ impl Frame<'_> {
         self.ui.theme
     }
 
+    /// How many quads are drawn so far (overlays aside): to draw something else (the
+    /// canvas) between those and what comes after.
+    pub fn mark(&self) -> usize {
+        self.quads.len()
+    }
+
+    /// The pointer, as this pass sees it.
+    pub fn pointer(&self) -> Pointer {
+        self.ui.pointer
+    }
+
+    /// The keys pressed since the last pass that nothing has taken yet (a focused text
+    /// field takes the ones it types with).
+    pub fn keys(&self) -> &[Key] {
+        &self.ui.keys
+    }
+
+    /// Logical → device pixels (for clipping in device pixels, say).
+    pub fn scale(&self) -> f32 {
+        self.ui.scale
+    }
+
+    /// A text field has the keyboard (shortcuts should leave letters alone).
+    pub fn typing(&self) -> bool {
+        self.ui.focus.is_some()
+    }
+
+    /// Take a key pressed since the last pass, by name (case aside), with or without Ctrl:
+    /// a shortcut handled here, so nothing else acts on it. True if it was pressed.
+    pub fn take_key(&mut self, name: &str, ctrl: bool) -> bool {
+        let i = self
+            .ui
+            .keys
+            .iter()
+            .position(|k| k.name.eq_ignore_ascii_case(name) && k.ctrl == ctrl);
+        i.map(|i| self.ui.keys.remove(i)).is_some()
+    }
+
+    /// Draw with `build` above everything (as menus and pop-ups are). Mark the area it
+    /// covers with [`Frame::block`] so the pointer there is its.
+    pub fn overlay(&mut self, build: impl FnOnce(&mut Self)) {
+        let was = self.in_overlay;
+        self.in_overlay = true;
+        build(self);
+        self.in_overlay = was;
+    }
+
+    /// The pointer over `rect` belongs to what's drawn there in the overlay.
+    pub fn block(&mut self, rect: Rect) {
+        self.blocking.push(rect);
+    }
+
     fn s(&self) -> f32 {
         self.ui.scale
     }
 
-    /// Draw a quad given in logical pixels.
-    fn put(&mut self, q: Quad) {
+    /// Draw a quad given in logical pixels (above what's drawn so far; in an overlay, above
+    /// everything).
+    pub fn put(&mut self, q: Quad) {
         let q = q.scaled(self.s());
         if self.in_overlay {
             self.overlay.push(q)
@@ -369,7 +422,8 @@ impl Frame<'_> {
         }
     }
 
-    fn put_text(&mut self, laid: &Laid, x: f32, y: f32) {
+    /// Draw laid-out text with its top-left at (x, y), logical pixels.
+    pub fn put_text(&mut self, laid: &Laid, x: f32, y: f32) {
         let s = self.s();
         let (dx, dy) = ((x * s).round(), (y * s).round());
         let qs = laid.quads.iter().map(|q| q.moved(dx, dy));
@@ -451,6 +505,16 @@ impl Frame<'_> {
         self.areas.pop();
     }
 
+    /// Lay widgets out in `rect` in a column (`gap` apart).
+    pub fn column_in(&mut self, rect: Rect, gap: f32, build: impl FnOnce(&mut Self)) {
+        self.within(rect, Dir::Column, gap, build);
+    }
+
+    /// Lay widgets out in `rect` in a row (`gap` apart).
+    pub fn row_in(&mut self, rect: Rect, gap: f32, build: impl FnOnce(&mut Self)) {
+        self.within(rect, Dir::Row, gap, build);
+    }
+
     /// A row `h` tall; its widgets go left to right (after [`Frame::then_right`], right to
     /// left from the end).
     pub fn row(&mut self, h: f32, build: impl FnOnce(&mut Self)) {
@@ -492,7 +556,8 @@ impl Frame<'_> {
         self.in_overlay || !self.ui.blocking.iter().any(|b| b.contains(p.x, p.y))
     }
 
-    fn interact(&mut self, id: Id, rect: Rect) -> Response {
+    /// Hover, press, click and right-click on `rect` for the widget `id` (custom widgets).
+    pub fn interact(&mut self, id: Id, rect: Rect) -> Response {
         let p = self.ui.pointer;
         let over = p.inside && rect.contains(p.x, p.y) && self.pointer_free();
         if over && p.pressed {
@@ -565,12 +630,25 @@ impl Frame<'_> {
     /// An icon (an SVG path in a 24 × 24 box, drawn as a 2 px line, as the design's icons)
     /// at `size`, in `color`.
     pub fn icon(&mut self, path: &str, x: f32, y: f32, size: f32, color: [f32; 4]) {
+        self.icon_stroked(path, x, y, size, color, 2.0);
+    }
+
+    /// An icon with its line `stroke` wide (in the 24 × 24 box; the design's are 2 to 2.2).
+    pub fn icon_stroked(
+        &mut self,
+        path: &str,
+        x: f32,
+        y: f32,
+        size: f32,
+        color: [f32; 4],
+        stroke: f32,
+    ) {
         let px = (size * self.s()).round().max(1.0) as u32;
-        let key = (path.to_string(), px);
+        let key = (format!("{path}|{stroke}"), px);
         let uv = match self.ui.icons.get(&key) {
             Some(uv) => *uv,
             None => {
-                let uv = raster_icon(path, px)
+                let uv = raster_icon(path, px, stroke)
                     .and_then(|rgba| self.ui.text.place(self.r, px, px, &rgba));
                 self.ui.icons.insert(key, uv);
                 uv
@@ -637,7 +715,7 @@ impl Frame<'_> {
     }
 
     /// A tooltip under `anchor`, once the pointer has rested on `owner` a moment.
-    fn tooltip(&mut self, owner: Id, text: &str, anchor: Rect) {
+    pub fn tooltip(&mut self, owner: Id, text: &str, anchor: Rect) {
         let Some((h, since)) = self.ui.hover else {
             // the hover starts this pass: the tooltip is due after the delay
             self.ui.next_at = Some(self.ui.now + TOOLTIP_DELAY);
@@ -658,7 +736,15 @@ impl Frame<'_> {
         let laid = self.lay_out(text, &Style::body(t.small, t.on_dark).weight(500), None);
         let (w, hh) = (laid.width + 16.0, laid.height + 10.0);
         let x = anchor.x + (anchor.w - w) / 2.0;
-        let y = anchor.bottom() + 6.0;
+        // under its anchor, or above it where there's no room below
+        let root = self.areas[0].rect;
+        let below = anchor.bottom() + 6.0;
+        let y = if below + hh > root.bottom() - 4.0 {
+            anchor.y - 6.0 - hh
+        } else {
+            below
+        };
+        let x = x.clamp(root.x + 4.0, (root.right() - w - 4.0).max(root.x + 4.0));
         self.put(Quad::rect(x, y, w, hh, t.ink).radius(8.0));
         self.put_text(&laid, x + 8.0, y + 5.0);
         self.in_overlay = was;
@@ -862,7 +948,28 @@ impl Frame<'_> {
         };
         let laid = self.lay_out(shown, &Style::body(t.text, color), None);
         let ty = rect.y + (rect.h - laid.height) / 2.0;
+        // long text stays inside the field
+        let start = if self.in_overlay {
+            self.overlay.len()
+        } else {
+            self.quads.len()
+        };
         self.put_text(&laid, rect.x + pad, ty);
+        let sc = self.s();
+        let clip = [
+            (rect.x + pad / 2.0) * sc,
+            rect.y * sc,
+            (rect.right() - pad / 2.0) * sc,
+            rect.bottom() * sc,
+        ];
+        let list = if self.in_overlay {
+            &mut self.overlay
+        } else {
+            &mut self.quads
+        };
+        for q in &mut list[start..] {
+            *q = q.clip(clip);
+        }
         if focused {
             let before = if value.is_empty() {
                 0.0
@@ -976,8 +1083,15 @@ impl Frame<'_> {
                     ),
                     None,
                 ),
-                Item::Entry { text, hint, .. } => (
-                    self.lay_out(text, &Style::body(13.0, t.on_dark).weight(500), None),
+                Item::Entry {
+                    text, hint, danger, ..
+                } => (
+                    self.lay_out(
+                        text,
+                        &Style::body(13.0, if *danger { hex(0xFF7A66) } else { t.on_dark })
+                            .weight(500),
+                        None,
+                    ),
                     (!hint.is_empty())
                         .then(|| self.lay_out(hint, &Style::body(12.0, t.on_dark_muted), None)),
                 ),
@@ -1000,7 +1114,11 @@ impl Frame<'_> {
             })
             .collect();
         let h = heights.iter().sum::<f32>() + 2.0 * pad;
-        let rect = Rect::new(o.x, o.y, w, h);
+        // inside the window: moved left or up where it would run off
+        let root = self.areas[0].rect;
+        let x = o.x.min(root.right() - w - 8.0).max(root.x + 8.0);
+        let y = o.y.min(root.bottom() - h - 8.0).max(root.y + 8.0);
+        let rect = Rect::new(x, y, w, h);
         self.blocking.push(rect);
         self.put(
             Quad::rect(rect.x, rect.y + 8.0, w, h, alpha(t.ink, 0.18))
@@ -1057,6 +1175,46 @@ impl Frame<'_> {
         }
     }
 
+    /// A pop-up card at `rect` (logical) if `name` is open, with the corners, padding and
+    /// border given (a border of 0: none). Its content goes in a column.
+    pub fn popup_at(
+        &mut self,
+        name: &str,
+        rect: Rect,
+        radius: f32,
+        pad: f32,
+        border: f32,
+        build: impl FnOnce(&mut Self),
+    ) {
+        if !self.is_open(name) {
+            return;
+        }
+        let t = self.ui.theme;
+        let was = self.in_overlay;
+        self.in_overlay = true;
+        self.blocking.push(rect);
+        self.put(
+            Quad::rect(
+                rect.x + 2.0,
+                rect.y + 8.0,
+                rect.w,
+                rect.h,
+                alpha(t.ink, 0.14),
+            )
+            .radius(radius)
+            .shadow(18.0),
+        );
+        let card = Quad::rect(rect.x, rect.y, rect.w, rect.h, t.card).radius(radius);
+        self.put(if border > 0.0 {
+            card.border(border, t.line)
+        } else {
+            card
+        });
+        let inner = rect.inset(pad);
+        self.within(inner, Dir::Column, t.gap * 1.5, build);
+        self.in_overlay = was;
+    }
+
     /// A pop-up card under `anchor` (logical), `w` × `h`, if `name` is open.
     pub fn popup(
         &mut self,
@@ -1104,6 +1262,7 @@ enum Item {
     Entry {
         text: String,
         hint: String,
+        danger: bool,
         picked: std::rc::Rc<std::cell::Cell<bool>>,
     },
     Sep,
@@ -1133,6 +1292,19 @@ impl Menu {
         self.items.push(Item::Entry {
             text: text.into(),
             hint: hint.into(),
+            danger: false,
+            picked: p.clone(),
+        });
+        Picked(p)
+    }
+
+    /// An item that destroys something (Delete…), in red.
+    pub fn danger(&mut self, text: &str, hint: &str) -> Picked {
+        let p = std::rc::Rc::new(std::cell::Cell::new(false));
+        self.items.push(Item::Entry {
+            text: text.into(),
+            hint: hint.into(),
+            danger: true,
             picked: p.clone(),
         });
         Picked(p)
@@ -1140,10 +1312,10 @@ impl Menu {
 }
 
 /// An icon path (24 × 24 box) as a white mask, `px` square, 2 px lines with round ends.
-fn raster_icon(path: &str, px: u32) -> Option<Vec<u8>> {
+fn raster_icon(path: &str, px: u32, stroke: f32) -> Option<Vec<u8>> {
     use resvg::{tiny_skia, usvg};
     let svg = format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="{path}" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>"##
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="{path}" fill="none" stroke="#fff" stroke-width="{stroke}" stroke-linecap="round" stroke-linejoin="round"/></svg>"##
     );
     let tree = usvg::Tree::from_str(&svg, &usvg::Options::default()).ok()?;
     let mut pixmap = tiny_skia::Pixmap::new(px, px)?;

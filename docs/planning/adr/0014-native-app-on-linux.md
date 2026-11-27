@@ -115,3 +115,29 @@ Each step is its own PR, with tests that need no window on the screen.
      The owner chose to go on to Phase 2 meanwhile.
    - **Measured in the baseline:** pen to screen, frame rate at 60/75/100/165 Hz, memory and power.
    - **Phase 1's gate:** pen to screen within budget on the owner's Huion.
+
+## Phase 2: the interface (2026-11-27)
+
+1. **The renderer** (`crates/gpu` `Renderer2d`): one WGSL shader, compiled to SPIR-V by naga at build
+   time. It draws rounded rectangles, borders, soft shadows, glyphs, pictures, gradients and
+   clipping. The drawing is copied in between the interface's layers.
+2. **Text** (`crates/ui` `text`): cosmic-text, with Inter and Bricolage Grotesque built in.
+   - The system's fonts (Arabic, emoji and the rest) load in the background.
+   - The design's fonts are ready in under 1 ms.
+3. **Widgets** (`crates/ui` `ui`): the design's tokens, buttons, toggles, sliders, tabs, icon
+   buttons (the design's line icons via resvg), tooltips, text fields, scroll areas, menus and
+   pop-ups.
+   - **Overlays** take the pointer from what's under them.
+   - **Idle:** a pass that would draw what's already on screen draws nothing.
+4. **The shell** (`apps/native`): the header, the tool column, the canvas card, the side panel and
+   each workspace's bottom strip (the Option 2 timeline with icon trays, the frame strip, the
+   drawings to colour, the review player), as the design's FullApp artboards. Each piece has its
+   own file and state.
+   - The canvas card paints with the brush engine (pen or mouse). Undo and Redo work.
+   - **Measured** on headless mutter at 165 Hz:
+     - 24 ms from start to the first frame shown (budget under 200 ms);
+     - 25.6 MB PSS (budget under 150 MB empty; today's app 419 MB);
+     - 3 frames drawn in 6 s with no input, all at startup (the first frame, a settling pass,
+       and the system fonts joining), and none after.
+   - **Screenshots:** `pencilpilot --render <workspace> --out x.png` draws any workspace off-screen,
+     so checks need no window.
