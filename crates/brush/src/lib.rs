@@ -4489,6 +4489,75 @@ impl Painter {
         true
     }
 
+    /// Load a drawing from tiles decoded ahead of time ([`decode_tile`], on any thread),
+    /// replacing it if it exists. Not an undo step. False if busy.
+    pub fn put_drawing_decoded(&mut self, drawing: u32, tiles: Vec<((i32, i32), DecodedTile)>) -> bool {
+        if drawing == 0 || !self.idle() {
+            return false;
+        }
+        let tiles: TileMap = tiles.into_iter().map(|(k, t)| (k, t.0)).collect();
+        self.next_drawing = self.next_drawing.max(drawing + 1);
+        if let Some(idx) = self.layers.iter().position(|l| l.drawing == drawing) {
+            let l = &mut self.layers[idx];
+            let keys: Vec<TileKey> = l
+                .surface
+                .tiles
+                .keys()
+                .chain(tiles.keys())
+                .copied()
+                .collect();
+            l.surface.tiles = tiles;
+            l.surface.dirty.extend(keys);
+        } else {
+            self.cels.insert(drawing, tiles);
+        }
+        true
+    }
+
+    /// Where a drawing has tiles (column, row), in no particular order; none for an
+    /// unknown drawing. With [`Painter::drawing_tile_rgba`], a drawing read a tile at a
+    /// time (on many threads at once, say).
+    pub fn drawing_tile_keys(&self, drawing: u32) -> Vec<(i32, i32)> {
+        self.drawing_tiles(drawing)
+            .map(|t| t.keys().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// One of a drawing's tiles as straight-alpha sRGB RGBA8 (64×64, 16 384 bytes) into
+    /// `out`. False if there's no such tile or nothing in it.
+    pub fn drawing_tile_rgba(&self, drawing: u32, key: (i32, i32), out: &mut [u8]) -> bool {
+        let ts = TILE_SIZE;
+        let Some(px) = self.drawing_tiles(drawing).and_then(|t| t.get(&key)) else {
+            return false;
+        };
+        if out.len() != ts * ts * 4 {
+            return false;
+        }
+        let mut any = false;
+        for (row, line) in px.iter().enumerate() {
+            for (col, p) in line.iter().enumerate() {
+                let i = (row * ts + col) * 4;
+                if p[3] == 0 {
+                    out[i..i + 4].fill(0);
+                    continue;
+                }
+                any = true;
+                let (c, a) = unpremul_srgb(*p);
+                out[i] = (c[0] * 255.0).round() as u8;
+                out[i + 1] = (c[1] * 255.0).round() as u8;
+                out[i + 2] = (c[2] * 255.0).round() as u8;
+                out[i + 3] = (a * 255.0).round() as u8;
+            }
+        }
+        any
+    }
+
+    /// Changes to the history so far (new edits, undo, redo): a different number, the
+    /// layers or drawings may have changed.
+    pub fn history_changes(&self) -> u64 {
+        self.edits
+    }
+
     /// Whether the engine holds a drawing's pixels (showing or kept).
     pub fn has_drawing(&self, drawing: u32) -> bool {
         drawing != 0
@@ -5704,6 +5773,31 @@ pub(crate) fn pack_tiles(tiles: Option<&TileMap>) -> Vec<u8> {
         }
     }
     out
+}
+
+/// A tile ready for the painter ([`Painter::put_drawing_decoded`]).
+#[derive(Clone)]
+pub struct DecodedTile(Box<TilePixels>);
+
+/// A 64×64 tile of straight-alpha sRGB RGBA8 (16 384 bytes, as the project file keeps
+/// them) made ready for the painter: the slow part of loading a drawing, done on any
+/// thread. None if it's the wrong size or has nothing in it.
+pub fn decode_tile(rgba: &[u8]) -> Option<DecodedTile> {
+    let ts = TILE_SIZE;
+    if rgba.len() != ts * ts * 4 {
+        return None;
+    }
+    let mut t = empty_tile();
+    let mut any = false;
+    for (k, px) in rgba.as_chunks::<4>().0.iter().enumerate() {
+        if px[3] == 0 {
+            continue;
+        }
+        any = true;
+        let c = [px[0], px[1], px[2]].map(|v| v as f32 / 255.0);
+        t[k / ts][k % ts] = premul_fix15(c, px[3] as f32 / 255.0);
+    }
+    any.then_some(DecodedTile(t))
 }
 
 /// Tiles packed as [`pack_tiles`] makes them, back (None if the bytes don't add up).
