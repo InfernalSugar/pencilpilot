@@ -350,6 +350,37 @@ impl Frame<'_> {
         self.ui.pointer
     }
 
+    /// The keys pressed since the last pass that nothing has taken yet (a focused text
+    /// field takes the ones it types with).
+    pub fn keys(&self) -> &[Key] {
+        &self.ui.keys
+    }
+
+    /// Take a key pressed since the last pass, by name (case aside), with or without Ctrl:
+    /// a shortcut handled here, so nothing else acts on it. True if it was pressed.
+    pub fn take_key(&mut self, name: &str, ctrl: bool) -> bool {
+        let i = self
+            .ui
+            .keys
+            .iter()
+            .position(|k| k.name.eq_ignore_ascii_case(name) && k.ctrl == ctrl);
+        i.map(|i| self.ui.keys.remove(i)).is_some()
+    }
+
+    /// Draw with `build` above everything (as menus and pop-ups are). Mark the area it
+    /// covers with [`Frame::block`] so the pointer there is its.
+    pub fn overlay(&mut self, build: impl FnOnce(&mut Self)) {
+        let was = self.in_overlay;
+        self.in_overlay = true;
+        build(self);
+        self.in_overlay = was;
+    }
+
+    /// The pointer over `rect` belongs to what's drawn there in the overlay.
+    pub fn block(&mut self, rect: Rect) {
+        self.blocking.push(rect);
+    }
+
     fn s(&self) -> f32 {
         self.ui.scale
     }
@@ -589,12 +620,25 @@ impl Frame<'_> {
     /// An icon (an SVG path in a 24 × 24 box, drawn as a 2 px line, as the design's icons)
     /// at `size`, in `color`.
     pub fn icon(&mut self, path: &str, x: f32, y: f32, size: f32, color: [f32; 4]) {
+        self.icon_stroked(path, x, y, size, color, 2.0);
+    }
+
+    /// An icon with its line `stroke` wide (in the 24 × 24 box; the design's are 2 to 2.2).
+    pub fn icon_stroked(
+        &mut self,
+        path: &str,
+        x: f32,
+        y: f32,
+        size: f32,
+        color: [f32; 4],
+        stroke: f32,
+    ) {
         let px = (size * self.s()).round().max(1.0) as u32;
-        let key = (path.to_string(), px);
+        let key = (format!("{path}|{stroke}"), px);
         let uv = match self.ui.icons.get(&key) {
             Some(uv) => *uv,
             None => {
-                let uv = raster_icon(path, px)
+                let uv = raster_icon(path, px, stroke)
                     .and_then(|rgba| self.ui.text.place(self.r, px, px, &rgba));
                 self.ui.icons.insert(key, uv);
                 uv
@@ -1081,6 +1125,46 @@ impl Frame<'_> {
         }
     }
 
+    /// A pop-up card at `rect` (logical) if `name` is open, with the corners, padding and
+    /// border given (a border of 0: none). Its content goes in a column.
+    pub fn popup_at(
+        &mut self,
+        name: &str,
+        rect: Rect,
+        radius: f32,
+        pad: f32,
+        border: f32,
+        build: impl FnOnce(&mut Self),
+    ) {
+        if !self.is_open(name) {
+            return;
+        }
+        let t = self.ui.theme;
+        let was = self.in_overlay;
+        self.in_overlay = true;
+        self.blocking.push(rect);
+        self.put(
+            Quad::rect(
+                rect.x + 2.0,
+                rect.y + 8.0,
+                rect.w,
+                rect.h,
+                alpha(t.ink, 0.14),
+            )
+            .radius(radius)
+            .shadow(18.0),
+        );
+        let card = Quad::rect(rect.x, rect.y, rect.w, rect.h, t.card).radius(radius);
+        self.put(if border > 0.0 {
+            card.border(border, t.line)
+        } else {
+            card
+        });
+        let inner = rect.inset(pad);
+        self.within(inner, Dir::Column, t.gap * 1.5, build);
+        self.in_overlay = was;
+    }
+
     /// A pop-up card under `anchor` (logical), `w` × `h`, if `name` is open.
     pub fn popup(
         &mut self,
@@ -1164,10 +1248,10 @@ impl Menu {
 }
 
 /// An icon path (24 × 24 box) as a white mask, `px` square, 2 px lines with round ends.
-fn raster_icon(path: &str, px: u32) -> Option<Vec<u8>> {
+fn raster_icon(path: &str, px: u32, stroke: f32) -> Option<Vec<u8>> {
     use resvg::{tiny_skia, usvg};
     let svg = format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="{path}" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>"##
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="{path}" fill="none" stroke="#fff" stroke-width="{stroke}" stroke-linecap="round" stroke-linejoin="round"/></svg>"##
     );
     let tree = usvg::Tree::from_str(&svg, &usvg::Options::default()).ok()?;
     let mut pixmap = tiny_skia::Pixmap::new(px, px)?;

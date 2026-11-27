@@ -7,7 +7,7 @@ use crate::state::Workspace;
 
 pub const MARGIN: f32 = 16.0;
 pub const GAP: f32 = 12.0;
-pub const HEADER_H: f32 = 48.0;
+pub const HEADER_H: f32 = 56.0;
 pub const TOOLS_W: f32 = 64.0;
 pub const PANEL_W: f32 = 320.0;
 
