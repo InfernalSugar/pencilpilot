@@ -56,3 +56,54 @@ fn a_linear_image_is_always_possible() {
     let px = gpu.read_back(&img).unwrap();
     assert_eq!(&px[..4], [0xff, 0, 0, 0xff]);
 }
+
+#[test]
+fn the_canvas_shows_what_was_painted() {
+    use pencilpilot_gpu::Canvas;
+    let Some(gpu) = gpu() else { return };
+    let (w, h) = (64u32, 32u32);
+    // paper, then two changes: a red square and a blue one
+    let mut rgba: Vec<u8> = (0..w * h).flat_map(|_| [246, 244, 239, 255]).collect();
+    let mut canvas = Canvas::new(&gpu, w, h).unwrap();
+    canvas.upload_all(&rgba);
+    let frame = DmabufImage::new(&gpu, 80, 40, &[]).unwrap(); // a bit bigger than the canvas
+    gpu.show(
+        &mut canvas,
+        &frame,
+        [26.0 / 255.0, 26.0 / 255.0, 26.0 / 255.0, 1.0],
+    )
+    .unwrap();
+    let put = |rgba: &mut Vec<u8>, x0: u32, y0: u32, c: [u8; 4]| {
+        for y in y0..y0 + 4 {
+            for x in x0..x0 + 4 {
+                let i = ((y * w + x) * 4) as usize;
+                rgba[i..i + 4].copy_from_slice(&c);
+            }
+        }
+    };
+    put(&mut rgba, 2, 2, [232, 73, 47, 255]);
+    canvas.upload(&rgba, 2, 2, 4, 4);
+    gpu.show(
+        &mut canvas,
+        &frame,
+        [26.0 / 255.0, 26.0 / 255.0, 26.0 / 255.0, 1.0],
+    )
+    .unwrap();
+    put(&mut rgba, 40, 20, [61, 107, 255, 255]);
+    canvas.upload(&rgba, 40, 20, 4, 4);
+    gpu.show(
+        &mut canvas,
+        &frame,
+        [26.0 / 255.0, 26.0 / 255.0, 26.0 / 255.0, 1.0],
+    )
+    .unwrap();
+    let px = gpu.read_back(&frame).unwrap();
+    let at = |x: u32, y: u32| {
+        let i = ((y * 80 + x) * 4) as usize;
+        [px[i + 2], px[i + 1], px[i], px[i + 3]] // BGRA → RGBA
+    };
+    assert_eq!(at(3, 3), [232, 73, 47, 255], "the first change");
+    assert_eq!(at(41, 21), [61, 107, 255, 255], "the second change");
+    assert_eq!(at(20, 10), [246, 244, 239, 255], "the paper");
+    assert_eq!(at(70, 35), [26, 26, 26, 255], "around the canvas");
+}

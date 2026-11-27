@@ -1,0 +1,11 @@
+[package]
+name = "pencilpilot-ui"
+description = "The native app's interface: text (cosmic-text: shaping, right-to-left, fallback fonts, emoji), layout and widgets, drawn by pencilpilot-gpu"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[dependencies]
+pencilpilot-gpu = { path = "../gpu" }
+cosmic-text = "0.19"

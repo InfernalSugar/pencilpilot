@@ -47,6 +47,9 @@ impl<T> Ctx<T> for std::result::Result<T, vk::Result> {
 }
 
 /// The device extensions needed to hand images to the compositor.
+mod draw2d;
+pub use draw2d::{ATLAS_SIZE, Quad, Renderer2d};
+
 const DEVICE_EXTENSIONS: &[&CStr] = &[
     khr::external_memory_fd::NAME,
     ext::external_memory_dma_buf::NAME,
@@ -165,9 +168,12 @@ impl Gpu {
             .queue_family_index(family)
             .queue_priorities(&prio)];
         let ext_ptrs: Vec<_> = DEVICE_EXTENSIONS.iter().map(|e| e.as_ptr()).collect();
+        // dynamic rendering (Vulkan 1.3): the interface draws without render-pass objects
+        let mut v13 = vk::PhysicalDeviceVulkan13Features::default().dynamic_rendering(true);
         let dci = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queues)
-            .enabled_extension_names(&ext_ptrs);
+            .enabled_extension_names(&ext_ptrs)
+            .push_next(&mut v13);
         let device =
             unsafe { instance.create_device(physical, &dci, None) }.ctx("vkCreateDevice")?;
 
@@ -658,3 +664,327 @@ impl Drop for DmabufImage {
 /// DRM's fourcc for BGRA8 in memory (little-endian ARGB8888), without and with alpha.
 pub const DRM_FORMAT_XRGB8888: u32 = u32::from_le_bytes(*b"XR24");
 pub const DRM_FORMAT_ARGB8888: u32 = u32::from_le_bytes(*b"AR24");
+
+/// The picture being drawn, kept on the GPU. Changed rectangles go up from the CPU (where
+/// the brush engine paints) and each frame copies the picture into the image on screen.
+pub struct Canvas {
+    device: ash::Device,
+    image: vk::Image,
+    memory: vk::DeviceMemory,
+    staging: vk::Buffer,
+    staging_memory: vk::DeviceMemory,
+    mapped: *mut u8,
+    pub width: u32,
+    pub height: u32,
+    /// rectangles written to the staging buffer, not yet copied to the image
+    pending: Vec<[u32; 4]>,
+    /// the image has been given its first contents
+    ready: bool,
+}
+
+impl Canvas {
+    pub fn new(gpu: &Gpu, width: u32, height: u32) -> Result<Canvas> {
+        let d = &gpu.device;
+        unsafe {
+            let image = d
+                .create_image(
+                    &vk::ImageCreateInfo::default()
+                        .image_type(vk::ImageType::TYPE_2D)
+                        .format(vk::Format::B8G8R8A8_UNORM)
+                        .extent(vk::Extent3D {
+                            width,
+                            height,
+                            depth: 1,
+                        })
+                        .mip_levels(1)
+                        .array_layers(1)
+                        .samples(vk::SampleCountFlags::TYPE_1)
+                        .tiling(vk::ImageTiling::OPTIMAL)
+                        .usage(
+                            vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::TRANSFER_SRC,
+                        )
+                        .initial_layout(vk::ImageLayout::UNDEFINED),
+                    None,
+                )
+                .ctx("vkCreateImage")?;
+            let req = d.get_image_memory_requirements(image);
+            let ty = gpu
+                .memory_type(req.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL)
+                .ok_or(Error::Missing("GPU memory for the canvas"))?;
+            let memory = d
+                .allocate_memory(
+                    &vk::MemoryAllocateInfo::default()
+                        .allocation_size(req.size)
+                        .memory_type_index(ty),
+                    None,
+                )
+                .ctx("vkAllocateMemory")?;
+            d.bind_image_memory(image, memory, 0)
+                .ctx("vkBindImageMemory")?;
+            let size = width as u64 * height as u64 * 4;
+            let staging = d
+                .create_buffer(
+                    &vk::BufferCreateInfo::default()
+                        .size(size)
+                        .usage(vk::BufferUsageFlags::TRANSFER_SRC),
+                    None,
+                )
+                .ctx("vkCreateBuffer")?;
+            let req = d.get_buffer_memory_requirements(staging);
+            let ty = gpu
+                .memory_type(
+                    req.memory_type_bits,
+                    vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+                )
+                .ok_or(Error::Missing("host-visible memory"))?;
+            let staging_memory = d
+                .allocate_memory(
+                    &vk::MemoryAllocateInfo::default()
+                        .allocation_size(req.size)
+                        .memory_type_index(ty),
+                    None,
+                )
+                .ctx("vkAllocateMemory")?;
+            d.bind_buffer_memory(staging, staging_memory, 0)
+                .ctx("vkBindBufferMemory")?;
+            let mapped = d
+                .map_memory(staging_memory, 0, size, vk::MemoryMapFlags::empty())
+                .ctx("vkMapMemory")? as *mut u8;
+            Ok(Canvas {
+                device: d.clone(),
+                image,
+                memory,
+                staging,
+                staging_memory,
+                mapped,
+                width,
+                height,
+                pending: Vec::new(),
+                ready: false,
+            })
+        }
+    }
+
+    /// Take a rectangle of `rgba` (the whole picture, straight RGBA8, `width` × `height`):
+    /// it goes up with the next frame.
+    pub fn upload(&mut self, rgba: &[u8], x: u32, y: u32, w: u32, h: u32) {
+        let (x1, y1) = ((x + w).min(self.width), (y + h).min(self.height));
+        if x >= x1 || y >= y1 {
+            return;
+        }
+        assert_eq!(rgba.len(), (self.width * self.height * 4) as usize);
+        let stride = self.width as usize * 4;
+        for row in y..y1 {
+            let a = row as usize * stride + x as usize * 4;
+            let b = row as usize * stride + x1 as usize * 4;
+            // SAFETY: inside the mapped staging buffer, the same size and layout as `rgba`
+            let dst = unsafe { std::slice::from_raw_parts_mut(self.mapped.add(a), b - a) };
+            // RGBA → BGRA (the screen's order)
+            for (d, s) in dst
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(rgba[a..b].as_chunks::<4>().0)
+            {
+                d[0] = s[2];
+                d[1] = s[1];
+                d[2] = s[0];
+                d[3] = s[3];
+            }
+        }
+        self.pending.push([x, y, x1 - x, y1 - y]);
+    }
+
+    /// The whole picture, to start with (or after a big change).
+    pub fn upload_all(&mut self, rgba: &[u8]) {
+        self.pending.clear();
+        self.upload(rgba, 0, 0, self.width, self.height);
+    }
+}
+
+impl Drop for Canvas {
+    fn drop(&mut self) {
+        // SAFETY: made by this device; the Gpu outlives its canvas
+        unsafe {
+            let _ = self.device.device_wait_idle();
+            self.device.unmap_memory(self.staging_memory);
+            self.device.destroy_buffer(self.staging, None);
+            self.device.free_memory(self.staging_memory, None);
+            self.device.destroy_image(self.image, None);
+            self.device.free_memory(self.memory, None);
+        }
+    }
+}
+
+impl Gpu {
+    /// A frame: what changed on the canvas goes up, the canvas is copied into `frame` (the
+    /// rest filled with `around`), and the frame is handed to the compositor. Returns when
+    /// the GPU has finished.
+    pub fn show(&self, canvas: &mut Canvas, frame: &DmabufImage, around: [f32; 4]) -> Result<()> {
+        let fam = self.family;
+        let regions: Vec<vk::BufferImageCopy> = canvas
+            .pending
+            .drain(..)
+            .map(|[x, y, w, h]| {
+                vk::BufferImageCopy::default()
+                    .buffer_offset((y as u64 * canvas.width as u64 + x as u64) * 4)
+                    .buffer_row_length(canvas.width)
+                    .image_subresource(COLOR_LAYERS)
+                    .image_offset(vk::Offset3D {
+                        x: x as i32,
+                        y: y as i32,
+                        z: 0,
+                    })
+                    .image_extent(vk::Extent3D {
+                        width: w,
+                        height: h,
+                        depth: 1,
+                    })
+            })
+            .collect();
+        let was_ready = canvas.ready;
+        canvas.ready = true;
+        let (cw, ch) = (
+            canvas.width.min(frame.width),
+            canvas.height.min(frame.height),
+        );
+        let fills = frame.width > canvas.width || frame.height > canvas.height;
+        self.run(|d, cmd| unsafe {
+            // the canvas: take the changes
+            let from = if was_ready {
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL
+            } else {
+                vk::ImageLayout::UNDEFINED
+            };
+            if !regions.is_empty() {
+                Self::barrier(
+                    d,
+                    cmd,
+                    canvas.image,
+                    (
+                        from,
+                        vk::AccessFlags::TRANSFER_READ,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::QUEUE_FAMILY_IGNORED,
+                    ),
+                    (
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        vk::AccessFlags::TRANSFER_WRITE,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::QUEUE_FAMILY_IGNORED,
+                    ),
+                );
+                d.cmd_copy_buffer_to_image(
+                    cmd,
+                    canvas.staging,
+                    canvas.image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &regions,
+                );
+                Self::barrier(
+                    d,
+                    cmd,
+                    canvas.image,
+                    (
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        vk::AccessFlags::TRANSFER_WRITE,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::QUEUE_FAMILY_IGNORED,
+                    ),
+                    (
+                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        vk::AccessFlags::TRANSFER_READ,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::QUEUE_FAMILY_IGNORED,
+                    ),
+                );
+            }
+            // the frame: back from the compositor (its old contents dropped), filled, handed back
+            Self::barrier(
+                d,
+                cmd,
+                frame.image,
+                (
+                    vk::ImageLayout::UNDEFINED,
+                    vk::AccessFlags::empty(),
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    vk::QUEUE_FAMILY_FOREIGN_EXT,
+                ),
+                (
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    vk::AccessFlags::TRANSFER_WRITE,
+                    vk::PipelineStageFlags::TRANSFER,
+                    fam,
+                ),
+            );
+            if fills {
+                d.cmd_clear_color_image(
+                    cmd,
+                    frame.image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &vk::ClearColorValue { float32: around },
+                    &[COLOR_RANGE],
+                );
+                Self::barrier(
+                    d,
+                    cmd,
+                    frame.image,
+                    (
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        vk::AccessFlags::TRANSFER_WRITE,
+                        vk::PipelineStageFlags::TRANSFER,
+                        fam,
+                    ),
+                    (
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        vk::AccessFlags::TRANSFER_WRITE,
+                        vk::PipelineStageFlags::TRANSFER,
+                        fam,
+                    ),
+                );
+            }
+            if was_ready || !regions.is_empty() {
+                let copy = vk::ImageCopy::default()
+                    .src_subresource(COLOR_LAYERS)
+                    .dst_subresource(COLOR_LAYERS)
+                    .extent(vk::Extent3D {
+                        width: cw,
+                        height: ch,
+                        depth: 1,
+                    });
+                d.cmd_copy_image(
+                    cmd,
+                    canvas.image,
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    frame.image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &[copy],
+                );
+            }
+            Self::barrier(
+                d,
+                cmd,
+                frame.image,
+                (
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    vk::AccessFlags::TRANSFER_WRITE,
+                    vk::PipelineStageFlags::TRANSFER,
+                    fam,
+                ),
+                (
+                    vk::ImageLayout::GENERAL,
+                    vk::AccessFlags::empty(),
+                    vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                    vk::QUEUE_FAMILY_FOREIGN_EXT,
+                ),
+            );
+        })
+    }
+}
+
+const COLOR_LAYERS: vk::ImageSubresourceLayers = vk::ImageSubresourceLayers {
+    aspect_mask: vk::ImageAspectFlags::COLOR,
+    mip_level: 0,
+    base_array_layer: 0,
+    layer_count: 1,
+};

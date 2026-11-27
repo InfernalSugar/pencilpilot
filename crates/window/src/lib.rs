@@ -28,6 +28,7 @@
 
 #![cfg(target_os = "linux")]
 
+pub mod clock;
 pub mod input;
 mod keyboard;
 
@@ -102,6 +103,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// A frame the compositor showed.
 #[derive(Debug, Clone, Copy)]
 pub struct Presented {
+    /// which frame (as `present` numbered it)
+    pub frame: u64,
     /// when it reached the screen (the compositor's clock, usually CLOCK_MONOTONIC), ns
     pub at_ns: u64,
     /// the output's refresh period then, ns (0: unknown, e.g. variable refresh)
@@ -138,6 +141,8 @@ struct State {
     on: Vec<u32>,
     presented: Vec<Presented>,
     discarded: u32,
+    /// the clock presentation times are on (Linux clock ids; 1 = CLOCK_MONOTONIC)
+    clock_id: u32,
     refused: bool,
     modifiers: Vec<u64>,
     // input
@@ -174,6 +179,8 @@ pub struct Window {
     /// the slot acquired for the next present
     current: Option<usize>,
     next_id: u64,
+    /// frames presented so far
+    frames: u64,
     /// the size the slots are (device pixels)
     slot_size: (u32, u32),
 }
@@ -266,6 +273,7 @@ impl Window {
             slots: Vec::new(),
             current: None,
             next_id: 1,
+            frames: 0,
             slot_size: (0, 0),
         })
     }
@@ -279,6 +287,25 @@ impl Window {
             ));
         }
         Ok(())
+    }
+
+    /// Wait for the compositor until `deadline_ns` (CLOCK_MONOTONIC) at the latest. True if
+    /// something came.
+    pub fn wait_until(&mut self, deadline_ns: u64) -> Result<bool> {
+        self.conn.flush().map_err(wl)?;
+        if self.queue.dispatch_pending(&mut self.st).map_err(wl)? > 0 {
+            return Ok(true);
+        }
+        let Some(guard) = self.queue.prepare_read() else {
+            return Ok(self.queue.dispatch_pending(&mut self.st).map_err(wl)? > 0);
+        };
+        let now = clock::now_ns();
+        if deadline_ns > now && clock::wait_readable(&guard.connection_fd(), deadline_ns - now) {
+            guard.read().map_err(wl)?;
+        } else {
+            drop(guard);
+        }
+        Ok(self.queue.dispatch_pending(&mut self.st).map_err(wl)? > 0)
     }
 
     /// Handle what's arrived without waiting.
@@ -450,8 +477,14 @@ impl Window {
         Ok(&self.slots[i].image)
     }
 
-    /// Show the acquired image (drawn and handed to the compositor by the GPU).
-    pub fn present(&mut self) -> Result<()> {
+    /// The clock presentation times are on (1 = CLOCK_MONOTONIC, as almost always).
+    pub fn clock_id(&self) -> u32 {
+        self.st.clock_id
+    }
+
+    /// Show the acquired image (drawn and handed to the compositor by the GPU). Returns the
+    /// frame's number, which its `Presented` carries.
+    pub fn present(&mut self) -> Result<u64> {
         let i = self
             .current
             .take()
@@ -473,14 +506,16 @@ impl Window {
         self.surface
             .damage_buffer(0, 0, slot.image.width as i32, slot.image.height as i32);
         self.surface.frame(&self.qh, ());
+        self.frames += 1;
+        let frame = self.frames;
         if let Some(p) = &self.presentation {
-            p.feedback(&self.surface, &self.qh, ());
+            p.feedback(&self.surface, &self.qh, frame);
         }
         self.surface.commit();
         self.st.busy.insert(slot.id);
         self.st.frame_due = false;
         self.conn.flush().map_err(wl)?;
-        Ok(())
+        Ok(frame)
     }
 }
 
@@ -510,7 +545,6 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for State {
     }
 }
 delegate_noop!(State: ignore wl_compositor::WlCompositor);
-delegate_noop!(State: ignore wp_presentation::WpPresentation);
 delegate_noop!(State: ignore wp_viewporter::WpViewporter);
 delegate_noop!(State: ignore wp_viewport::WpViewport);
 delegate_noop!(State: ignore wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1);
@@ -712,12 +746,27 @@ impl Dispatch<zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1, ()> for State 
     }
 }
 
-impl Dispatch<wp_presentation_feedback::WpPresentationFeedback, ()> for State {
+impl Dispatch<wp_presentation::WpPresentation, ()> for State {
+    fn event(
+        s: &mut Self,
+        _: &wp_presentation::WpPresentation,
+        e: wp_presentation::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wp_presentation::Event::ClockId { clk_id } = e {
+            s.clock_id = clk_id;
+        }
+    }
+}
+
+impl Dispatch<wp_presentation_feedback::WpPresentationFeedback, u64> for State {
     fn event(
         s: &mut Self,
         _: &wp_presentation_feedback::WpPresentationFeedback,
         e: wp_presentation_feedback::Event,
-        _: &(),
+        frame: &u64,
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
@@ -731,6 +780,7 @@ impl Dispatch<wp_presentation_feedback::WpPresentationFeedback, ()> for State {
             } => {
                 let secs = ((tv_sec_hi as u64) << 32) | tv_sec_lo as u64;
                 s.presented.push(Presented {
+                    frame: *frame,
                     at_ns: secs * 1_000_000_000 + tv_nsec as u64,
                     refresh_ns: refresh,
                 });
