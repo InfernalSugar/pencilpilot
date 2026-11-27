@@ -2879,6 +2879,17 @@ impl Painter {
     /// selection) so they can be moved, scaled, rotated and flipped. Returns
     /// the lifted box `[x0, y0, x1, y1]` (empty if there's nothing to lift).
     pub fn transform_begin(&mut self) -> Vec<f32> {
+        self.transform_lift(true)
+    }
+
+    /// `transform_begin` for pixels shown moving elsewhere (on the GPU): the layer shows
+    /// without them, and they're not drawn back in until `transform_preview` (at commit).
+    /// Much quicker for a large area.
+    pub fn transform_begin_lifted(&mut self) -> Vec<f32> {
+        self.transform_lift(false)
+    }
+
+    fn transform_lift(&mut self, preview: bool) -> Vec<f32> {
         if self.transform.is_some() || self.stroking.is_some() || self.adjusting.is_some() {
             return Vec::new();
         }
@@ -2944,7 +2955,11 @@ impl Painter {
             cover: None,
             under: None,
         }));
-        self.transform_preview_h(H_IDENTITY);
+        if preview {
+            self.transform_preview_h(H_IDENTITY);
+        } else {
+            self.transform_show_base();
+        }
         vec![x0 as f32, y0 as f32, (x1 + 1) as f32, (y1 + 1) as f32]
     }
 
@@ -3176,23 +3191,32 @@ impl Painter {
         // what each piece draws, per canvas pixel of the new area (first piece wins)
         let (nw, nh) = ((now.2 - now.0 + 1) as usize, (now.3 - now.1 + 1) as usize);
         let mut drawn: Vec<Option<[u16; 4]>> = vec![None; nw * nh];
-        for p in &pieces {
-            let b = clip(p.bbox);
-            for cy in b.1..=b.3 {
-                for cx in b.0..=b.2 {
-                    let i = (cy - now.1) as usize * nw + (cx - now.0) as usize;
-                    if drawn[i].is_some() {
+        {
+            // rows are independent: on every core
+            use rayon::prelude::*;
+            drawn.par_chunks_mut(nw).enumerate().for_each(|(ry, row)| {
+                let cy = now.1 + ry as i64;
+                for p in &pieces {
+                    let b = clip(p.bbox);
+                    if cy < b.1 || cy > b.3 {
                         continue;
                     }
-                    let Some((sx, sy)) = h_apply(p.inv, cx as f32 + 0.5, cy as f32 + 0.5) else {
-                        continue;
-                    };
-                    if sx < p.src.0 || sy < p.src.1 || sx > p.src.2 || sy > p.src.3 {
-                        continue;
+                    for cx in b.0..=b.2 {
+                        let i = (cx - now.0) as usize;
+                        if row[i].is_some() {
+                            continue;
+                        }
+                        let Some((sx, sy)) = h_apply(p.inv, cx as f32 + 0.5, cy as f32 + 0.5)
+                        else {
+                            continue;
+                        };
+                        if sx < p.src.0 || sy < p.src.1 || sx > p.src.2 || sy > p.src.3 {
+                            continue;
+                        }
+                        row[i] = Some(sample(sx, sy));
                     }
-                    drawn[i] = Some(sample(sx, sy));
                 }
-            }
+            });
         }
         t.cover = track.then(|| {
             (

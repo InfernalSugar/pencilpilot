@@ -671,6 +671,8 @@ pub struct Canvas {
     device: ash::Device,
     image: vk::Image,
     view: vk::ImageView,
+    /// this picture, among every one made (a new one can get an old one's handles back)
+    pub(crate) serial: u64,
     memory: vk::DeviceMemory,
     staging: vk::Buffer,
     staging_memory: vk::DeviceMemory,
@@ -682,6 +684,8 @@ pub struct Canvas {
     /// the image has been given its first contents
     ready: bool,
 }
+
+static CANVAS_SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 impl Canvas {
     pub fn new(gpu: &Gpu, width: u32, height: u32) -> Result<Canvas> {
@@ -767,6 +771,7 @@ impl Canvas {
                 device: d.clone(),
                 image,
                 view,
+                serial: CANVAS_SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                 memory,
                 staging,
                 staging_memory,
