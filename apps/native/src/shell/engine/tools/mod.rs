@@ -501,7 +501,7 @@ pub fn apply(e: &mut Engine, s: &mut State, a: &Action) -> bool {
         "Flip horizontally" | "Flip vertically" => flip(e, s, name == "Flip horizontally"),
         "Transform" => {
             s.tool = Tool::Transform;
-            xf_begin(e, s);
+            xf_show(e, s);
         }
         "Transform: commit" => xf_commit(e, s),
         "Transform: cancel" => xf_cancel(e, s),
@@ -954,6 +954,22 @@ fn xf_begin(e: &mut Engine, s: &mut State) -> bool {
         m: geom::IDENTITY,
     });
     true
+}
+
+/// Picking Transform: its box at once, around what it would lift (a quick scan); the
+/// pixels are lifted when the box is first pressed or flipped ([`xf_begin`]), so the box
+/// shows on the next frame even for a large area.
+fn xf_show(e: &mut Engine, s: &mut State) {
+    if s.tooling.transform.is_some() {
+        return;
+    }
+    text_commit(e, s);
+    if let Some(rect) = e.painter.lift_bounds() {
+        s.tooling.transform = Some(XfBox {
+            rect,
+            m: geom::IDENTITY,
+        });
+    }
 }
 
 /// The transform's map is now `m` (the GPU moves the pixels; the box follows).

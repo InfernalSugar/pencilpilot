@@ -4,8 +4,8 @@
 //! How early to start is measured, not guessed:
 //! - the time a frame takes to make (from starting it to handing it over), its 95th
 //!   percentile over the last 64 frames, plus some slack;
-//! - the slack starts at 2 ms; a frame that misses its refresh adds 1 ms (up to half a frame);
-//!   200 on time take 0.1 ms off (down to 1 ms);
+//! - the slack starts at 1 ms; a frame that misses its refresh adds 1 ms (up to half a frame);
+//!   50 on time take 0.1 ms off (down to 1 ms);
 //! - three misses within a second: frames are drawn as soon as the compositor asks for half
 //!   a second (a busy machine), then late again;
 //! - when making a frame takes more than three quarters of one, it's drawn at once.
@@ -14,9 +14,13 @@ use std::collections::{BTreeMap, VecDeque};
 
 use crate::Presented;
 
-const SLACK_START: u64 = 2_000_000;
+const SLACK_START: u64 = 1_000_000;
 const SLACK_MIN: u64 = 1_000_000;
 const WORK_KEPT: usize = 64;
+/// refreshes without a frame shown after which the next is drawn at once
+const PAUSE_REFRESHES: u64 = 2;
+/// frames on time before the slack tightens by 0.1 ms
+const ON_TIME_TO_TIGHTEN: u32 = 50;
 /// a rest from drawing late, after `MISSES_TO_REST` misses within `MISS_WINDOW`
 const COOL_DOWN: u64 = 500_000_000;
 const MISS_WINDOW: u64 = 1_000_000_000;
@@ -98,9 +102,9 @@ impl Pacer {
             return None;
         }
         let p = p as u64;
-        // after a pause the refreshes' rhythm is stale (and the compositor may be idle):
-        // draw now, and plan again from that frame
-        if now.saturating_sub(last) > 8 * p {
+        // after a pause (even a short one: between two strokes) the compositor has gone idle
+        // and its rhythm is stale: drawing late would miss, so draw now and plan from there
+        if now.saturating_sub(last) > PAUSE_REFRESHES * p {
             return None;
         }
         let margin = self.margin_ns();
@@ -163,7 +167,7 @@ impl Pacer {
                 }
             } else {
                 self.on_time += 1;
-                if self.on_time >= 200 {
+                if self.on_time >= ON_TIME_TO_TIGHTEN {
                     self.slack_ns = self.slack_ns.saturating_sub(100_000).max(SLACK_MIN);
                     self.on_time = 0;
                 }
@@ -215,15 +219,16 @@ mod tests {
         let mut p = Pacer::new(false);
         assert_eq!(p.plan(0), None, "no refresh known yet: now");
         p.shown(&shown(1, 1_000_000_000));
-        // no work measured yet: 1 ms + 2 ms slack
+        // no work measured yet: 1 ms + 1 ms slack
         let plan = p.plan(1_001_000_000).unwrap();
         assert_eq!(plan.target, 1_000_000_000 + P);
-        assert_eq!(plan.draw_at, 1_000_000_000 + P - 3_000_000);
+        assert_eq!(plan.draw_at, 1_000_000_000 + P - 2_000_000);
         // too close to that refresh: the one after
         let plan = p.plan(1_004_000_000).unwrap();
         assert_eq!(plan.target, 1_000_000_000 + 2 * P);
-        // after a pause: at once
+        // after a pause, even a short one: at once
         assert_eq!(p.plan(1_100_000_000), None);
+        assert_eq!(p.plan(1_000_000_000 + 3 * P), None);
     }
 
     #[test]
@@ -233,18 +238,22 @@ mod tests {
         for f in 0..64 {
             p.drawn(100 + f, None, Some(1_500_000));
         }
-        assert_eq!(p.margin_ns(), 3_500_000);
+        assert_eq!(p.margin_ns(), 2_500_000);
         // slow frames: a bigger margin; too slow for late drawing: at once
         for f in 0..64 {
-            p.drawn(200 + f, None, Some(3_000_000));
+            p.drawn(200 + f, None, Some(3_800_000));
         }
-        assert_eq!(p.plan(1_001_000_000), None, "5 ms of a 6 ms frame: at once");
+        assert_eq!(
+            p.plan(1_001_000_000),
+            None,
+            "4.8 ms of a 6 ms frame: at once"
+        );
         // a one-off of half a second isn't counted
         let mut q = Pacer::new(false);
         q.shown(&shown(1, 1_000_000_000));
         q.drawn(2, None, Some(465_000_000));
         q.drawn(3, None, None);
-        assert_eq!(q.margin_ns(), 3_000_000);
+        assert_eq!(q.margin_ns(), 2_000_000);
     }
 
     #[test]

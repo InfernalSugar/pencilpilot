@@ -276,11 +276,19 @@ fn transform_moves_scales_and_turns_the_selection() {
     let b0 = ink_box(&e).unwrap();
     s.tool = Tool::Select;
     drag(&mut e, &mut s, (30.0, 30.0), (130.0, 110.0));
-    // picking Transform lifts it; dragging inside moves it (the GPU shows it moving)
+    // picking Transform shows its box around the paint at once (nothing lifted yet);
+    // pressing in it lifts, and dragging moves it (the GPU shows it moving)
     s.tool = Tool::Transform;
-    assert!(other(&mut e, &mut s, "Transform"));
-    assert!(e.float.is_some() && s.tooling.transform.is_some());
+    other(&mut e, &mut s, "Transform");
+    let shown = s.tooling.transform.expect("the box shows on picking");
+    assert!(e.float.is_none() && !e.painter.transforming());
     drag(&mut e, &mut s, (80.0, 70.0), (180.0, 120.0));
+    assert!(e.float.is_some());
+    assert_eq!(
+        s.tooling.transform.unwrap().rect,
+        shown.rect,
+        "the box shown on picking is the box lifted (around the paint, {b0:?})"
+    );
     let m = s.tooling.transform.unwrap().m;
     assert_eq!(e.float.as_ref().unwrap().m, m);
     assert!(

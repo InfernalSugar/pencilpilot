@@ -136,6 +136,8 @@ struct State {
     /// the compositor sends fractional scales: integer ones are ignored
     fractional: bool,
     frame_due: bool,
+    /// when the compositor last asked for a frame (CLOCK_MONOTONIC ns)
+    frame_due_at: u64,
     busy: HashSet<u64>,
     outputs: HashMap<u32, Output>,
     output_ids: HashMap<wayland_client::backend::ObjectId, u32>,
@@ -327,6 +329,12 @@ impl Window {
     /// The compositor is ready for a new frame.
     pub fn wants_frame(&self) -> bool {
         self.st.frame_due
+    }
+
+    /// When the compositor last asked for a frame (its frame callback came), CLOCK_MONOTONIC
+    /// ns; 0 before it first did.
+    pub fn frame_asked_at(&self) -> u64 {
+        self.st.frame_due_at
     }
 
     /// The window's size in logical pixels.
@@ -691,6 +699,7 @@ impl Dispatch<wl_callback::WlCallback, ()> for State {
     ) {
         if let wl_callback::Event::Done { .. } = e {
             s.frame_due = true;
+            s.frame_due_at = crate::clock::now_ns();
         }
     }
 }

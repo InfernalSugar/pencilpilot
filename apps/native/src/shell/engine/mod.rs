@@ -145,7 +145,7 @@ impl Engine {
     /// lifted box (x0, y0, x1, y1, document pixels), empty when there's nothing to lift.
     pub fn lift(&mut self) -> Vec<f32> {
         let b = self.painter.transform_begin_lifted();
-        if b.is_empty() || !self.float_begin() {
+        if b.is_empty() || !self.float_from_painter(false) {
             return Vec::new();
         }
         b
@@ -154,10 +154,18 @@ impl Engine {
     /// After `painter.transform_begin()`: the lifted pixels move on the GPU from now on
     /// ([`Engine::float_move`]); the layer shows without them. False when nothing's lifted.
     pub fn float_begin(&mut self) -> bool {
+        self.float_from_painter(true)
+    }
+
+    /// The lifted pixels become the GPU's picture; `show_base`: the layer shows without
+    /// them now (not needed after `transform_begin_lifted`, which already does).
+    fn float_from_painter(&mut self, show_base: bool) -> bool {
         let Some((rgba, x, y, w, h)) = self.painter.transform_float() else {
             return false;
         };
-        self.painter.transform_show_base();
+        if show_base {
+            self.painter.transform_show_base();
+        }
         self.lifts += 1;
         self.float = Some(Float {
             rgba,
@@ -631,5 +639,52 @@ mod stroke_end_timing {
         let cached = t.elapsed() / 10;
         eprintln!("parsing the brush {parse:?}, from the cache {cached:?}");
         assert!(cached < parse, "{cached:?} vs {parse:?}");
+    }
+}
+
+#[cfg(test)]
+mod lift_with_selection {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    #[ignore = "timing: cargo test --release -- --ignored lift_with_a_selection --nocapture"]
+    fn lift_with_a_selection() {
+        let mut e = Engine::new(1920, 1080);
+        let (w, h) = (1920usize, 1080usize);
+        let mut cov = vec![0u8; w * h];
+        for y in 100..900 {
+            cov[y * w + 300..y * w + 1500].fill(255);
+        }
+        assert!(e.painter.fill_mask(&cov, [200, 30, 30], 1.0));
+        e.painter.flush();
+        let mut sel = vec![0u8; w * h];
+        for y in 80..920 {
+            sel[y * w + 280..y * w + 1520].fill(255);
+        }
+        e.painter.set_selection(&sel, 0);
+        let mut st = crate::state::State::demo();
+        st.tool = crate::state::Tool::Transform;
+        for _ in 0..3 {
+            let t = Instant::now();
+            assert!(e.apply(&mut st, &Action::Other("Transform".into())));
+            let whole = t.elapsed();
+            let t = Instant::now();
+            e.painter.flush();
+            eprintln!("the Transform action: {whole:?}, flush {:?}", t.elapsed());
+            e.apply(&mut st, &Action::Other("Transform: cancel".into()));
+            e.painter.flush();
+        }
+        for _ in 0..3 {
+            let t = Instant::now();
+            assert!(!e.lift().is_empty());
+            let lift = t.elapsed();
+            let t = Instant::now();
+            e.painter.flush();
+            let flush = t.elapsed();
+            eprintln!("with a selection: lift {lift:?}, flush {flush:?}");
+            e.float_end(false);
+            e.painter.flush();
+        }
     }
 }

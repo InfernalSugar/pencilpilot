@@ -170,6 +170,32 @@ Each step is its own PR, with tests that need no window on the screen.
   | Memory, PSS | under 150 MiB | 53 MiB at rest, 121 MiB after 600 strokes |
   | Startup | under 200 ms | 57 ms |
 
-- **Open, for the owner's check on a real display** (headless mutter's frame timing isn't a real
-  display's): the 60 Hz p99 with an occasional late frame, and wheel zoom's late frames. Pressing
-  V shows the box after 35 ms (the lift), against "the next frame".
+- **Closed after step 4** (headless mutter, release, two to three runs each):
+  - **Wheel zoom:** 0 missed frames at 165 and 60 Hz (6–8 and 2 before). Frames whose only input
+    moved the view are drawn at once: drawing late is for the pen's newest sample, and for zooming
+    it only risked a missed refresh (at once: 0 missed; late: 6–8).
+  - **Transform:** V shows the box in about 3 ms (35 ms before). The box comes from a quick scan
+    of what would be lifted (`Painter::lift_bounds`, 1 ms, on every core); the pixels are lifted
+    at the first press or flip, which the drag doesn't notice (165 / 60 fps, 0 missed). The lift
+    itself is 7–8 ms (25 ms before): tile copies and the lifted pixels' conversion on every core,
+    and one copy fewer. What the interface's actions change shows in the same frame (a second
+    pass after them).
+  - **Pen to screen:** within budget in every run (three, release, headless mutter), p99 from
+    the compositor's event time:
+
+    | | Strokes with pauses | One continuous stroke | Budget |
+    |---|---|---|---|
+    | 165 Hz | 8.5–9.3 ms (p50 from receipt 6.5–7.0) | 8.4–9.0 ms | 10.06 ms |
+    | 60 Hz | 19.1–20.1 ms | 19.9–20.2 ms | 20.67 ms |
+
+    What it took: a stroke's samples that come while its frame is being made go in that frame
+    (input is read again just before drawing; they waited a whole refresh before); after a pause
+    of over two refreshes the next frame is drawn at once (the compositor has gone idle, and a
+    late frame then missed, which also widened the margin for every frame after); the pacer's
+    slack starts at 1 ms and tightens every 50 frames on time.
+  - **Tried and left out:** a real-time priority for the drawing thread (directly or through
+    rtkit). Under load it made no consistent difference in three runs against three, so it isn't
+    worth its risks.
+- **Left for the owner's check on a real display:** pen to screen with the Huion on a real
+  monitor (headless mutter's input goes through its remote-desktop interface, about 1.5 ms of
+  the event-time figures above).
