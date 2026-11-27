@@ -356,6 +356,11 @@ impl Frame<'_> {
         &self.ui.keys
     }
 
+    /// A text field has the keyboard (shortcuts should leave letters alone).
+    pub fn typing(&self) -> bool {
+        self.ui.focus.is_some()
+    }
+
     /// Take a key pressed since the last pass, by name (case aside), with or without Ctrl:
     /// a shortcut handled here, so nothing else acts on it. True if it was pressed.
     pub fn take_key(&mut self, name: &str, ctrl: bool) -> bool {
@@ -930,7 +935,28 @@ impl Frame<'_> {
         };
         let laid = self.lay_out(shown, &Style::body(t.text, color), None);
         let ty = rect.y + (rect.h - laid.height) / 2.0;
+        // long text stays inside the field
+        let start = if self.in_overlay {
+            self.overlay.len()
+        } else {
+            self.quads.len()
+        };
         self.put_text(&laid, rect.x + pad, ty);
+        let sc = self.s();
+        let clip = [
+            (rect.x + pad / 2.0) * sc,
+            rect.y * sc,
+            (rect.right() - pad / 2.0) * sc,
+            rect.bottom() * sc,
+        ];
+        let list = if self.in_overlay {
+            &mut self.overlay
+        } else {
+            &mut self.quads
+        };
+        for q in &mut list[start..] {
+            *q = q.clip(clip);
+        }
         if focused {
             let before = if value.is_empty() {
                 0.0
@@ -1044,8 +1070,15 @@ impl Frame<'_> {
                     ),
                     None,
                 ),
-                Item::Entry { text, hint, .. } => (
-                    self.lay_out(text, &Style::body(13.0, t.on_dark).weight(500), None),
+                Item::Entry {
+                    text, hint, danger, ..
+                } => (
+                    self.lay_out(
+                        text,
+                        &Style::body(13.0, if *danger { hex(0xFF7A66) } else { t.on_dark })
+                            .weight(500),
+                        None,
+                    ),
                     (!hint.is_empty())
                         .then(|| self.lay_out(hint, &Style::body(12.0, t.on_dark_muted), None)),
                 ),
@@ -1068,7 +1101,11 @@ impl Frame<'_> {
             })
             .collect();
         let h = heights.iter().sum::<f32>() + 2.0 * pad;
-        let rect = Rect::new(o.x, o.y, w, h);
+        // inside the window: moved left or up where it would run off
+        let root = self.areas[0].rect;
+        let x = o.x.min(root.right() - w - 8.0).max(root.x + 8.0);
+        let y = o.y.min(root.bottom() - h - 8.0).max(root.y + 8.0);
+        let rect = Rect::new(x, y, w, h);
         self.blocking.push(rect);
         self.put(
             Quad::rect(rect.x, rect.y + 8.0, w, h, alpha(t.ink, 0.18))
@@ -1212,6 +1249,7 @@ enum Item {
     Entry {
         text: String,
         hint: String,
+        danger: bool,
         picked: std::rc::Rc<std::cell::Cell<bool>>,
     },
     Sep,
@@ -1241,6 +1279,19 @@ impl Menu {
         self.items.push(Item::Entry {
             text: text.into(),
             hint: hint.into(),
+            danger: false,
+            picked: p.clone(),
+        });
+        Picked(p)
+    }
+
+    /// An item that destroys something (Delete…), in red.
+    pub fn danger(&mut self, text: &str, hint: &str) -> Picked {
+        let p = std::rc::Rc::new(std::cell::Cell::new(false));
+        self.items.push(Item::Entry {
+            text: text.into(),
+            hint: hint.into(),
+            danger: true,
             picked: p.clone(),
         });
         Picked(p)
