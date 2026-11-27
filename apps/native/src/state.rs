@@ -158,6 +158,9 @@ pub struct State {
     pub project: crate::shell::engine::files::ProjectUi,
     /// the export dialog and progress (`shell/engine/export.rs`)
     pub export: crate::shell::engine::export::ExportUi,
+    /// an export running: frames done and how many in all (set by the export, for the
+    /// window's `--stats` too)
+    pub export_progress: Option<(u32, u32)>,
     /// the cut's exposure sheet (`shell/engine/frames.rs`)
     pub sheet: crate::shell::engine::frames::Sheet,
     /// each shell piece's own state (each defined in its piece's file)
@@ -271,6 +274,7 @@ impl State {
             tooling: Default::default(),
             project: Default::default(),
             export: Default::default(),
+            export_progress: None,
             sheet: crate::shell::engine::frames::Sheet::demo(),
             header: Default::default(),
             tools: Default::default(),
