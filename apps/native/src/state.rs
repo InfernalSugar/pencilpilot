@@ -148,6 +148,12 @@ pub struct State {
     pub can_redo: bool,
     /// what the interface asked for this pass, for the app to carry out
     pub actions: Vec<Action>,
+    /// how the document sits in the canvas card
+    pub view: crate::shell::view::View,
+    /// the canvas tools' state the interface shows (`shell/engine/tools.rs`)
+    pub tooling: crate::shell::engine::tools::ToolsUi,
+    /// the cut's exposure sheet (`shell/engine/frames.rs`)
+    pub sheet: crate::shell::engine::frames::Sheet,
     /// each shell piece's own state (each defined in its piece's file)
     pub header: crate::shell::header::HeaderState,
     pub tools: crate::shell::tools::ToolsState,
@@ -255,6 +261,9 @@ impl State {
             can_undo: false,
             can_redo: false,
             actions: Vec::new(),
+            view: Default::default(),
+            tooling: Default::default(),
+            sheet: Default::default(),
             header: Default::default(),
             tools: Default::default(),
             panel: Default::default(),

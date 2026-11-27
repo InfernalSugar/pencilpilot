@@ -224,6 +224,11 @@ impl Ui {
         self.keys.push(k);
     }
 
+    /// A text field has the keyboard (shortcuts should leave letters alone).
+    pub fn typing(&self) -> bool {
+        self.focus.is_some()
+    }
+
     /// Is a menu or pop-up open?
     pub fn overlay_open(&self) -> bool {
         self.open.is_some()

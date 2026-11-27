@@ -167,13 +167,49 @@ pub fn overlays(f: &mut Frame, card: Rect, s: &mut State) {
         m.item("Symmetry", "Off ›");
         m.item("Snap to guides", "✓");
         m.separator();
-        m.item("Rotate view", "›");
+        m.item("Rotate view", "15°");
         m.item("Flip view", "H");
         m.item("Reset view", "0");
         m.separator();
         m.item("Record timelapse", "●");
     });
-    if let Some(item) = picked {
+    if let Some(item) = picked
+        && !view_item(s, card, &item)
+    {
         s.actions.push(Action::Other(item));
     }
+    // the view's keys (not while typing): 0 fits, 1 is 100 %, H flips, + and − zoom
+    if !f.typing() {
+        for (key, item) in [
+            ("0", "Reset view"),
+            ("1", "Actual size"),
+            ("h", "Flip view"),
+            ("plus", "Zoom in"),
+            ("equal", "Zoom in"),
+            ("KP_Add", "Zoom in"),
+            ("minus", "Zoom out"),
+            ("KP_Subtract", "Zoom out"),
+        ] {
+            if f.take_key(key, false) {
+                view_item(s, card, item);
+            }
+        }
+    }
+}
+
+/// The view's menu items and keys. Returns whether `item` was one.
+pub fn view_item(s: &mut State, card: Rect, item: &str) -> bool {
+    let c = (card.x + card.w / 2.0, card.y + card.h / 2.0);
+    let card = card.inset(12.0);
+    match item {
+        "Reset view" => s.view.reset(card),
+        "Actual size" => s.view.set_zoom(card, 1.0),
+        "Flip view" => s.view.flip_view(card),
+        "Zoom in" => s.view.zoom_at(card, c, 1.25),
+        "Zoom out" => s.view.zoom_at(card, c, 0.8),
+        "Rotate view" | "Rotate right" => s.view.rotate_about(card, c, 15f32.to_radians()),
+        "Rotate left" => s.view.rotate_about(card, c, -15f32.to_radians()),
+        _ => return false,
+    }
+    true
 }

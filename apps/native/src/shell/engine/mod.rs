@@ -1,42 +1,79 @@
 //! The drawing engine behind the canvas card: the brush engine (`crates/brush`) painting
 //! with the brush, colour, size and tool the interface has picked.
+//!
+//! - this file: the engine, painting with the Brush and the Eraser, and handing out the
+//!   rest: pointer input on the canvas for the other tools goes to [`tools`], what the
+//!   interface asks for (actions) goes to [`tools`] then [`frames`];
+//! - [`tools`]: Fill, Lasso, Select, Transform, Eyedropper, Shape, Text, the selection and
+//!   canvas menus, the clipboard;
+//! - [`frames`]: layers, drawings and their exposures, onion skin, playback, and the picture
+//!   the canvas shows.
+//!
+//! Positions here are the document's pixels (the shell maps the screen through the view).
+
+pub mod frames;
+pub mod tools;
 
 use brush::{Painter, set_brush_rgb};
 use hokusai::BrushSetting;
 
-use crate::state::{State, Tool};
+use crate::state::{Action, State, Tool};
+
+/// A pointer on the canvas, in document pixels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Sample {
+    pub x: f32,
+    pub y: f32,
+    /// 0–1 (a mouse: 0.5)
+    pub pressure: f32,
+    /// −1–1 each way
+    pub tilt: (f32, f32),
+    /// the input's time, ms
+    pub ms: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    Down,
+    Move,
+    Up,
+}
 
 /// The brushes the interface lists, by name, and their files.
 const BRUSHES: &[(&str, &str)] = &[
     (
         "2B pencil",
-        include_str!("../../../web/static/brushes/deevad-2b-pencil.myb"),
+        include_str!("../../../../web/static/brushes/deevad-2b-pencil.myb"),
     ),
     (
         "Rough pencil",
-        include_str!("../../../web/static/brushes/pencilpilot-rough-pencil.myb"),
+        include_str!("../../../../web/static/brushes/pencilpilot-rough-pencil.myb"),
     ),
     (
         "Liner",
-        include_str!("../../../web/static/brushes/deevad-liner.myb"),
+        include_str!("../../../../web/static/brushes/deevad-liner.myb"),
     ),
     (
         "Marker",
-        include_str!("../../../web/static/brushes/aotz-040-marker.myb"),
+        include_str!("../../../../web/static/brushes/aotz-040-marker.myb"),
     ),
     (
         "Airbrush",
-        include_str!("../../../web/static/brushes/deevad-airbrush.myb"),
+        include_str!("../../../../web/static/brushes/deevad-airbrush.myb"),
     ),
 ];
 
 /// The Eraser tool's brush: solid, so it erases cleanly (a grainy brush only thins paint).
-const ERASER: &str = include_str!("../../../web/static/brushes/deevad-large-hard-eraser.myb");
+const ERASER: &str = include_str!("../../../../web/static/brushes/deevad-large-hard-eraser.myb");
 
 pub struct Engine {
     pub painter: Painter,
     stroking: Option<hokusai::Brush>,
     last_ms: Option<u32>,
+    /// the other tools' state ([`tools`])
+    pub tools: tools::Tools,
+    /// layers, drawings, playback ([`frames`])
+    pub frames: frames::Frames,
 }
 
 impl Engine {
@@ -45,7 +82,56 @@ impl Engine {
             painter: Painter::new(width, height),
             stroking: None,
             last_ms: None,
+            tools: tools::Tools::default(),
+            frames: frames::Frames::default(),
         }
+    }
+
+    /// A pointer on the canvas (pen or mouse, pressed). The Brush and the Eraser paint;
+    /// the other tools are [`tools`]'.
+    pub fn pointer(&mut self, s: &mut State, phase: Phase, p: Sample) {
+        if Engine::paints(s) || self.is_stroking() {
+            match phase {
+                Phase::Down => self.down(s, p.x, p.y, p.pressure, p.tilt, p.ms),
+                Phase::Move => self.moved(p.x, p.y, p.pressure, p.tilt, p.ms),
+                Phase::Up => self.up(),
+            }
+        } else {
+            tools::pointer(self, s, phase, p);
+        }
+    }
+
+    /// Whether a press on the canvas at this document point goes to the engine with the
+    /// current tool (the Hand, and Review, move the view instead).
+    pub fn takes_canvas_input(s: &State) -> bool {
+        s.workspace != crate::state::Workspace::Review && s.tool != Tool::Hand
+    }
+
+    /// Carries out what the interface asked for. Returns whether the picture may have
+    /// changed (the shell then shows it).
+    pub fn apply(&mut self, s: &mut State, a: &Action) -> bool {
+        match a {
+            Action::Undo => self.painter.undo(),
+            Action::Redo => self.painter.redo(),
+            _ => tools::apply(self, s, a) || frames::apply(self, s, a),
+        }
+    }
+
+    /// Once a loop, before drawing: playback and anything else that moves with time.
+    /// Returns whether the picture changed.
+    pub fn tick(&mut self, s: &mut State, now: std::time::Instant) -> bool {
+        frames::tick(self, s, now)
+    }
+
+    /// When [`Engine::tick`] next has something to do (the shell sleeps until then).
+    pub fn next_tick_at(&self, s: &State) -> Option<std::time::Instant> {
+        frames::next_tick_at(self, s)
+    }
+
+    /// The canvas's picture (straight RGBA8, document size) and what changed in it since
+    /// the last call (x, y, w, h), if anything.
+    pub fn picture(&mut self, s: &State) -> Option<(&[u8], [u32; 4])> {
+        frames::picture(self, s)
     }
 
     /// The brush to paint with now: the picked one, in the picked colour and size, erasing
