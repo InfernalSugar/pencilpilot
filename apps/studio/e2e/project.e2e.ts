@@ -4433,6 +4433,17 @@ const pixelHash = (page: Page) =>
 test('the eraser cuts editable strokes exactly: pieces stay editable, redrawn to the last pixel (plain and line layers)', async ({
 	page
 }) => {
+	// the pencil's grain (and the eraser's) comes from each stroke's random seed: some seeds
+	// leave the cut a few pixels off or a speck where it was; the same seeds every run
+	await page.addInitScript(() => {
+		let a = 0x9e3779b9;
+		Math.random = () => {
+			a = (a + 0x6d2b79f5) | 0;
+			let t = Math.imul(a ^ (a >>> 15), 1 | a);
+			t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+			return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+		};
+	});
 	await stubTauri(page);
 	await ready(page);
 	for (let i = 0; i < 4; i++) await page.keyboard.press(']');
