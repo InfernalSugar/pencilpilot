@@ -588,40 +588,44 @@ fn set_hsv(s: &mut State, hsv: [f32; 3]) {
     }
 }
 
-/// Strips this wide (logical px) make the gradients.
-const STRIP: f32 = 2.0;
-
 /// The saturation/value square for `hue`, as the design's two gradients over the hue: white
 /// from the left, black from the bottom; 14 px corners.
 fn sv_square(f: &mut Frame, r: Rect, hue: f32) {
-    let t = f.theme();
-    f.put(Quad::rect(r.x, r.y, r.w, r.h, hsv_to_rgb(hue, 1.0, 1.0)));
-    let n = (r.w / STRIP).ceil() as usize;
-    for i in 0..n {
-        let a = 1.0 - (i as f32 + 0.5) / n as f32;
-        let x = r.x + i as f32 * STRIP;
-        let w = STRIP.min(r.right() - x);
-        f.put(Quad::rect(x, r.y, w, r.h, alpha(t.card, a)));
-    }
-    let n = (r.h / STRIP).ceil() as usize;
-    for i in 0..n {
-        let a = (i as f32 + 0.5) / n as f32;
-        let y = r.y + i as f32 * STRIP;
-        let h = STRIP.min(r.bottom() - y);
-        f.put(Quad::rect(r.x, y, r.w, h, [0.0, 0.0, 0.0, a]));
-    }
-    round_corners(f, r, 14.0, t.card);
+    let pure = hsv_to_rgb(hue, 1.0, 1.0);
+    f.put(Quad::gradient(r.x, r.y, r.w, r.h, [1.0; 4], pure, (1.0, 0.0)).radius(14.0));
+    f.put(
+        Quad::gradient(
+            r.x,
+            r.y,
+            r.w,
+            r.h,
+            [0.0; 4],
+            [0.0, 0.0, 0.0, 1.0],
+            (0.0, 1.0),
+        )
+        .radius(14.0),
+    );
 }
 
-/// The hue slider's rainbow, with round ends.
+/// The hue slider's rainbow (six gradients, red round to red), with round ends.
 fn hue_bar(f: &mut Frame, r: Rect) {
     let t = f.theme();
-    let n = (r.w / STRIP).ceil() as usize;
-    for i in 0..n {
-        let x = r.x + i as f32 * STRIP;
-        let w = STRIP.min(r.right() - x);
-        let hue = (i as f32 + 0.5) / n as f32 * 360.0;
-        f.put(Quad::rect(x, r.y, w, r.h, hsv_to_rgb(hue, 1.0, 1.0)));
+    let seg = r.w / 6.0;
+    for k in 0..6 {
+        let (a, b) = (
+            hsv_to_rgb(k as f32 * 60.0, 1.0, 1.0),
+            hsv_to_rgb((k + 1) as f32 * 60.0, 1.0, 1.0),
+        );
+        // (a hair of overlap, so no seam shows between them)
+        f.put(Quad::gradient(
+            r.x + k as f32 * seg,
+            r.y,
+            seg + 0.5,
+            r.h,
+            a,
+            b,
+            (1.0, 0.0),
+        ));
     }
     round_corners(f, r, r.h / 2.0, t.card);
 }
