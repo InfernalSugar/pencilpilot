@@ -274,7 +274,10 @@ fn a_right_click_in_the_selection_opens_its_menu_and_its_items_work() {
     let before = painted(&sh.e);
     sh.click(Shell::menu_item(inside, &items, "Clear"));
     assert!(!sh.ui.overlay_open());
-    assert!(painted(&sh.e) < before, "Clear took the selected paint away");
+    assert!(
+        painted(&sh.e) < before,
+        "Clear took the selected paint away"
+    );
     // Ctrl+Z (the shell's) brings it back
     sh.e.apply(&mut sh.s, &Action::Undo);
     assert_eq!(painted(&sh.e), before);
@@ -360,7 +363,10 @@ fn text_is_typed_with_the_keys_tool_letters_included() {
     sh.key("BackSpace", None, false, false);
     sh.key("Return", None, false, true);
     sh.typed("Hi");
-    assert_eq!(sh.s.tooling.text.as_ref().unwrap().text, "Bevel, mind i\nHi");
+    assert_eq!(
+        sh.s.tooling.text.as_ref().unwrap().text,
+        "Bevel, mind i\nHi"
+    );
     assert!(painted(&sh.e) > 1000);
     sh.save("tools-text-typing");
     sh.key("Return", None, false, false);

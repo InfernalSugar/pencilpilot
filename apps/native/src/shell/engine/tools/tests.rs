@@ -653,7 +653,12 @@ fn clear_then_undo_and_paste_restore_the_exact_layer() {
     other(&mut e, &mut s, "Clear");
     e.painter.undo();
     let l1 = e.painter.layer_rgba(e.painter.active_layer());
-    let diff = |a: &[u8], b: &[u8]| a.chunks(4).zip(b.chunks(4)).filter(|(a, b)| (a[3] as i32 - b[3] as i32).abs() > 2).count();
+    let diff = |a: &[u8], b: &[u8]| {
+        a.chunks(4)
+            .zip(b.chunks(4))
+            .filter(|(a, b)| (a[3] as i32 - b[3] as i32).abs() > 2)
+            .count()
+    };
     assert_eq!(diff(&l0, &l1), 0, "undoing a clear");
     for a in ["Copy", "Clear", "Paste in place"] {
         other(&mut e, &mut s, a);
