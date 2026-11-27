@@ -14,8 +14,7 @@ use std::io::{Read, Seek, Write};
 
 use super::{
     Error, MASK_TILE, Manifest, PALETTE_COLOURS_MAX, PALETTE_NAME_MAX, PALETTES_MAX, Project,
-    RGBA_TILE, Result, STAGES, TIMELAPSE_MAX, VERSION, audio_name_ok, is_hex_colour,
-    lines_name_ok,
+    RGBA_TILE, Result, STAGES, TIMELAPSE_MAX, VERSION, audio_name_ok, is_hex_colour, lines_name_ok,
 };
 
 /// The name a tile is stored under: its bytes' hash (as [`Project::put_drawing`] names
@@ -30,9 +29,34 @@ pub struct Opened<R> {
     pub manifest: Manifest,
     zip: zip::ZipArchive<R>,
     /// entry name → its index in the archive
-    names: HashMap<String, usize>,
+    names: std::sync::Arc<HashMap<String, usize>>,
     /// the timelapse pictures in order (the manifest's times): their entries
     timelapse: Vec<usize>,
+}
+
+/// A cheap reader of an [`Opened`] file's tiles, for reading them on many threads (each its
+/// own [`Opened::tiles`], when `R` is cheap to clone: a `Cursor` over bytes in memory).
+#[derive(Clone)]
+pub struct Tiles<R> {
+    zip: zip::ZipArchive<R>,
+    names: std::sync::Arc<HashMap<String, usize>>,
+}
+
+impl<R: Read + Seek> Tiles<R> {
+    /// A tile's bytes: RGBA (16 384) or a mask's grey (4 096).
+    pub fn tile(&mut self, hash: &str) -> Result<Vec<u8>> {
+        let i = *self
+            .names
+            .get(&format!("tiles/{hash}"))
+            .ok_or_else(|| Error::Invalid(format!("missing tile {hash}")))?;
+        let f = self.zip.by_index(i)?;
+        let mut v = Vec::with_capacity(RGBA_TILE);
+        f.take(RGBA_TILE as u64 + 1).read_to_end(&mut v)?;
+        if v.len() != RGBA_TILE && v.len() != MASK_TILE {
+            return Err(Error::Invalid(format!("tile {hash} has the wrong size")));
+        }
+        Ok(v)
+    }
 }
 
 impl<R: Clone> Clone for Opened<R> {
@@ -55,7 +79,10 @@ impl<R: Read + Seek> Opened<R> {
             let f = zip.by_name("manifest.json").map_err(|_| {
                 Error::Invalid("not a PencilPilot project (no manifest.json)".into())
             })?;
-            serde_json::from_reader(f.take(64 << 20))?
+            // (read whole first: serde reading a zip entry a byte at a time is slow)
+            let mut json = Vec::new();
+            f.take(64 << 20).read_to_end(&mut json)?;
+            serde_json::from_slice(&json)?
         };
         if manifest.format == super::FORMAT && manifest.version > VERSION {
             return Err(Error::TooNew(manifest.version));
@@ -137,9 +164,35 @@ impl<R: Read + Seek> Opened<R> {
         Ok(Opened {
             manifest: shell.manifest,
             zip,
-            names,
+            names: std::sync::Arc::new(names),
             timelapse,
         })
+    }
+
+    /// The same file through another reader (the file itself, after reading it from bytes
+    /// in memory): the manifest and its checks not done again. (It must be the same file.)
+    pub fn with_reader<R2: Read + Seek>(&self, r: R2) -> Result<Opened<R2>> {
+        let zip = zip::ZipArchive::new(r)?;
+        if zip.len() != self.zip.len() {
+            return Err(Error::Invalid("the file changed".into()));
+        }
+        Ok(Opened {
+            manifest: self.manifest.clone(),
+            zip,
+            names: self.names.clone(),
+            timelapse: self.timelapse.clone(),
+        })
+    }
+
+    /// A reader of the tiles alone (cheap to clone when `R` is).
+    pub fn tiles(&self) -> Tiles<R>
+    where
+        R: Clone,
+    {
+        Tiles {
+            zip: self.zip.clone(),
+            names: self.names.clone(),
+        }
     }
 
     /// Whether the file has this entry ("tiles/<hash>", "audio/<file>"…).
@@ -277,7 +330,11 @@ impl Project {
         refs.sort();
         refs.dedup();
         for name in refs {
-            put!(format!("references/{name}"), self.references.get(name), stored);
+            put!(
+                format!("references/{name}"),
+                self.references.get(name),
+                stored
+            );
         }
         // line data: what's in memory, and what the old file has for drawings still here
         let mut lines: Vec<&String> = self
@@ -425,7 +482,10 @@ mod tests {
         p.write(&mut buf).unwrap();
         let bytes = buf.into_inner();
         let mut o = Opened::read(Cursor::new(bytes.clone())).unwrap();
-        assert_eq!(o.manifest, Project::read(Cursor::new(bytes)).unwrap().manifest);
+        assert_eq!(
+            o.manifest,
+            Project::read(Cursor::new(bytes)).unwrap().manifest
+        );
         let first = o.manifest.drawings["D1"].tiles[0].hash.clone();
         assert!(o.has_tile(&first));
         assert_eq!(o.tile(&first).unwrap(), p.tiles[&first]);

@@ -4491,7 +4491,11 @@ impl Painter {
 
     /// Load a drawing from tiles decoded ahead of time ([`decode_tile`], on any thread),
     /// replacing it if it exists. Not an undo step. False if busy.
-    pub fn put_drawing_decoded(&mut self, drawing: u32, tiles: Vec<((i32, i32), DecodedTile)>) -> bool {
+    pub fn put_drawing_decoded(
+        &mut self,
+        drawing: u32,
+        tiles: Vec<((i32, i32), DecodedTile)>,
+    ) -> bool {
         if drawing == 0 || !self.idle() {
             return false;
         }
@@ -5798,6 +5802,27 @@ pub fn decode_tile(rgba: &[u8]) -> Option<DecodedTile> {
         t[k / ts][k % ts] = premul_fix15(c, px[3] as f32 / 255.0);
     }
     any.then_some(DecodedTile(t))
+}
+
+/// A decoded tile back as straight-alpha sRGB RGBA8 (16 384 bytes into `out`), as the
+/// painter would give it ([`Painter::drawing_tile_rgba`]): what a tile looks like after a
+/// trip through the painter.
+pub fn encode_tile(t: &DecodedTile, out: &mut [u8]) {
+    let ts = TILE_SIZE;
+    for (row, line) in t.0.iter().enumerate() {
+        for (col, p) in line.iter().enumerate() {
+            let i = (row * ts + col) * 4;
+            if p[3] == 0 {
+                out[i..i + 4].fill(0);
+                continue;
+            }
+            let (c, a) = unpremul_srgb(*p);
+            out[i] = (c[0] * 255.0).round() as u8;
+            out[i + 1] = (c[1] * 255.0).round() as u8;
+            out[i + 2] = (c[2] * 255.0).round() as u8;
+            out[i + 3] = (a * 255.0).round() as u8;
+        }
+    }
 }
 
 /// Tiles packed as [`pack_tiles`] makes them, back (None if the bytes don't add up).

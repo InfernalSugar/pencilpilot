@@ -157,6 +157,8 @@ pub struct RunOptions {
     pub save_doc: Option<String>,
     /// start in this workspace
     pub workspace: Option<crate::state::Workspace>,
+    /// open this project once started
+    pub open: Option<String>,
 }
 
 /// A frame drawn, for `--stats`.
@@ -203,6 +205,7 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
     let mut r = Renderer2d::new(&gpu)?;
     let mut ui = Ui::new(win.scale() as f32);
     let mut s = State::demo();
+    s.project.startup = opts.open.as_ref().map(std::path::PathBuf::from);
     if let Some(w) = opts.workspace {
         s.workspace = w;
     }
