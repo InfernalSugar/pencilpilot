@@ -54,6 +54,16 @@ impl Quad {
         }
     }
 
+    /// Its rectangle (x, y, w, h), for checks.
+    pub fn rect_xywh(&self) -> [f32; 4] {
+        self.rect
+    }
+
+    /// Its fill colour (premultiplied), for checks.
+    pub fn fill_rgba(&self) -> [f32; 4] {
+        self.fill
+    }
+
     /// A filled rectangle (pixels).
     pub fn rect(x: f32, y: f32, w: f32, h: f32, fill: [f32; 4]) -> Quad {
         Quad {

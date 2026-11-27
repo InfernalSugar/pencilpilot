@@ -410,12 +410,7 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
         let first = ui.pass(&mut r, w, h, |f| {
             (mark, canvas_rect) = build(f, &mut s, w, h);
         });
-        // a settling pass, with no new input: a click that changed what an earlier piece had
-        // already drawn shows now, not at the next input (it acts on nothing a second time)
-        let settled = ui.pass(&mut r, w, h, |f| {
-            (mark, canvas_rect) = build(f, &mut s, w, h);
-        });
-        let changed = first.or(settled);
+        let changed = first;
         dirty = false;
         // what the interface asked for
         for a in std::mem::take(&mut s.actions) {

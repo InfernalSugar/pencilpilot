@@ -236,12 +236,34 @@ impl Ui {
 
     /// A pass: build the interface (logical size `w` × `h`) with `build`. Returns the quads
     /// (device pixels) when they differ from what's on screen, None when nothing would change.
+    ///
+    /// When the pass acted on input (a press, a release, a key, a scroll), it builds once
+    /// more with no new input before returning: a click that changed what an earlier part had
+    /// already drawn (the tab picked before, a tool's highlight) then shows complete, in this
+    /// frame, whoever drives the passes.
     pub fn pass(
         &mut self,
         r: &mut Renderer2d,
         w: f32,
         h: f32,
-        build: impl FnOnce(&mut Frame),
+        mut build: impl FnMut(&mut Frame),
+    ) -> Option<Vec<Quad>> {
+        let p = self.pointer;
+        let input =
+            p.pressed || p.released || p.context || p.scroll != 0.0 || !self.keys.is_empty();
+        let first = self.pass_once(r, w, h, &mut build);
+        if !input {
+            return first;
+        }
+        self.pass_once(r, w, h, &mut build).or(first)
+    }
+
+    fn pass_once(
+        &mut self,
+        r: &mut Renderer2d,
+        w: f32,
+        h: f32,
+        build: &mut impl FnMut(&mut Frame),
     ) -> Option<Vec<Quad>> {
         if self.text.poll_fonts() {
             // the atlas started over: icons go in again, and the screen is redrawn
