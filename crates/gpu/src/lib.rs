@@ -91,13 +91,19 @@ impl Gpu {
             .application_name(c"PencilPilot")
             .engine_name(c"PencilPilot")
             .api_version(vk::make_api_version(0, 1, 3, 0));
-        let instance = unsafe {
+        let instance = match unsafe {
             entry.create_instance(
                 &vk::InstanceCreateInfo::default().application_info(&app),
                 None,
             )
-        }
-        .ctx("vkCreateInstance")?;
+        } {
+            Ok(i) => i,
+            // a loader with no driver behind it (as on machines without a GPU)
+            Err(vk::Result::ERROR_INCOMPATIBLE_DRIVER) => {
+                return Err(Error::NoDevice("no Vulkan driver".into()));
+            }
+            Err(e) => return Err(Error::Vk("vkCreateInstance", e)),
+        };
         let mut devices =
             unsafe { instance.enumerate_physical_devices() }.ctx("vkEnumeratePhysicalDevices")?;
         let rank =
