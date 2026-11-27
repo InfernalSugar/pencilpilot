@@ -66,7 +66,10 @@ class App:
     def __init__(self, binary, mutter, out, tag, secs, workspace="animate", args=(), env=None):
         self.stats = os.path.join(out, f"{tag}-stats.json")
         self.doc = os.path.join(out, f"{tag}-doc.png")
-        env = dict(os.environ, WAYLAND_DISPLAY=mutter.name, **(env or {}))
+        # recent files and recovery copies go to the run's folder, never the user's own
+        env = dict(os.environ, WAYLAND_DISPLAY=mutter.name,
+                   XDG_CONFIG_HOME=os.path.join(out, "xdg-config"),
+                   XDG_STATE_HOME=os.path.join(out, "xdg-state"), **(env or {}))
         self.launched_ns = mono_ns()
         self.p = subprocess.Popen(
             [binary, "--quit-after", str(secs), "--stats", self.stats, "--save-doc", self.doc,
