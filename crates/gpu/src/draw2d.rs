@@ -81,6 +81,22 @@ impl Quad {
             clip: NO_CLIP,
         }
     }
+    /// Scaled by `s` (logical to device pixels): position, size, corners, border, shadow
+    /// and clip.
+    pub fn scaled(mut self, s: f32) -> Quad {
+        for v in &mut self.rect {
+            *v *= s;
+        }
+        self.params[0] *= s;
+        self.params[1] *= s;
+        self.params[2] *= s;
+        if self.clip != NO_CLIP {
+            for v in &mut self.clip {
+                *v *= s;
+            }
+        }
+        self
+    }
     /// Moved by (dx, dy), its clip too.
     pub fn moved(mut self, dx: f32, dy: f32) -> Quad {
         self.rect[0] += dx;

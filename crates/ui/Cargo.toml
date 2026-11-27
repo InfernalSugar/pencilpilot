@@ -9,3 +9,4 @@ version.workspace = true
 [dependencies]
 pencilpilot-gpu = { path = "../gpu" }
 cosmic-text = "0.19"
+resvg = { version = "0.50", default-features = false }

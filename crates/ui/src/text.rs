@@ -122,6 +122,8 @@ pub struct Text {
     glyphs: HashMap<CacheKey, Option<Slot>>,
     body: String,
     display: String,
+    /// the system's fonts, loading
+    pending: Option<std::sync::mpsc::Receiver<cosmic_text::fontdb::Database>>,
 }
 
 impl Default for Text {
@@ -131,30 +133,71 @@ impl Default for Text {
 }
 
 impl Text {
-    /// The system's fonts and the design's.
+    /// The design's fonts at once; the system's (for Arabic, emoji and the rest) load in the
+    /// background and join when ready ([`Text::poll_fonts`]), so starting stays quick.
     pub fn new() -> Text {
-        let mut fonts = FontSystem::new();
-        let db = fonts.db_mut();
-        let before = db.faces().count();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("system fonts".into())
+            .spawn(move || {
+                let mut db = cosmic_text::fontdb::Database::new();
+                db.load_system_fonts();
+                let _ = tx.send(db);
+            })
+            .ok();
+        let mut t = Text::with_db(cosmic_text::fontdb::Database::new());
+        t.pending = Some(rx);
+        t
+    }
+
+    fn with_db(mut db: cosmic_text::fontdb::Database) -> Text {
         db.load_font_data(INTER.to_vec());
         db.load_font_data(BRICOLAGE.to_vec());
-        // their family names, as the files give them
-        let name = |i: usize| {
+        let family = |i: usize| {
             db.faces()
-                .nth(i)
+                .nth(db.len() - 2 + i)
                 .and_then(|f| f.families.first())
                 .map(|(n, _)| n.clone())
         };
-        let body = name(before).unwrap_or_else(|| "Inter".into());
-        let display = name(before + 1).unwrap_or_else(|| "Bricolage Grotesque".into());
+        let body = family(0).unwrap_or_else(|| "Inter".into());
+        let display = family(1).unwrap_or_else(|| "Bricolage Grotesque".into());
+        let locale = std::env::var("LANG")
+            .ok()
+            .and_then(|l| l.split('.').next().map(|l| l.replace('_', "-")))
+            .filter(|l| !l.is_empty() && l != "C")
+            .unwrap_or_else(|| "en-US".into());
         Text {
-            fonts,
+            fonts: FontSystem::new_with_locale_and_db(locale, db),
             raster: SwashCache::new(),
             shelves: Shelves::default(),
             glyphs: HashMap::new(),
             body,
             display,
+            pending: None,
         }
+    }
+
+    /// Take the system's fonts once they've loaded. True when they just did: text laid out
+    /// before should be laid out again (it may have glyphs it lacked).
+    pub fn poll_fonts(&mut self) -> bool {
+        let Some(db) = self.pending.as_ref().and_then(|rx| rx.try_recv().ok()) else {
+            return false;
+        };
+        // a new font system: glyphs are keyed by font, so the atlas starts over
+        *self = Text::with_db(db);
+        true
+    }
+
+    /// Wait for the system's fonts (tests, and anything that must have them now).
+    pub fn wait_for_fonts(&mut self) {
+        if let Some(db) = self.pending.take().and_then(|rx| rx.recv().ok()) {
+            *self = Text::with_db(db);
+        }
+    }
+
+    /// Whether the system's fonts are still loading.
+    pub fn fonts_loading(&self) -> bool {
+        self.pending.is_some()
     }
 
     /// Lay `text` out in `style`, wrapped at `max_width` (device pixels; None: a line per
@@ -213,6 +256,21 @@ impl Text {
             }
         }
         out
+    }
+
+    /// Put a picture (premultiplied RGBA8, `w` × `h`) into the atlas; its texture
+    /// coordinates. (The atlas starts over when the system's fonts join: pictures put
+    /// before then are put again.)
+    pub fn place(&mut self, r: &mut Renderer2d, w: u32, h: u32, rgba: &[u8]) -> Option<[f32; 4]> {
+        let (x, y) = self.shelves.place(w, h)?;
+        r.atlas_put(x, y, w, h, rgba);
+        let s = ATLAS_SIZE as f32;
+        Some([
+            x as f32 / s,
+            y as f32 / s,
+            (x + w) as f32 / s,
+            (y + h) as f32 / s,
+        ])
     }
 
     /// A glyph's place in the atlas, drawing it there the first time.
