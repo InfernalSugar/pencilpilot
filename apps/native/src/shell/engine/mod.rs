@@ -90,6 +90,9 @@ pub struct Engine {
     pub painter: Painter,
     stroking: Option<hokusai::Brush>,
     last_ms: Option<u32>,
+    /// where the stroke started, its pressure and tilt, the brush size, and whether it has
+    /// moved since (a tap paints a dot)
+    tap: Option<(f32, f32, f32, (f32, f32), f32, bool)>,
     /// the other tools' state ([`tools`])
     pub tools: tools::Tools,
     /// layers, drawings, playback ([`frames`])
@@ -105,6 +108,7 @@ impl Engine {
             painter: Painter::new(width, height),
             stroking: None,
             last_ms: None,
+            tap: None,
             tools: tools::Tools::default(),
             frames: frames::Frames::default(),
             float: None,
@@ -279,6 +283,7 @@ impl Engine {
             .stroke_to(&b, x, y, pressure, tilt.0, tilt.1, 0.004);
         self.stroking = Some(b);
         self.last_ms = Some(ms);
+        self.tap = Some((x, y, pressure, tilt, s.brush_size, false));
     }
 
     pub fn moved(&mut self, x: f32, y: f32, pressure: f32, tilt: (f32, f32), ms: u32) {
@@ -287,14 +292,29 @@ impl Engine {
             (ms.wrapping_sub(l) as f64 / 1000.0).clamp(0.0005, 0.1)
         });
         self.last_ms = Some(ms);
+        if let Some(t) = &mut self.tap
+            && ((x - t.0).abs() > 0.5 || (y - t.1).abs() > 0.5)
+        {
+            t.5 = true;
+        }
         self.painter
             .stroke_to(b, x, y, pressure, tilt.0, tilt.1, dt);
     }
 
     pub fn up(&mut self) {
         if let Some(b) = self.stroking.take() {
+            // a tap: a dot where it landed (a brush lays down nothing without moving), a
+            // little there and back
+            if let Some((x, y, p, t, size, false)) = self.tap {
+                let d = (size / 4.0).max(0.6);
+                for (dx, dy) in [(d, 0.0), (-d, d * 0.5), (0.0, 0.0)] {
+                    self.painter
+                        .stroke_to(&b, x + dx, y + dy, p, t.0, t.1, 0.01);
+                }
+            }
             self.painter.end_stroke(&b);
         }
+        self.tap = None;
     }
 }
 
@@ -471,5 +491,34 @@ mod tests {
         };
         assert!(red(&e, 120, 20) && !red(&e, 20, 20), "the move was kept");
         assert!(ink(&e, 70, 90) > 100, "and the stroke painted");
+    }
+
+    /// A tap (press and release without moving) paints a dot there, about the brush's size.
+    #[test]
+    fn a_tap_paints_a_dot() {
+        let mut s = State::demo();
+        for size in [4.0, 12.0, 40.0] {
+            s.brush_size = size;
+            let mut e = Engine::new(200, 200);
+            e.down(&s, 100.0, 100.0, 0.8, (0.0, 0.0), 0);
+            e.up();
+            e.painter.flush();
+            let w = 200usize;
+            let inked: Vec<(usize, usize)> = (0..200 * 200)
+                .filter(|i| e.painter.rgba()[i * 4] < 200)
+                .map(|i| (i % w, i / w))
+                .collect();
+            assert!(!inked.is_empty(), "{size} px: the tap painted nothing");
+            let far = inked
+                .iter()
+                .map(|&(x, y)| ((x as f32 - 100.0).powi(2) + (y as f32 - 100.0).powi(2)).sqrt())
+                .fold(0.0, f32::max);
+            assert!(
+                far <= size,
+                "{size} px: a dot, not a line (reaches {far} px)"
+            );
+            // one undo takes it
+            assert!(e.painter.undo());
+        }
     }
 }
