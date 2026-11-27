@@ -54,6 +54,22 @@ impl Quad {
         }
     }
 
+    /// A canvas quad showing the second picture (see [`Renderer2d::draw_canvases`]).
+    pub fn second(mut self) -> Quad {
+        self.params[2] = 1.0;
+        self
+    }
+
+    /// Its rectangle (x, y, w, h), for checks.
+    pub fn rect_xywh(&self) -> [f32; 4] {
+        self.rect
+    }
+
+    /// Its fill colour (premultiplied), for checks.
+    pub fn fill_rgba(&self) -> [f32; 4] {
+        self.fill
+    }
+
     /// A filled rectangle (pixels).
     pub fn rect(x: f32, y: f32, w: f32, h: f32, fill: [f32; 4]) -> Quad {
         Quad {
@@ -194,8 +210,8 @@ pub struct Renderer2d {
     atlas: vk::Image,
     atlas_memory: vk::DeviceMemory,
     atlas_view: vk::ImageView,
-    /// what binding 2 shows: a canvas's view, or the atlas's
-    bound_canvas: vk::ImageView,
+    /// what bindings 2 and 3 show: a picture's view, or the atlas's
+    bound_canvas: [vk::ImageView; 2],
     staging: vk::Buffer,
     staging_memory: vk::DeviceMemory,
     staging_ptr: *mut u8,
@@ -227,9 +243,14 @@ impl Renderer2d {
                     .descriptor_type(vk::DescriptorType::SAMPLER)
                     .descriptor_count(1)
                     .stage_flags(vk::ShaderStageFlags::FRAGMENT),
-                // the canvas (the atlas stands in when there's none)
+                // the canvas and a second picture (the atlas stands in when there's none)
                 vk::DescriptorSetLayoutBinding::default()
                     .binding(2)
+                    .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(3)
                     .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
                     .descriptor_count(1)
                     .stage_flags(vk::ShaderStageFlags::FRAGMENT),
@@ -380,7 +401,7 @@ impl Renderer2d {
             let sizes = [
                 vk::DescriptorPoolSize {
                     ty: vk::DescriptorType::SAMPLED_IMAGE,
-                    descriptor_count: 2,
+                    descriptor_count: 3,
                 },
                 vk::DescriptorPoolSize {
                     ty: vk::DescriptorType::SAMPLER,
@@ -423,6 +444,11 @@ impl Renderer2d {
                         .dst_binding(2)
                         .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
                         .image_info(&img),
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(set)
+                        .dst_binding(3)
+                        .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                        .image_info(&img),
                 ],
                 &[],
             );
@@ -445,7 +471,7 @@ impl Renderer2d {
                 atlas,
                 atlas_memory,
                 atlas_view,
-                bound_canvas: atlas_view,
+                bound_canvas: [atlas_view; 2],
                 staging,
                 staging_memory,
                 staging_ptr: staging_ptr as *mut u8,
@@ -498,6 +524,20 @@ impl Renderer2d {
         clear: [f32; 4],
         quads: &[Quad],
         canvas: Option<&mut Canvas>,
+    ) -> Result<()> {
+        self.draw_canvases(gpu, frame, clear, quads, canvas, None)
+    }
+
+    /// [`Renderer2d::draw_layered`] with a second picture, `second`, for
+    /// [`Quad::canvas`] quads marked [`Quad::second`] (e.g. pixels being moved).
+    pub fn draw_canvases(
+        &mut self,
+        gpu: &Gpu,
+        frame: &DmabufImage,
+        clear: [f32; 4],
+        quads: &[Quad],
+        canvas: Option<&mut Canvas>,
+        second: Option<&mut Canvas>,
     ) -> Result<()> {
         if quads.len() > self.capacity {
             let cap = quads.len().next_power_of_two();
@@ -553,9 +593,15 @@ impl Renderer2d {
             .collect();
         let first = !self.atlas_ready;
         self.atlas_ready = true;
-        // the canvas quads sample: bind this canvas (or the atlas, when there's none)
-        let want = canvas.as_ref().map_or(self.atlas_view, |c| c.view);
-        if want != self.bound_canvas {
+        // the canvas quads sample: bind these pictures (or the atlas, when there's none)
+        for (binding, want) in [
+            (2, canvas.as_ref().map_or(self.atlas_view, |c| c.view)),
+            (3, second.as_ref().map_or(self.atlas_view, |c| c.view)),
+        ] {
+            let bound = &mut self.bound_canvas[binding as usize - 2];
+            if want == *bound {
+                continue;
+            }
             let img = [vk::DescriptorImageInfo::default()
                 .image_view(want)
                 .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
@@ -564,39 +610,43 @@ impl Renderer2d {
                 self.device.update_descriptor_sets(
                     &[vk::WriteDescriptorSet::default()
                         .dst_set(self.set)
-                        .dst_binding(2)
+                        .dst_binding(binding)
                         .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
                         .image_info(&img)],
                     &[],
                 )
             };
-            self.bound_canvas = want;
+            *bound = want;
         }
-        let under = canvas.map(|c| {
-            let regions: Vec<vk::BufferImageCopy> = c
-                .pending
-                .drain(..)
-                .map(|[x, y, w, h]| {
-                    vk::BufferImageCopy::default()
-                        .buffer_offset((y as u64 * c.width as u64 + x as u64) * 4)
-                        .buffer_row_length(c.width)
-                        .image_subresource(super::COLOR_LAYERS)
-                        .image_offset(vk::Offset3D {
-                            x: x as i32,
-                            y: y as i32,
-                            z: 0,
-                        })
-                        .image_extent(vk::Extent3D {
-                            width: w,
-                            height: h,
-                            depth: 1,
-                        })
-                })
-                .collect();
-            let was_ready = c.ready;
-            c.ready = true;
-            (c.image, c.staging, regions, was_ready)
-        });
+        let pictures: Vec<_> = canvas
+            .into_iter()
+            .chain(second)
+            .map(|c| {
+                let regions: Vec<vk::BufferImageCopy> = c
+                    .pending
+                    .drain(..)
+                    .map(|[x, y, w, h]| {
+                        vk::BufferImageCopy::default()
+                            .buffer_offset((y as u64 * c.width as u64 + x as u64) * 4)
+                            .buffer_row_length(c.width)
+                            .image_subresource(super::COLOR_LAYERS)
+                            .image_offset(vk::Offset3D {
+                                x: x as i32,
+                                y: y as i32,
+                                z: 0,
+                            })
+                            .image_extent(vk::Extent3D {
+                                width: w,
+                                height: h,
+                                depth: 1,
+                            })
+                    })
+                    .collect();
+                let was_ready = c.ready;
+                c.ready = true;
+                (c.image, c.staging, regions, was_ready)
+            })
+            .collect();
         let fam = gpu.family;
         let (atlas, staging, pipeline, layout, set, instances) = (
             self.atlas,
@@ -758,10 +808,11 @@ impl Renderer2d {
                 }
                 d.cmd_end_rendering(cmd);
             };
-            // the canvas's changes go up, then it's read by the shader
-            if let Some((cimg, cstaging, cregions, was_ready)) = &under
-                && (!cregions.is_empty() || !*was_ready)
-            {
+            // the pictures' changes go up, then they're read by the shader
+            for (cimg, cstaging, cregions, was_ready) in &pictures {
+                if cregions.is_empty() && *was_ready {
+                    continue;
+                }
                 let from = if *was_ready {
                     vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
                 } else {

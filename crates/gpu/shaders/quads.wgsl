@@ -6,7 +6,8 @@
 //           along the direction in uv.xy (1, 0: left to right; 0, 1: top to bottom)
 //   kind 4: the canvas, through a map from frame pixels to canvas pixels (uv: a b c d;
 //           border_color: tx ty, then the canvas's size), `fill` outside it; params.y = 1
-//           shows canvas pixels as squares. The canvas is straight RGBA.
+//           shows canvas pixels as squares; params.z = 1 shows the second picture. The
+//           pictures are straight RGBA.
 // Colours are premultiplied; blending is "over".
 
 struct Push {
@@ -17,6 +18,7 @@ var<immediate> pc: Push; // (Vulkan push constants)
 @group(0) @binding(0) var atlas: texture_2d<f32>;
 @group(0) @binding(1) var samp: sampler;
 @group(0) @binding(2) var canvas: texture_2d<f32>;
+@group(0) @binding(3) var second: texture_2d<f32>;
 
 struct Quad {
     @location(0) rect: vec4<f32>,         // x, y, w, h (pixels)
@@ -89,7 +91,13 @@ fn fs(i: Out) -> @location(0) vec4<f32> {
             return i.fill * cover;
         }
         var t: vec4<f32>;
-        if (i.params.y == 1.0) {
+        if (i.params.z == 1.0) {
+            if (i.params.y == 1.0) {
+                t = textureLoad(second, vec2<i32>(floor(c)), 0);
+            } else {
+                t = textureSampleLevel(second, samp, c / size, 0.0);
+            }
+        } else if (i.params.y == 1.0) {
             t = textureLoad(canvas, vec2<i32>(floor(c)), 0);
         } else {
             t = textureSampleLevel(canvas, samp, c / size, 0.0);

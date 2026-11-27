@@ -35,6 +35,22 @@ pub fn card(f: &mut Frame, r: Rect, s: &mut State) -> Rect {
         )
         .radius(24.0),
     );
+    // pixels being moved, over the document (the GPU moves them; nothing is redrawn)
+    if let Some(mv) = s.moving
+        && let Some(map) = v.moving_affine(inner, 1.0, &mv)
+    {
+        f.put(
+            Quad::canvas(
+                [r.x, r.y, r.w, r.h],
+                map,
+                [mv.w as f32, mv.h as f32],
+                [0.0; 4],
+                v.zoom >= 2.0,
+            )
+            .radius(24.0)
+            .second(),
+        );
+    }
     inner
 }
 
