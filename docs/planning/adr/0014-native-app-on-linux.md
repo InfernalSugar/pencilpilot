@@ -99,5 +99,19 @@ Each step is its own PR, with tests that need no window on the screen.
      whenever it comes, so drawing late doesn't help there (60 Hz: 27 ms median, 31 ms p99).
      Hyprland's own timing can only be measured on the owner's screen: it can't run headless
      without a synthetic timer.
+   - **The owner's check** (2026-11-27, Hyprland 0.57, a Huion pen on the 2560×1440 165 Hz
+     monitor, 29 s of drawing):
+     - 165 fps, steady. The owner: "works smoothly".
+     - Pen to screen about 16 ms median, about 19 ms slowest. This counts from the tablet's own
+       timestamp, so the trip from the tablet into Hyprland is in it.
+     - Drawing late made no difference: Hyprland shows a commit about two refreshes after it
+       arrives.
+   - **Open:** the 10 ms budget at 165 Hz isn't met yet. To try, with the full canvas
+     (Phase 3):
+     - presenting without waiting for the refresh (`wp_tearing_control_v1`, which Hyprland honours
+       for fullscreen windows);
+     - explicit sync.
+
+     The owner chose to go on to Phase 2 meanwhile.
    - **Measured in the baseline:** pen to screen, frame rate at 60/75/100/165 Hz, memory and power.
    - **Phase 1's gate:** pen to screen within budget on the owner's Huion.
