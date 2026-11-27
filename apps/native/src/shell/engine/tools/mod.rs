@@ -263,6 +263,8 @@ pub struct Tools {
     typesetter: Option<text::Typesetter>,
     /// the layer's pixels when typing started
     text_base: Option<Vec<u8>>,
+    /// the floating pixels are a paste (on no layer until kept), not lifted
+    pasting: bool,
 }
 
 impl std::fmt::Debug for Tools {
@@ -311,7 +313,7 @@ fn snap(s: &State, p: (f32, f32)) -> (f32, f32) {
 /// Keeps the tools' state in step with the painter (an undo while transforming or
 /// typing cancels those).
 fn sync(e: &mut Engine, s: &mut State) {
-    if s.tooling.transform.is_some() && !e.painter.transforming() {
+    if s.tooling.transform.is_some() && !e.painter.transforming() && !e.tools.pasting {
         e.float = None;
         e.tools.drag = Drag::None;
         s.tooling.transform = None;
@@ -481,12 +483,16 @@ pub fn apply(e: &mut Engine, s: &mut State, a: &Action) -> bool {
             xf_commit(e, s);
             e.painter.erase_mask(&vec![255; w * h]);
         }
-        "Paste" | "Paste in place" => {
-            if paste(e, s) && name == "Paste" {
-                // the pasted pixels, ready to move
+        // Paste: the copy floats where it was copied from, ready to move, and goes in
+        // when kept; Paste in place puts it straight in
+        "Paste" => {
+            if paste_floating(e, s) {
                 s.tool = Tool::Transform;
-                xf_begin(e, s);
+                s.tooling.memo.transform_asked = true;
             }
+        }
+        "Paste in place" => {
+            paste(e, s);
         }
         "Fill selection" => {
             xf_commit(e, s);
@@ -808,13 +814,132 @@ fn paste(e: &mut Engine, s: &mut State) -> bool {
     true
 }
 
+/// Floats the clipboard where it was copied from (the layer unchanged until it's kept).
+fn paste_floating(e: &mut Engine, s: &mut State) -> bool {
+    xf_commit(e, s);
+    text_commit(e, s);
+    let Some(c) = e.tools.clip.clone() else {
+        return false;
+    };
+    let (x, y) = (c.x as f32, c.y as f32);
+    e.float_pixels(c.rgba, c.w as u32, c.h as u32, (x, y));
+    e.tools.pasting = true;
+    s.tooling.transform = Some(XfBox {
+        rect: [x, y, x + c.w as f32, y + c.h as f32],
+        m: geom::IDENTITY,
+    });
+    true
+}
+
+/// Draws floating pasted pixels into the active layer where they've been taken (bilinear,
+/// one undo step), and selects them there.
+fn put_float(e: &mut Engine, f: &super::Float) -> bool {
+    let (w, h) = (e.painter.width() as usize, e.painter.height() as usize);
+    let Some(inv) = geom::invert(f.m) else {
+        return false;
+    };
+    let mut layer = e.painter.layer_rgba(e.painter.active_layer());
+    if layer.len() != w * h * 4 {
+        return false;
+    }
+    let (fw, fh) = (f.w as i64, f.h as i64);
+    let (ax, ay) = f.at;
+    // premultiplied, outside transparent
+    let get = |x: i64, y: i64| -> [f32; 4] {
+        if x < 0 || y < 0 || x >= fw || y >= fh {
+            return [0.0; 4];
+        }
+        let i = ((y * fw + x) * 4) as usize;
+        let a = f.rgba[i + 3] as f32 / 255.0;
+        [
+            f.rgba[i] as f32 * a,
+            f.rgba[i + 1] as f32 * a,
+            f.rgba[i + 2] as f32 * a,
+            a,
+        ]
+    };
+    let corners = [
+        (ax, ay),
+        (ax + fw as f32, ay),
+        (ax, ay + fh as f32),
+        (ax + fw as f32, ay + fh as f32),
+    ]
+    .map(|(x, y)| geom::apply(f.m, x, y));
+    let x0 = corners
+        .iter()
+        .map(|c| c.0)
+        .fold(f32::MAX, f32::min)
+        .floor()
+        .max(0.0) as usize;
+    let y0 = corners
+        .iter()
+        .map(|c| c.1)
+        .fold(f32::MAX, f32::min)
+        .floor()
+        .max(0.0) as usize;
+    let x1 = (corners
+        .iter()
+        .map(|c| c.0)
+        .fold(f32::MIN, f32::max)
+        .ceil()
+        .max(0.0) as usize)
+        .min(w);
+    let y1 = (corners
+        .iter()
+        .map(|c| c.1)
+        .fold(f32::MIN, f32::max)
+        .ceil()
+        .max(0.0) as usize)
+        .min(h);
+    let mut mask = vec![0u8; w * h];
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let (sx, sy) = geom::apply(inv, x as f32 + 0.5, y as f32 + 0.5);
+            let (u, v) = (sx - ax - 0.5, sy - ay - 0.5);
+            let (iu, iv) = (u.floor(), v.floor());
+            let (tu, tv) = (u - iu, v - iv);
+            let (iu, iv) = (iu as i64, iv as i64);
+            let (p00, p10, p01, p11) = (
+                get(iu, iv),
+                get(iu + 1, iv),
+                get(iu, iv + 1),
+                get(iu + 1, iv + 1),
+            );
+            let mut p = [0f32; 4];
+            for k in 0..4 {
+                p[k] = p00[k] * (1.0 - tu) * (1.0 - tv)
+                    + p10[k] * tu * (1.0 - tv)
+                    + p01[k] * (1.0 - tu) * tv
+                    + p11[k] * tu * tv;
+            }
+            if p[3] <= 1.0 / 255.0 {
+                continue;
+            }
+            let top = [
+                (p[0] / p[3]).round().clamp(0.0, 255.0) as u8,
+                (p[1] / p[3]).round().clamp(0.0, 255.0) as u8,
+                (p[2] / p[3]).round().clamp(0.0, 255.0) as u8,
+                (p[3] * 255.0).round() as u8,
+            ];
+            let i = y * w + x;
+            over(&mut layer[i * 4..i * 4 + 4], &top);
+            mask[i] = 255;
+        }
+    }
+    if !put_layer(e, &layer) {
+        return false;
+    }
+    e.painter.set_selection(&mask, 0);
+    true
+}
+
 // ---- transform ----
 
 /// Lifts the selection (or the whole active layer) to transform it: the GPU shows the
 /// lifted pixels moving ([`Engine::float_begin`]), nothing is redrawn per pointer move.
 /// Whether there's anything lifted.
 fn xf_begin(e: &mut Engine, s: &mut State) -> bool {
-    if s.tooling.transform.is_some() && e.painter.transforming() {
+    if s.tooling.transform.is_some() && (e.painter.transforming() || e.tools.pasting) {
         return true;
     }
     text_commit(e, s);
@@ -844,6 +969,14 @@ fn xf_commit(e: &mut Engine, s: &mut State) {
     if s.tooling.transform.take().is_none() {
         return;
     }
+    if std::mem::take(&mut e.tools.pasting) {
+        if let Some(f) = e.float.take() {
+            put_float(e, &f);
+        }
+        e.tools.drag = Drag::None;
+        refresh_selection(e, s);
+        return;
+    }
     e.float_end(true);
     e.tools.drag = Drag::None;
     refresh_selection(e, s);
@@ -851,6 +984,14 @@ fn xf_commit(e: &mut Engine, s: &mut State) {
 
 fn xf_cancel(e: &mut Engine, s: &mut State) {
     if s.tooling.transform.take().is_none() {
+        return;
+    }
+    if std::mem::take(&mut e.tools.pasting) {
+        // a paste let go of: nothing was put down
+        e.float = None;
+        e.tools.drag = Drag::None;
+        e.painter.deselect();
+        refresh_selection(e, s);
         return;
     }
     e.float_end(false);

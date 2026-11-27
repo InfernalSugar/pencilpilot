@@ -34,7 +34,7 @@ pub struct Memo {
     /// the settings pop-up is the Fill's
     fill_settings: bool,
     /// a transform was asked for since the Transform tool was picked
-    transform_asked: bool,
+    pub(super) transform_asked: bool,
     /// the rest of a press of Ctrl+Shift+V (the toolkit's Ctrl keys don't tell Shift)
     paste_in_place: bool,
 }
