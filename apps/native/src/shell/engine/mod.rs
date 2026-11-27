@@ -168,6 +168,17 @@ impl Engine {
     /// the other tools are [`tools`]'.
     pub fn pointer(&mut self, s: &mut State, phase: Phase, p: Sample) {
         if Engine::paints(s) || self.is_stroking() {
+            // pixels still being moved are put down first (the painter takes no stroke while
+            // they float), as picking the brush would have
+            if phase == Phase::Down && (self.float.is_some() || self.painter.transforming()) {
+                tools::apply(self, s, &Action::Other("Transform: commit".into()));
+                // (lifted other than by the Transform tool)
+                if self.float.is_some() {
+                    self.float_end(true);
+                } else if self.painter.transforming() {
+                    self.painter.transform_commit();
+                }
+            }
             match phase {
                 Phase::Down => self.down(s, p.x, p.y, p.pressure, p.tilt, p.ms),
                 Phase::Move => self.moved(p.x, p.y, p.pressure, p.tilt, p.ms),
@@ -394,5 +405,44 @@ mod tests {
         assert!(red(&e, 305, 105) && !red(&e, 1550, 920));
         eprintln!("1200×800 move: lift {lift:?}, each drag step {per_step:?}, commit {commit:?}");
         assert!(per_step.as_micros() < 1000, "a drag step: {per_step:?}");
+    }
+
+    /// A stroke started while pixels are still being moved (a key and a pen press in the same
+    /// batch of input): the move is kept and the stroke paints.
+    #[test]
+    fn a_stroke_while_pixels_float_keeps_both() {
+        let mut s = State::demo();
+        let mut e = Engine::new(240, 120);
+        let (w, h) = (240usize, 120usize);
+        let mut cov = vec![0u8; w * h];
+        for y in 10..30 {
+            cov[y * w + 10..y * w + 30].fill(255);
+        }
+        assert!(e.painter.fill_mask(&cov, [200, 30, 30], 1.0));
+        e.painter.flush();
+        assert!(!e.lift().is_empty());
+        e.float_move([1.0, 0.0, 0.0, 1.0, 100.0, 0.0]);
+        // the brush, before the interface turned the tool change into a commit
+        s.tool = Tool::Brush;
+        let at = |x: f32, ms: u32| Sample {
+            x,
+            y: 80.0,
+            pressure: 0.9,
+            tilt: (0.0, 0.0),
+            ms,
+        };
+        e.pointer(&mut s, Phase::Down, at(20.0, 0));
+        for i in 1..60 {
+            e.pointer(&mut s, Phase::Move, at(20.0 + i as f32 * 3.0, i * 4));
+        }
+        e.pointer(&mut s, Phase::Up, at(200.0, 240));
+        e.painter.flush();
+        assert!(e.float.is_none() && !e.painter.transforming());
+        let red = |e: &Engine, x: usize, y: usize| {
+            let p = &e.painter.rgba()[(y * w + x) * 4..][..3];
+            p[0] > 150 && p[1] < 80
+        };
+        assert!(red(&e, 120, 20) && !red(&e, 20, 20), "the move was kept");
+        assert!(ink(&e, 70, 90) > 100, "and the stroke painted");
     }
 }
