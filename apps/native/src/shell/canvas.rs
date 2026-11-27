@@ -181,6 +181,8 @@ pub fn overlays(f: &mut Frame, card: Rect, s: &mut State) {
     }
     // right-click: the canvas menu; in Review, what to do with the frame being reviewed
     f.context_area(MENU, card);
+    // the tools' overlays, the selection's menu (instead of this one inside it), their keys
+    crate::shell::engine::tools::overlay::draw(f, card, s);
     let review = s.workspace == Workspace::Review;
     let frame = s.frame + 1;
     let picked = f.menu(MENU, |m| {
