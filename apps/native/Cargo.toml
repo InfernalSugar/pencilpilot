@@ -24,5 +24,7 @@ pencilpilot-ppstudio = { path = "../../crates/ppstudio" }
 serde_json = "1"
 # drawings not showing, kept compressed
 miniz_oxide = "0.8"
+# (the threads decoding drawings ahead run at a lower priority)
+libc = "0.2"
 # the desktop portal (the system file dialog), over D-Bus
 zbus = "5"

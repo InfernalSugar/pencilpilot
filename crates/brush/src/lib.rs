@@ -5842,6 +5842,13 @@ pub fn decode_tile(rgba: &[u8]) -> Option<DecodedTile> {
     if rgba.len() != ts * ts * 4 {
         return None;
     }
+    // (the sRGB curve of each 8-bit value, looked up: the same numbers premul_fix15 makes,
+    // without three powf a pixel)
+    static LINEAR: std::sync::OnceLock<[f32; 256]> = std::sync::OnceLock::new();
+    let lin = LINEAR.get_or_init(|| {
+        std::array::from_fn(|v| hokusai::color::srgb_to_linear((v as f32 / 255.0).clamp(0.0, 1.0)))
+    });
+    let one = hokusai::fix15::FIX15_ONE as f32;
     let mut t = empty_tile();
     let mut any = false;
     for (k, px) in rgba.as_chunks::<4>().0.iter().enumerate() {
@@ -5849,8 +5856,9 @@ pub fn decode_tile(rgba: &[u8]) -> Option<DecodedTile> {
             continue;
         }
         any = true;
-        let c = [px[0], px[1], px[2]].map(|v| v as f32 / 255.0);
-        t[k / ts][k % ts] = premul_fix15(c, px[3] as f32 / 255.0);
+        let a = (px[3] as f32 / 255.0).clamp(0.0, 1.0);
+        let f = |v: u8| (lin[v as usize] * a * one).round() as u16;
+        t[k / ts][k % ts] = [f(px[0]), f(px[1]), f(px[2]), (a * one).round() as u16];
     }
     any.then_some(DecodedTile(t))
 }
@@ -5904,6 +5912,32 @@ pub(crate) fn unpack_tiles(packed: &[u8]) -> Option<TileMap> {
         tiles.insert((tx, ty), t);
     }
     Some(tiles)
+}
+
+#[cfg(test)]
+mod decode_tile_tests {
+    use super::*;
+
+    /// The quick decoding gives what premul_fix15 gives, for every value and alpha.
+    #[test]
+    fn decode_tile_matches_premul_fix15() {
+        let mut px = vec![0u8; TILE_SIZE * TILE_SIZE * 4];
+        for a in 0..=255u32 {
+            for (k, p) in px.chunks_mut(4).enumerate() {
+                let v = ((k as u32 * 7 + a) % 256) as u8;
+                p.copy_from_slice(&[v, 255 - v, v / 2, a as u8]);
+            }
+            let Some(t) = decode_tile(&px) else {
+                assert_eq!(a, 0);
+                continue;
+            };
+            for (k, p) in px.chunks(4).enumerate() {
+                let c = [p[0], p[1], p[2]].map(|v| v as f32 / 255.0);
+                let want = premul_fix15(c, p[3] as f32 / 255.0);
+                assert_eq!(t.0[k / TILE_SIZE][k % TILE_SIZE], want, "{p:?}");
+            }
+        }
+    }
 }
 
 #[cfg(test)]

@@ -114,6 +114,10 @@ pub struct Frames {
     edits_seen: u64,
     /// the next and previous frames' drawings, being decoded on another thread
     prefetch: Option<(Vec<u32>, std::sync::mpsc::Receiver<Prefetched>)>,
+    /// when to put away drawings not wanted any more
+    trim_at: Option<Instant>,
+    /// drawings around the frame are to be asked for ahead (next tick)
+    ahead_due: bool,
 }
 
 /// Drawings decoded ahead (on another thread).
@@ -348,7 +352,13 @@ fn show(e: &mut Engine, s: &State) -> bool {
     if e.painter.show_drawings(&pairs) {
         e.frames.asked = pairs;
         e.frames.showed = true;
-        trim(e, s);
+        // (putting away waits for a pause: frame changes stay quick while scrubbing; unless
+        // too much is held meanwhile)
+        if held_tiles(e) > HELD_TILES {
+            trim(e, s);
+        } else {
+            e.frames.trim_at = Some(Instant::now() + TRIM_AFTER);
+        }
         return true;
     }
     false
@@ -371,10 +381,12 @@ pub fn load_drawings(e: &mut Engine, drawings: &[u32]) {
         return;
     }
     let st = &e.frames.store;
-    let back: Prefetched = missing
-        .par_iter()
-        .filter_map(|&d| Some((d, st.decode(d)?)))
-        .collect();
+    let back: Prefetched = store::pool().install(|| {
+        missing
+            .par_iter()
+            .filter_map(|&d| Some((d, st.decode(d)?)))
+            .collect()
+    });
     for (d, tiles) in back {
         e.painter.put_drawing_decoded(d, tiles);
     }
@@ -405,33 +417,59 @@ fn wanted(e: &Engine, s: &State) -> std::collections::HashSet<u32> {
     if s.onion && !s.playing {
         keep.extend(onion_entries(s).chunks(3).map(|e| e[0]));
     }
-    keep.extend(neighbours(s));
+    keep.extend(neighbours(e, s));
     keep
 }
 
-/// The drawings of the frames next to this one (the next two while playing): brought in
-/// ahead, on another thread, so going there needn't wait.
-fn neighbours(s: &State) -> Vec<u32> {
+/// Tiles of drawings brought in ahead, at most (64 MB in the painter).
+const AHEAD_TILES: usize = 2048;
+/// Drawings not wanted any more are put away this long after the last frame change, or at
+/// once past this many tiles held that the store has too.
+const TRIM_AFTER: Duration = Duration::from_millis(60);
+const HELD_TILES: usize = 4 * AHEAD_TILES;
+
+/// Tiles the painter holds of drawings not showing that the store has too.
+fn held_tiles(e: &Engine) -> usize {
+    e.painter
+        .kept_drawings()
+        .iter()
+        .map(|d| e.frames.store.tiles_of(*d))
+        .sum()
+}
+
+/// The drawings of the frames around this one, nearest first (ahead only while playing):
+/// brought in ahead, on other threads, so going there needn't wait. The next and previous
+/// frames' always; farther ones while they fit in [`AHEAD_TILES`].
+fn neighbours(e: &Engine, s: &State) -> Vec<u32> {
     let n = s.frames.max(1);
-    let near: &[u32] = if s.playing { &[1, 2] } else { &[1, n - 1] };
-    let mut v = Vec::new();
-    for k in near {
-        let f = (s.frame + k) % n;
-        v.extend(
-            s.sheet
-                .tracks
-                .iter()
-                .map(|t| t.drawing_at(f))
-                .filter(|d| *d != 0),
-        );
+    let steps: Vec<i64> = if s.playing {
+        (1..=8).collect()
+    } else {
+        vec![1, -1, 2, -2, 3, -3, 4, 5]
+    };
+    let mut v: Vec<u32> = Vec::new();
+    let mut tiles = 0;
+    for (i, k) in steps.into_iter().enumerate() {
+        let f = (s.frame as i64 + k).rem_euclid(n as i64) as u32;
+        let here: Vec<u32> = s
+            .sheet
+            .tracks
+            .iter()
+            .map(|t| t.drawing_at(f))
+            .filter(|d| *d != 0 && !v.contains(d))
+            .collect();
+        let cost: usize = here.iter().map(|d| e.frames.store.tiles_of(*d)).sum();
+        if i >= 2 && tiles + cost > AHEAD_TILES {
+            break;
+        }
+        tiles += cost;
+        v.extend(here);
     }
-    v.sort_unstable();
-    v.dedup();
     v
 }
 
 /// Drawings decoded ahead arrive; more are asked for. Whether some arrived.
-fn prefetch(e: &mut Engine, s: &State) -> bool {
+fn prefetch(e: &mut Engine, s: &State, more: bool) -> bool {
     let mut arrived = false;
     if let Some((_, rx)) = &e.frames.prefetch {
         match rx.try_recv() {
@@ -449,10 +487,12 @@ fn prefetch(e: &mut Engine, s: &State) -> bool {
             Err(_) => e.frames.prefetch = None,
         }
     }
-    if e.is_stroking() {
+    if e.is_stroking() || !more {
+        e.frames.ahead_due = !more;
         return arrived;
     }
-    let jobs: Vec<store::Job> = neighbours(s)
+    e.frames.ahead_due = false;
+    let jobs: Vec<store::Job> = neighbours(e, s)
         .into_iter()
         .filter(|d| !e.painter.has_drawing(*d))
         .filter_map(|d| e.frames.store.job(d))
@@ -460,7 +500,7 @@ fn prefetch(e: &mut Engine, s: &State) -> bool {
     if !jobs.is_empty() {
         let ds = jobs.iter().map(|j| j.d).collect();
         let (tx, rx) = std::sync::mpsc::channel();
-        rayon::spawn(move || {
+        store::ahead_pool().spawn(move || {
             let done: Prefetched = jobs.iter().map(|j| (j.d, j.decode())).collect();
             let _ = tx.send(done);
         });
@@ -492,10 +532,11 @@ pub fn trim(e: &mut Engine, s: &State) {
             pack.push((d, t));
         }
     }
-    let packed: Vec<(u32, std::sync::Arc<store::Kept>)> = pack
-        .into_par_iter()
-        .map(|(d, t)| (d, std::sync::Arc::new(store::Store::pack(t))))
-        .collect();
+    let packed: Vec<(u32, std::sync::Arc<store::Kept>)> = store::pool().install(|| {
+        pack.into_par_iter()
+            .map(|(d, t)| (d, std::sync::Arc::new(store::Store::pack(t))))
+            .collect()
+    });
     e.frames.store.drawings.extend(packed);
 }
 
@@ -966,10 +1007,16 @@ pub fn tick(e: &mut Engine, s: &mut State, now: Instant) -> bool {
         }
     }
     e.frames.seen = (s.frame, s.active_layer, e.painter.layers().len());
-    if show(e, s) {
+    let shown = show(e, s);
+    if shown {
         changed = true;
     }
-    prefetch(e, s);
+    // (more asked for once this frame is drawn, not while: their decoding would slow it)
+    prefetch(e, s, !shown);
+    if e.frames.trim_at.is_some_and(|t| now >= t) {
+        e.frames.trim_at = None;
+        trim(e, s);
+    }
     changed
         || before
             != (
@@ -989,6 +1036,8 @@ fn idle(e: &Engine, s: &State) -> bool {
     let f = &e.frames;
     f.ready
         && f.prefetch.is_none()
+        && f.trim_at.is_none()
+        && !f.ahead_due
         && !s.playing
         && f.play.is_none()
         && f.opacity.is_none()
@@ -1025,8 +1074,11 @@ pub fn next_tick_at(e: &Engine, s: &State) -> Option<Instant> {
     if let Some((_, _, t)) = &f.opacity {
         at.push(*t + OPACITY_SETTLES);
     }
-    if f.prefetch.is_some() {
-        at.push(now + Duration::from_millis(2));
+    if f.prefetch.is_some() || f.ahead_due {
+        at.push(now + Duration::from_millis(1));
+    }
+    if let Some(t) = f.trim_at {
+        at.push(t);
     }
     if !e.is_stroking() {
         let adopt = s.sheet.tracks.iter().any(|t| {

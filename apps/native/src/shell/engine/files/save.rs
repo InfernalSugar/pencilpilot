@@ -8,7 +8,6 @@
 //! stored ([`ppstudio::Project::write_from`]); only changed tiles are encoded.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::Path;
 
 use ppstudio::{Cut, Drawing, Exposure, Layer, Manifest, Palette, PaletteColour, Project, TileRef};
 use rayon::prelude::*;
@@ -21,6 +20,9 @@ use crate::state::State;
 /// How saving went (ms, tiles), for checks.
 #[derive(Debug, Clone, Default)]
 pub struct SaveTimes {
+    /// the window's part (the project made, the changed tiles read), and the rest (written
+    /// on another thread)
+    pub window_ms: f64,
     pub tiles_ms: f64,
     pub write_ms: f64,
     /// tiles read from the painter, and of those new to the file (compressed)
@@ -55,19 +57,24 @@ pub fn now_rfc3339() -> String {
     )
 }
 
-/// A small picture of what the canvas shows, as PNG (at most 320 px across).
-fn thumbnail(e: &Engine) -> Option<Vec<u8>> {
+/// A small picture of what the canvas shows (at most 320 px across, straight RGBA8): each
+/// pixel the average of a 4 × 4 grid of samples over its area (not every pixel: a 4K canvas
+/// has 8 million, and the window waits for this). [`png`] makes the file's PNG of it.
+pub fn thumbnail(e: &Engine) -> (u32, u32, Vec<u8>) {
     let (w, h) = (e.painter.width() as usize, e.painter.height() as usize);
     let k = (w.max(h)).div_ceil(320).max(1);
     let (tw, th) = (w.div_ceil(k), h.div_ceil(k));
     let src = e.painter.rgba();
     let mut out = vec![0u8; tw * th * 4];
+    const N: usize = 4;
     for ty in 0..th {
         for tx in 0..tw {
             let mut acc = [0u32; 4];
             let mut n = 0;
-            for y in ty * k..((ty + 1) * k).min(h) {
-                for x in tx * k..((tx + 1) * k).min(w) {
+            for sy in 0..N {
+                let y = (ty * k + (sy * k) / N).min(h - 1);
+                for sx in 0..N {
+                    let x = (tx * k + (sx * k) / N).min(w - 1);
                     let i = (y * w + x) * 4;
                     for c in 0..4 {
                         acc[c] += src[i + c] as u32;
@@ -77,16 +84,21 @@ fn thumbnail(e: &Engine) -> Option<Vec<u8>> {
             }
             let o = (ty * tw + tx) * 4;
             for c in 0..4 {
-                out[o + c] = (acc[c] / n.max(1)) as u8;
+                out[o + c] = (acc[c] / n) as u8;
             }
         }
     }
-    let mut png = Vec::new();
-    let mut enc = png::Encoder::new(&mut png, tw as u32, th as u32);
+    (tw as u32, th as u32, out)
+}
+
+/// The thumbnail as PNG (on the writing thread).
+pub fn png((w, h, rgba): &(u32, u32, Vec<u8>)) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut enc = png::Encoder::new(&mut out, *w, *h);
     enc.set_color(png::ColorType::Rgba);
     enc.set_depth(png::BitDepth::Eight);
-    enc.write_header().ok()?.write_image_data(&out).ok()?;
-    Some(png)
+    enc.write_header().ok()?.write_image_data(rgba).ok()?;
+    Some(out)
 }
 
 /// A layer as the file keeps it, for a layer the file didn't have.
@@ -332,60 +344,61 @@ pub fn project(e: &Engine, s: &State, doc: &mut Doc) -> Result<(Project, SaveTim
         .collect();
     // (drawing, tile, its name, its bytes when the old file hasn't it)
     type Named = (u32, (i32, i32), String, Option<Vec<u8>>);
-    let tiles: Vec<Named> = jobs
-        .par_iter()
-        .filter_map(|&(d, (x, y), at)| {
-            let mut px = vec![0u8; TILE * TILE * 4];
-            match at {
-                None => {
-                    if !painter.drawing_tile_rgba(d, (x, y), &mut px) {
-                        return None;
+    let tiles: Vec<Named> = super::super::frames::store::pool().install(|| {
+        jobs.par_iter()
+            .filter_map(|&(d, (x, y), at)| {
+                let mut px = vec![0u8; TILE * TILE * 4];
+                match at {
+                    None => {
+                        if !painter.drawing_tile_rgba(d, (x, y), &mut px) {
+                            return None;
+                        }
+                    }
+                    Some(i) => {
+                        let Some(Kept::Raw(t)) = store.drawings.get(&d).map(|k| &**k) else {
+                            return None;
+                        };
+                        let raw = miniz_oxide::inflate::decompress_to_vec_with_limit(
+                            &t.get(i)?.1,
+                            brush::DecodedTile::BYTES,
+                        )
+                        .ok()?;
+                        brush::encode_tile(&brush::DecodedTile::from_bytes(&raw)?, &mut px);
                     }
                 }
-                Some(i) => {
-                    let Some(Kept::Raw(t)) = store.drawings.get(&d).map(|k| &**k) else {
-                        return None;
-                    };
-                    let raw = miniz_oxide::inflate::decompress_to_vec_with_limit(
-                        &t.get(i)?.1,
-                        brush::DecodedTile::BYTES,
-                    )
-                    .ok()?;
-                    brush::encode_tile(&brush::DecodedTile::from_bytes(&raw)?, &mut px);
+                // (paint past the canvas's edge isn't part of the picture: as the file cuts
+                // tiles from a whole canvas)
+                let (x0, y0) = (x as usize * TILE, y as usize * TILE);
+                let (wn, hn) = ((w as usize - x0).min(TILE), (h as usize - y0).min(TILE));
+                if wn < TILE || hn < TILE {
+                    for row in 0..TILE {
+                        let from = if row < hn { wn } else { 0 };
+                        px[(row * TILE + from) * 4..(row + 1) * TILE * 4].fill(0);
+                    }
                 }
-            }
-            // (paint past the canvas's edge isn't part of the picture: as the file cuts
-            // tiles from a whole canvas)
-            let (x0, y0) = (x as usize * TILE, y as usize * TILE);
-            let (wn, hn) = ((w as usize - x0).min(TILE), (h as usize - y0).min(TILE));
-            if wn < TILE || hn < TILE {
-                for row in 0..TILE {
-                    let from = if row < hn { wn } else { 0 };
-                    px[(row * TILE + from) * 4..(row + 1) * TILE * 4].fill(0);
+                if px.chunks(4).all(|p| p[3] == 0) {
+                    return None;
                 }
-            }
-            if px.chunks(4).all(|p| p[3] == 0) {
-                return None;
-            }
-            let mut hash = ppstudio::tile_hash(&px);
-            let mut known = source.is_some_and(|o| o.has_tile(&hash));
-            // (unchanged since it was read: the file's own bytes for it)
-            if !known
-                && let Some(orig) = origin.get(&(d, (x, y)))
-                && source.is_some_and(|o| o.has_tile(orig))
-                && let Some(file) = store.file_rgba(orig)
-                && let Some(t) = brush::decode_tile(&file)
-            {
-                let mut back = vec![0u8; TILE * TILE * 4];
-                brush::encode_tile(&t, &mut back);
-                if back == px {
-                    hash = (*orig).clone();
-                    known = true;
+                let mut hash = ppstudio::tile_hash(&px);
+                let mut known = source.is_some_and(|o| o.has_tile(&hash));
+                // (unchanged since it was read: the file's own bytes for it)
+                if !known
+                    && let Some(orig) = origin.get(&(d, (x, y)))
+                    && source.is_some_and(|o| o.has_tile(orig))
+                    && let Some(file) = store.file_rgba(orig)
+                    && let Some(t) = brush::decode_tile(&file)
+                {
+                    let mut back = vec![0u8; TILE * TILE * 4];
+                    brush::encode_tile(&t, &mut back);
+                    if back == px {
+                        hash = (*orig).clone();
+                        known = true;
+                    }
                 }
-            }
-            Some((d, (x, y), hash, (!known).then_some(px)))
-        })
-        .collect();
+                Some((d, (x, y), hash, (!known).then_some(px)))
+            })
+            .collect()
+    });
     times.tiles = tiles.len();
     let mut refs: HashMap<u32, Vec<TileRef>> = kept_refs;
     for (d, (x, y), hash, px) in tiles {
@@ -478,21 +491,7 @@ pub fn project(e: &Engine, s: &State, doc: &mut Doc) -> Result<(Project, SaveTim
     if doc.source.is_some() {
         p.strokes.clear();
     }
-    p.thumbnail = thumbnail(e);
-    Ok((p, times))
-}
-
-/// Writes the project to `path` (safely: next to it, then moved into place).
-pub fn write(
-    e: &Engine,
-    s: &State,
-    doc: &mut Doc,
-    path: &Path,
-) -> Result<(Project, SaveTimes), String> {
-    let (p, mut times) = project(e, s, doc)?;
-    let t = std::time::Instant::now();
-    p.save_from(path, doc.source.as_mut())
-        .map_err(|e| e.to_string())?;
-    times.write_ms = t.elapsed().as_secs_f64() * 1e3;
+    // (made into a PNG by whoever writes the file)
+    p.thumbnail = None;
     Ok((p, times))
 }

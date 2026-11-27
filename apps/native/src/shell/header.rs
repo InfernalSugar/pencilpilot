@@ -114,6 +114,7 @@ pub fn build(f: &mut Frame, r: Rect, s: &mut State) {
             ("n", files::NEW),
             ("o", files::OPEN),
             ("s", if shift_s { files::SAVE_AS } else { files::SAVE }),
+            ("q", files::QUIT),
         ] {
             if f.take_key(key, true) {
                 s.actions.push(Action::File(item.into()));
@@ -271,7 +272,7 @@ pub fn build(f: &mut Frame, r: Rect, s: &mut State) {
     }
     s.header.layout = l;
     // "Save first?" (New or Open with unsaved changes), over the window
-    files::ask_popup(f, Rect::new(r.x, r.y, r.w, r.w * 0.6), s);
+    files::popup::build(f, Rect::new(r.x, r.y, r.w, r.w * 0.6), s);
 }
 
 /// A text button in the nav (File, View): it opens its menu under it, and closes it when
@@ -571,6 +572,7 @@ mod tests {
             ("o", false, files::OPEN),
             ("s", false, files::SAVE),
             ("S", true, files::SAVE_AS),
+            ("q", false, files::QUIT),
         ] {
             ctrl(&mut h, k, shift);
             assert_eq!(h.s.actions, vec![Action::File(item.into())], "{k}");
@@ -606,11 +608,29 @@ mod tests {
         assert!(h.idle());
     }
 
+    fn save_first() -> files::Question {
+        use pencilpilot_ui::ui::Kind;
+        files::Question {
+            title: "Save the changes to Ember first?".into(),
+            detail: "Your changes are lost if you don’t save them.".into(),
+            buttons: vec![
+                ("Save".into(), files::CONFIRM_SAVE.into(), Kind::Primary),
+                (
+                    "Don’t save".into(),
+                    files::CONFIRM_DISCARD.into(),
+                    Kind::Secondary,
+                ),
+                ("Cancel".into(), files::CONFIRM_CANCEL.into(), Kind::Ghost),
+            ],
+            dismiss: files::CONFIRM_CANCEL.into(),
+        }
+    }
+
     /// "Save first?": Escape or a click outside cancels; its buttons answer.
     #[test]
     fn save_first_asks_and_answers() {
         let Some(mut h) = Harness::new() else { return };
-        h.s.project.asking = Some("Save the changes to Ember first?".into());
+        h.s.project.asking = Some(save_first());
         h.pass();
         h.pass();
         assert!(h.ui.overlay_open(), "the pop-up shows");
@@ -625,7 +645,7 @@ mod tests {
         // (the engine clears the question; ask again) a click outside cancels too
         h.s.project.asking = None;
         h.pass();
-        h.s.project.asking = Some("Save the changes to Ember first?".into());
+        h.s.project.asking = Some(save_first());
         h.pass();
         h.pass();
         assert!(h.ui.overlay_open());
@@ -647,7 +667,7 @@ mod tests {
         .into_iter()
         .enumerate()
         {
-            h.s.project.asking = Some("Save the changes to Ember first?".into());
+            h.s.project.asking = Some(save_first());
             h.pass();
             h.pass();
             let r = h.s.project.ask_buttons[i];

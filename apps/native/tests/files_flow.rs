@@ -9,7 +9,13 @@ use pencilpilot_native::shell::engine::{Engine, files};
 use pencilpilot_native::state::{Action, State};
 
 fn settle(e: &mut Engine, s: &mut State) {
+    // (a save is written on another thread)
+    let t = Instant::now();
     for _ in 0..3 {
+        e.tick(s, Instant::now());
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    while s.project.saving && t.elapsed() < Duration::from_secs(10) {
         e.tick(s, Instant::now());
         std::thread::sleep(Duration::from_millis(5));
     }

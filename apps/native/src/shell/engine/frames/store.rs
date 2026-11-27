@@ -51,6 +51,40 @@ pub struct Store {
     pub origin: HashMap<u32, Vec<(i32, i32, String)>>,
 }
 
+/// The threads drawings wanted now are decoded and packed on (a jump to a frame waits
+/// for them): their own, not the shared pool the window composites with.
+pub fn pool() -> &'static rayon::ThreadPool {
+    static POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        let n = std::thread::available_parallelism().map_or(4, |n| n.get());
+        rayon::ThreadPoolBuilder::new()
+            .num_threads((n / 2).clamp(2, 8))
+            .thread_name(|i| format!("pp-drawings-{i}"))
+            .build()
+            .expect("the drawings' threads")
+    })
+}
+
+/// The threads drawings are decoded ahead on: two, at a lower priority (the window's
+/// drawing and the decoding wanted now go first).
+pub fn ahead_pool() -> &'static rayon::ThreadPool {
+    static POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .thread_name(|i| format!("pp-ahead-{i}"))
+            .start_handler(|_| {
+                // SAFETY: plain system calls on this thread's own id
+                unsafe {
+                    let tid = libc::gettid();
+                    libc::setpriority(libc::PRIO_PROCESS, tid as libc::id_t, 10);
+                }
+            })
+            .build()
+            .expect("the drawings' threads ahead")
+    })
+}
+
 fn inflate(b: &[u8], limit: usize) -> Option<Vec<u8>> {
     miniz_oxide::inflate::decompress_to_vec_with_limit(b, limit).ok()
 }
@@ -130,6 +164,15 @@ impl Store {
                 })
                 .collect(),
         )
+    }
+
+    /// How many tiles a kept drawing has (0: not kept here).
+    pub fn tiles_of(&self, d: u32) -> usize {
+        match self.drawings.get(&d).map(|k| &**k) {
+            Some(Kept::File(r)) => r.len(),
+            Some(Kept::Raw(t)) => t.len(),
+            None => 0,
+        }
     }
 
     /// Bytes held (compressed tiles), for checks.

@@ -597,7 +597,7 @@ fn new_asks_first_when_unsaved() {
     assert!(s.project.unsaved);
     e.apply(&mut s, &Action::File(NEW.into()));
     assert_eq!(
-        s.project.asking.as_deref(),
+        s.project.asking.as_ref().map(|q| q.title.as_str()),
         Some("Save the changes to Untitled first?")
     );
     // Cancel: nothing happens
@@ -633,6 +633,9 @@ fn save_first_saves_then_opens() {
     e.apply(&mut s, &Action::File(recent));
     assert!(s.project.asking.is_some());
     e.apply(&mut s, &Action::File(CONFIRM_SAVE.into()));
+    assert!(s.project.saving, "saving…");
+    assert!(s.project.subtitle(&s.cut_name).ends_with("saving…"));
+    wait_for_save(&mut e, &mut s);
     assert_eq!(s.project.name, "b");
     assert!(!s.project.unsaved);
     let (mut e2, mut s2) = engine();
@@ -684,7 +687,9 @@ fn a_recovery_copy_every_two_minutes() {
     let at = next_tick_at(&e, &s).unwrap();
     assert!(at > Instant::now() + Duration::from_secs(100), "not yet");
     e.tick(&mut s, at + Duration::from_millis(1));
+    wait_for_save(&mut e, &mut s);
     let rec = s.project.recovery.clone().expect("a recovery copy");
+    assert!(s.project.unsaved, "a recovery copy isn't a save");
     assert!(rec.starts_with(recent::state_dir().join("recovery")));
     assert_eq!(
         std::fs::read(&path).unwrap(),
@@ -737,10 +742,14 @@ fn drawings_not_showing_stay_out_of_the_painter() {
         v.sort();
         v
     };
-    // what frames f - 1, f and f + 1 show (the next and previous are brought in ahead)
+    // what frames f - 3 to f + 5 show (frames around are brought in ahead, as far as they
+    // fit: all of these, here)
     let near = |s: &State, f: u32| -> Vec<u32> {
-        let n = s.frames;
-        let mut v: Vec<u32> = [f, (f + 1) % n, (f + n - 1) % n]
+        let n = s.frames as i64;
+        let mut v: Vec<u32> = [0i64, 1, -1, 2, -2, 3, -3, 4, 5]
+            .iter()
+            .map(|k| (f as i64 + k).rem_euclid(n) as u32)
+            .collect::<Vec<u32>>()
             .iter()
             .flat_map(|&g| s.sheet.tracks.iter().map(move |t| t.drawing_at(g)))
             .filter(|d| *d != 0)
@@ -754,6 +763,8 @@ fn drawings_not_showing_stay_out_of_the_painter() {
         s.frame = f;
         e.tick(&mut s, Instant::now());
         let _ = e.picture(&s);
+        // (what isn't wanted is put away after a pause)
+        e.tick(&mut s, Instant::now() + Duration::from_millis(100));
         let showing: Vec<u32> = s
             .sheet
             .tracks
@@ -806,6 +817,7 @@ fn drawings_not_showing_stay_out_of_the_painter() {
     s.frame = 4;
     e.tick(&mut s, Instant::now());
     let _ = e.picture(&s);
+    e.tick(&mut s, Instant::now() + Duration::from_millis(100));
     assert!(e.painter.has_drawing(2), "undo still changes it: kept");
     e.apply(&mut s, &Action::Undo);
     e.tick(&mut s, Instant::now());
@@ -813,23 +825,29 @@ fn drawings_not_showing_stay_out_of_the_painter() {
     e.apply(&mut s, &Action::Redo);
     e.tick(&mut s, Instant::now());
     assert_eq!(e.drawing_rgba(2), painted);
-    // the history let go: the changed drawing is put away, as it is (no rounding)
-    e.painter.clear_history();
+    // the history let go: the changed drawing is put away, as it is (no rounding), once
+    // far enough (Ink's drawing 3 held 18 frames longer: frame 12 is far from drawing 2)
     s.frame = 3;
+    for _ in 0..18 {
+        e.apply(&mut s, &Action::Other("Insert frame".into()));
+    }
+    e.painter.clear_history();
+    s.frame = 12;
     e.tick(&mut s, Instant::now());
     let _ = e.picture(&s);
+    e.tick(&mut s, Instant::now() + Duration::from_millis(100));
     assert!(!e.painter.has_drawing(2), "put away");
     assert!(matches!(
         e.frames.store.drawings.get(&2).map(|k| &**k),
         Some(super::super::frames::store::Kept::Raw(_))
     ));
     for _ in 0..3 {
-        s.frame = 0;
-        e.tick(&mut s, Instant::now());
-        let _ = e.picture(&s);
-        s.frame = 3;
-        e.tick(&mut s, Instant::now());
-        let _ = e.picture(&s);
+        for f in [0, 12] {
+            s.frame = f;
+            e.tick(&mut s, Instant::now());
+            let _ = e.picture(&s);
+            e.tick(&mut s, Instant::now() + Duration::from_millis(100));
+        }
     }
     assert_eq!(
         e.drawing_rgba(2),
@@ -859,6 +877,119 @@ fn drawings_not_showing_stay_out_of_the_painter() {
             assert!(s2.sheet.thumbs.contains_key(&dd), "thumbnail {dd}");
         }
     }
+}
+
+/// Quit: at once with nothing unsaved; else "Save first?": Cancel stays, Don't save quits,
+/// Save quits once the file is written.
+#[test]
+fn quitting_asks_to_save_first() {
+    let d = dir("quit");
+    let path = d.join("chase.ppstudio");
+    web_project(&path);
+    let (mut e, mut s) = engine();
+    assert!(open_path(&mut e, &mut s, &path));
+    e.tick(&mut s, Instant::now());
+    assert!(e.apply(&mut s, &Action::File(QUIT.into())));
+    assert!(s.quit_now, "nothing unsaved: quits");
+    s.quit_now = false;
+    s.active_layer = 0;
+    s.frame = 0;
+    e.apply(&mut s, &Action::Other("Hold on 3s".into()));
+    e.tick(&mut s, Instant::now());
+    quit_requested(&mut e, &mut s);
+    let q = s.project.asking.clone().expect("asks");
+    assert_eq!(q.title, "Save the changes to chase before quitting?");
+    assert!(!s.quit_now);
+    e.apply(&mut s, &Action::File(CONFIRM_CANCEL.into()));
+    assert!(!s.quit_now && s.project.asking.is_none(), "Cancel stays");
+    quit_requested(&mut e, &mut s);
+    e.apply(&mut s, &Action::File(CONFIRM_SAVE.into()));
+    assert!(!s.quit_now, "not until it's written");
+    wait_for_save(&mut e, &mut s);
+    assert!(s.quit_now, "written: quits");
+    let (mut e2, mut s2) = engine();
+    assert!(open_path(&mut e2, &mut s2, &path));
+    assert_eq!(s2.sheet.tracks[0].cels[0].hold, 3, "saved before quitting");
+    s.quit_now = false;
+    e.apply(&mut s, &Action::Other("Hold on 1s".into()));
+    e.tick(&mut s, Instant::now());
+    quit_requested(&mut e, &mut s);
+    e.apply(&mut s, &Action::File(CONFIRM_DISCARD.into()));
+    assert!(s.quit_now, "Don't save: quits");
+}
+
+/// A save asked for while one is written waits for it; the window's part is short.
+#[test]
+fn saves_are_written_on_another_thread() {
+    let d = dir("background");
+    let path = d.join("chase.ppstudio");
+    web_project(&path);
+    let (mut e, mut s) = engine();
+    assert!(open_path(&mut e, &mut s, &path));
+    e.tick(&mut s, Instant::now());
+    s.active_layer = 0;
+    s.frame = 0;
+    e.apply(&mut s, &Action::Other("Hold on 3s".into()));
+    e.apply(&mut s, &Action::File(SAVE.into()));
+    assert!(s.project.saving);
+    e.apply(&mut s, &Action::Other("Hold on 1s".into()));
+    e.apply(&mut s, &Action::File(SAVE.into()));
+    let t = Instant::now();
+    while s.project.saving || e.files.saving.is_some() {
+        e.tick(&mut s, Instant::now());
+        assert!(t.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    e.tick(&mut s, Instant::now());
+    assert!(!s.project.unsaved, "the second save took the second change");
+    let (mut e2, mut s2) = engine();
+    assert!(open_path(&mut e2, &mut s2, &path));
+    assert_eq!(s2.sheet.tracks[0].cels[0].hold, 1);
+    // a change made while a save is written stays unsaved
+    e.apply(&mut s, &Action::Other("Hold on 2s".into()));
+    e.apply(&mut s, &Action::File(SAVE.into()));
+    e.apply(&mut s, &Action::Other("Hold on 3s".into()));
+    wait_for_save(&mut e, &mut s);
+    e.tick(&mut s, Instant::now());
+    assert!(s.project.unsaved, "changed after the save started");
+}
+
+/// At start, a recovery copy newer than its file is offered: opened, it's the project with
+/// its changes unsaved (a save goes to the project's file); discarded, it goes.
+#[test]
+fn a_recovery_copy_is_offered_at_start() {
+    OFFER_RECOVERY.with(|o| o.set(true));
+    let d = dir("offer");
+    recent::TEST_HOME.with(|h| *h.borrow_mut() = Some(d.join("home")));
+    let path = d.join("offered.ppstudio");
+    web_project(&path);
+    let (mut e, mut s) = engine();
+    assert!(open_path(&mut e, &mut s, &path));
+    e.tick(&mut s, Instant::now());
+    s.active_layer = 0;
+    s.frame = 0;
+    e.apply(&mut s, &Action::Other("Hold on 3s".into()));
+    e.tick(&mut s, Instant::now());
+    let at = next_tick_at(&e, &s).unwrap();
+    e.tick(&mut s, at + Duration::from_millis(1));
+    wait_for_save(&mut e, &mut s);
+    let rec = s.project.recovery.clone().unwrap();
+    // the app starts again (the old one closed without saving)
+    drop(e);
+    let (mut e, mut s) = engine();
+    let q = s.project.asking.clone().expect("offered");
+    assert_eq!(q.title, "Recover your unsaved changes to offered?");
+    e.apply(&mut s, &Action::File(RECOVER_OPEN.into()));
+    assert_eq!(s.project.path.as_deref(), Some(path.as_path()));
+    assert_eq!(s.project.name, "offered");
+    assert!(s.project.unsaved);
+    assert_eq!(s.sheet.tracks[0].cels[0].hold, 3, "the changes are back");
+    assert!(save_to(&mut e, &mut s, &path));
+    assert!(!rec.exists(), "saved: the copy goes");
+    let (_e, s) = engine();
+    assert!(s.project.asking.is_none(), "nothing more to offer");
+    OFFER_RECOVERY.with(|o| o.set(false));
+    recent::TEST_HOME.with(|h| *h.borrow_mut() = None);
 }
 
 /// Open and save times for the baseline's projects (`tools/baseline/fixtures.py` into
@@ -892,7 +1023,8 @@ fn fixtures_open_save_and_round_trip() {
         }
         let p95 = |v: &mut Vec<f64>| {
             v.sort_by(f64::total_cmp);
-            v[(v.len() * 95 / 100).min(v.len() - 1)]
+            let at = |q: usize| v[(v.len() * q / 100).min(v.len() - 1)];
+            (at(50), at(95), at(99))
         };
         let scrub = |e: &mut Engine, s: &mut State, order: Vec<u32>| {
             let (mut all, mut back) = (Vec::new(), Vec::new());
@@ -919,8 +1051,8 @@ fn fixtures_open_save_and_round_trip() {
         let seq = scrub(&mut e, &mut s, (0..n).chain((0..n).rev()).collect());
         let jumps = scrub(&mut e, &mut s, (0..n).map(|k| (k * 7919 + 3) % n).collect());
         eprintln!(
-            "{name}: scrubbing at 165 Hz, frame change p95 (of which bringing drawings back): \
-             frame by frame {:.2} ms ({:.2}), jumps {:.2} ms ({:.2})",
+            "{name}: scrubbing at 165 Hz, frame change p50/p95/p99 (of which bringing drawings \
+             back): frame by frame {:.1?} ms ({:.1?}), jumps {:.1?} ms ({:.1?})",
             seq.0, seq.1, jumps.0, jumps.1
         );
         let resident = e
@@ -939,14 +1071,25 @@ fn fixtures_open_save_and_round_trip() {
         assert!(save_to(&mut e, &mut s, &saved), "{}", s.project.note);
         let first_save = t.elapsed().as_secs_f64() * 1e3;
         let st1 = e.files.last_save.clone().unwrap();
-        // a stroke, saved again
+        // a stroke, saved again as the interface saves: the window's longest wait (Save
+        // asked, then each tick until it's written)
         s.tool = crate::state::Tool::Brush;
         let _ = e.picture(&s);
         stroke(&mut e, &s, 200.0, 200.0);
+        e.tick(&mut s, Instant::now());
         let t = Instant::now();
-        assert!(save_to(&mut e, &mut s, &saved));
-        let resave = t.elapsed().as_secs_f64() * 1e3;
+        e.apply(&mut s, &Action::File(SAVE.into()));
+        let mut longest = t.elapsed().as_secs_f64() * 1e3;
+        while e.files.saving.is_some() {
+            let t = Instant::now();
+            e.tick(&mut s, Instant::now());
+            let _ = e.picture(&s);
+            longest = longest.max(t.elapsed().as_secs_f64() * 1e3);
+            std::thread::sleep(Duration::from_millis(1));
+        }
         let st2 = e.files.last_save.clone().unwrap();
+        let resave = st2.window_ms + st2.write_ms;
+        eprintln!("{name}: saving, the window's longest wait {longest:.1} ms");
         // (what's open now, the stroke in it, against what the file opens as)
         let before = seen(&mut e, &s);
         let (mut e2, mut s2) = engine();
