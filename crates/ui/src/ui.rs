@@ -165,7 +165,7 @@ pub struct Ui {
     hover: Option<(Id, Instant)>,
     icons: HashMap<(String, u32), Option<[f32; 4]>>,
     /// pictures in the atlas by key: their pixels' hash, size and place
-    pictures: HashMap<String, (u64, u32, u32, Option<[f32; 4]>)>,
+    pictures: HashMap<String, Picture>,
     shown: Vec<Quad>,
     next_at: Option<Instant>,
     /// the last input (the system's fonts join only once it's been calm for a while)
@@ -380,6 +380,9 @@ impl Ui {
         }
     }
 }
+
+/// A picture in the atlas: its pixels' hash, its size, and its place (texture coordinates).
+type Picture = (u64, u32, u32, Option<[f32; 4]>);
 
 /// One pass: widgets are placed and drawn into it.
 pub struct Frame<'a> {
