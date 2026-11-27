@@ -579,7 +579,26 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             canvas = Some(c);
             eng = Some(e);
         }
-        if changed.is_none() && !new_canvas && !canvas_dirty {
+        // a document of another size (a project opened, a new one): its picture on the GPU
+        // and the view follow the painter
+        let mut resized = false;
+        if let (Some(e), Some(c)) = (&mut eng, &canvas)
+            && (c.width, c.height) != (e.painter.width(), e.painter.height())
+        {
+            let (pw, ph) = (e.painter.width(), e.painter.height());
+            (s.view.doc_w, s.view.doc_h) = (pw, ph);
+            s.view.reset(canvas_rect);
+            let mut c = Canvas::new(&gpu, pw, ph)?;
+            match e.picture(&s) {
+                Some((rgba, _)) => c.upload_all(rgba),
+                None => c.upload_all(e.painter.rgba()),
+            }
+            canvas = Some(c);
+            resized = true;
+            // the interface (the view's quad) catches up next pass
+            dirty = true;
+        }
+        if changed.is_none() && !new_canvas && !canvas_dirty && !resized {
             continue;
         }
         canvas_dirty = false;
