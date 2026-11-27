@@ -86,8 +86,15 @@ fn corner(s: &State) -> String {
             let n = s.notes.iter().filter(|n| n.frame == s.frame).count();
             format!("{n} note{} on this frame", if n == 1 { "" } else { "s" })
         }
-        Workspace::Draw if s.onion => "Onion skin: 1 before · 1 after".into(),
-        Workspace::Animate if s.onion => "Onion skin: 2 before · 1 after".into(),
+        Workspace::Draw | Workspace::Animate if s.onion => {
+            // as the engine shows it (frames::onion_entries)
+            let (before, after) = match s.strips.onion_range {
+                0 => (1, 1),
+                1 => (2, 1),
+                _ => (2, 2),
+            };
+            format!("Onion skin: {before} before · {after} after")
+        }
         _ => "Onion skin off".into(),
     }
 }
