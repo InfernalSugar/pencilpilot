@@ -129,6 +129,41 @@ fn sync_moving(
     Ok(moved)
 }
 
+/// The engine's picture to the GPU: what changed in it, or all of it in a new GPU picture when
+/// the document's size changed (a project opened, a new one; the view is fitted again).
+/// Returns (something went up, the picture was remade).
+fn upload_picture(
+    gpu: &Gpu,
+    e: &mut engine::Engine,
+    s: &mut State,
+    canvas: &mut Option<Canvas>,
+    card: Rect,
+) -> Result<(bool, bool), Box<dyn std::error::Error>> {
+    let Some(c) = canvas else {
+        return Ok((false, false));
+    };
+    let (pw, ph) = (e.painter.width(), e.painter.height());
+    if (c.width, c.height) != (pw, ph) {
+        (s.view.doc_w, s.view.doc_h) = (pw, ph);
+        s.view.reset(card);
+        let mut c = Canvas::new(gpu, pw, ph)?;
+        match e.picture(s) {
+            // (a whole picture of the new size, or the painter's when nothing's new)
+            Some((rgba, _)) if rgba.len() == (pw * ph * 4) as usize => c.upload_all(rgba),
+            _ => c.upload_all(e.painter.rgba()),
+        }
+        *canvas = Some(c);
+        return Ok((true, true));
+    }
+    match e.picture(s) {
+        Some((rgba, [x, y, w, h])) => {
+            c.upload(rgba, x, y, w, h);
+            Ok((true, false))
+        }
+        None => Ok((false, false)),
+    }
+}
+
 /// What a held mouse button or pen is doing.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Drag {
@@ -208,6 +243,8 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut canvas: Option<Canvas> = None;
     let mut recs: Vec<FrameRec> = Vec::new();
+    // the document's GPU picture was remade (another size) since the last frame
+    let mut resized_now = false;
     // what the input since the last frame did: moved the view / reached the engine
     let (mut view_moved, mut drew) = (false, false);
     let mut pacer =
@@ -486,12 +523,10 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             dirty = true;
         }
         // the picture's changes go up to the GPU
-        if let Some(e) = &mut eng
-            && let Some(c) = &mut canvas
-            && let Some((rgba, [x, y, w, h])) = e.picture(&s)
-        {
-            c.upload(rgba, x, y, w, h);
-            canvas_dirty = true;
+        if let Some(e) = &mut eng {
+            let (up, re) = upload_picture(&gpu, e, &mut s, &mut canvas, canvas_rect)?;
+            canvas_dirty |= up;
+            resized_now |= re;
         }
         for p in win.take_presented() {
             pacer.shown(&p);
@@ -543,12 +578,10 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
                 dirty = true;
             }
         }
-        if let Some(e) = &mut eng
-            && let Some(c) = &mut canvas
-            && let Some((rgba, [x, y, w, h])) = e.picture(&s)
-        {
-            c.upload(rgba, x, y, w, h);
-            canvas_dirty = true;
+        if let Some(e) = &mut eng {
+            let (up, re) = upload_picture(&gpu, e, &mut s, &mut canvas, canvas_rect)?;
+            canvas_dirty |= up;
+            resized_now |= re;
         }
         let mut undo_changed = false;
         if let Some(e) = &eng {
@@ -584,22 +617,15 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             canvas = Some(c);
             eng = Some(e);
         }
-        // a document of another size (a project opened, a new one): its picture on the GPU
-        // and the view follow the painter
-        let mut resized = false;
-        if let (Some(e), Some(c)) = (&mut eng, &canvas)
-            && (c.width, c.height) != (e.painter.width(), e.painter.height())
-        {
-            let (pw, ph) = (e.painter.width(), e.painter.height());
-            (s.view.doc_w, s.view.doc_h) = (pw, ph);
-            s.view.reset(canvas_rect);
-            let mut c = Canvas::new(&gpu, pw, ph)?;
-            match e.picture(&s) {
-                Some((rgba, _)) => c.upload_all(rgba),
-                None => c.upload_all(e.painter.rgba()),
-            }
-            canvas = Some(c);
-            resized = true;
+        // a document of another size (a project opened, a new one) whose picture hasn't
+        // changed since (no upload went through the check above)
+        if let Some(e) = &mut eng {
+            let (up, re) = upload_picture(&gpu, e, &mut s, &mut canvas, canvas_rect)?;
+            canvas_dirty |= up;
+            resized_now |= re;
+        }
+        let resized = std::mem::take(&mut resized_now);
+        if resized {
             // the interface (the view's quad) catches up next pass
             dirty = true;
         }
@@ -616,11 +642,9 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             {
                 read_input!();
             }
-            if let Some(e) = &mut eng
-                && let Some(c) = &mut canvas
-                && let Some((rgba, [x, y, w, h])) = e.picture(&s)
-            {
-                c.upload(rgba, x, y, w, h);
+            if let Some(e) = &mut eng {
+                let (_, re) = upload_picture(&gpu, e, &mut s, &mut canvas, canvas_rect)?;
+                resized_now |= re;
             }
         }
         let gpu_from = pencilpilot_window::clock::now_ns();
