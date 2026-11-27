@@ -726,6 +726,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "color_quant"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d7b894f5411737b7867f4827955924d7c254fc9f4d91a6aad6b097804b1018b"
+
+[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1650,6 +1656,16 @@ checksum = "f0d8a4362ccb29cb0b265253fb0a2728f592895ee6854fd9bc13f2ffda266ff1"
 dependencies = [
  "opaque-debug",
  "polyval",
+]
+
+[[package]]
+name = "gif"
+version = "0.14.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee8cfcc411d9adbbaba82fb72661cc1bcca13e8bba98b364e62b2dba8f960159"
+dependencies = [
+ "color_quant",
+ "weezl",
 ]
 
 [[package]]
@@ -3316,6 +3332,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pencilpilot-export"
+version = "0.1.0"
+dependencies = [
+ "gif",
+ "libc",
+ "png",
+ "serde",
+]
+
+[[package]]
 name = "pencilpilot-feedback"
 version = "0.1.0"
 dependencies = [
@@ -3358,8 +3384,11 @@ name = "pencilpilot-native"
 version = "0.1.0"
 dependencies = [
  "cosmic-text",
+ "gif",
  "hokusai",
+ "libc",
  "pencilpilot-brush",
+ "pencilpilot-export",
  "pencilpilot-gpu",
  "pencilpilot-ppstudio",
  "pencilpilot-ui",
@@ -5954,6 +5983,12 @@ checksum = "7265c9301c16a8711c992c2d8da90ee77ef54b1ed51482d6dfeb00dc756b1297"
 dependencies = [
  "rustls-pki-types",
 ]
+
+[[package]]
+name = "weezl"
+version = "0.1.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
 
 [[package]]
 name = "widestring"

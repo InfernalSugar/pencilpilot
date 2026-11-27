@@ -7,6 +7,7 @@
 pub mod canvas;
 pub mod dialog;
 pub mod engine;
+pub mod export_ui;
 pub mod header;
 pub mod layout;
 pub mod panel;
@@ -33,6 +34,7 @@ pub fn build(f: &mut Frame, s: &mut State, width: f32, height: f32) -> (usize, R
     canvas::overlays(f, r.canvas, s);
     panel::build(f, r.panel, s);
     strips::build(f, r.strip, s);
+    export_ui::build(f, s);
     (mark, canvas)
 }
 
