@@ -18,8 +18,8 @@ pub enum Workspace {
 
 impl Workspace {
     pub const ALL: [Workspace; 4] = [
-        Workspace::Animate,
         Workspace::Draw,
+        Workspace::Animate,
         Workspace::Colour,
         Workspace::Review,
     ];
@@ -252,7 +252,7 @@ impl State {
                     resolved: false,
                 },
             ],
-            can_undo: true,
+            can_undo: false,
             can_redo: false,
             actions: Vec::new(),
             header: Default::default(),

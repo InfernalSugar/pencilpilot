@@ -9,7 +9,7 @@ pub const MARGIN: f32 = 16.0;
 pub const GAP: f32 = 12.0;
 pub const HEADER_H: f32 = 56.0;
 pub const TOOLS_W: f32 = 64.0;
-pub const PANEL_W: f32 = 320.0;
+pub const PANEL_W: f32 = 312.5;
 
 /// The bottom strip's height in each workspace.
 pub fn strip_height(w: Workspace) -> f32 {
@@ -17,7 +17,7 @@ pub fn strip_height(w: Workspace) -> f32 {
         // the timeline: its two toolbars and the grid (four layers and the sound row)
         Workspace::Animate => 279.0,
         Workspace::Draw => 52.0,
-        Workspace::Colour => 142.0,
+        Workspace::Colour => 137.0,
         Workspace::Review => 94.0,
     }
 }

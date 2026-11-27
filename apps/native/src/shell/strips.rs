@@ -719,7 +719,9 @@ fn timeline(f: &mut Frame, r: Rect, s: &mut State) {
     );
 }
 
-const NAMES_W: f32 = 110.0;
+const NAMES_W: f32 = 170.0;
+const EYE: &str = "M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z M12 9a3 3 0 1 0 0.01 0Z";
+const EYE_OFF: &str = "M3 3l18 18 M10.6 5.1A10 10 0 0 1 12 5c6.5 0 10 7 10 7a17 17 0 0 1-3.2 4.1 M6.6 6.6A17 17 0 0 0 2 12s3.5 7 10 7a9.7 9.7 0 0 0 4.4-1";
 const RULER_H: f32 = 24.0;
 
 fn grid_area(f: &mut Frame, g: Rect, strip: Rect, s: &mut State) {
@@ -779,6 +781,18 @@ fn grid_area(f: &mut Frame, g: Rect, strip: Rect, s: &mut State) {
         }
     }
 
+    // above the names: the heading and New layer
+    let hl = text(f, "LAYERS", 10.0, 700, RULER);
+    text_at(f, &hl, g.x + 10.0, g.y + RULER_H / 2.0);
+    let nb = Rect::new(g.x + NAMES_W - 6.0 - 22.0, g.y + 1.0, 22.0, 22.0);
+    hit(s, "strips/new-layer", nb);
+    let res = act(f, id("strips/new-layer"), nb);
+    put(f, Quad::rect(nb.x, nb.y, nb.w, nb.h, RAISED).radius(6.0));
+    f.icon(PLUS, nb.x + 4.0, nb.y + 4.0, 14.0, ON_DARK);
+    if res.clicked {
+        s.actions.push(Action::NewLayer);
+    }
+
     // the rows: a layer each, then the sound
     for (li, layer) in s.layers.clone().iter().enumerate() {
         let y = g.y + RULER_H + li as f32 * rh;
@@ -791,11 +805,39 @@ fn grid_area(f: &mut Frame, g: Rect, strip: Rect, s: &mut State) {
         }
         let ny = name_r.y + name_r.h / 2.0;
         let badge = Rect::new(g.x + NAMES_W - 8.0 - 20.0, ny - 10.0, 20.0, 20.0);
-        let mut nl = text(f, &layer.name, 12.0, 600, ON_DARK);
-        if nl.width > badge.x - 6.0 - (g.x + 8.0) {
-            nl = text(f, &ellipsize(&layer.name, 8), 12.0, 600, ON_DARK);
+        // the eye: hide or show the layer
+        let eye = Rect::new(g.x + 6.0, ny - 12.0, 24.0, 24.0);
+        let ename = format!("strips/eye/{li}");
+        hit(s, &ename, eye);
+        let er = act(f, id(&ename), eye);
+        if er.hovered {
+            put(
+                f,
+                Quad::rect(eye.x, eye.y, eye.w, eye.h, RAISED).radius(6.0),
+            );
         }
-        text_at(f, &nl, g.x + 8.0, ny);
+        f.icon(
+            if layer.visible { EYE } else { EYE_OFF },
+            eye.x + 4.0,
+            eye.y + 4.0,
+            16.0,
+            if layer.visible { ON_DARK } else { RULER },
+        );
+        if er.clicked {
+            s.layers[li].visible = !s.layers[li].visible;
+        }
+        let name_x = eye.right() + 6.0;
+        let mut nl = text(
+            f,
+            &layer.name,
+            12.0,
+            600,
+            if layer.visible { ON_DARK } else { RULER },
+        );
+        if nl.width > badge.x - 6.0 - name_x {
+            nl = text(f, &ellipsize(&layer.name, 12), 12.0, 600, ON_DARK);
+        }
+        text_at(f, &nl, name_x, ny);
         put(
             f,
             Quad::rect(badge.x, badge.y, badge.w, badge.h, RAISED).radius(6.0),
@@ -1682,15 +1724,7 @@ fn review_player(f: &mut Frame, r: Rect, s: &mut State) {
         f,
         Quad::rect(x0, top + 11.0, px - x0, 6.0, CORAL).radius(3.0),
     );
-    put(
-        f,
-        Quad::rect(px - 11.0, top + 3.0, 22.0, 22.0, CORAL).radius(11.0),
-    );
-    put(
-        f,
-        Quad::rect(px - 8.0, top + 6.0, 16.0, 16.0, WHITE).radius(8.0),
-    );
-    // the notes, over the knob so a note on this frame stays in sight
+    // the notes, then the knob over them (as the design)
     for n in &s.notes {
         let mx = at(n.frame);
         // a pin: round but for its bottom-left corner
@@ -1709,6 +1743,14 @@ fn review_player(f: &mut Frame, r: Rect, s: &mut State) {
         );
     }
 
+    put(
+        f,
+        Quad::rect(px - 11.0, top + 3.0, 22.0, 22.0, CORAL).radius(11.0),
+    );
+    put(
+        f,
+        Quad::rect(px - 8.0, top + 6.0, 16.0, 16.0, WHITE).radius(8.0),
+    );
     // previous note, Play, next note, the time; asking for changes, approving
     let cy = top + 28.0 + 10.0 + 18.0;
     let mut x = x0;

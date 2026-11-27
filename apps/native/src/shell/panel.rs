@@ -1257,7 +1257,7 @@ mod tests {
         s.workspace = Workspace::Review;
         assert_eq!(content(&s), Content::Notes);
         s.workspace = Workspace::Draw;
-        s.panel_tab[1] = 9; // out of range: the last tab
+        s.panel_tab[Workspace::Draw.index()] = 9; // out of range: the last tab
         assert_eq!(content(&s), Content::Layers);
     }
 

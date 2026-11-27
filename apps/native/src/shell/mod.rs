@@ -4,6 +4,7 @@
 //! Each piece lives in its own file and has one job: draw itself in its region from the
 //! [`State`], change the state, and push [`crate::state::Action`]s.
 
+pub mod canvas;
 pub mod engine;
 pub mod header;
 pub mod layout;
@@ -11,7 +12,7 @@ pub mod panel;
 pub mod strips;
 pub mod tools;
 
-use pencilpilot_gpu::{Canvas, DmabufImage, Gpu, Quad, Renderer2d};
+use pencilpilot_gpu::{Canvas, DmabufImage, Gpu, Renderer2d};
 use pencilpilot_ui::ui::{Frame, Rect, Ui};
 
 use crate::state::State;
@@ -20,15 +21,14 @@ use crate::state::State;
 /// canvas's rectangle (logical pixels) inside its card.
 pub fn build(f: &mut Frame, s: &mut State, width: f32, height: f32) -> (usize, Rect) {
     let r = layout::regions(width, height, s.workspace);
-    let t = f.theme();
     header::build(f, r.header, s);
     if let Some(tr) = r.tools {
         tools::build(f, tr, s);
     }
     // the canvas's card; the drawing goes in front of it, the rest in front of the drawing
-    f.put(Quad::rect(r.canvas.x, r.canvas.y, r.canvas.w, r.canvas.h, t.card).radius(24.0));
-    let canvas = r.canvas.inset(12.0);
+    let canvas = canvas::card(f, r.canvas);
     let mark = f.mark();
+    canvas::overlays(f, r.canvas, s);
     panel::build(f, r.panel, s);
     strips::build(f, r.strip, s);
     (mark, canvas)

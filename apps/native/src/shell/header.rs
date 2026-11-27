@@ -480,6 +480,7 @@ mod tests {
     #[test]
     fn undo_and_redo_push_actions_when_they_can() {
         let Some(mut h) = Harness::new() else { return };
+        h.s.can_undo = true;
         h.pass();
         let l = h.s.header.layout;
         h.click_in(l.undo);
