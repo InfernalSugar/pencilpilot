@@ -126,6 +126,9 @@ pub struct Output {
 #[derive(Default)]
 struct State {
     open: bool,
+    /// closing asks the app first (see [`Window::ask_before_closing`]), and it was asked
+    close_asks: bool,
+    close_asked: bool,
     /// the size the compositor asked for (logical pixels; 0: ours to choose)
     asked: (i32, i32),
     configured: bool,
@@ -302,8 +305,10 @@ impl Window {
         let Some(guard) = self.queue.prepare_read() else {
             return Ok(self.queue.dispatch_pending(&mut self.st).map_err(wl)? > 0);
         };
-        let now = clock::now_ns();
-        if deadline_ns > now && clock::wait_readable(&guard.connection_fd(), deadline_ns - now) {
+        // (a deadline already past still reads what has arrived: a caller with work due
+        // all the time mustn't starve the compositor's events, frame callbacks included)
+        let wait = deadline_ns.saturating_sub(clock::now_ns());
+        if clock::wait_readable(&guard.connection_fd(), wait) {
             guard.read().map_err(wl)?;
         } else {
             drop(guard);
@@ -324,6 +329,23 @@ impl Window {
 
     pub fn is_open(&self) -> bool {
         self.st.open
+    }
+
+    /// From now on, the window's close button (or the compositor's close) only asks:
+    /// [`Window::take_close_request`] says so, and the app calls [`Window::close`] when it's
+    /// ready (e.g. after asking to save). Without this, closing closes at once.
+    pub fn ask_before_closing(&mut self) {
+        self.st.close_asks = true;
+    }
+
+    /// Whether closing was asked for since the last call.
+    pub fn take_close_request(&mut self) -> bool {
+        std::mem::take(&mut self.st.close_asked)
+    }
+
+    /// Closes the window: [`Window::is_open`] is false from now on.
+    pub fn close(&mut self) {
+        self.st.open = false;
     }
 
     /// The compositor is ready for a new frame.
@@ -608,6 +630,7 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for State {
     ) {
         match e {
             xdg_toplevel::Event::Configure { width, height, .. } => s.asked = (width, height),
+            xdg_toplevel::Event::Close if s.close_asks => s.close_asked = true,
             xdg_toplevel::Event::Close => s.open = false,
             _ => {}
         }

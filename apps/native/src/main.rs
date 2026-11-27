@@ -1,6 +1,7 @@
 //! PencilPilot, native.
 //!
 //!   pencilpilot                                  the app (the shell, Phase 2)
+//!   pencilpilot path.ppstudio                    …with that project open
 //!   pencilpilot --render animate --out a.png     a workspace drawn off-screen, as PNG
 //!               [--size 1440x900] [--scale 1]    (no window anywhere: for checks)
 //!   pencilpilot --pen-check [--replay 10] …      Phase 1's pen check (see pencheck.rs)
@@ -51,5 +52,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         stats: val("--stats"),
         save_doc: val("--save-doc"),
         workspace,
+        open: a.iter().find(|x| x.ends_with(".ppstudio")).cloned(),
     })
 }

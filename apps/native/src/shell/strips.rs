@@ -894,10 +894,16 @@ fn grid_area(f: &mut Frame, g: Rect, strip: Rect, s: &mut State) {
         text_at(f, &bl, badge.x + (20.0 - bl.width) / 2.0, ny);
 
         // the cels
+        let numbers = s
+            .sheet
+            .tracks
+            .get(li)
+            .map(|t| t.drawing_numbers())
+            .unwrap_or_default();
         let cel_spans: Vec<(u32, u32, Mark, u32, String)> = spans(s, li)
             .into_iter()
             .map(|(a, h, m, d)| {
-                let label = match (layer.kind, drawing_number(s, li, d)) {
+                let label = match (layer.kind, numbers.get(&d).copied()) {
                     ('S', _) => "Static".to_string(),
                     (_, Some(n)) => n.to_string(),
                     _ => String::new(),
