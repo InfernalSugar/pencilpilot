@@ -137,7 +137,7 @@ fn a_click_shows_complete_in_its_own_pass() {
     ui.text.wait_for_fonts();
     let mut picked = 0usize;
     const PATH: &str = "M4 12h16";
-    let mut build = |f: &mut Frame, picked: &mut usize| {
+    let build = |f: &mut Frame, picked: &mut usize| {
         f.row(34.0, |f| {
             for i in 0..2 {
                 if f.icon_button(&format!("b{i}"), PATH, "", *picked == i, false)
