@@ -1074,8 +1074,10 @@ pub fn next_tick_at(e: &Engine, s: &State) -> Option<Instant> {
     if let Some((_, _, t)) = &f.opacity {
         at.push(*t + OPACITY_SETTLES);
     }
-    if f.prefetch.is_some() || f.ahead_due {
-        at.push(now + Duration::from_millis(1));
+    // decoding ahead: its results are picked up at the next tick; while playing that's the next
+    // frame's own (no extra wakes between frames), otherwise every few milliseconds
+    if (f.prefetch.is_some() || f.ahead_due) && !s.playing {
+        at.push(now + Duration::from_millis(4));
     }
     if let Some(t) = f.trim_at {
         at.push(t);
