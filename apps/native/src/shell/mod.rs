@@ -246,211 +246,229 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         let cr = canvas_rect;
-        for ev in win.take_input() {
-            dirty = true;
-            let t = match &ev {
-                InputEvent::Pointer(
-                    PointerEvent::Move { time_ms, .. }
-                    | PointerEvent::Button { time_ms, .. }
-                    | PointerEvent::Scroll { time_ms, .. },
-                ) => Some(*time_ms),
-                InputEvent::Pen(p) => Some(p.time_ms),
-                InputEvent::Key(k) => Some(k.time_ms),
-                _ => None,
-            };
-            if let Some(t) = t {
-                ui.active();
-                events += 1;
-                oldest_input.get_or_insert((t, pencilpilot_window::clock::now_ns()));
-            }
-            // a press here goes to the engine (its tool), not the interface
-            let engine_here = |x: f64, y: f64, s: &State, ui: &Ui| {
-                engine::Engine::takes_canvas_input(s)
-                    && !ui.overlay_open()
-                    && cr.contains(x as f32, y as f32)
-            };
-            // a press here moves the view (the Hand, Space held, the middle button, Review)
-            let view_here =
-                |x: f64, y: f64, ui: &Ui| !ui.overlay_open() && cr.contains(x as f32, y as f32);
-            let sample = |s: &State, x: f64, y: f64, pressure: f32, tilt: (f32, f32), ms: u32| {
-                let (dx, dy) = s.view.to_doc(cr, x as f32, y as f32);
-                engine::Sample {
-                    x: dx,
-                    y: dy,
-                    pressure,
-                    tilt,
-                    ms,
-                }
-            };
-            match ev {
-                InputEvent::Pointer(PointerEvent::Move { x, y, time_ms }) => match drag {
-                    Drag::Engine => {
-                        if let Some(e) = &mut eng {
-                            let p = sample(&s, x, y, 0.5, (0.0, 0.0), time_ms);
-                            e.pointer(&mut s, engine::Phase::Move, p);
-                            drew = true;
-                        }
+        // the input since the last read: to the engine (strokes), the view or the interface
+        // (a macro: it's read again just before drawing, below)
+        macro_rules! read_input {
+            () => {
+                for ev in win.take_input() {
+                    dirty = true;
+                    let t = match &ev {
+                        InputEvent::Pointer(
+                            PointerEvent::Move { time_ms, .. }
+                            | PointerEvent::Button { time_ms, .. }
+                            | PointerEvent::Scroll { time_ms, .. },
+                        ) => Some(*time_ms),
+                        InputEvent::Pen(p) => Some(p.time_ms),
+                        InputEvent::Key(k) => Some(k.time_ms),
+                        _ => None,
+                    };
+                    if let Some(t) = t {
+                        ui.active();
+                        events += 1;
+                        oldest_input.get_or_insert((t, pencilpilot_window::clock::now_ns()));
                     }
-                    Drag::Pan(lx, ly) => {
-                        s.view.pan_by(x as f32 - lx, y as f32 - ly);
-                        view_moved = true;
-                        drag = Drag::Pan(x as f32, y as f32);
-                    }
-                    Drag::Rotate(a) => {
-                        let c = (cr.x + cr.w / 2.0, cr.y + cr.h / 2.0);
-                        let now = (y as f32 - c.1).atan2(x as f32 - c.0);
-                        s.view.rotate_about(cr, c, now - a);
-                        view_moved = true;
-                        drag = Drag::Rotate(now);
-                    }
-                    Drag::None => ui.pointer_moved(x as f32, y as f32),
-                },
-                InputEvent::Pointer(PointerEvent::Enter { x, y }) => {
-                    ui.pointer_moved(x as f32, y as f32)
-                }
-                InputEvent::Pointer(PointerEvent::Leave) => ui.pointer_left(),
-                InputEvent::Pointer(PointerEvent::Button {
-                    button: button @ (0x110 | 0x112),
-                    pressed,
-                    x,
-                    y,
-                    time_ms,
-                }) => {
-                    let middle = button == 0x112;
-                    if pressed && view_here(x, y, &ui) && (middle || moves_view(&s, space)) {
-                        drag = if shift && !middle {
-                            let c = (cr.x + cr.w / 2.0, cr.y + cr.h / 2.0);
-                            Drag::Rotate((y as f32 - c.1).atan2(x as f32 - c.0))
-                        } else {
-                            Drag::Pan(x as f32, y as f32)
+                    // a press here goes to the engine (its tool), not the interface
+                    let engine_here = |x: f64, y: f64, s: &State, ui: &Ui| {
+                        engine::Engine::takes_canvas_input(s)
+                            && !ui.overlay_open()
+                            && cr.contains(x as f32, y as f32)
+                    };
+                    // a press here moves the view (the Hand, Space held, the middle button, Review)
+                    let view_here = |x: f64, y: f64, ui: &Ui| {
+                        !ui.overlay_open() && cr.contains(x as f32, y as f32)
+                    };
+                    let sample =
+                        |s: &State, x: f64, y: f64, pressure: f32, tilt: (f32, f32), ms: u32| {
+                            let (dx, dy) = s.view.to_doc(cr, x as f32, y as f32);
+                            engine::Sample {
+                                x: dx,
+                                y: dy,
+                                pressure,
+                                tilt,
+                                ms,
+                            }
                         };
-                    } else if pressed && !middle && engine_here(x, y, &s, &ui) {
-                        if let Some(e) = &mut eng {
-                            let p = sample(&s, x, y, 0.5, (0.0, 0.0), time_ms);
-                            (s.tooling.shift, s.tooling.alt) = (shift, alt);
-                            e.pointer(&mut s, engine::Phase::Down, p);
-                            drew = true;
-                            drag = Drag::Engine;
-                        }
-                    } else if !pressed && drag != Drag::None {
-                        if drag == Drag::Engine
-                            && let Some(e) = &mut eng
-                        {
-                            let p = sample(&s, x, y, 0.5, (0.0, 0.0), time_ms);
-                            e.pointer(&mut s, engine::Phase::Up, p);
-                        }
-                        drag = Drag::None;
-                    } else if !middle {
-                        ui.pointer_moved(x as f32, y as f32);
-                        ui.pointer_button(pressed);
-                    }
-                }
-                InputEvent::Pointer(PointerEvent::Button {
-                    button: 0x111,
-                    pressed: true,
-                    x,
-                    y,
-                    ..
-                }) => {
-                    ui.pointer_moved(x as f32, y as f32);
-                    ui.pointer_context();
-                }
-                InputEvent::Pointer(PointerEvent::Scroll {
-                    dy, x, y, wheel, ..
-                }) => {
-                    // over the drawing the wheel zooms (Ctrl too: a touchpad's pinch); the
-                    // interface's scroll areas take it everywhere else
-                    if view_here(x, y, &ui) {
-                        let steps = if wheel { dy / 10.0 } else { dy / 40.0 };
-                        let factor = 1.2f32.powf(-steps as f32);
-                        s.view.zoom_at(cr, (x as f32, y as f32), factor);
-                        view_moved = true;
-                    } else {
-                        ui.pointer_moved(x as f32, y as f32);
-                        ui.scrolled(dy as f32);
-                    }
-                }
-                InputEvent::Pen(p) => {
-                    let (x, y) = (p.sample.x, p.sample.y);
-                    let tilt = (p.sample.tilt_x / 90.0, p.sample.tilt_y / 90.0);
-                    let down = p.phase == PenPhase::Down && p.buttons == 0;
-                    if down && view_here(x, y, &ui) && moves_view(&s, space) {
-                        drag = Drag::Pan(x as f32, y as f32);
-                    } else if down && engine_here(x, y, &s, &ui) {
-                        drag = Drag::Engine;
-                    }
-                    match (drag, p.phase) {
-                        (
-                            Drag::Engine,
-                            PenPhase::Down | PenPhase::Move | PenPhase::Up | PenPhase::Leave,
-                        ) => {
-                            if let Some(e) = &mut eng {
-                                let phase = match p.phase {
-                                    PenPhase::Down => engine::Phase::Down,
-                                    PenPhase::Move => engine::Phase::Move,
-                                    _ => engine::Phase::Up,
-                                };
-                                let smp = sample(&s, x, y, p.sample.pressure, tilt, p.time_ms);
-                                if phase == engine::Phase::Down {
-                                    (s.tooling.shift, s.tooling.alt) = (shift, alt);
+                    match ev {
+                        InputEvent::Pointer(PointerEvent::Move { x, y, time_ms }) => match drag {
+                            Drag::Engine => {
+                                if let Some(e) = &mut eng {
+                                    let p = sample(&s, x, y, 0.5, (0.0, 0.0), time_ms);
+                                    e.pointer(&mut s, engine::Phase::Move, p);
+                                    drew = true;
                                 }
-                                e.pointer(&mut s, phase, smp);
-                                drew = true;
                             }
-                            if matches!(p.phase, PenPhase::Up | PenPhase::Leave) {
+                            Drag::Pan(lx, ly) => {
+                                s.view.pan_by(x as f32 - lx, y as f32 - ly);
+                                view_moved = true;
+                                drag = Drag::Pan(x as f32, y as f32);
+                            }
+                            Drag::Rotate(a) => {
+                                let c = (cr.x + cr.w / 2.0, cr.y + cr.h / 2.0);
+                                let now = (y as f32 - c.1).atan2(x as f32 - c.0);
+                                s.view.rotate_about(cr, c, now - a);
+                                view_moved = true;
+                                drag = Drag::Rotate(now);
+                            }
+                            Drag::None => ui.pointer_moved(x as f32, y as f32),
+                        },
+                        InputEvent::Pointer(PointerEvent::Enter { x, y }) => {
+                            ui.pointer_moved(x as f32, y as f32)
+                        }
+                        InputEvent::Pointer(PointerEvent::Leave) => ui.pointer_left(),
+                        InputEvent::Pointer(PointerEvent::Button {
+                            button: button @ (0x110 | 0x112),
+                            pressed,
+                            x,
+                            y,
+                            time_ms,
+                        }) => {
+                            let middle = button == 0x112;
+                            if pressed && view_here(x, y, &ui) && (middle || moves_view(&s, space))
+                            {
+                                drag = if shift && !middle {
+                                    let c = (cr.x + cr.w / 2.0, cr.y + cr.h / 2.0);
+                                    Drag::Rotate((y as f32 - c.1).atan2(x as f32 - c.0))
+                                } else {
+                                    Drag::Pan(x as f32, y as f32)
+                                };
+                            } else if pressed && !middle && engine_here(x, y, &s, &ui) {
+                                if let Some(e) = &mut eng {
+                                    let p = sample(&s, x, y, 0.5, (0.0, 0.0), time_ms);
+                                    (s.tooling.shift, s.tooling.alt) = (shift, alt);
+                                    e.pointer(&mut s, engine::Phase::Down, p);
+                                    drew = true;
+                                    drag = Drag::Engine;
+                                }
+                            } else if !pressed && drag != Drag::None {
+                                if drag == Drag::Engine
+                                    && let Some(e) = &mut eng
+                                {
+                                    let p = sample(&s, x, y, 0.5, (0.0, 0.0), time_ms);
+                                    e.pointer(&mut s, engine::Phase::Up, p);
+                                }
                                 drag = Drag::None;
+                            } else if !middle {
+                                ui.pointer_moved(x as f32, y as f32);
+                                ui.pointer_button(pressed);
                             }
                         }
-                        (Drag::Pan(lx, ly), PenPhase::Move) => {
-                            s.view.pan_by(x as f32 - lx, y as f32 - ly);
-                            view_moved = true;
-                            drag = Drag::Pan(x as f32, y as f32);
-                        }
-                        (Drag::Pan(..), PenPhase::Up | PenPhase::Leave) => drag = Drag::None,
-                        (Drag::Pan(..), PenPhase::Down) => {}
-                        _ => {
-                            // the interface: the pen's side button right-clicks
+                        InputEvent::Pointer(PointerEvent::Button {
+                            button: 0x111,
+                            pressed: true,
+                            x,
+                            y,
+                            ..
+                        }) => {
                             ui.pointer_moved(x as f32, y as f32);
-                            match p.phase {
-                                PenPhase::Down if p.buttons & 1 != 0 => ui.pointer_context(),
-                                PenPhase::Down => ui.pointer_button(true),
-                                PenPhase::Up => ui.pointer_button(false),
-                                PenPhase::Leave => ui.pointer_left(),
-                                _ => {}
+                            ui.pointer_context();
+                        }
+                        InputEvent::Pointer(PointerEvent::Scroll {
+                            dy, x, y, wheel, ..
+                        }) => {
+                            // over the drawing the wheel zooms (Ctrl too: a touchpad's pinch); the
+                            // interface's scroll areas take it everywhere else
+                            if view_here(x, y, &ui) {
+                                let steps = if wheel { dy / 10.0 } else { dy / 40.0 };
+                                let factor = 1.2f32.powf(-steps as f32);
+                                s.view.zoom_at(cr, (x as f32, y as f32), factor);
+                                view_moved = true;
+                            } else {
+                                ui.pointer_moved(x as f32, y as f32);
+                                ui.scrolled(dy as f32);
                             }
                         }
+                        InputEvent::Pen(p) => {
+                            let (x, y) = (p.sample.x, p.sample.y);
+                            let tilt = (p.sample.tilt_x / 90.0, p.sample.tilt_y / 90.0);
+                            let down = p.phase == PenPhase::Down && p.buttons == 0;
+                            if down && view_here(x, y, &ui) && moves_view(&s, space) {
+                                drag = Drag::Pan(x as f32, y as f32);
+                            } else if down && engine_here(x, y, &s, &ui) {
+                                drag = Drag::Engine;
+                            }
+                            match (drag, p.phase) {
+                                (
+                                    Drag::Engine,
+                                    PenPhase::Down
+                                    | PenPhase::Move
+                                    | PenPhase::Up
+                                    | PenPhase::Leave,
+                                ) => {
+                                    if let Some(e) = &mut eng {
+                                        let phase = match p.phase {
+                                            PenPhase::Down => engine::Phase::Down,
+                                            PenPhase::Move => engine::Phase::Move,
+                                            _ => engine::Phase::Up,
+                                        };
+                                        let smp =
+                                            sample(&s, x, y, p.sample.pressure, tilt, p.time_ms);
+                                        if phase == engine::Phase::Down {
+                                            (s.tooling.shift, s.tooling.alt) = (shift, alt);
+                                        }
+                                        e.pointer(&mut s, phase, smp);
+                                        drew = true;
+                                    }
+                                    if matches!(p.phase, PenPhase::Up | PenPhase::Leave) {
+                                        drag = Drag::None;
+                                    }
+                                }
+                                (Drag::Pan(lx, ly), PenPhase::Move) => {
+                                    s.view.pan_by(x as f32 - lx, y as f32 - ly);
+                                    view_moved = true;
+                                    drag = Drag::Pan(x as f32, y as f32);
+                                }
+                                (Drag::Pan(..), PenPhase::Up | PenPhase::Leave) => {
+                                    drag = Drag::None
+                                }
+                                (Drag::Pan(..), PenPhase::Down) => {}
+                                _ => {
+                                    // the interface: the pen's side button right-clicks
+                                    ui.pointer_moved(x as f32, y as f32);
+                                    match p.phase {
+                                        PenPhase::Down if p.buttons & 1 != 0 => {
+                                            ui.pointer_context()
+                                        }
+                                        PenPhase::Down => ui.pointer_button(true),
+                                        PenPhase::Up => ui.pointer_button(false),
+                                        PenPhase::Leave => ui.pointer_left(),
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                        InputEvent::Key(k) => {
+                            if k.name == "space" && !ui.typing() {
+                                space = k.pressed;
+                            }
+                            if k.name.starts_with("Shift") {
+                                shift = k.pressed;
+                            }
+                            if k.name.starts_with("Alt") {
+                                alt = k.pressed;
+                            }
+                            if !k.pressed {
+                                continue;
+                            }
+                            if k.mods.ctrl && k.name.eq_ignore_ascii_case("z") {
+                                s.actions.push(if k.mods.shift {
+                                    Action::Redo
+                                } else {
+                                    Action::Undo
+                                });
+                            }
+                            ui.key(pencilpilot_ui::ui::Key {
+                                name: k.name.clone(),
+                                text: k.text.clone(),
+                                ctrl: k.mods.ctrl,
+                                shift: k.mods.shift,
+                            });
+                        }
+                        _ => {}
                     }
                 }
-                InputEvent::Key(k) => {
-                    if k.name == "space" && !ui.typing() {
-                        space = k.pressed;
-                    }
-                    if k.name.starts_with("Shift") {
-                        shift = k.pressed;
-                    }
-                    if k.name.starts_with("Alt") {
-                        alt = k.pressed;
-                    }
-                    if !k.pressed {
-                        continue;
-                    }
-                    if k.mods.ctrl && k.name.eq_ignore_ascii_case("z") {
-                        s.actions.push(if k.mods.shift {
-                            Action::Redo
-                        } else {
-                            Action::Undo
-                        });
-                    }
-                    ui.key(pencilpilot_ui::ui::Key {
-                        name: k.name.clone(),
-                        text: k.text.clone(),
-                        ctrl: k.mods.ctrl,
-                        shift: k.mods.shift,
-                    });
-                }
-                _ => {}
-            }
+            };
         }
+        read_input!();
         // pixels being moved: the GPU shows them where they are now
         if let Some(e) = &eng {
             dirty |= sync_moving(&gpu, e, &mut s, &mut float_tex)?;
@@ -564,6 +582,22 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
         canvas_dirty = false;
+        // a stroke's samples that came while this frame was being made go in it too (they'd
+        // wait a whole refresh otherwise); anything else they did shows next frame
+        if drag == Drag::Engine {
+            win.poll()?;
+            // (what it notes for pacing is for the next frame, and reset at present)
+            #[allow(unused_assignments)]
+            {
+                read_input!();
+            }
+            if let Some(e) = &mut eng
+                && let Some(c) = &mut canvas
+                && let Some((rgba, [x, y, w, h])) = e.picture(&s)
+            {
+                c.upload(rgba, x, y, w, h);
+            }
+        }
         let gpu_from = pencilpilot_window::clock::now_ns();
         let img = win.acquire(&gpu)?;
         r.draw_canvases(
