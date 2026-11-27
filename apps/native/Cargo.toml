@@ -15,3 +15,5 @@ pencilpilot-brush = { path = "../../crates/brush" }
 pencilpilot-gpu = { path = "../../crates/gpu" }
 pencilpilot-window = { path = "../../crates/window" }
 hokusai = { version = "0.3", default-features = false, features = ["myb-json"] }
+pencilpilot-ui = { path = "../../crates/ui" }
+png = "0.18"

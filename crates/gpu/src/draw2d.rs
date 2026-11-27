@@ -5,7 +5,7 @@ use std::ffi::c_void;
 
 use ash::vk;
 
-use super::{COLOR_RANGE, Ctx, DmabufImage, Error, Gpu, Result};
+use super::{COLOR_RANGE, Canvas, Ctx, DmabufImage, Error, Gpu, Result};
 
 /// The atlas is this many pixels a side (RGBA8, premultiplied).
 pub const ATLAS_SIZE: u32 = 2048;
@@ -408,6 +408,20 @@ impl Renderer2d {
         clear: [f32; 4],
         quads: &[Quad],
     ) -> Result<()> {
+        self.draw_layered(gpu, frame, clear, quads, quads.len(), None)
+    }
+
+    /// Draw `quads[..below]`, then the canvas copied into `at` (x, y, w, h in the frame's
+    /// pixels; its changes go up first), then the rest of `quads` over it.
+    pub fn draw_layered(
+        &mut self,
+        gpu: &Gpu,
+        frame: &DmabufImage,
+        clear: [f32; 4],
+        quads: &[Quad],
+        below: usize,
+        canvas: Option<(&mut Canvas, [i32; 4])>,
+    ) -> Result<()> {
         if quads.len() > self.capacity {
             let cap = quads.len().next_power_of_two();
             unsafe {
@@ -462,6 +476,40 @@ impl Renderer2d {
             .collect();
         let first = !self.atlas_ready;
         self.atlas_ready = true;
+        let below = below.min(quads.len());
+        let under = canvas.map(|(c, at)| {
+            let regions: Vec<vk::BufferImageCopy> = c
+                .pending
+                .drain(..)
+                .map(|[x, y, w, h]| {
+                    vk::BufferImageCopy::default()
+                        .buffer_offset((y as u64 * c.width as u64 + x as u64) * 4)
+                        .buffer_row_length(c.width)
+                        .image_subresource(super::COLOR_LAYERS)
+                        .image_offset(vk::Offset3D {
+                            x: x as i32,
+                            y: y as i32,
+                            z: 0,
+                        })
+                        .image_extent(vk::Extent3D {
+                            width: w,
+                            height: h,
+                            depth: 1,
+                        })
+                })
+                .collect();
+            let was_ready = c.ready;
+            c.ready = true;
+            // the part of the canvas that fits at `at` inside the frame
+            let (x, y) = (at[0].max(0), at[1].max(0));
+            let w = (at[2].min(c.width as i32))
+                .min(frame.width as i32 - x)
+                .max(0) as u32;
+            let h = (at[3].min(c.height as i32))
+                .min(frame.height as i32 - y)
+                .max(0) as u32;
+            (c.image, c.staging, regions, was_ready, [x, y], [w, h])
+        });
         let fam = gpu.family;
         let (atlas, staging, pipeline, layout, set, instances) = (
             self.atlas,
@@ -568,14 +616,6 @@ impl Renderer2d {
                     fam,
                 ),
             );
-            let attach = [vk::RenderingAttachmentInfo::default()
-                .image_view(view)
-                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .load_op(vk::AttachmentLoadOp::CLEAR)
-                .store_op(vk::AttachmentStoreOp::STORE)
-                .clear_value(vk::ClearValue {
-                    color: vk::ClearColorValue { float32: clear },
-                })];
             let area = vk::Rect2D {
                 offset: vk::Offset2D { x: 0, y: 0 },
                 extent: vk::Extent2D {
@@ -583,43 +623,162 @@ impl Renderer2d {
                     height: fh,
                 },
             };
-            d.cmd_begin_rendering(
-                cmd,
-                &vk::RenderingInfo::default()
-                    .render_area(area)
-                    .layer_count(1)
-                    .color_attachments(&attach),
-            );
-            d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
-            d.cmd_set_viewport(
-                cmd,
-                0,
-                &[vk::Viewport {
-                    x: 0.0,
-                    y: 0.0,
-                    width: fw as f32,
-                    height: fh as f32,
-                    min_depth: 0.0,
-                    max_depth: 1.0,
-                }],
-            );
-            d.cmd_set_scissor(cmd, 0, &[area]);
-            d.cmd_bind_descriptor_sets(
-                cmd,
-                vk::PipelineBindPoint::GRAPHICS,
-                layout,
-                0,
-                &[set],
-                &[],
-            );
-            let screen = [fw as f32, fh as f32];
-            let bytes = std::slice::from_raw_parts(screen.as_ptr() as *const u8, 8);
-            d.cmd_push_constants(cmd, layout, vk::ShaderStageFlags::VERTEX, 0, bytes);
-            d.cmd_bind_vertex_buffers(cmd, 0, &[instances], &[0]);
-            if !quads.is_empty() {
-                d.cmd_draw(cmd, 4, quads.len() as u32, 0, 0);
+            // a rendering pass drawing quads[from..to]: the first clears, the second keeps
+            let pass = |from: usize, to: usize, load: vk::AttachmentLoadOp| {
+                let attach = [vk::RenderingAttachmentInfo::default()
+                    .image_view(view)
+                    .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .load_op(load)
+                    .store_op(vk::AttachmentStoreOp::STORE)
+                    .clear_value(vk::ClearValue {
+                        color: vk::ClearColorValue { float32: clear },
+                    })];
+                d.cmd_begin_rendering(
+                    cmd,
+                    &vk::RenderingInfo::default()
+                        .render_area(area)
+                        .layer_count(1)
+                        .color_attachments(&attach),
+                );
+                d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
+                d.cmd_set_viewport(
+                    cmd,
+                    0,
+                    &[vk::Viewport {
+                        x: 0.0,
+                        y: 0.0,
+                        width: fw as f32,
+                        height: fh as f32,
+                        min_depth: 0.0,
+                        max_depth: 1.0,
+                    }],
+                );
+                d.cmd_set_scissor(cmd, 0, &[area]);
+                d.cmd_bind_descriptor_sets(
+                    cmd,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    layout,
+                    0,
+                    &[set],
+                    &[],
+                );
+                let screen = [fw as f32, fh as f32];
+                let bytes = std::slice::from_raw_parts(screen.as_ptr() as *const u8, 8);
+                d.cmd_push_constants(cmd, layout, vk::ShaderStageFlags::VERTEX, 0, bytes);
+                d.cmd_bind_vertex_buffers(cmd, 0, &[instances], &[0]);
+                if to > from {
+                    d.cmd_draw(cmd, 4, (to - from) as u32, 0, from as u32);
+                }
+                d.cmd_end_rendering(cmd);
+            };
+            pass(0, below, vk::AttachmentLoadOp::CLEAR);
+            if let Some((cimg, cstaging, cregions, was_ready, [x, y], [w, h])) = &under {
+                let cfrom = if *was_ready {
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL
+                } else {
+                    vk::ImageLayout::UNDEFINED
+                };
+                if !cregions.is_empty() {
+                    Gpu::barrier(
+                        d,
+                        cmd,
+                        *cimg,
+                        (
+                            cfrom,
+                            vk::AccessFlags::TRANSFER_READ,
+                            vk::PipelineStageFlags::TRANSFER,
+                            vk::QUEUE_FAMILY_IGNORED,
+                        ),
+                        (
+                            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                            vk::AccessFlags::TRANSFER_WRITE,
+                            vk::PipelineStageFlags::TRANSFER,
+                            vk::QUEUE_FAMILY_IGNORED,
+                        ),
+                    );
+                    d.cmd_copy_buffer_to_image(
+                        cmd,
+                        *cstaging,
+                        *cimg,
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        cregions,
+                    );
+                    Gpu::barrier(
+                        d,
+                        cmd,
+                        *cimg,
+                        (
+                            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                            vk::AccessFlags::TRANSFER_WRITE,
+                            vk::PipelineStageFlags::TRANSFER,
+                            vk::QUEUE_FAMILY_IGNORED,
+                        ),
+                        (
+                            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                            vk::AccessFlags::TRANSFER_READ,
+                            vk::PipelineStageFlags::TRANSFER,
+                            vk::QUEUE_FAMILY_IGNORED,
+                        ),
+                    );
+                }
+                if (*was_ready || !cregions.is_empty()) && *w > 0 && *h > 0 {
+                    Gpu::barrier(
+                        d,
+                        cmd,
+                        frame.image,
+                        (
+                            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                            vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                            vk::QUEUE_FAMILY_IGNORED,
+                        ),
+                        (
+                            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                            vk::AccessFlags::TRANSFER_WRITE,
+                            vk::PipelineStageFlags::TRANSFER,
+                            vk::QUEUE_FAMILY_IGNORED,
+                        ),
+                    );
+                    let copy = vk::ImageCopy::default()
+                        .src_subresource(super::COLOR_LAYERS)
+                        .dst_subresource(super::COLOR_LAYERS)
+                        .dst_offset(vk::Offset3D { x: *x, y: *y, z: 0 })
+                        .extent(vk::Extent3D {
+                            width: *w,
+                            height: *h,
+                            depth: 1,
+                        });
+                    d.cmd_copy_image(
+                        cmd,
+                        *cimg,
+                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        frame.image,
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        &[copy],
+                    );
+                    Gpu::barrier(
+                        d,
+                        cmd,
+                        frame.image,
+                        (
+                            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                            vk::AccessFlags::TRANSFER_WRITE,
+                            vk::PipelineStageFlags::TRANSFER,
+                            vk::QUEUE_FAMILY_IGNORED,
+                        ),
+                        (
+                            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                            vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                                | vk::AccessFlags::COLOR_ATTACHMENT_READ,
+                            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                            vk::QUEUE_FAMILY_IGNORED,
+                        ),
+                    );
+                }
             }
-            d.cmd_end_rendering(cmd);
+            if quads.len() > below || under.is_some() {
+                pass(below, quads.len(), vk::AttachmentLoadOp::LOAD);
+            }
             Gpu::barrier(
                 d,
                 cmd,

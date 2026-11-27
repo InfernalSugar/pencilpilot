@@ -339,12 +339,24 @@ impl Frame<'_> {
         self.ui.theme
     }
 
+    /// How many quads are drawn so far (overlays aside): to draw something else (the
+    /// canvas) between those and what comes after.
+    pub fn mark(&self) -> usize {
+        self.quads.len()
+    }
+
+    /// The pointer, as this pass sees it.
+    pub fn pointer(&self) -> Pointer {
+        self.ui.pointer
+    }
+
     fn s(&self) -> f32 {
         self.ui.scale
     }
 
-    /// Draw a quad given in logical pixels.
-    fn put(&mut self, q: Quad) {
+    /// Draw a quad given in logical pixels (above what's drawn so far; in an overlay, above
+    /// everything).
+    pub fn put(&mut self, q: Quad) {
         let q = q.scaled(self.s());
         if self.in_overlay {
             self.overlay.push(q)
@@ -369,7 +381,8 @@ impl Frame<'_> {
         }
     }
 
-    fn put_text(&mut self, laid: &Laid, x: f32, y: f32) {
+    /// Draw laid-out text with its top-left at (x, y), logical pixels.
+    pub fn put_text(&mut self, laid: &Laid, x: f32, y: f32) {
         let s = self.s();
         let (dx, dy) = ((x * s).round(), (y * s).round());
         let qs = laid.quads.iter().map(|q| q.moved(dx, dy));
@@ -451,6 +464,16 @@ impl Frame<'_> {
         self.areas.pop();
     }
 
+    /// Lay widgets out in `rect` in a column (`gap` apart).
+    pub fn column_in(&mut self, rect: Rect, gap: f32, build: impl FnOnce(&mut Self)) {
+        self.within(rect, Dir::Column, gap, build);
+    }
+
+    /// Lay widgets out in `rect` in a row (`gap` apart).
+    pub fn row_in(&mut self, rect: Rect, gap: f32, build: impl FnOnce(&mut Self)) {
+        self.within(rect, Dir::Row, gap, build);
+    }
+
     /// A row `h` tall; its widgets go left to right (after [`Frame::then_right`], right to
     /// left from the end).
     pub fn row(&mut self, h: f32, build: impl FnOnce(&mut Self)) {
@@ -492,7 +515,8 @@ impl Frame<'_> {
         self.in_overlay || !self.ui.blocking.iter().any(|b| b.contains(p.x, p.y))
     }
 
-    fn interact(&mut self, id: Id, rect: Rect) -> Response {
+    /// Hover, press, click and right-click on `rect` for the widget `id` (custom widgets).
+    pub fn interact(&mut self, id: Id, rect: Rect) -> Response {
         let p = self.ui.pointer;
         let over = p.inside && rect.contains(p.x, p.y) && self.pointer_free();
         if over && p.pressed {
@@ -637,7 +661,7 @@ impl Frame<'_> {
     }
 
     /// A tooltip under `anchor`, once the pointer has rested on `owner` a moment.
-    fn tooltip(&mut self, owner: Id, text: &str, anchor: Rect) {
+    pub fn tooltip(&mut self, owner: Id, text: &str, anchor: Rect) {
         let Some((h, since)) = self.ui.hover else {
             // the hover starts this pass: the tooltip is due after the delay
             self.ui.next_at = Some(self.ui.now + TOOLTIP_DELAY);
