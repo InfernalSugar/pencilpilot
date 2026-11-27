@@ -112,6 +112,17 @@ impl Engine {
         }
     }
 
+    /// Lifts the selection (or the active layer's paint) to move it: the pixels move on the
+    /// GPU from now on ([`Engine::float_move`]); the layer shows without them. Returns the
+    /// lifted box (x0, y0, x1, y1, document pixels), empty when there's nothing to lift.
+    pub fn lift(&mut self) -> Vec<f32> {
+        let b = self.painter.transform_begin_lifted();
+        if b.is_empty() || !self.float_begin() {
+            return Vec::new();
+        }
+        b
+    }
+
     /// After `painter.transform_begin()`: the lifted pixels move on the GPU from now on
     /// ([`Engine::float_move`]); the layer shows without them. False when nothing's lifted.
     pub fn float_begin(&mut self) -> bool {
@@ -345,8 +356,7 @@ mod tests {
         assert!(red(&e, 305, 105));
 
         let t = Instant::now();
-        assert!(!e.painter.transform_begin().is_empty());
-        assert!(e.float_begin());
+        assert_eq!(e.lift(), vec![300.0, 100.0, 1500.0, 900.0]);
         let lift = t.elapsed();
         let f = e.float.as_ref().unwrap();
         assert_eq!((f.w, f.h, f.at), (1200, 800, (300.0, 100.0)));

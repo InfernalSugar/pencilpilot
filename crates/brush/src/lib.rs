@@ -2879,6 +2879,17 @@ impl Painter {
     /// selection) so they can be moved, scaled, rotated and flipped. Returns
     /// the lifted box `[x0, y0, x1, y1]` (empty if there's nothing to lift).
     pub fn transform_begin(&mut self) -> Vec<f32> {
+        self.transform_lift(true)
+    }
+
+    /// `transform_begin` for pixels shown moving elsewhere (on the GPU): the layer shows
+    /// without them, and they're not drawn back in until `transform_preview` (at commit).
+    /// Much quicker for a large area.
+    pub fn transform_begin_lifted(&mut self) -> Vec<f32> {
+        self.transform_lift(false)
+    }
+
+    fn transform_lift(&mut self, preview: bool) -> Vec<f32> {
         if self.transform.is_some() || self.stroking.is_some() || self.adjusting.is_some() {
             return Vec::new();
         }
@@ -2944,7 +2955,11 @@ impl Painter {
             cover: None,
             under: None,
         }));
-        self.transform_preview_h(H_IDENTITY);
+        if preview {
+            self.transform_preview_h(H_IDENTITY);
+        } else {
+            self.transform_show_base();
+        }
         vec![x0 as f32, y0 as f32, (x1 + 1) as f32, (y1 + 1) as f32]
     }
 
