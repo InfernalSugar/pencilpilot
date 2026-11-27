@@ -636,8 +636,9 @@ fn stats(v: &mut [f64]) -> (f64, f64, f64, f64) {
 /// what the window does with the picture: flush and copy out the changed rectangle) must stay
 /// under 16 ms, and letting go must finish within 100 ms (BUDGETS.md).
 ///
-/// This measures the brush crate's transform directly (what the Transform tool is built on);
-/// `transform_through_the_tool_*` measures it through the tool once the tool lands.
+/// This measures the brush crate's CPU preview (`transform_preview` every step), which the
+/// app no longer uses for a drag (step4 e771f04: the engine's float); kept as the comparison.
+/// The budget is held by `moving_a_1200x800_painted_selection_through_the_engines_float`.
 #[test]
 #[ignore = "QA suite: tools/native-qa/run.sh"]
 fn moving_a_1200x800_painted_selection_stays_interactive() {
@@ -734,4 +735,73 @@ fn drag_a_large_selection(step: f32, json: &str) {
         commit_ms < 100.0,
         "letting go takes {commit_ms:.0} ms; budget 100 ms"
     );
+}
+
+/// The same move through the engine's float (step4's `Engine::float_begin` / `float_move` /
+/// `float_end`): during the drag the lifted pixels are a GPU picture, so a step costs the CPU
+/// nothing; lifting and letting go are measured (whole-pixel and fractional moves), and the
+/// pixels must land where the matrix says.
+#[test]
+#[ignore = "QA suite: tools/native-qa/run.sh"]
+fn moving_a_1200x800_painted_selection_through_the_engines_float() {
+    let area = (360.0, 140.0, 1200.0, 800.0);
+    let mut rows = Vec::new();
+    let mut problems = Vec::new();
+    for (name, dx, dy) in [("whole", 360.0f32, 180.0f32), ("fractional", 393.3, 196.65)] {
+        let (mut e, _s) = painted(area);
+        let (dw, dh) = (DOC.0 as usize, DOC.1 as usize);
+        let mut mask = vec![0u8; dw * dh];
+        for yy in (area.1 - 20.0) as usize..(area.1 + area.3 + 20.0) as usize {
+            for xx in (area.0 - 20.0) as usize..(area.0 + area.2 + 20.0) as usize {
+                mask[yy * dw + xx] = 255;
+            }
+        }
+        e.painter.set_selection(&mask, 0);
+        let t = Instant::now();
+        let lifted = e.painter.transform_begin();
+        assert_eq!(lifted.len(), 4);
+        assert!(e.float_begin(), "float_begin");
+        e.painter.flush();
+        let lift_ms = t.elapsed().as_secs_f64() * 1e3;
+        let mut steps = Vec::new();
+        for i in 1..=90 {
+            let k = i as f32 / 90.0;
+            let t = Instant::now();
+            e.float_move([1.0, 0.0, 0.0, 1.0, dx * k, dy * k]);
+            let _ = e.painter.flush();
+            steps.push(t.elapsed().as_secs_f64() * 1e3);
+        }
+        let t = Instant::now();
+        assert!(e.float_end(true));
+        e.painter.flush();
+        let commit_ms = t.elapsed().as_secs_f64() * 1e3;
+        let ink = ink_points(e.painter.rgba(), DOC.0);
+        let minx = ink.iter().map(|p| p.0).fold(f32::MAX, f32::min);
+        let (p50, _, p99, max) = stats(&mut steps);
+        rows.push(format!(
+            "{{\"move\": \"{name}\", \"liftMs\": {lift_ms:.1}, \"stepMs\": {{\"p50\": {p50:.4}, \"p99\": {p99:.4}, \"max\": {max:.4}}}, \"commitMs\": {commit_ms:.1}, \"inkMinX\": {minx}}}"
+        ));
+        problems.extend(check_float(name, minx, lifted[0] + dx, commit_ms, p99));
+    }
+    save_json(
+        "transform-float-1200x800.json",
+        &format!("[{}]", rows.join(", ")),
+    );
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+fn check_float(name: &str, minx: f32, want: f32, commit_ms: f64, p99: f64) -> Vec<String> {
+    let mut out = Vec::new();
+    if (minx - want).abs() > 1.5 {
+        out.push(format!("{name}: the pixels landed at x {minx}, not {want}"));
+    }
+    if commit_ms >= 100.0 {
+        out.push(format!(
+            "{name}: letting go takes {commit_ms:.0} ms; budget 100 ms"
+        ));
+    }
+    if p99 >= 1.0 {
+        out.push(format!("{name}: a drag step costs the CPU {p99:.2} ms"));
+    }
+    out
 }
