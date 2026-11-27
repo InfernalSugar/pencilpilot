@@ -37,6 +37,20 @@ pub struct Float {
     pub lift: u64,
 }
 
+/// A brush file, parsed once (parsing takes milliseconds: not at every stroke's start).
+fn parsed(src: &'static str) -> Option<hokusai::Brush> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<usize, hokusai::Brush>>> = OnceLock::new();
+    let mut cache = CACHE.get_or_init(Default::default).lock().ok()?;
+    if let Some(b) = cache.get(&(src.as_ptr() as usize)) {
+        return Some(b.clone());
+    }
+    let b = hokusai::myb::from_str(src).ok()?;
+    cache.insert(src.as_ptr() as usize, b.clone());
+    Some(b)
+}
+
 pub const IDENTITY: [f32; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
 
 /// Where a stroke started, and whether it has moved since.
@@ -264,7 +278,7 @@ impl Engine {
                 .map(|(_, b)| *b)
                 .unwrap_or(BRUSHES[0].1)
         };
-        let mut b = hokusai::myb::from_str(src).ok()?;
+        let mut b = parsed(src)?;
         let [r, g, bl, _] = s.colour.map(|c| (c * 255.0).round() as u8);
         set_brush_rgb(&mut b, r, g, bl);
         // the size: brush_size px across, as a log radius
@@ -600,5 +614,22 @@ mod stroke_end_timing {
                 "round {round}: down {down:?}, its frame {down_frame:?}, slowest mid frame {mid:?}, up {up:?}, tick after {tick:?}, picture after {pic:?}"
             );
         }
+    }
+
+    /// A stroke's start doesn't parse its brush again (it did, at every stroke).
+    #[test]
+    fn a_brush_is_parsed_once() {
+        let s = State::demo();
+        let t = std::time::Instant::now();
+        let _ = hokusai::myb::from_str(BRUSHES[0].1).unwrap();
+        let parse = t.elapsed();
+        let _ = Engine::brush(&s).unwrap();
+        let t = std::time::Instant::now();
+        for _ in 0..10 {
+            let _ = Engine::brush(&s).unwrap();
+        }
+        let cached = t.elapsed() / 10;
+        eprintln!("parsing the brush {parse:?}, from the cache {cached:?}");
+        assert!(cached < parse, "{cached:?} vs {parse:?}");
     }
 }
