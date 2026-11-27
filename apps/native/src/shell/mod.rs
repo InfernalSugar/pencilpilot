@@ -237,6 +237,8 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
     let (mut presented, mut drawn) = (0u64, 0u64);
     let gpu = Gpu::new()?;
     let mut win = Window::new(&gpu, "PencilPilot")?;
+    // the close button asks (unsaved changes): the app closes when it's ready
+    win.ask_before_closing();
     let mut r = Renderer2d::new(&gpu)?;
     let mut ui = Ui::new(win.scale() as f32);
     let mut s = State::demo();
@@ -572,14 +574,27 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
         let pass_ns = pencilpilot_window::clock::now_ns().saturating_sub(pass_from);
         dirty = false;
         // what the interface asked for
+        if win.take_close_request() {
+            s.actions.push(Action::File("Quit".into()));
+        }
         let acted = !s.actions.is_empty();
         for a in std::mem::take(&mut s.actions) {
-            if let Some(e) = &mut eng
-                && e.apply(&mut s, &a)
-            {
+            let quit = a == Action::File("Quit".into());
+            let handled = match &mut eng {
+                Some(e) => e.apply(&mut s, &a),
+                None => false,
+            };
+            if handled {
                 canvas_dirty = true;
                 dirty = true;
+            } else if quit {
+                // (nothing asks first: close)
+                s.quit_now = true;
             }
+        }
+        if std::mem::take(&mut s.quit_now) {
+            win.close();
+            break;
         }
         if let Some(e) = &mut eng {
             let (up, re) = upload_picture(&gpu, e, &mut s, &mut canvas, canvas_rect)?;
