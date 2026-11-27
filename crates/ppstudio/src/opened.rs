@@ -43,6 +43,28 @@ pub struct Tiles<R> {
 }
 
 impl<R: Read + Seek> Tiles<R> {
+    /// A tile as the file stores it: whether it's deflated (raw deflate, no header), and
+    /// its bytes, not decompressed (for keeping many tiles in little memory).
+    pub fn tile_stored(&mut self, hash: &str) -> Result<(bool, Vec<u8>)> {
+        let i = *self
+            .names
+            .get(&format!("tiles/{hash}"))
+            .ok_or_else(|| Error::Invalid(format!("missing tile {hash}")))?;
+        let f = self.zip.by_index_raw(i)?;
+        let deflated = match f.compression() {
+            zip::CompressionMethod::Stored => false,
+            zip::CompressionMethod::Deflated => true,
+            m => {
+                return Err(Error::Invalid(format!(
+                    "tile {hash} is compressed with {m:?}"
+                )));
+            }
+        };
+        let mut v = Vec::new();
+        f.take(RGBA_TILE as u64 + 1024).read_to_end(&mut v)?;
+        Ok((deflated, v))
+    }
+
     /// A tile's bytes: RGBA (16 384) or a mask's grey (4 096).
     pub fn tile(&mut self, hash: &str) -> Result<Vec<u8>> {
         let i = *self
