@@ -403,7 +403,19 @@ mod tests {
         assert!(e.painter.undo());
         e.painter.flush();
         assert!(red(&e, 305, 105) && !red(&e, 1550, 920));
-        eprintln!("1200×800 move: lift {lift:?}, each drag step {per_step:?}, commit {commit:?}");
+        // a move by a fraction of a pixel (any zoom but 100 %) resamples every pixel
+        e.painter.redo();
+        e.painter.flush();
+        assert!(!e.lift().is_empty());
+        let t = Instant::now();
+        e.float_move([1.0, 0.0, 0.0, 1.0, 93.3, 46.65]);
+        assert!(e.float_end(true));
+        e.painter.flush();
+        let commit_fraction = t.elapsed();
+        eprintln!(
+            "1200×800 move: lift {lift:?}, each drag step {per_step:?}, commit {commit:?}, \
+             commit after a fractional move {commit_fraction:?}"
+        );
         assert!(per_step.as_micros() < 1000, "a drag step: {per_step:?}");
     }
 
