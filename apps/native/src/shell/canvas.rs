@@ -184,6 +184,12 @@ pub fn overlays(f: &mut Frame, card: Rect, s: &mut State) {
     // the tools' overlays, the selection's menu (instead of this one inside it), their keys
     crate::shell::engine::tools::overlay::draw(f, card, s);
     let review = s.workspace == Workspace::Review;
+    let hints = s.tooling.clone();
+    let hint = |item: &str, fallback: &str| {
+        hints
+            .menu_hint(item)
+            .unwrap_or_else(|| fallback.to_string())
+    };
     let frame = s.frame + 1;
     let picked = f.menu(MENU, |m| {
         if review {
@@ -199,15 +205,15 @@ pub fn overlays(f: &mut Frame, card: Rect, s: &mut State) {
         m.item("Paste", "Ctrl+V");
         m.item("Select all", "Ctrl+A");
         m.separator();
-        m.item("Guides", "Grid · Perspective · Rulers ›");
-        m.item("Symmetry", "Off ›");
-        m.item("Snap to guides", "✓");
+        m.item("Guides", &hint("Guides", "Grid · Perspective · Rulers ›"));
+        m.item("Symmetry", &hint("Symmetry", "Off ›"));
+        m.item("Snap to guides", &hint("Snap to guides", "✓"));
         m.separator();
         m.item("Rotate view", "15°");
         m.item("Flip view", "H");
         m.item("Reset view", "0");
         m.separator();
-        m.item("Record timelapse", "●");
+        m.item("Record timelapse", &hint("Record timelapse", "●"));
     });
     if let Some(item) = picked
         && !view_item(s, card, &item)

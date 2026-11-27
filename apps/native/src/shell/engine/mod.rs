@@ -232,6 +232,7 @@ impl Engine {
         if s.tool == Tool::Eraser {
             b.get_mut(BrushSetting::Eraser).base_value = 1.0;
         }
+        tools::tune_brush(&mut b, s);
         Some(b)
     }
 
