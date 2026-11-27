@@ -46,10 +46,10 @@ pub struct Job {
 
 /// From the window to the renderer, in order.
 pub enum Msg {
-    /// a drawing's pixels, before the first frame showing it (None: it's empty)
-    Drawing(u32, Option<DrawingCopy>),
+    /// a drawing's pixels, before the first frame showing it
+    Drawing(u32, Source),
     /// a static run's layer's drawing (the layer's id), merged at once, bottom up
-    Merge(u32, Option<DrawingCopy>),
+    Merge(u32, Source),
     /// a frame: each layer's drawing (the window's layer ids), how long it's held, and the
     /// drawings no later frame shows
     Frame {
@@ -59,6 +59,25 @@ pub enum Msg {
     },
     /// no more frames (or cancelled)
     End,
+}
+
+/// Where a drawing's pixels come from.
+pub enum Source {
+    /// copied from the window's painter (None: it's empty)
+    Copy(Option<DrawingCopy>),
+    /// kept compressed out of the painter: decoded here
+    Kept(crate::shell::engine::frames::store::Job),
+}
+
+impl Source {
+    fn pixels(self, pool: Option<&rayon::ThreadPool>) -> Option<DrawingCopy> {
+        match self {
+            Source::Copy(c) => c,
+            Source::Kept(j) => {
+                Some(on(pool, || DrawingCopy::from_decoded(j.decode()))).filter(|c| !c.is_empty())
+            }
+        }
+    }
 }
 
 /// Counters the window reads.
@@ -310,14 +329,16 @@ fn render(
             }
         };
         match msg {
-            Msg::Drawing(d, copy) => {
+            Msg::Drawing(d, src) => {
+                let copy = src.pixels(pool);
                 if let Some(c) = copy {
                     held.insert(d, c.bytes());
                     p.put_drawing_copy(d, c);
                 }
                 st.held_max = st.held_max.max(held.values().sum());
             }
-            Msg::Merge(layer, copy) => {
+            Msg::Merge(layer, src) => {
+                let copy = src.pixels(pool);
                 let Some(r) = run_of(layer) else { continue };
                 let t = Instant::now();
                 if let (Some(c), Some(lp)) = (copy, props.get(&layer))

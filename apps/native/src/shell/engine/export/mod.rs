@@ -562,6 +562,30 @@ fn feed(e: &mut Engine) {
         };
         let ts = Instant::now();
         let msg = match item {
+            Item::Copy(d, merge) if !e.painter.has_drawing(d) => {
+                // kept compressed out of the painter: the export decodes it (the window only
+                // hands it over)
+                r.partial = None;
+                let src = worker::Source::Kept(match e.frames.store.job(d) {
+                    Some(j) => j,
+                    None => {
+                        r.pending.pop_front();
+                        let empty = worker::Source::Copy(None);
+                        let msg = match merge {
+                            Some(layer) => worker::Msg::Merge(layer, empty),
+                            None => worker::Msg::Drawing(d, empty),
+                        };
+                        if r.tx.send(msg).is_err() {
+                            break;
+                        }
+                        continue;
+                    }
+                });
+                match merge {
+                    Some(layer) => worker::Msg::Merge(layer, src),
+                    None => worker::Msg::Drawing(d, src),
+                }
+            }
             Item::Copy(d, merge) => {
                 let p = &e.painter;
                 let part = r.partial.get_or_insert_with(|| Partial {
@@ -601,9 +625,10 @@ fn feed(e: &mut Engine) {
                     continue;
                 }
                 let copy = r.partial.take().map(|p| p.copy).filter(|c| !c.is_empty());
+                let src = worker::Source::Copy(copy);
                 match merge {
-                    Some(layer) => worker::Msg::Merge(layer, copy),
-                    None => worker::Msg::Drawing(d, copy),
+                    Some(layer) => worker::Msg::Merge(layer, src),
+                    None => worker::Msg::Drawing(d, src),
                 }
             }
             Item::Frame(i) => {

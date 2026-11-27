@@ -61,6 +61,11 @@ impl DrawingCopy {
         DrawingCopy(TileMap::new())
     }
 
+    /// A drawing's decoded tiles (as a frame store decodes them) as a copy.
+    pub fn from_decoded(tiles: Vec<((i32, i32), DecodedTile)>) -> DrawingCopy {
+        DrawingCopy(tiles.into_iter().map(|(k, t)| (k, t.0)).collect())
+    }
+
     /// Another part of the same drawing's tiles (see [`Painter::drawing_copy_tiles`]).
     pub fn absorb(&mut self, other: DrawingCopy) {
         self.0.extend(other.0);
