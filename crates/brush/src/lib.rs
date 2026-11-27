@@ -40,6 +40,17 @@ pub use lines::{paint_reach, smudge_reach};
 
 pub(crate) type TileKey = (i32, i32);
 pub(crate) type TileMap = HashMap<TileKey, Box<TilePixels>>;
+
+/// A copy of a layer's tiles: on every core natively (a 1080p layer is 16 MB).
+fn copy_tiles(tiles: &TileMap) -> TileMap {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use rayon::prelude::*;
+        tiles.par_iter().map(|(k, t)| (*k, t.clone())).collect()
+    }
+    #[cfg(target_arch = "wasm32")]
+    tiles.clone()
+}
 /// Tiles as they were before an edit. `None` = the tile did not exist.
 type Snapshot = HashMap<TileKey, Option<Box<TilePixels>>>;
 
@@ -2909,27 +2920,13 @@ impl Painter {
             Some(s) => cx >= 0 && cy >= 0 && cx < w && cy < h && s[(cy * w + cx) as usize] > 0,
         };
         let l = &self.layers[li];
-        let (mut x0, mut y0, mut x1, mut y1) = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
-        for (&(tx, ty), tile) in &l.surface.tiles {
-            for (py, row) in tile.iter().enumerate() {
-                for (px, p) in row.iter().enumerate() {
-                    let (cx, cy) = (tx as i64 * ts + px as i64, ty as i64 * ts + py as i64);
-                    if p[3] > 0 && picked(cx, cy) {
-                        x0 = x0.min(cx);
-                        y0 = y0.min(cy);
-                        x1 = x1.max(cx);
-                        y1 = y1.max(cy);
-                    }
-                }
-            }
-        }
-        if x0 > x1 {
+        let Some((x0, y0, x1, y1)) = self.paint_box(li) else {
             return Vec::new();
-        }
+        };
         let (fw, fh) = ((x1 - x0 + 1) as usize, (y1 - y0 + 1) as usize);
         let mut float = vec![[0u16; 4]; fw * fh];
-        let original = l.surface.tiles.clone();
-        let mut base = original.clone();
+        let original = copy_tiles(&l.surface.tiles);
+        let mut base = copy_tiles(&original);
         for (&(tx, ty), tile) in base.iter_mut() {
             for (py, row) in tile.iter_mut().enumerate() {
                 for (px, p) in row.iter_mut().enumerate() {
@@ -2967,6 +2964,66 @@ impl Painter {
         self.transform.is_some()
     }
 
+    /// The box (x0, y0, x1, y1, inclusive) of the active layer's paint inside the selection
+    /// (all of it without one): what a transform would lift. None when there's nothing to
+    /// lift (nothing painted there, or the layer locked or hidden).
+    pub fn lift_bounds(&self) -> Option<[f32; 4]> {
+        let li = self.index_of(self.active)?;
+        if self.layers[li].props.locked || !self.shown(li) {
+            return None;
+        }
+        let (x0, y0, x1, y1) = self.paint_box(li)?;
+        Some([x0 as f32, y0 as f32, (x1 + 1) as f32, (y1 + 1) as f32])
+    }
+
+    /// The box of layer `li`'s paint inside the selection, inclusive (tiles on every core
+    /// natively).
+    fn paint_box(&self, li: usize) -> Option<(i64, i64, i64, i64)> {
+        let (w, h) = (self.width as i64, self.height as i64);
+        let ts = TILE_SIZE as i64;
+        let sel = self.selection.as_deref();
+        let tile_box = |(&(tx, ty), tile): (&TileKey, &TilePixels)| {
+            let (mut x0, mut y0, mut x1, mut y1) = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
+            for (py, row) in tile.iter().enumerate() {
+                for (px, p) in row.iter().enumerate() {
+                    let (cx, cy) = (tx as i64 * ts + px as i64, ty as i64 * ts + py as i64);
+                    let picked = match sel {
+                        None => true,
+                        Some(s) => {
+                            cx >= 0 && cy >= 0 && cx < w && cy < h && s[(cy * w + cx) as usize] > 0
+                        }
+                    };
+                    if p[3] > 0 && picked {
+                        x0 = x0.min(cx);
+                        y0 = y0.min(cy);
+                        x1 = x1.max(cx);
+                        y1 = y1.max(cy);
+                    }
+                }
+            }
+            (x0, y0, x1, y1)
+        };
+        let join = |a: (i64, i64, i64, i64), b: (i64, i64, i64, i64)| {
+            (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3))
+        };
+        let none = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
+        let tiles = &self.layers[li].surface.tiles;
+        #[cfg(not(target_arch = "wasm32"))]
+        let b = {
+            use rayon::prelude::*;
+            tiles
+                .par_iter()
+                .map(|(k, t)| tile_box((k, &**t)))
+                .reduce(|| none, join)
+        };
+        #[cfg(target_arch = "wasm32")]
+        let b = tiles
+            .iter()
+            .map(|(k, t)| tile_box((k, &**t)))
+            .fold(none, join);
+        (b.0 <= b.2).then_some(b)
+    }
+
     /// A transform's lifted pixels as straight-alpha sRGB RGBA8, `w`×`h` from canvas (x, y):
     /// for showing them moving (on the GPU) without redrawing the layer at every step.
     pub fn transform_float(&self) -> Option<(Vec<u8>, i64, i64, usize, usize)> {
@@ -2975,16 +3032,25 @@ impl Painter {
             return None;
         }
         let mut out = vec![0u8; t.fw * t.fh * 4];
-        for (i, p) in t.float.iter().enumerate() {
-            if p[3] == 0 {
-                continue;
+        let row = |(y, o): (usize, &mut [u8])| {
+            for (x, p) in t.float[y * t.fw..(y + 1) * t.fw].iter().enumerate() {
+                if p[3] == 0 {
+                    continue;
+                }
+                let (c, a) = unpremul_srgb(*p);
+                o[x * 4] = (c[0] * 255.0).round() as u8;
+                o[x * 4 + 1] = (c[1] * 255.0).round() as u8;
+                o[x * 4 + 2] = (c[2] * 255.0).round() as u8;
+                o[x * 4 + 3] = (a * 255.0).round() as u8;
             }
-            let (c, a) = unpremul_srgb(*p);
-            out[i * 4] = (c[0] * 255.0).round() as u8;
-            out[i * 4 + 1] = (c[1] * 255.0).round() as u8;
-            out[i * 4 + 2] = (c[2] * 255.0).round() as u8;
-            out[i * 4 + 3] = (a * 255.0).round() as u8;
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use rayon::prelude::*;
+            out.par_chunks_mut(t.fw * 4).enumerate().for_each(row);
         }
+        #[cfg(target_arch = "wasm32")]
+        out.chunks_mut(t.fw * 4).enumerate().for_each(row);
         Some((out, t.fx0, t.fy0, t.fw, t.fh))
     }
 
@@ -2998,9 +3064,19 @@ impl Painter {
             return false;
         };
         let tiles = &mut self.layers[li].surface.tiles;
-        self.dirty.extend(tiles.keys().copied());
-        *tiles = t.base.clone();
-        self.dirty.extend(tiles.keys().copied());
+        // only the lifted box's tiles change
+        let ts = TILE_SIZE as i64;
+        let (tx0, ty0) = (t.fx0.div_euclid(ts), t.fy0.div_euclid(ts));
+        let (tx1, ty1) = (
+            (t.fx0 + t.fw as i64 - 1).div_euclid(ts),
+            (t.fy0 + t.fh as i64 - 1).div_euclid(ts),
+        );
+        let in_box = |&(x, y): &TileKey| {
+            (x as i64) >= tx0 && (x as i64) <= tx1 && (y as i64) >= ty0 && (y as i64) <= ty1
+        };
+        self.dirty.extend(tiles.keys().copied().filter(in_box));
+        *tiles = copy_tiles(&t.base);
+        self.dirty.extend(tiles.keys().copied().filter(in_box));
         t.last = None;
         true
     }

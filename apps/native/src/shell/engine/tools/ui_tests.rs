@@ -319,12 +319,13 @@ fn keys_select_copy_paste_clear_and_transform() {
     assert_ne!(sh.s.tool, Tool::Transform);
     sh.key("Escape", None, false, false);
     assert!(!sh.e.painter.has_selection(), "Escape deselects");
-    // V picks Transform, which lifts the whole layer; a drag moves it on the GPU
+    // V picks Transform: its box around the whole layer's paint at once; a press in it lifts
+    // the pixels and the drag moves them on the GPU
     sh.key("v", Some("v"), false, false);
     assert_eq!(sh.s.tool, Tool::Transform);
-    assert!(sh.e.float.is_some() && sh.s.tooling.transform.is_some());
+    assert!(sh.s.tooling.transform.is_some() && sh.e.float.is_none());
     sh.canvas_drag(&[(500.0, 400.0), (650.0, 450.0), (800.0, 500.0)]);
-    assert!(sh.s.moving.is_some());
+    assert!(sh.e.float.is_some() && sh.s.moving.is_some());
     // the box's handles are drawn, and the lifted pixels move with it
     sh.save("tools-transform-moving");
     sh.key("Return", None, false, false);

@@ -99,6 +99,35 @@ fn save_png(path: &str, rgba: &[u8], w: u32, h: u32) -> Result<(), Box<dyn std::
 /// Pen and mouse strokes that start on the canvas card paint (with a painting tool, and no
 /// menu open); everything else works the interface. A frame is drawn only when the
 /// interface or the drawing changed.
+/// The pixels being moved, from the engine: where they are (`s.moving`), and their picture on
+/// the GPU (made once a lift). Returns whether where they are changed.
+fn sync_moving(
+    gpu: &Gpu,
+    e: &engine::Engine,
+    s: &mut State,
+    tex: &mut Option<(Canvas, u64)>,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let now = e.float.as_ref().map(|f| crate::shell::view::Moving {
+        at: f.at,
+        w: f.w,
+        h: f.h,
+        m: f.m,
+    });
+    let moved = now != s.moving;
+    s.moving = now;
+    match (&e.float, &*tex) {
+        (Some(f), Some((_, lift))) if *lift == f.lift => {}
+        (Some(f), _) => {
+            let mut c = Canvas::new(gpu, f.w.max(1), f.h.max(1))?;
+            c.upload_all(&f.rgba);
+            *tex = Some((c, f.lift));
+        }
+        (None, Some(_)) => *tex = None,
+        (None, None) => {}
+    }
+    Ok(moved)
+}
+
 /// What a held mouse button or pen is doing.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Drag {
@@ -148,6 +177,9 @@ struct FrameRec {
     /// of the rest: waking after its time, and the interface's pass, ns
     wake_ns: u64,
     pass_ns: u64,
+    /// when the compositor asked for it, from when it was meant to start, ns (negative:
+    /// before)
+    asked_ns: i64,
     /// when it reached the screen, ns
     shown_ns: Option<u64>,
 }
@@ -170,6 +202,8 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut canvas: Option<Canvas> = None;
     let mut recs: Vec<FrameRec> = Vec::new();
+    // what the input since the last frame did: moved the view / reached the engine
+    let (mut view_moved, mut drew) = (false, false);
     let mut pacer =
         pencilpilot_window::pace::Pacer::new(std::env::var_os("PP_DRAW_AT_ONCE").is_some());
     let mut plan: Option<pencilpilot_window::pace::Plan> = None;
@@ -254,16 +288,19 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
                         if let Some(e) = &mut eng {
                             let p = sample(&s, x, y, 0.5, (0.0, 0.0), time_ms);
                             e.pointer(&mut s, engine::Phase::Move, p);
+                            drew = true;
                         }
                     }
                     Drag::Pan(lx, ly) => {
                         s.view.pan_by(x as f32 - lx, y as f32 - ly);
+                        view_moved = true;
                         drag = Drag::Pan(x as f32, y as f32);
                     }
                     Drag::Rotate(a) => {
                         let c = (cr.x + cr.w / 2.0, cr.y + cr.h / 2.0);
                         let now = (y as f32 - c.1).atan2(x as f32 - c.0);
                         s.view.rotate_about(cr, c, now - a);
+                        view_moved = true;
                         drag = Drag::Rotate(now);
                     }
                     Drag::None => ui.pointer_moved(x as f32, y as f32),
@@ -292,6 +329,7 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
                             let p = sample(&s, x, y, 0.5, (0.0, 0.0), time_ms);
                             (s.tooling.shift, s.tooling.alt) = (shift, alt);
                             e.pointer(&mut s, engine::Phase::Down, p);
+                            drew = true;
                             drag = Drag::Engine;
                         }
                     } else if !pressed && drag != Drag::None {
@@ -326,6 +364,7 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
                         let steps = if wheel { dy / 10.0 } else { dy / 40.0 };
                         let factor = 1.2f32.powf(-steps as f32);
                         s.view.zoom_at(cr, (x as f32, y as f32), factor);
+                        view_moved = true;
                     } else {
                         ui.pointer_moved(x as f32, y as f32);
                         ui.scrolled(dy as f32);
@@ -356,6 +395,7 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
                                     (s.tooling.shift, s.tooling.alt) = (shift, alt);
                                 }
                                 e.pointer(&mut s, phase, smp);
+                                drew = true;
                             }
                             if matches!(p.phase, PenPhase::Up | PenPhase::Leave) {
                                 drag = Drag::None;
@@ -363,6 +403,7 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
                         }
                         (Drag::Pan(lx, ly), PenPhase::Move) => {
                             s.view.pan_by(x as f32 - lx, y as f32 - ly);
+                            view_moved = true;
                             drag = Drag::Pan(x as f32, y as f32);
                         }
                         (Drag::Pan(..), PenPhase::Up | PenPhase::Leave) => drag = Drag::None,
@@ -412,26 +453,7 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
         }
         // pixels being moved: the GPU shows them where they are now
         if let Some(e) = &eng {
-            let now = e.float.as_ref().map(|f| crate::shell::view::Moving {
-                at: f.at,
-                w: f.w,
-                h: f.h,
-                m: f.m,
-            });
-            if now != s.moving {
-                s.moving = now;
-                dirty = true;
-            }
-            match (&e.float, &float_tex) {
-                (Some(f), Some((_, lift))) if *lift == f.lift => {}
-                (Some(f), _) => {
-                    let mut c = Canvas::new(&gpu, f.w.max(1), f.h.max(1))?;
-                    c.upload_all(&f.rgba);
-                    float_tex = Some((c, f.lift));
-                }
-                (None, Some(_)) => float_tex = None,
-                (None, None) => {}
-            }
+            dirty |= sync_moving(&gpu, e, &mut s, &mut float_tex)?;
         }
         // time: playback
         if let Some(e) = &mut eng
@@ -460,7 +482,11 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
         }
         // drawn late: just before the refresh it's for, with the newest input
         let now = pencilpilot_window::clock::now_ns();
-        if plan.is_none_or(|p| now > p.target) {
+        if view_moved && !drew {
+            // only the view moved: drawn at once (drawing late is for the pen's newest
+            // sample; for zooming it only risks a missed refresh)
+            plan = None;
+        } else if plan.is_none_or(|p| now > p.target) {
             plan = pacer.plan(now);
         }
         if let Some(p) = plan
@@ -471,6 +497,7 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
         }
         // (from when it was meant to start: waking late under load counts too)
         let woke = pencilpilot_window::clock::now_ns();
+        let asked = win.frame_asked_at();
         let work_from = plan.map_or(woke, |p| p.draw_at.min(woke));
         let (lw, lh) = win.logical_size();
         ui.scale = win.scale() as f32;
@@ -479,10 +506,11 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
         let first = ui.pass(&mut r, w, h, |f| {
             (mark, canvas_rect) = build(f, &mut s, w, h);
         });
-        let changed = first;
+        let mut changed = first;
         let pass_ns = pencilpilot_window::clock::now_ns().saturating_sub(pass_from);
         dirty = false;
         // what the interface asked for
+        let acted = !s.actions.is_empty();
         for a in std::mem::take(&mut s.actions) {
             if let Some(e) = &mut eng
                 && e.apply(&mut s, &a)
@@ -498,12 +526,26 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             c.upload(rgba, x, y, w, h);
             canvas_dirty = true;
         }
+        let mut undo_changed = false;
         if let Some(e) = &eng {
             let now = (e.painter.can_undo(), e.painter.can_redo());
             if now != (s.can_undo, s.can_redo) {
                 (s.can_undo, s.can_redo) = now;
-                dirty = true; // the Undo and Redo buttons follow: another pass next frame
+                undo_changed = true;
             }
+        }
+        // what the actions changed shows in this frame, not the next: the interface again
+        // (a tool's box, Undo greyed…), and pixels just lifted
+        if acted || undo_changed {
+            if let Some(e) = &eng {
+                sync_moving(&gpu, e, &mut s, &mut float_tex)?;
+            }
+            let again = ui.pass(&mut r, w, h, |f| {
+                (mark, canvas_rect) = build(f, &mut s, w, h);
+            });
+            changed = again.or(changed);
+            // (the actions this pass asked for wait for the next frame)
+            dirty |= !s.actions.is_empty();
         }
         let (cw, ch) = (s.view.doc_w, s.view.doc_h);
         // the document, made once the card's size is known (the view fits it there)
@@ -533,6 +575,7 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             float_tex.as_mut().map(|(c, _)| c),
         )?;
         let frame = win.present()?;
+        (view_moved, drew) = (false, false);
         let work_ns = pencilpilot_window::clock::now_ns().saturating_sub(work_from);
         pacer.drawn(
             frame,
@@ -551,6 +594,7 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             gpu_ns: pencilpilot_window::clock::now_ns().saturating_sub(gpu_from),
             wake_ns: woke.saturating_sub(work_from),
             pass_ns,
+            asked_ns: asked as i64 - work_from as i64,
             shown_ns: None,
         });
     }
@@ -564,7 +608,7 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             .iter()
             .map(|r| {
                 format!(
-                    "{{\"frame\": {}, \"inputMs\": {}, \"receivedNs\": {}, \"events\": {}, \"drawnNs\": {}, \"shownNs\": {}, \"sheetFrame\": {}, \"workNs\": {}, \"gpuNs\": {}, \"wakeNs\": {}, \"passNs\": {}}}",
+                    "{{\"frame\": {}, \"inputMs\": {}, \"receivedNs\": {}, \"events\": {}, \"drawnNs\": {}, \"shownNs\": {}, \"sheetFrame\": {}, \"workNs\": {}, \"gpuNs\": {}, \"wakeNs\": {}, \"passNs\": {}, \"askedNs\": {}}}",
                     r.frame,
                     opt(r.input.map(|i| i.0 as u64)),
                     opt(r.input.map(|i| i.1)),
@@ -575,7 +619,8 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
                     r.work_ns,
                     r.gpu_ns,
                     r.wake_ns,
-                    r.pass_ns
+                    r.pass_ns,
+                    r.asked_ns
                 )
             })
             .collect();
