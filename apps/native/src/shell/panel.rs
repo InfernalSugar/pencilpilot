@@ -734,7 +734,36 @@ fn brushes(f: &mut Frame, body: Rect, s: &mut State) {
 
 // ---- Layers ----
 
+const EYE: &str = "M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z M12 9a3 3 0 1 0 0.01 0Z";
+const EYE_OFF: &str = "M3 3l18 18 M10.6 5.1A10 10 0 0 1 12 5c6.5 0 10 7 10 7a17 17 0 0 1-3.2 4.1 M6.6 6.6A17 17 0 0 0 2 12s3.5 7 10 7a9.7 9.7 0 0 0 4.4-1";
+const UNLOCKED: &str = "M6 11h12v9H6Z M8.5 11V8a3.5 3.5 0 0 1 6.8-1.2";
+const DUPLICATE: &str = "M9 9h11v11H9Z M5 15V4h11";
+const TRASH: &str = "M4 7h16 M9 7V4h6v3 M6 7l1 13h10l1-13";
+const UP: &str = "M12 19V5 M6 11l6-6 6 6";
+const DOWN: &str = "M12 5v14 M6 13l6 6 6-6";
+
+/// A small light icon button (the layer's eye and lock, the layer buttons).
+fn layer_icon(f: &mut Frame, name: &str, r: Rect, path: &str, on: bool, tip: &str) -> bool {
+    let t = f.theme();
+    let wid = id(name);
+    let res = f.interact(wid, r);
+    if res.hovered {
+        f.put(Quad::rect(r.x, r.y, r.w, r.h, t.line).radius(8.0));
+        f.tooltip(wid, tip, r);
+    }
+    let size = 16.0;
+    f.icon(
+        path,
+        r.x + (r.w - size) / 2.0,
+        r.y + (r.h - size) / 2.0,
+        size,
+        if on { t.ink } else { CHECK_OFF },
+    );
+    res.clicked
+}
+
 fn layers(f: &mut Frame, body: Rect, s: &mut State) {
+    use crate::shell::engine::frames::ops;
     let t = f.theme();
     let n = s.layers.len();
     let mut y = body.y;
@@ -744,8 +773,45 @@ fn layers(f: &mut Frame, body: Rect, s: &mut State) {
     if dark_button(f, "panel/new-layer", b, "New layer") {
         s.actions.push(Action::NewLayer);
     }
+    // the active layer: duplicate, delete, move up and down, and its opacity
+    let bw = 36.0;
+    let by = b.y - 8.0 - bw;
+    let buttons = [
+        ("duplicate-layer", DUPLICATE, ops::DUPLICATE_LAYER),
+        ("delete-layer", TRASH, ops::DELETE_LAYER),
+        ("layer-up", UP, ops::LAYER_UP),
+        ("layer-down", DOWN, ops::LAYER_DOWN),
+    ];
+    for (k, (name, path, op)) in buttons.into_iter().enumerate() {
+        let r = Rect::new(body.x + k as f32 * (bw + 6.0), by, bw, bw);
+        hit!(s, r, "{name}");
+        if layer_icon(f, &format!("panel/{name}"), r, path, true, op) {
+            s.actions.push(Action::Other(op.to_string()));
+        }
+    }
+    let sh = slider_height(f);
+    let sr = Rect::new(body.x, by - GAP - sh, body.w, sh);
+    let active = s.active_layer;
+    if let Some(o) = s.sheet.tracks.get(active).map(|t| t.opacity) {
+        hit!(s, sr, "layer-opacity");
+        let mut v = (o * 100.0).round();
+        let shown = format!("{v}%");
+        if slider(
+            f,
+            "panel/layer-opacity",
+            sr,
+            "Opacity",
+            &shown,
+            &mut v,
+            0.0,
+            100.0,
+        ) && let Some(tr) = s.sheet.tracks.get_mut(active)
+        {
+            tr.opacity = v / 100.0;
+        }
+    }
 
-    let area = Rect::new(body.x, y, body.w, (b.y - GAP - y).max(0.0));
+    let area = Rect::new(body.x, y, body.w, (sr.y - GAP - y).max(0.0));
     let (row_h, gap) = (48.0, 4.0);
     list(
         f,
@@ -766,7 +832,7 @@ fn layers(f: &mut Frame, body: Rect, s: &mut State) {
                 } else if res.hovered {
                     f.put(Quad::rect(lr.x, lr.y, lr.w, lr.h, alpha(PICKED, 0.6)).radius(12.0));
                 }
-                let layer = &s.layers[i];
+                let layer = s.layers[i].clone();
                 // its kind: C (a drawing per exposure) or S (static)
                 let k = 26.0;
                 let kr = Rect::new(lr.x + 12.0, lr.y + (row_h - k) / 2.0, k, k);
@@ -787,22 +853,33 @@ fn layers(f: &mut Frame, body: Rect, s: &mut State) {
                 } else {
                     "Cel layer"
                 };
-                let name = f.lay_out(&layer.name, &Style::body(13.0, t.ink).weight(600), None);
+                let ink = if layer.visible { t.ink } else { MUTED };
+                let name = f.lay_out(&layer.name, &Style::body(13.0, ink).weight(600), None);
                 let sub = f.lay_out(what, &Style::body(12.0, MUTED), None);
                 let tx = kr.right() + 12.0;
                 let ty = lr.y + (row_h - name.height - sub.height) / 2.0;
                 f.put_text(&name, tx, ty);
                 f.put_text(&sub, tx, ty + name.height);
-                if layer.locked {
-                    f.icon(LOCK, lr.right() - 12.0 - 16.0, lr.y + 16.0, 16.0, MUTED);
+                // the eye and the lock (after the row, so a press on them is theirs)
+                let eye = Rect::new(lr.right() - 8.0 - 30.0, lr.y + 9.0, 30.0, 30.0);
+                let lock = Rect::new(eye.x - 4.0 - 30.0, eye.y, 30.0, 30.0);
+                hit!(s, eye, "eye/{i}");
+                hit!(s, lock, "lock/{i}");
+                let (path, tip) = if layer.visible {
+                    (EYE, "Hide layer")
+                } else {
+                    (EYE_OFF, "Show layer")
+                };
+                if layer_icon(f, &format!("panel/eye/{i}"), eye, path, layer.visible, tip) {
+                    s.layers[i].visible = !layer.visible;
                 }
-                if !layer.visible {
-                    let h = f.lay_out("Hidden", &Style::body(12.0, MUTED), None);
-                    f.put_text(
-                        &h,
-                        lr.right() - 40.0 - h.width,
-                        lr.y + (row_h - h.height) / 2.0,
-                    );
+                let (path, tip) = if layer.locked {
+                    (LOCK, "Unlock layer")
+                } else {
+                    (UNLOCKED, "Lock layer")
+                };
+                if layer_icon(f, &format!("panel/lock/{i}"), lock, path, layer.locked, tip) {
+                    s.layers[i].locked = !layer.locked;
                 }
             }
         },

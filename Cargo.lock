@@ -3144,6 +3144,7 @@ dependencies = [
  "pencilpilot-ui",
  "pencilpilot-window",
  "png",
+ "rayon",
 ]
 
 [[package]]

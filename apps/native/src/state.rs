@@ -232,16 +232,15 @@ impl State {
             playing: false,
             onion: true,
             frame_width: 22.0,
-            drawings: 8,
-            drawing: 3,
+            // (as the sheet has them: Clean's six drawings, frame 15 on drawing 3)
+            drawings: 6,
+            drawing: 2,
             to_colour: vec![
                 ColourStatus::Done,
                 ColourStatus::Done,
                 ColourStatus::Done,
                 ColourStatus::Flatted,
                 ColourStatus::Flatted,
-                ColourStatus::ToDo,
-                ColourStatus::ToDo,
                 ColourStatus::ToDo,
             ],
             notes: vec![
@@ -266,7 +265,7 @@ impl State {
             view: Default::default(),
             moving: None,
             tooling: Default::default(),
-            sheet: Default::default(),
+            sheet: crate::shell::engine::frames::Sheet::demo(),
             header: Default::default(),
             tools: Default::default(),
             panel: Default::default(),
