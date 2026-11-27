@@ -27,6 +27,18 @@ fn stroke(e: &mut Engine, s: &mut State, y: f32) {
     tick(e, s, Instant::now());
 }
 
+/// Ticks until nothing is due (thumbnails are made one a tick).
+fn settle(e: &mut Engine, s: &mut State) {
+    for _ in 0..64 {
+        picture(e, s);
+        if next_tick_at(e, s).is_none() {
+            return;
+        }
+        tick(e, s, Instant::now());
+    }
+    panic!("still busy after 64 ticks");
+}
+
 fn go(e: &mut Engine, s: &mut State, f: u32) {
     assert!(apply(e, s, &Action::GoToFrame(f)));
     picture(e, s);
@@ -433,6 +445,7 @@ fn playback_advances_at_the_frame_rate_and_loops() {
     assert!(apply(&mut e, &mut s, &Action::Stop));
     assert!(!s.playing);
     tick(&mut e, &mut s, at(1200));
+    settle(&mut e, &mut s);
     assert_eq!(next_tick_at(&e, &s), None, "idle when stopped");
     // once: stops on the last frame
     s.strips.play_mode = 0;
@@ -537,10 +550,11 @@ fn thumbnails_follow_the_drawings() {
     s.sheet.status.insert(2, ColourStatus::Done);
     derive(&mut s);
     assert_eq!(s.to_colour[1], ColourStatus::Done);
-    // idle: nothing due
-    tick(&mut e, &mut s, Instant::now());
-    picture(&mut e, &s);
+    // idle: nothing due, and a tick does nothing
+    settle(&mut e, &mut s);
     assert_eq!(next_tick_at(&e, &s), None);
+    assert!(idle(&e, &s));
+    assert!(!tick(&mut e, &mut s, Instant::now()));
 }
 
 #[test]
@@ -602,5 +616,61 @@ fn onion_timing() {
         p(&times, 1.0),
         p(&parts, 0.5),
         p(&parts, 0.95)
+    );
+}
+
+/// Animate, the demo at 1920×1080, onion skin on: 20 strokes as the window feeds them (a
+/// tick and a picture per input sample). Prints tick's p50/p99 and the picture after each
+/// stroke ends.
+#[test]
+#[ignore = "timing, release: cargo test --release -p pencilpilot-native -- --ignored stroke_timing --nocapture"]
+fn stroke_timing() {
+    let mut s = State::demo();
+    s.onion = true;
+    let mut e = Engine::new(1920, 1080);
+    tick(&mut e, &mut s, Instant::now());
+    picture(&mut e, &s);
+    tick(&mut e, &mut s, Instant::now());
+    let (mut ticks, mut after, mut during) = (Vec::new(), Vec::new(), Vec::new());
+    let ms = |t: Instant| t.elapsed().as_secs_f64() * 1e3;
+    for k in 0..20u32 {
+        let y = 200.0 + k as f32 * 30.0;
+        e.down(&s, 300.0, y, 0.8, (0.0, 0.0), 0);
+        for i in 1..60u32 {
+            e.moved(300.0 + i as f32 * 12.0, y, 0.8, (0.0, 0.0), i * 4);
+            let t = Instant::now();
+            tick(&mut e, &mut s, Instant::now());
+            ticks.push(ms(t));
+            let t = Instant::now();
+            picture(&mut e, &s);
+            during.push(ms(t));
+        }
+        e.up();
+        let t = Instant::now();
+        tick(&mut e, &mut s, Instant::now());
+        ticks.push(ms(t));
+        let t = Instant::now();
+        picture(&mut e, &s);
+        after.push(ms(t));
+        // the frames after: whatever is due
+        for _ in 0..3 {
+            let t = Instant::now();
+            tick(&mut e, &mut s, Instant::now());
+            ticks.push(ms(t));
+            picture(&mut e, &s);
+        }
+    }
+    let p = |v: &mut Vec<f64>, q: f64| {
+        v.sort_by(f64::total_cmp);
+        v[((v.len() - 1) as f64 * q) as usize]
+    };
+    eprintln!(
+        "tick p50 {:.3} p99 {:.3} max {:.3} ms; picture during a stroke p99 {:.3} ms; after a stroke p50 {:.3} max {:.3} ms",
+        p(&mut ticks, 0.5),
+        p(&mut ticks, 0.99),
+        p(&mut ticks, 1.0),
+        p(&mut during, 0.99),
+        p(&mut after, 0.5),
+        p(&mut after, 1.0)
     );
 }
