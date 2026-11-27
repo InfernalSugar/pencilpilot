@@ -503,7 +503,14 @@ async function systemIdle(label, secs) {
 	const s = sampler(process.pid);
 	await sleep(secs * 1000);
 	const r = s.stop();
-	return { gpuBusyPct: r.gpuBusyPct, gpuW: r.gpuW, cpuPackageW: r.cpuPackageW };
+	// how busy the rest of the machine was (a quiet machine is near 0)
+	const load = +read('/proc/loadavg').split(' ')[0];
+	return {
+		gpuBusyPct: r.gpuBusyPct,
+		gpuW: r.gpuW,
+		cpuPackageW: r.cpuPackageW,
+		loadAverage1m: load
+	};
 }
 
 const delta = (m, ref) => ({

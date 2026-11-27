@@ -1,0 +1,245 @@
+{
+  "when": "2026-11-27T08:15:42.072Z",
+  "app": {
+    "binary": "apps/studio/src-tauri/target/release/pencilpilot-studio (dev at 28bb303 + #350)",
+    "sizeMB": 21.7
+  },
+  "machine": {
+    "cpu": "AMD Ryzen 7 5700X 8-Core Processor",
+    "threads": 16,
+    "memGB": 31.3,
+    "gpu": "Advanced Micro Devices, Inc. [AMD/ATI] Navi 21 [Radeon RX 6800/6800 XT / 6900 XT] (rev c1)",
+    "kernel": "7.3.5-2-cachyos",
+    "display": "headless mutter pp-bench-0, 3840x2160@60"
+  },
+  "notes": [],
+  "results": {
+    "machineIdle": {
+      "gpuBusyPct": 0.5,
+      "gpuW": 35.53,
+      "cpuPackageW": 28.14,
+      "loadAverage1m": 0.94
+    },
+    "startup": {
+      "warmMs": [
+        328.39,
+        384.24,
+        369.39,
+        337.92,
+        335.53
+      ],
+      "coldMs": 872.21,
+      "homePssMB": 308.08,
+      "processes": [
+        "pencilpilot-stu",
+        "bwrap",
+        "bwrap",
+        "glycin-svg",
+        "WebKitNetworkPr",
+        "WebKitWebProces"
+      ],
+      "warm": {
+        "n": 5,
+        "p50": 337.92,
+        "p95": 384.24,
+        "p99": 384.24,
+        "max": 384.24
+      }
+    },
+    "empty": {
+      "openMs": 261.68,
+      "pssMB": 419.22,
+      "idle": {
+        "seconds": 30,
+        "cpuCorePct": 0.07,
+        "pssMeanMB": 384,
+        "pssMaxMB": 396.1,
+        "gpuBusyPct": 0,
+        "gpuW": 35,
+        "cpuPackageW": 28.35,
+        "cpuPackageWAboveIdle": 0.21,
+        "gpuWAboveIdle": -0.53,
+        "appFrameRequests": 0,
+        "appFramesPerSecond": 0
+      },
+      "draw": {
+        "seconds": 13.11,
+        "cpuCorePct": 29.13,
+        "pssMeanMB": 401.4,
+        "pssMaxMB": 423.9,
+        "gpuBusyPct": 1.4,
+        "gpuW": 37.57,
+        "cpuPackageW": 34.39,
+        "cpuPackageWAboveIdle": 6.25,
+        "gpuWAboveIdle": 2.04,
+        "samples": 2400,
+        "penToDrawnMs": {
+          "n": 2400,
+          "p50": 12.5,
+          "p95": 21,
+          "p99": 23.67,
+          "max": 60.5
+        },
+        "penToScreenMs": {
+          "n": 2400,
+          "p50": 28.17,
+          "p95": 36.67,
+          "p99": 39.83,
+          "max": 82.5
+        },
+        "frameMs": {
+          "n": 807,
+          "p50": 16,
+          "p95": 17,
+          "p99": 18,
+          "max": 60
+        },
+        "framesOver1_5Vsync": 1,
+        "frames": 807
+      }
+    },
+    "layers20_4k": {
+      "openMs": 883.07,
+      "pssMB": 1057.73,
+      "store": {
+        "bytesInMemory": 164216832,
+        "peakInMemory": 164216832,
+        "placed": 14854,
+        "drawings": 64,
+        "budget": 805306368,
+        "bytesOnDisk": 0,
+        "tiles": 10023
+      },
+      "idle": {
+        "seconds": 30,
+        "cpuCorePct": 0.07,
+        "pssMeanMB": 944.2,
+        "pssMaxMB": 953.7,
+        "gpuBusyPct": 0,
+        "gpuW": 35,
+        "cpuPackageW": 28.83,
+        "cpuPackageWAboveIdle": 0.69,
+        "gpuWAboveIdle": -0.53,
+        "appFrameRequests": 0,
+        "appFramesPerSecond": 0
+      },
+      "draw": {
+        "seconds": 13.13,
+        "cpuCorePct": 33.06,
+        "pssMeanMB": 948.5,
+        "pssMaxMB": 953.8,
+        "gpuBusyPct": 2.1,
+        "gpuW": 37.67,
+        "cpuPackageW": 35.94,
+        "cpuPackageWAboveIdle": 7.8,
+        "gpuWAboveIdle": 2.14,
+        "samples": 2400,
+        "penToDrawnMs": {
+          "n": 2400,
+          "p50": 13,
+          "p95": 21.67,
+          "p99": 24,
+          "max": 33.17
+        },
+        "penToScreenMs": {
+          "n": 2400,
+          "p50": 28.5,
+          "p95": 37.17,
+          "p99": 39.5,
+          "max": 47
+        },
+        "frameMs": {
+          "n": 813,
+          "p50": 16,
+          "p95": 17,
+          "p99": 18,
+          "max": 25
+        },
+        "framesOver1_5Vsync": 1,
+        "frames": 813
+      },
+      "play": {
+        "seconds": 22.11,
+        "cpuCorePct": 62.74,
+        "pssMeanMB": 1102.6,
+        "pssMaxMB": 1753.7,
+        "gpuBusyPct": 3.9,
+        "gpuW": 39.64,
+        "cpuPackageW": 38.7,
+        "cpuPackageWAboveIdle": 10.56,
+        "gpuWAboveIdle": 4.11,
+        "startMs": 6756,
+        "framesShown": 336,
+        "expectedAt24": 361,
+        "framesSkipped": 25,
+        "shownFps": 22.32,
+        "frameChangeGapMs": {
+          "n": 335,
+          "p50": 48,
+          "p95": 51,
+          "p99": 52,
+          "max": 545
+        },
+        "vsyncIntervalMs": {
+          "n": 834,
+          "p50": 17,
+          "p95": 18,
+          "p99": 18,
+          "max": 513
+        }
+      },
+      "pssAfterMB": 1103.65
+    },
+    "drawings500": {
+      "openMs": 946.65,
+      "pssMB": 1225.3,
+      "openPeakPssMB": 1252.1,
+      "store": {
+        "bytesInMemory": 411926528,
+        "peakInMemory": 411926528,
+        "placed": 26938,
+        "drawings": 500,
+        "budget": 805306368,
+        "bytesOnDisk": 0,
+        "tiles": 25142
+      },
+      "play": {
+        "seconds": 19.92,
+        "cpuCorePct": 77.77,
+        "pssMeanMB": 1294.4,
+        "pssMaxMB": 1340,
+        "gpuBusyPct": 3.7,
+        "gpuW": 39.27,
+        "cpuPackageW": 41.2,
+        "cpuPackageWAboveIdle": 13.06,
+        "gpuWAboveIdle": 3.74,
+        "startMs": 9600,
+        "framesShown": 241,
+        "expectedAt24": 241,
+        "framesSkipped": 0,
+        "shownFps": 24.01,
+        "frameChangeGapMs": {
+          "n": 240,
+          "p50": 48,
+          "p95": 50,
+          "p99": 53,
+          "max": 55
+        },
+        "vsyncIntervalMs": {
+          "n": 601,
+          "p50": 17,
+          "p95": 18,
+          "p99": 18,
+          "max": 23
+        }
+      },
+      "pssAfterMB": 1284.62
+    },
+    "machineIdleAfter": {
+      "gpuBusyPct": 0,
+      "gpuW": 35.02,
+      "cpuPackageW": 27.86,
+      "loadAverage1m": 0.63
+    }
+  }
+}
