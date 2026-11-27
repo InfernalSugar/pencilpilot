@@ -56,7 +56,7 @@ fi
 if [ "${SKIP_CANVAS:-0}" != 1 ]; then
   echo "== the canvas (step 4): library tests"
   PP_QA_OUT="$out/canvas" \
-    cargo test --release -p pencilpilot-native --test canvas_qa -- --include-ignored --test-threads 1 \
+    cargo test --release -p pencilpilot-native --test canvas_qa --test canvas_tools_qa -- --include-ignored --test-threads 1 \
     >"$out/canvas-tests.txt" 2>&1
   grep -E "^test |test result" "$out/canvas-tests.txt"
   if [ "${SKIP_HEADLESS:-0}" != 1 ]; then

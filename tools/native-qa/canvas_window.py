@@ -30,7 +30,7 @@ BTN_LEFT, BTN_MIDDLE = 0x110, 0x112
 KEYSYM = {
     "0": 0x30, "1": 0x31, "plus": 0x2B, "minus": 0x2D, "equal": 0x3D, "h": 0x68,
     "space": 0x20, "Shift_L": 0xFFE1, "Control_L": 0xFFE3, "Escape": 0xFF1B, "z": 0x7A,
-    "Return": 0xFF0D,
+    "Return": 0xFF0D, "m": 0x6D, "v": 0x76, "b": 0x62,
 }
 
 
@@ -455,44 +455,133 @@ def scenario_memory(binary, out, strokes=600):
 
 
 def scenario_playback(binary, out):
-    """Play (the strip's Play) for 5 s at the cut's 24 fps: timeline frames shown per second,
-    each frame's time on screen, and drift."""
-    # Play is started with the keyboard if the app has a key for it; otherwise skipped
-    m = Mutter(out, 165)
-    try:
-        app = App(binary, m, out, "playback", 9, "animate")
-        time.sleep(1.8)
-        inp = Input()
-        inp.to(560, 330)
-        inp.key("Return")  # (the frames' Play key, once there is one)
-        t0 = mono_ns()
-        time.sleep(5.0)
-        t1 = mono_ns()
-        inp.stop()
-        st = app.wait()
-        fr = [f for f in frame_numbers(st, t0, t1) if f["shownNs"]]
-        changes = []
-        last = None
-        for f in fr:
-            if f["sheetFrame"] != last:
-                changes.append((f["shownNs"], f["sheetFrame"]))
-                last = f["sheetFrame"]
-        if len(changes) < 3:
-            return {"played": False, "note": "no playback seen (Return didn't start it)",
-                    "playing": st["state"]["playing"]}
-        iv = [(b[0] - a[0]) / 1e6 for a, b in zip(changes, changes[1:])]
-        skips = sum(1 for a, b in zip(changes, changes[1:]) if b[1] - a[1] not in (1, -(st["state"].get("frames", 48) - 1)))
-        span = (changes[-1][0] - changes[0][0]) / 1e9
-        return {"played": True, "timelineFramesPerSecond": round((len(changes) - 1) / span, 2),
-                "frameOnScreenMs": {"p50": round(pct(iv, .5), 2), "min": round(min(iv), 2), "max": round(max(iv), 2)},
-                "skipped": skips, "displayFrames": len(fr)}
-    finally:
-        m.stop()
+    """Play (Return) for 5 s at the cut's 24 fps, at 165 Hz and 60 Hz: timeline frames shown a
+    second, skipped or repeated frames, and when each frame shows against its time
+    (t0 + n / 24): the budget is the display frame nearest that time, so within half a
+    refresh."""
+    res = {}
+    for hz in (165, 60):
+        m = Mutter(out, hz)
+        try:
+            app = App(binary, m, out, f"playback-{hz}", 9, "animate")
+            time.sleep(1.8)
+            inp = Input()
+            inp.to(560, 330)
+            time.sleep(0.05)
+            inp.key("Return")
+            t0 = mono_ns()
+            time.sleep(5.0)
+            t1 = mono_ns()
+            inp.stop()
+            st = app.wait()
+            fr = sorted((f for f in frame_numbers(st, t0, t1) if f["shownNs"]), key=lambda f: f["shownNs"])
+            changes, last = [], None
+            for f in fr:
+                if f["sheetFrame"] != last:
+                    changes.append((f["shownNs"], f["sheetFrame"]))
+                    last = f["sheetFrame"]
+            # (the first is the frame shown before Play)
+            changes = changes[1:]
+            if len(changes) < 10:
+                res[str(hz)] = {"played": False, "changes": len(changes), "state": st["state"]}
+                continue
+            # frames advanced since the first change (wrapping at the loop's end)
+            n_frames = max(c[1] for c in changes) + 1
+            k, ks, skips = 0, [0], 0
+            for a, b in zip(changes, changes[1:]):
+                step = (b[1] - a[1]) % n_frames
+                if step != 1:
+                    skips += 1
+                k += step
+                ks.append(k)
+            # the schedule's start: the best fit of shown = t0 + k / 24 (the median offset)
+            offs = sorted(c[0] - kk * 1e9 / 24 for c, kk in zip(changes, ks))
+            t_start = offs[len(offs) // 2]
+            err = [(c[0] - (t_start + kk * 1e9 / 24)) / 1e6 for c, kk in zip(changes, ks)]
+            iv = [(b[0] - a[0]) / 1e6 for a, b in zip(changes, changes[1:])]
+            half = 500 / hz
+            span = (changes[-1][0] - changes[0][0]) / 1e9
+            res[str(hz)] = {
+                "played": True, "framesPerSecond": round((len(changes) - 1) / span, 3),
+                "skippedOrRepeated": skips,
+                "onScreenMs": {"p50": round(pct(iv, .5), 2), "min": round(min(iv), 2), "max": round(max(iv), 2)},
+                "offScheduleMs": {"p50": round(pct([abs(e) for e in err], .5), 2), "max": round(max(abs(e) for e in err), 2)},
+                "halfRefreshMs": round(half, 2),
+                "pass": skips == 0 and max(abs(e) for e in err) <= half + 0.5,
+                "displayFramesDrawn": len(fr),
+            }
+        finally:
+            m.stop()
+    return res
+
+
+def scenario_transform(binary, out):
+    """The owner's top complaint: moving a large painted area. In the Draw workspace, strokes
+    fill about 1200 x 800 document pixels; M (Select) and a marquee around them; V (Transform)
+    lifts them (click to result: the key to the frame that shows the box); a 3 s drag inside
+    the box (the rate, misses, pen to screen while dragging); Return puts them down (key to
+    the frame shown). The document saved after: the pixels moved by the drag."""
+    res = {}
+    for hz in (165, 60):
+        m = Mutter(out, hz)
+        try:
+            app = App(binary, m, out, f"transform-{hz}", 40, "draw")
+            time.sleep(1.8)
+            inp = Input()
+            # where the document is: Draw's canvas rect at 1280 x 800, fitted (from a dry
+            # read of the layout: the stats at the end give the exact view)
+            cx, cy = 104 + 980 / 2, 96 + 612 / 2
+            z = 0.47  # about the fitted zoom; the strokes only need to cover the area
+            x0, x1 = cx - 600 * z, cx + 600 * z
+            y = cy - 400 * z
+            while y < cy + 400 * z:
+                inp.drag(line((x0, y), (x1, y + 6), 60), 0.002)
+                y += 5
+            time.sleep(0.3)
+            inp.key("m")
+            time.sleep(0.1)
+            inp.drag(line((x0 - 20, cy - 400 * z - 20), (x1 + 20, cy + 400 * z + 20), 20), 0.004)
+            time.sleep(0.3)
+            t_v = mono_ns()
+            inp.key("v")
+            time.sleep(0.5)
+            t_drag = mono_ns()
+            pts = []
+            for i in range(1500):
+                a = i / 1500 * 4 * math.pi
+                pts.append((cx + 60 * math.sin(a) + i * 0.08, cy + 40 * math.sin(2 * a)))
+            inp.drag(pts, 0.002)
+            t_ret = mono_ns()
+            time.sleep(0.2)
+            inp.key("Return")
+            time.sleep(0.6)
+            t_end = mono_ns()
+            inp.stop()
+            st = app.wait()
+            fr = sorted(st["frames"], key=lambda f: f["drawnNs"])
+            first_after = lambda t: next((f for f in fr if f["receivedNs"] and f["receivedNs"] >= t and f["shownNs"]), None)
+            fv = first_after(t_v)
+            fret = first_after(t_ret + 150_000_000)
+            drag = [f for f in fr if t_drag <= f["drawnNs"] <= t_ret]
+            xs, ys = ink(app.doc)
+            res[str(hz)] = {
+                "liftKeyToShownMs": fv and round((fv["shownNs"] - fv["receivedNs"]) / 1e6, 1),
+                "commitKeyToShownMs": fret and round((fret["shownNs"] - fret["receivedNs"]) / 1e6, 1),
+                "drag": {"rate": rate(drag, hz), "latency": latency([f for f in drag if f["events"]])},
+                "netDragScreenPx": [round(pts[-1][0] - pts[0][0], 1), round(pts[-1][1] - pts[0][1], 1)],
+                "view": st["view"], "tool": st["state"]["tool"],
+                "inkBoxDoc": [int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())] if len(xs) else None,
+                "inkPx": int(len(xs)),
+            }
+        finally:
+            m.stop()
+    return res
 
 
 SCENARIOS = {
     "view": scenario_view, "latency": scenario_latency, "viewfps": scenario_viewfps,
     "idle": scenario_idle, "memory": scenario_memory, "playback": scenario_playback,
+    "transform": scenario_transform,
 }
 
 
