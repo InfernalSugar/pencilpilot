@@ -21,6 +21,7 @@
 		type GuideSettings
 	} from '@pencilpilot/paint/guides';
 	import { smoothTool, type SmoothTool } from '@pencilpilot/paint/stabilizer';
+	import { deflateTiles, inflateTiles } from '@pencilpilot/paint/inflate';
 	import PaintCanvas, {
 		BLANK_STATUS,
 		type CanvasStatus,
@@ -108,6 +109,8 @@
 	import {
 		readSavedShare,
 		Together,
+		useDeflater,
+		useInflater,
 		type Ask,
 		type CanvasPort,
 		type SavedShare,
@@ -2429,6 +2432,9 @@
 
 	function startTogether(info: ShareInfo, joining: boolean) {
 		if (!canvas) return;
+		// (tiles inflated and deflated in the paint engine: much faster than the browser)
+		useInflater(inflateTiles);
+		useDeflater(deflateTiles);
 		together = new Together(
 			info.me.id,
 			info.me.name,
@@ -2514,6 +2520,7 @@
 	function stopTogether(info: ShareInfo | null = sharing) {
 		clearTimeout(togetherTimer);
 		if (together && info) savedShare = together.save(info.invite, everyone(info.members));
+		together?.close();
 		dropLive();
 		if (together && canvas)
 			for (const id of together.ids.values()) canvas.setLayerQuiet(id, { locked: false });
@@ -2521,11 +2528,15 @@
 		togetherTick++;
 	}
 
-	/** the canvas changed: send this app's changes a moment later (one batch per pause) */
+	/**
+	 * the canvas changed: send this app's changes a moment later (one batch per pause; a
+	 * stroke's tiles go about 40 ms after it ends, well within the 100 ms others wait for
+	 * them; a send already going takes in what changes meanwhile)
+	 */
 	function togetherChanged() {
 		if (!together) return;
 		clearTimeout(togetherTimer);
-		togetherTimer = setTimeout(() => void together?.localChanged(), 120);
+		togetherTimer = setTimeout(() => void together?.localChanged(), 40);
 	}
 
 	/** Back to this project's shared session: join who's online, or host it again. */

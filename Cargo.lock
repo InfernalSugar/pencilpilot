@@ -3507,6 +3507,7 @@ name = "pencilpilot-brush-wasm"
 version = "0.1.0"
 dependencies = [
  "hokusai",
+ "miniz_oxide 0.9.1",
  "pencilpilot-brush",
  "wasm-bindgen",
 ]
@@ -3654,6 +3655,20 @@ dependencies = [
  "rayon",
  "rtrb",
  "symphonia",
+]
+
+[[package]]
+name = "pencilpilot-together"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "blake3",
+ "flate2",
+ "indexmap",
+ "pencilpilot-ppstudio",
+ "pencilpilot-share",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
