@@ -364,7 +364,7 @@ fn from_file(e: &mut Engine, s: &State) -> Option<(Timeline, (usize, usize))> {
                     h,
                     Arc::new(super::super::frames::store::FileTile {
                         deflated,
-                        bytes: b.into_boxed_slice(),
+                        bytes: b.into(),
                     }),
                 );
             }

@@ -360,6 +360,8 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             // (not while input comes in: scrubbing, drawing; playing, until the next frame)
             if let (Some(e), Some(k)) = (&mut eng, &mut comp)
                 && last_input.elapsed() > std::time::Duration::from_millis(100)
+                // (not while the session's thread waits on the canvas: joining asks hundreds)
+                && !e.together.busy()
             {
                 let room = match e.next_tick_at(&s) {
                     Some(t) if s.playing => t
@@ -373,10 +375,16 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
                     e.gpu_ahead(&s, &gpu, k, room.min(std::time::Duration::from_millis(8)));
                 }
             }
-            let tick = eng
-                .as_ref()
-                .and_then(|e| e.next_tick_at(&s))
-                .map(|t| t.checked_sub(lead).unwrap_or(t));
+            // (playing, early by the frames' lead; otherwise when due: with the lead, work
+            // due within it, a store's poll or a live stroke's next datagram, would wake the
+            // loop at once again and again, a spin taking the processor from the pen)
+            let tick = eng.as_ref().and_then(|e| e.next_tick_at(&s)).map(|t| {
+                if s.playing {
+                    t.checked_sub(lead).unwrap_or(t)
+                } else {
+                    t
+                }
+            });
             let next = [ui.next_pass_at(), deadline, tick]
                 .into_iter()
                 .flatten()

@@ -122,6 +122,12 @@ pub enum Cmd {
 pub struct Bytes {
     pub sent: AtomicU64,
     pub received: AtomicU64,
+    /// the canvas asked (calls), and how long the session's thread waited for its answers
+    pub asks: AtomicU64,
+    pub ask_wait_ns: AtomicU64,
+    /// passing state (live strokes, cursors) goes from the window's thread straight out:
+    /// never behind the session thread's work
+    pub presencer: std::sync::Mutex<Option<pencilpilot_share::Presencer>>,
 }
 
 /// The session's thread, from the window's side.
@@ -205,9 +211,11 @@ impl Net {
         let thread = std::thread::Builder::new()
             .name("together".into())
             .spawn(move || {
+                super::port::behind();
                 let rt = match tokio::runtime::Builder::new_multi_thread()
                     .worker_threads(2)
                     .thread_name("together-io")
+                    .on_thread_start(super::port::behind)
                     .enable_all()
                     .build()
                 {
@@ -230,12 +238,27 @@ impl Net {
     }
 
     pub fn send(&self, c: Cmd) -> bool {
+        if let Cmd::Presence(body) = c {
+            let p = self.bytes.presencer.lock().unwrap().clone();
+            return match p {
+                Some(p) => {
+                    p.send(body);
+                    true
+                }
+                None => self.tx.send(Cmd::Presence(body)).is_ok(),
+            };
+        }
         self.tx.send(c).is_ok()
     }
 
     /// What's come (never waits).
     pub fn try_recv(&self) -> Option<In> {
         self.rx.try_recv().ok()
+    }
+
+    /// The next message, waited for at most `d`.
+    pub fn recv_timeout(&self, d: Duration) -> Option<In> {
+        self.rx.recv_timeout(d).ok()
     }
 
     /// Leaves: the thread closes the session (waited for at most `wait`; the canvas's
@@ -484,12 +507,14 @@ async fn run(
         }
     };
     let info = info_of(&s);
+    *bytes.presencer.lock().unwrap() = Some(s.presencer());
     if !out.send(In::Started(info.clone())) {
         s.close().await;
         return;
     }
     let asker = out.clone();
     let mut port = RemotePort::new(move |a| asker.send(In::Ask(a)));
+    port.bytes = Some(bytes.clone());
     let mut t = Together::new(&info.me.id, &info.me.name);
     let mut pump = Pump {
         out: out.clone(),
@@ -532,6 +557,17 @@ async fn run(
     loop {
         tokio::select! {
             _ = again.tick() => {
+                // (a big picture's tiles came, decoded on threads of their own and freed on
+                // the window's: what they used goes back to the system once they've stopped)
+                if port.untrimmed > 16 << 20
+                    && port.put_at.is_some_and(|t| t.elapsed() > Duration::from_millis(300))
+                {
+                    port.untrimmed = 0;
+                    // SAFETY: glibc's own call, no arguments that matter
+                    unsafe {
+                        libc::malloc_trim(0);
+                    }
+                }
                 if t.waiting() {
                     tokio::task::block_in_place(|| {
                         t.retry(&mut port);
@@ -674,6 +710,7 @@ async fn run(
         }
     }
     let saved = saved_of(&t, &s, &everyone);
+    *bytes.presencer.lock().unwrap() = None;
     out.send(In::Closed {
         why,
         saved: Some(saved),

@@ -441,3 +441,75 @@ fn a_project_from_a_file_is_shared_whole() {
     eprintln!("ink: host {h}, guest {g}");
     assert!(g > 100, "the guest has the host's drawing ({g} px)");
 }
+
+/// The host leaves a session of three: the next one takes over and the third comes over
+/// to it. That's a hand-over, not a lost session: no one goes looking for the others.
+#[test]
+fn a_host_leaving_hands_over() {
+    let (mut host, mut a) = host_and_guest();
+    let code = host.s.together.info.as_ref().unwrap().invite.clone();
+    let mut b = App::new("Cy");
+    b.e.together.auto = Some(Start::Join(code));
+    until(
+        &mut [&mut host, &mut a, &mut b],
+        30,
+        "the third joining",
+        |x| x[2].e.together.synced() && x[0].s.together.info.as_ref().unwrap().members.len() == 3,
+    );
+    settle(&mut [&mut host, &mut a, &mut b], 200);
+    host.s.actions.push(Action::Other(ops::LEAVE.into()));
+    let hosting = |x: &App| x.s.together.info.as_ref().is_some_and(|i| i.host);
+    let two = |x: &App| {
+        x.s.together
+            .info
+            .as_ref()
+            .is_some_and(|i| i.members.len() == 2)
+    };
+    until(&mut [&mut host, &mut a, &mut b], 20, "the hand-over", |x| {
+        (hosting(x[1]) || hosting(x[2])) && two(x[1]) && two(x[2])
+    });
+    // (past the time a lost session is noticed in: still together, no one went looking)
+    settle(&mut [&mut a, &mut b], 6000);
+    for x in [&a, &b] {
+        assert!(two(x), "both still in the session");
+        assert!(
+            !x.e.together.reconnected,
+            "no one went looking for the others"
+        );
+        let note =
+            x.s.together
+                .note
+                .as_ref()
+                .map(|n| n.0.clone())
+                .unwrap_or_default();
+        assert!(
+            !note.contains("Lost touch"),
+            "no one was told they were lost: {note}"
+        );
+    }
+    assert!(hosting(&a) != hosting(&b), "one host");
+    a.stroke(500.0);
+    same(&mut a, &mut b, "drawing after the hand-over");
+}
+
+/// Taking over as host with no one else to wait for (the others may have dropped this app
+/// while it was away, not left): it goes looking for them at once.
+#[test]
+fn taking_over_alone_goes_looking_at_once() {
+    let (mut host, mut guest) = host_and_guest();
+    host.s.actions.push(Action::Other(ops::LEAVE.into()));
+    until(
+        &mut [&mut host, &mut guest],
+        20,
+        "looking for the others",
+        |x| x[1].e.together.reconnected,
+    );
+    let note = guest
+        .s
+        .together
+        .note
+        .as_ref()
+        .map(|n| n.0.clone())
+        .unwrap_or_default();
+    assert!(note.contains("Lost touch"), "told: {note}");
+}

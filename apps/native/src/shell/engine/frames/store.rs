@@ -28,7 +28,8 @@ pub type Key = (i32, i32);
 pub struct FileTile {
     /// raw deflate (else stored)
     pub deflated: bool,
-    pub bytes: Box<[u8]>,
+    /// (shared: the session's own copy of a tile from the wire is this one)
+    pub bytes: Arc<[u8]>,
 }
 
 /// A drawing kept out of the painter.

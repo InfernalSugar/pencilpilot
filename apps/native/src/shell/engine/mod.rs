@@ -399,6 +399,7 @@ impl Engine {
             .stroke_to(&b, x, y, pressure, tilt.0, tilt.1, 0.004);
         together::stroke_begins(self, s);
         self.together.live_out.point(x, y, pressure, 4.0);
+        together::send_live_now(self);
         self.stroking = Some(b);
         self.last_ms = Some(ms);
         self.tap = Some(Tap {
