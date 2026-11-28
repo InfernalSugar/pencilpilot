@@ -2788,6 +2788,39 @@ def scenario_studio_join4k(out):
     return res
 
 
+def scenario_studio_groups(out):
+    """The reference for x-groups: a current app joins a current app whose two layers... one
+    of them in a group; the joiner's saved copy: groups, and its own pre-join layers (hidden?
+    locked?)."""
+    projects = env_bin("PP_PROJECTS")
+    res = {"load": load()}
+    a = b = None
+    try:
+        a = Studio(env_bin("PP_STUDIO"), out, "sga", project=os.path.join(projects, "empty.ppstudio"), name="Ana")
+        b = Studio(env_bin("PP_STUDIO"), out, "sgb", project=os.path.join(projects, "tiny.ppstudio"), name="Bo")
+        a.open()
+        b.open()
+        a.js("document.querySelector('button[aria-label=\"New layer\"]').click(); return true;")
+        time.sleep(0.5)
+        invite = a.host()["invite"]
+        a.pen([wave(0, y0=0.3)])
+        a.js("const b = document.querySelector('button[title=\"Put this layer in a new group\"]'); b?.click(); return !!b;")
+        time.sleep(1.5)
+        b.join(invite)
+        time.sleep(3.0)
+        b.pen([wave(1, y0=0.6)])
+        time.sleep(1.5)
+        for tag, x in (("host", a), ("joiner", b)):
+            m = json.loads(zipfile.ZipFile(x.save()).read("manifest.json"))
+            res[tag] = {"groups": m.get("groups"),
+                        "layers": [(l["name"], l.get("group"), l.get("visible"), l.get("locked")) for l in m["layers"]]}
+    finally:
+        for x in (a, b):
+            if x:
+                x.quit()
+    return res
+
+
 SCENARIOS = {
     "studio-wire": scenario_studio_wire,
     "studio-pair": scenario_studio_pair,
@@ -2798,6 +2831,7 @@ SCENARIOS = {
     "x-access": scenario_x_access,
     "studio-revoke": scenario_studio_revoke,
     "studio-join4k": scenario_studio_join4k,
+    "studio-groups": scenario_studio_groups,
     "x-crowd": scenario_x_crowd,
     "x-crowd-peers": lambda out: scenario_x_crowd(out, with_studio=False),
     "x-timeline-merge": scenario_x_timeline_merge,
