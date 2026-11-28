@@ -117,10 +117,10 @@ fn two_apps_draw_together() {
     let mut guest = App::new("Ben");
     guest.e.together.auto = Some(Start::Join(code));
     until(&mut [&mut host, &mut guest], 30, "joining", |a| {
-        a[1].s.together.synced && a[0].e.together.shared.layers.len() == 5
+        a[1].s.together.synced && a[0].e.together.shared.len() == 5
     });
     // the project arrived: the host's four layers and the guest's own, the same pictures
-    assert_eq!(guest.e.together.shared.layers.len(), 5);
+    assert_eq!(guest.e.together.shared.len(), 5);
     assert_eq!(
         guest.s.frame, host.s.frame,
         "the guest starts on the host's frame"
@@ -188,9 +188,20 @@ fn two_apps_draw_together() {
     host.s
         .actions
         .push(Action::Other(format!("{}{lid} {who}", ops::LET)));
-    until(&mut [&mut host, &mut guest], 20, "the answer", |a| {
-        !a[1].s.layers[clean].locked
-    });
+    let t = Instant::now();
+    while guest.s.layers[clean].locked {
+        if t.elapsed() > Duration::from_secs(20) {
+            panic!(
+                "the answer: the guest may draw {}, the host thinks {}; {:?}; who {who}",
+                guest.e.together.shared.can_draw(&lid, &who),
+                host.e.together.shared.can_draw(&lid, &who),
+                guest.s.layers
+            );
+        }
+        host.tick();
+        guest.tick();
+        std::thread::sleep(Duration::from_millis(2));
+    }
 
     // chat
     guest.s.together.chat_text = "hello".into();
@@ -213,4 +224,147 @@ fn two_apps_draw_together() {
         guest.s.layers.iter().all(|l| !l.locked),
         "unlocked after leaving"
     );
+}
+
+/// What this app doesn't show (other scenes and cuts, markers, sound clips, notes, the
+/// camera, mouth charts, palettes; masks, line strokes and sound files from another app)
+/// comes back unchanged from it, and a joiner gets it from it as host: it only changes
+/// the tracks it changed.
+#[test]
+fn what_this_app_doesnt_show_goes_round_unchanged() {
+    use serde_json::{Value, json};
+    let mut host = App::new("Ana");
+    host.e.together.auto = Some(Start::Host);
+    until(&mut [&mut host], 20, "hosting", |a| {
+        a[0].s.together.info.is_some()
+    });
+    let code = host.s.together.info.as_ref().unwrap().invite.clone();
+    let mut guest = App::new("Ben");
+    guest.e.together.auto = Some(Start::Join(code));
+    until(&mut [&mut host, &mut guest], 30, "joining", |a| {
+        a[1].s.together.synced && a[0].e.together.shared.len() == 5
+    });
+    // a timeline as the current app makes them: three scenes, cuts, and all it has
+    let mut rich = host.e.together.session_tl.clone().unwrap();
+    let tracks = rich["scenes"][0]["cuts"][0]["tracks"].clone();
+    let first = tracks.as_object().unwrap().keys().next().unwrap().clone();
+    let did = tracks[&first][0]["d"].clone();
+    rich["scenes"][0]["markers"] = json!([{"frame": 3, "label": "hit"}]);
+    rich["scenes"][0]["audio"] =
+        json!([{"name": "Wind", "file": "s1-abc.mp3", "start": 12, "gain": 0.8, "muted": false}]);
+    let cut0 = &mut rich["scenes"][0]["cuts"][0];
+    cut0["camera"] = json!({"x": 10, "y": 20, "width": 1600, "height": 900});
+    cut0["action"] = json!({"4": "She turns"});
+    cut0["dialogue"] = json!({"6": "Hello"});
+    cut0["transition"] = json!("dissolve");
+    let more_cut = json!({"name": "Cut 9", "tracks": {first.clone(): [{"d": did, "n": 5}, {"d": "", "n": 2}]}});
+    rich["scenes"][0]["cuts"]
+        .as_array_mut()
+        .unwrap()
+        .push(more_cut.clone());
+    for n in 2..=3 {
+        rich["scenes"].as_array_mut().unwrap().push(json!({
+            "name": format!("Scene {n}"),
+            "markers": [{"frame": 1, "label": "in"}],
+            "cuts": [more_cut.clone(), {"name": "Cut 2", "tracks": {}, "transition": "flash"}]
+        }));
+    }
+    rich["mouths"] = json!([{"lid": first, "shapes": {"A": did}}]);
+    rich["stages"] = json!({first.clone(): "clean"});
+    rich["palettes"] = json!([{"name": "Ana", "colours": [{"name": "Ink", "hex": "#16161a"}]}]);
+    host.e.together.edit(json!({"k": "timeline", "tl": rich}));
+    until(&mut [&mut host, &mut guest], 20, "the timeline", |a| {
+        a[1].e.together.session_tl.as_ref() == Some(&rich)
+    });
+    // a mask, line strokes and a sound file, as the current app sends them: kept
+    let lid = first.clone();
+    let px = super::net::encode_tile(&[255u8; 64 * 64 * 4]);
+    host.e
+        .together
+        .edit(json!({"k": "mask", "lid": lid, "on": true, "set": [[0, 0, px]], "clear": []}));
+    host.e.together.edit(
+        json!({"k": "sound", "file": "s1-abc.mp3", "name": "Wind", "i": 0, "n": 1, "data": "AAAA"}),
+    );
+    until(
+        &mut [&mut host, &mut guest],
+        20,
+        "the mask and the sound",
+        |a| a[1].e.together.masks.contains_key(&lid) && !a[1].e.together.sounds.is_empty(),
+    );
+
+    // the guest draws on its own layer (a new drawing on a blank frame) and holds it longer
+    guest.stroke(700.0);
+    guest.s.actions.push(Action::Other(
+        crate::shell::engine::frames::ops::HOLD_LONGER.into(),
+    ));
+    let own = guest
+        .e
+        .together
+        .lid_of(guest.e.painter.active_layer())
+        .cloned()
+        .unwrap();
+    until(
+        &mut [&mut host, &mut guest],
+        20,
+        "the guest's timeline",
+        |a| {
+            a[0].e.together.session_tl.as_ref().is_some_and(|tl| {
+                tl["scenes"][0]["cuts"][0]["tracks"][own.as_str()]
+                    .as_array()
+                    .is_some_and(|c| c.iter().any(|x| x["d"] != json!("")))
+            })
+        },
+    );
+    for _ in 0..100 {
+        host.tick();
+        guest.tick();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let back = host.e.together.session_tl.clone().unwrap();
+    let without = |mut tl: Value| {
+        tl["scenes"][0]["cuts"][0]["tracks"]
+            .as_object_mut()
+            .unwrap()
+            .remove(&own);
+        tl
+    };
+    assert_eq!(
+        without(back.clone()),
+        without(rich.clone()),
+        "only the guest's own track changed"
+    );
+    let cels = back["scenes"][0]["cuts"][0]["tracks"][own.as_str()].clone();
+    assert!(
+        cels.as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["d"] != json!("") && c["n"].as_u64() >= Some(2)),
+        "held longer: {cels}"
+    );
+
+    // a third joins with the guest hosting (the host leaves: the guest takes over) and gets
+    // all of it
+    host.s.actions.push(Action::Other(ops::LEAVE.into()));
+    until(&mut [&mut host, &mut guest], 30, "the hand-over", |a| {
+        a[1].s.together.info.as_ref().is_some_and(|i| i.host)
+    });
+    let code = guest.s.together.info.as_ref().unwrap().invite.clone();
+    let mut third = App::new("Cy");
+    third.e.together.auto = Some(Start::Join(code));
+    until(
+        &mut [&mut guest, &mut third],
+        30,
+        "the third joining",
+        |a| a[1].s.together.synced,
+    );
+    let t = &third.e.together;
+    assert_eq!(
+        t.session_tl, guest.e.together.session_tl,
+        "the whole timeline"
+    );
+    assert!(
+        t.masks.get(&lid).is_some_and(|m| m.0 && m.1.len() == 1),
+        "the mask"
+    );
+    assert_eq!(t.sounds.len(), 1, "the sound file");
 }

@@ -51,6 +51,13 @@ pub struct GpuFrames {
     pub input_at: Option<std::time::Instant>,
 }
 
+impl GpuFrames {
+    /// A layer's mask changed from outside (drawing together): the GPU's copy goes up again.
+    pub fn forget_mask(&mut self, layer: u32) {
+        self.forget_now.push(mask_source(layer));
+    }
+}
+
 /// How long the pen rests before the painter's own picture catches up (it takes the
 /// window's thread a few milliseconds a tick: not between strokes).
 pub const INPUT_QUIET: std::time::Duration = std::time::Duration::from_millis(400);

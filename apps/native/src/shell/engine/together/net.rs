@@ -60,6 +60,28 @@ impl std::fmt::Debug for Tiles {
     }
 }
 
+/// A drawing's tiles as they came (straight RGBA8, raw deflate or stored): a joiner keeps
+/// the project's drawings so, compressed, until they're shown.
+pub struct WireTiles {
+    pub lid: String,
+    pub did: String,
+    pub tiles: Vec<((i32, i32), Arc<FileTile>)>,
+}
+
+impl std::fmt::Debug for WireTiles {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "WireTiles({} {} {})",
+            self.lid,
+            self.did,
+            self.tiles.len()
+        )
+    }
+}
+
+use crate::shell::engine::frames::store::FileTile;
+
 /// What reaches the window.
 #[derive(Debug)]
 pub enum In {
@@ -81,7 +103,8 @@ pub enum In {
     Direct {
         from: String,
         body: Value,
-        tiles: Option<Tiles>,
+        /// a snapshot's tiles ("snap.tiles"), as they came
+        wire: Option<WireTiles>,
         at_ns: u64,
     },
     Joined(Member),
@@ -328,18 +351,9 @@ async fn run(
                 }
                 Some(Cmd::Presence(body)) => s.presence(body),
                 Some(c @ (Cmd::Tiles { .. } | Cmd::Kept { .. })) => {
-                    let (to, lid, did, set, clear, t_ns) = match c {
-                        Cmd::Tiles { to, lid, did, set, clear, t_ns } => (to, lid, did, set, clear, t_ns),
-                        Cmd::Kept { to, lid, did, job } => {
-                            let set = tokio::task::block_in_place(|| job.decode());
-                            (to, lid, did, set, Vec::new(), None)
-                        }
-                        _ => unreachable!(),
-                    };
-                    let (rgba, blank) = tokio::task::block_in_place(|| to_rgba(set));
-                    let mut clear = clear;
-                    clear.extend(blank);
-                    for mut body in tile_edits(to.is_some(), &lid, &did, rgba, clear) {
+                    let (to, bodies, t_ns) = tokio::task::block_in_place(|| tile_bodies(c));
+                    let mut ended = false;
+                    for mut body in bodies {
                         if let Some(t) = t_ns {
                             body["t"] = json!(t);
                         }
@@ -349,9 +363,13 @@ async fn run(
                             None => s.edit(body),
                         };
                         if r.is_err() && to.is_none() {
-                            out.send(In::Closed("The session has ended.".into()));
+                            ended = true;
                             break;
                         }
+                    }
+                    if ended {
+                        out.send(In::Closed("The session has ended.".into()));
+                        break;
                     }
                 }
                 Some(Cmd::Leave) | None => break,
@@ -368,8 +386,10 @@ async fn run(
                     }
                     Event::Direct { from, body } => {
                         bytes.received.fetch_add(size(&body), Ordering::Relaxed);
-                        let tiles = decode_tiles(&body, "snap.tiles");
-                        In::Direct { from, body: strip_tiles(body, &tiles), tiles, at_ns }
+                        // (the project for a joiner: its tiles kept as they came, compressed)
+                        let wire = tokio::task::block_in_place(|| wire_tiles(&body));
+                        let body = if wire.is_some() { strip(body) } else { body };
+                        In::Direct { from, body, wire, at_ns }
                     }
                     Event::Presence { from, body } => In::Presence { from, body, at_ns },
                     Event::Joined(m) => In::Joined(m),
@@ -396,7 +416,107 @@ fn strip_tiles(mut body: Value, tiles: &Option<Tiles>) -> Value {
     if tiles.is_some()
         && let Some(o) = body.as_object_mut()
     {
-        o.remove("set");
+        // (the pixels went to the tiles: the edit is checked without them)
+        o.insert("set".into(), Value::Array(Vec::new()));
+    }
+    body
+}
+
+/// The edits a [`Cmd::Tiles`] or [`Cmd::Kept`] goes as (to one member, or everyone), and
+/// its time.
+fn tile_bodies(c: Cmd) -> (Option<String>, Vec<Value>, Option<u64>) {
+    match c {
+        Cmd::Tiles {
+            to,
+            lid,
+            did,
+            set,
+            clear,
+            t_ns,
+        } => {
+            let (rgba, blank) = to_rgba(set);
+            let mut clear = clear;
+            clear.extend(blank);
+            let b = tile_edits(to.is_some(), &lid, &did, rgba, clear);
+            (to, b, t_ns)
+        }
+        Cmd::Kept { to, lid, did, job } => {
+            // kept as the file has them (or as they came): sent as they are
+            if let Some(w) = job.rgba_tiles() {
+                let enc: Vec<Value> = w
+                    .iter()
+                    .map(|((x, y), t)| {
+                        let p = if t.deflated { "z:" } else { "r:" };
+                        json!([
+                            x,
+                            y,
+                            format!("{p}{}", data_encoding::BASE64.encode(&t.bytes))
+                        ])
+                    })
+                    .collect();
+                return (
+                    to.clone(),
+                    chunked(to.is_some(), &lid, &did, enc, Vec::new()),
+                    None,
+                );
+            }
+            let (rgba, _) = to_rgba(job.decode());
+            (
+                to.clone(),
+                tile_edits(to.is_some(), &lid, &did, rgba, Vec::new()),
+                None,
+            )
+        }
+        _ => (None, Vec::new(), None),
+    }
+}
+
+/// A snapshot's tiles as they came: base64 undone, nothing inflated (checked when shown).
+fn wire_tiles(body: &Value) -> Option<WireTiles> {
+    use rayon::prelude::*;
+    if body.get("k")?.as_str()? != "snap.tiles" {
+        return None;
+    }
+    let lid = body.get("lid")?.as_str()?.to_string();
+    let did = body.get("did")?.as_str()?.to_string();
+    let int = |v: &Value| v.as_i64().filter(|n| n.abs() < 1_000_000).map(|n| n as i32);
+    let set: Vec<(i32, i32, &str)> = body
+        .get("set")?
+        .as_array()?
+        .iter()
+        .filter_map(|t| {
+            let t = t.as_array()?;
+            Some((int(t.first()?)?, int(t.get(1)?)?, t.get(2)?.as_str()?))
+        })
+        .collect();
+    let tiles = set
+        .par_iter()
+        .filter_map(|(x, y, s)| {
+            let (deflated, b) = if let Some(z) = s.strip_prefix("z:") {
+                (true, z)
+            } else {
+                (false, s.strip_prefix("r:")?)
+            };
+            let bytes = data_encoding::BASE64.decode(b.as_bytes()).ok()?;
+            if !deflated && bytes.len() != TILE_BYTES {
+                return None;
+            }
+            Some((
+                (*x, *y),
+                Arc::new(FileTile {
+                    deflated,
+                    bytes: bytes.into_boxed_slice(),
+                }),
+            ))
+        })
+        .collect();
+    Some(WireTiles { lid, did, tiles })
+}
+
+/// An edit without its tiles' pixels (they went elsewhere).
+fn strip(mut body: Value) -> Value {
+    if let Some(o) = body.as_object_mut() {
+        o.insert("set".into(), Value::Array(Vec::new()));
     }
     body
 }
@@ -443,42 +563,54 @@ pub fn tile_edits(
         .par_iter()
         .map(|(x, y, px)| json!([x, y, encode_tile(px)]))
         .collect();
+    chunked(snap, lid, did, enc, clear)
+}
+
+/// Tiles (on the wire already) in edits of at most [`TILES_PER_EDIT`] set and
+/// [`CLEARS_PER_EDIT`] cleared (a snapshot's carry no clearing).
+fn chunked(
+    snap: bool,
+    lid: &str,
+    did: &str,
+    enc: Vec<Value>,
+    clear: Vec<(i32, i32)>,
+) -> Vec<Value> {
     let k = if snap { "snap.tiles" } else { "tiles" };
-    let mut out = Vec::new();
-    let mut clear = Some(clear);
-    for chunk in enc.chunks(TILES_PER_EDIT) {
-        let mut e = json!({"k": k, "lid": lid, "did": did, "set": chunk});
-        if !snap {
-            e["clear"] = json!(clear.take().unwrap_or_default());
-        }
-        out.push(e);
+    if snap {
+        return enc
+            .chunks(TILES_PER_EDIT)
+            .map(|c| json!({"k": k, "lid": lid, "did": did, "set": c}))
+            .collect();
     }
-    if let Some(c) = clear
-        && !snap
-        && (!c.is_empty() || out.is_empty())
-    {
-        out.push(json!({"k": k, "lid": lid, "did": did, "set": [], "clear": c}));
+    // (an edit takes 4 × 48 tiles in all at most, set and cleared: the rest go in more)
+    let mut sets = enc.chunks(TILES_PER_EDIT);
+    let mut clears = clear.chunks(CLEARS_PER_EDIT);
+    let mut out = Vec::new();
+    loop {
+        let (s, c) = (sets.next(), clears.next());
+        if s.is_none() && c.is_none() && !out.is_empty() {
+            break;
+        }
+        out.push(json!({
+            "k": k, "lid": lid, "did": did,
+            "set": s.unwrap_or_default(), "clear": c.unwrap_or_default()
+        }));
     }
     out
 }
 
-/// A tile for the wire: deflated ("z:"), as the current app sends them.
+/// Tiles cleared per edit at most (with [`TILES_PER_EDIT`] set, under the 4 × 48 an edit
+/// may carry).
+pub const CLEARS_PER_EDIT: usize = 3 * TILES_PER_EDIT;
+
+/// A tile for the wire: deflated ("z:") as the current app deflates them.
 pub fn encode_tile(px: &[u8]) -> String {
-    let z = miniz_oxide::deflate::compress_to_vec(px, 6);
-    format!("z:{}", data_encoding::BASE64.encode(&z))
+    pencilpilot_together::encode_tile(px)
 }
 
 /// A tile from the wire (16 384 bytes of straight RGBA8), or None.
 pub fn decode_tile(s: &str) -> Option<Vec<u8>> {
-    let b = if let Some(z) = s.strip_prefix("z:") {
-        let raw = data_encoding::BASE64.decode(z.as_bytes()).ok()?;
-        miniz_oxide::inflate::decompress_to_vec_with_limit(&raw, TILE_BYTES).ok()?
-    } else {
-        data_encoding::BASE64
-            .decode(s.strip_prefix("r:")?.as_bytes())
-            .ok()?
-    };
-    (b.len() == TILE_BYTES).then_some(b)
+    pencilpilot_together::decode_tile(s).filter(|b| b.len() == TILE_BYTES)
 }
 
 /// The tiles in an edit of kind `k`, decoded for the painter (in parallel), or None when
@@ -576,5 +708,38 @@ mod tests {
             Some("pp1-AbC_d-9")
         );
         assert_eq!(clean_invite("nothing here"), None);
+    }
+
+    /// Tiles cleared go as the current app sends them (all in the first edit, with its
+    /// first 48 set) while that's an edit its own check takes (set and cleared 4 × 48 at
+    /// most); past that the current app's own edit would be refused by every app, so they
+    /// go in more edits, each one both take.
+    #[test]
+    fn cleared_tiles_go_as_the_current_app_sends_them() {
+        let px = vec![255u8; TILE_BYTES];
+        let set: Vec<(i32, i32, Vec<u8>)> = (0..60).map(|i| (i, 0, px.clone())).collect();
+        let clear: Vec<(i32, i32)> = (0..100).map(|i| (i, 1)).collect();
+        let e = tile_edits(
+            false,
+            "aaaaaaaaaaaa:1",
+            "aaaaaaaaaaaa:2",
+            set.clone(),
+            clear,
+        );
+        assert_eq!(e.len(), 2);
+        assert_eq!(e[0]["set"].as_array().unwrap().len(), 48);
+        assert_eq!(e[0]["clear"].as_array().unwrap().len(), 100);
+        assert_eq!(e[1]["clear"], json!([]));
+        // a big erase: every edit within the limit, and checked as edits
+        let clear: Vec<(i32, i32)> = (0..400).map(|i| (i, 2)).collect();
+        let e = tile_edits(false, "aaaaaaaaaaaa:1", "aaaaaaaaaaaa:2", set, clear);
+        let mut cleared = 0;
+        for x in &e {
+            let n = x["set"].as_array().unwrap().len() + x["clear"].as_array().unwrap().len();
+            assert!(n <= 4 * TILES_PER_EDIT);
+            assert!(pencilpilot_together::parse_edit(x).is_some());
+            cleared += x["clear"].as_array().unwrap().len();
+        }
+        assert_eq!(cleared, 400);
     }
 }

@@ -14,9 +14,9 @@ use serde_json::{Value, json};
 
 use super::super::{BRUSHES, ERASER, parsed};
 
-/// The most points a datagram carries (four numbers each): a datagram must fit in one
-/// packet (about 1200 bytes; a bigger one is dropped), and the session adds its own.
-pub const POINTS_PER_MESSAGE: usize = 32;
+/// The most points a datagram carries (four numbers each, 96 numbers: the current app's
+/// pieces). A datagram must fit in one packet (about 1200 bytes; a bigger one is dropped).
+pub const POINTS_PER_MESSAGE: usize = 24;
 
 /// A brush's id on the wire: its file's name, as the current app names brushes.
 fn brush_id(name: &str) -> &'static str {
@@ -148,6 +148,8 @@ struct Stroke {
     /// the painter's stroke key
     key: u32,
     brush: hokusai::Brush,
+    /// when its newest message came (one whose end was lost goes after a while)
+    at: std::time::Instant,
 }
 
 /// Others' live strokes: each member's preview layer and strokes going.
@@ -225,13 +227,21 @@ impl LiveIn {
                 }
                 self.begun.insert(id.clone(), std::time::Instant::now());
                 self.ended.remove(from);
-                self.strokes.insert(id, Stroke { key, brush: b });
+                self.strokes.insert(
+                    id,
+                    Stroke {
+                        key,
+                        brush: b,
+                        at: std::time::Instant::now(),
+                    },
+                );
                 Took::Nothing
             }
             "points" => {
-                let Some(st) = self.strokes.get(&id) else {
+                let Some(st) = self.strokes.get_mut(&id) else {
                     return Took::Nothing;
                 };
+                st.at = std::time::Instant::now();
                 let Some(pts) = ev.get("pts").and_then(Value::as_array) else {
                     return Took::Nothing;
                 };
@@ -302,6 +312,22 @@ impl LiveIn {
 
     /// Previews whose strokes ended a while ago go. Whether any did.
     pub fn prune(&mut self, p: &mut brush::Painter) -> bool {
+        // strokes whose end never came (datagrams may be lost) end now
+        let lost: Vec<(String, u64)> = self
+            .strokes
+            .iter()
+            .filter(|(_, st)| st.at.elapsed() >= STALE_PREVIEW)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in lost {
+            if let Some(st) = self.strokes.remove(&k) {
+                p.remote_end(st.key, &st.brush);
+            }
+            self.begun.remove(&k);
+            self.ended
+                .entry(k.0)
+                .or_insert_with(|| std::time::Instant::now() - STALE_PREVIEW);
+        }
         let old: Vec<String> = self
             .ended
             .iter()
@@ -321,7 +347,11 @@ impl LiveIn {
 
     /// When [`LiveIn::prune`] next has something to do.
     pub fn prune_at(&self) -> Option<std::time::Instant> {
-        self.ended.values().map(|t| *t + STALE_PREVIEW).min()
+        self.ended
+            .values()
+            .chain(self.strokes.values().map(|st| &st.at))
+            .map(|t| *t + STALE_PREVIEW)
+            .min()
     }
 
     /// Someone left: their strokes and preview layer go.
@@ -399,9 +429,9 @@ mod tests {
         }
         out.end(false);
         let msgs = out.take();
-        // begin, eight pieces of points (32 each, 26), end
-        assert_eq!(msgs.len(), 10, "{msgs:?}");
-        assert_eq!(msgs[1]["live"]["pts"].as_array().unwrap().len(), 32 * 4);
+        // begin, eleven pieces of points (24 each, 10), end
+        assert_eq!(msgs.len(), 13, "{msgs:?}");
+        assert_eq!(msgs[1]["live"]["pts"].as_array().unwrap().len(), 24 * 4);
         for m in &msgs {
             let wire = serde_json::json!({"from": "f".repeat(64), "body": m}).to_string();
             assert!(

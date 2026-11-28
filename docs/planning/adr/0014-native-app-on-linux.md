@@ -412,3 +412,55 @@ Each step is its own PR, with tests that need no window on the screen.
   the budget, until the frames' timing is known); the real device's latency on the owner's PipeWire (only ALSA
   `null` was opened here); adding sounds and lip-sync (the current app's) aren't ported yet;
   undo for clip moves.
+
+## Phase 6: drawing together (2026-11-28)
+
+The native app takes part in the current app's live sessions (ADR-0013): it hosts, joins with
+a `pp1-` code, and draws with others, the current app included, in the same session.
+
+- **Where:** `apps/native/src/shell/engine/together` (the session's own thread around
+  `crates/share`, the edits put in and sent), `shell/together_ui.rs` (the dialog, chat,
+  cursors), the layers panel (whose each shared layer is; the lock asks to draw on someone
+  else's). The rules and the edits' checks are `crates/together`'s (the current app's
+  `together.ts`, ported by the core part of this phase).
+- **Nothing on the window's thread waits on the network:** the session runs on a thread of
+  its own (a small tokio runtime) that wakes the window when something comes (a pipe the
+  window's wait watches with the compositor's socket: no polling). Tiles are decoded and
+  compressed there; the window only swaps decoded tiles into drawings between frames, within
+  3 ms a tick.
+- **Tiles go straight to the GPU's copy:** a drawing showing gets the changed tiles marked
+  (the compositor re-uploads only those, checked by hash); one not showing is forgotten and
+  goes up when shown.
+- **Live strokes:** this app's stroke goes as it's drawn (the points gathered each frame, in
+  datagrams of 24 points, as the current app's: a datagram has to fit in one packet), others' are drawn with their
+  brush on a layer of their own until their tiles arrive.
+- **What a stroke sends:** the painter keeps which drawings' tiles recorded edits changed
+  (`Painter::track_edits`), so a stroke's end sends only its tiles, copied out a few hundred
+  a tick and compressed on the session's thread (the current app compares whole drawings).
+- **Joining:** the project's size and frame come with the snapshot (extra fields the current
+  app ignores; from the current app the joiner keeps its own size); drawings kept as the
+  file has them go as they are (no decoding or compressing again), and the joiner keeps them
+  compressed as they came until they're shown.
+- **Identity:** the current app's key file (`$XDG_DATA_HOME/app.pencilpilot.studio/share/key`),
+  so a computer is the same member in either app. **Checks never use a relay** (`--stats`,
+  `--quit-after`: loopback only); `--host` / `--join <code>` / `--name` start a session
+  without the interface, for checks only.
+- **Measured** (release, two native apps on loopback, each on a headless mutter and D-Bus of
+  its own, both drawing at once, 14 strokes each at 240 Hz input; 3 runs, the range;
+  load average 1–4):
+
+  | What | Proposed budget | 165 Hz | 60 Hz |
+  |---|---|---|---|
+  | Pen to the others' screen (live stroke shown), p99 | 50 ms | 6.2–6.5 ms | 13.2–13.4 ms |
+  | Stroke's end to its tiles shown there, worst | 100 ms | 9.0–9.4 ms | 13.1–13.3 ms |
+  | Pen to screen while the other draws, p99 (event time) | 10.06 / 20.67 ms | 8.3–8.6 ms | 18.4–18.5 ms |
+  | Missed frames while both draw | 0 | 0–1 | 0 |
+  | Joining 4K × 20 layers: connected to drawable | 3 s | 37–41 ms (launch to drawable 0.71 s) | |
+  | — the joiner's memory, peak PSS | 600 MiB | 325–326 MiB | |
+  | 8 members drawing at once (10 strokes each) | none dropped | 70 of 70 tile edits each; all 8 pictures the same | |
+
+  A first run under load average ~90 (other builds) had 8–11 missed frames and a pen p99 of
+  13–16.5 ms at 165 Hz; the same run quiet had none.
+- **Not yet in the native app** (the current app's): groups, masks, line (vector) layers,
+  adjustment layers and layer styles in a session; merging or deleting others' layers by
+  asking; sound files; rejoining a saved session after a break; the invite as a QR code.
