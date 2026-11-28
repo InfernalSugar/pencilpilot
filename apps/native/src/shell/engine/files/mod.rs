@@ -588,6 +588,15 @@ fn open_file(e: &mut Engine, s: &mut State, path: &Path, listed: bool) -> bool {
             s.project.name = stem(path);
             s.project.path = Some(path.to_path_buf());
             s.project.note.clear();
+            // (the painter holds so many layers: the rest aren't opened, and the person is told)
+            let all = e.files.doc.base.as_ref().map_or(0, |m| m.layers.len());
+            if all > brush::MAX_LAYERS {
+                let left = all - brush::MAX_LAYERS;
+                s.project.note = format!(
+                    "{left} of its {all} layers weren't opened: this version holds {} at most.",
+                    brush::MAX_LAYERS
+                );
+            }
             s.project.recovery = None;
             mark_saved(e, s);
             if listed {

@@ -311,11 +311,17 @@ Each step is its own PR, with tests that need no window on the screen.
   - **Output:** cpal (ALSA, which reaches PipeWire and PulseAudio through their ALSA plugins). The
     mixer runs in cpal's callback and never allocates, locks or frees there (a test counts it):
     commands come through a lock-free ring (rtrb) and go back the same way to be dropped. The
-    output opens at the first play or scrub and pauses 1.5 s after the sound stops, so idle stays
-    at 0 frames and 0 % CPU.
+    output is opened (not playing) when a project with sound opens, plays from Play or a scrub,
+    and pauses 1.5 s after the sound stops, so idle stays at 0 frames and 0 % CPU. The device's
+    own buffer size is used (a fixed 480 underran every cycle under PipeWire's 1024 quantum).
   - **In step with the picture:** the mixer knows when each buffer will be heard (cpal's
-    latency) and plays the scene sample playback's clock says is due then, warping its time by
-    at most 0.2 % to follow the clock (no drift, no pitch change). Frames reach the screen a
+    stream timestamps, mapped to the app's clock by their smallest offset seen: cpal's
+    callback time is when the device last reported, up to a quantum ago) and plays the scene
+    sample playback's clock says is due then, warping its time by at most 0.2 % to follow the
+    clock (no drift, no pitch change); a jump over 3 ms (an underrun) is taken at once.
+  - **Starting:** a play's clock starts when its first sound can be heard (the mixer says
+    when; the frame showing holds that long, the output's latency), so a sound on the first
+    frame is heard from its start, as in today's app. Frames reach the screen a
     little away from the clock's time (on mutter, 0.6–0.8 of a refresh early: playback's lead
     overestimates the show delay); the sound follows the frames as presented (the median of the
     play's latest 48 frames' presentation times, from its third frame; kept for the next play).
@@ -352,10 +358,29 @@ Each step is its own PR, with tests that need no window on the screen.
   | Export with sound, 4K MP4 peak | 1 GB | 652 MiB (WebM 1.19 GB: libvpx, as without sound) |
   | Exported sound vs the mix | — | lag 0 ms; correlation 1.000 (AAC), 0.984 (Opus) |
 
+- **Measured through PipeWire** (QA's harness, `tools/native-qa/phase4.py sync` and
+  `sound-start` on `native/p4-qa-work`: the app's ALSA `null` device is a private, device-less
+  PipeWire null sink recorded on its own sample clock; clicks every 12 frames for 10 s, 3 runs
+  each at 165 and 60 Hz, two projects; offsets less what the recorder adds):
+
+  | What | Budget | Quantum 1024 (the owner's) | Quantum 256 |
+  |---|---|---|---|
+  | Click vs its frame shown, p50 | ±1 display frame | −0.48 to −0.03 ms | −0.44 to −0.05 ms |
+  | Click vs its frame shown, worst after the first | ±6.06 / 16.67 ms | −0.93 to +0.01 ms | within ±4.7 ms (all clicks) |
+  | The first click (on the frame showing at Play) | — | +11 to +20 ms after that frame first showed: it holds until the sound can be heard | +0 to +4.7 ms |
+  | Play to sound heard | 50 ms | 36–48 ms | 7–19 ms |
+  | A tone from frame 0: its start not heard | 0 | 0–1 ms (5 runs), once 21 ms heard early | 0–5 ms |
+
+  Before the fix (QA's gate): clicks −0.1 to +19.4 ms late at quantum 1024 (a fixed 480-sample
+  buffer underran every cycle or two, and the mixer took 20 ms jumps as drift to warp
+  through), and the first 19–26 ms of a play weren't heard. One of the twelve 1024 runs at
+  165 Hz isn't matched by the harness: its picture skipped frames 11–12 under load (load
+  average 5), which leaves no anchor frame.
+
 - **Fixed on the way:** a video scaled while written lost its sound (the sound's `-i` came after
   `-vf`, which FFmpeg refuses); `-shortest` held up to 10 s of frames back (1 GB at 1080p): the
   mix is made as long as the frames instead.
-- **Open:** the first play of a session at 165 Hz (its first frame 2 ms past the budget, until
-  the frames' timing is known); the real device's latency on the owner's PipeWire (only ALSA
+- **Open:** the first play of a session at 165 Hz on the silent output (its first frame 2 ms past
+  the budget, until the frames' timing is known); the real device's latency on the owner's PipeWire (only ALSA
   `null` was opened here); adding sounds and lip-sync (the current app's) aren't ported yet;
   undo for clip moves.

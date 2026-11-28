@@ -1141,3 +1141,25 @@ fn fixtures_open_save_and_round_trip() {
         );
     }
 }
+
+/// A file with more layers than the painter holds opens with as many as it holds, and says
+/// how many weren't opened.
+#[test]
+fn too_many_layers_are_said() {
+    let d = dir("many-layers");
+    let path = d.join("many.ppstudio");
+    let mut p = Project::new("PencilPilot 0.1.0", "2026-11-28T10:00:00Z", 64, 64, 24);
+    let n = brush::MAX_LAYERS as u32 + 2;
+    p.manifest.layers = (1..=n).map(|i| layer(i, &format!("L{i}"))).collect();
+    p.save(&path).unwrap();
+    let (mut e, mut s) = engine();
+    assert!(open_path(&mut e, &mut s, &path), "{}", s.project.note);
+    assert!(
+        s.project
+            .note
+            .starts_with(&format!("2 of its {n} layers weren't opened")),
+        "{}",
+        s.project.note
+    );
+    assert_eq!(s.project.subtitle("Cut 1"), s.project.note);
+}
