@@ -38,8 +38,14 @@ pub enum Change {
         lid: String,
         to: String,
     },
-    /// anything else that's allowed (a kind this app doesn't follow yet: groups, masks,
-    /// line strokes, adjustment settings, sound)
+    /// a layer's mask (kept as it came; shown)
+    Mask(String),
+    /// a drawing's line strokes (kept as they came: its pixels come as tiles)
+    Lines(String, String),
+    /// a piece of a sound file (kept as it came)
+    Sound,
+    /// anything else that's allowed (kept in the shared state, not drawn here: groups,
+    /// adjustment settings)
     Other,
 }
 
@@ -94,6 +100,9 @@ impl Shared {
             Edit::Grant { lid, .. } | Edit::Revoke { lid, .. } => Change::Access(lid),
             Edit::Ask { lid, .. } => Change::Asked(lid),
             Edit::Deny { lid, to } => Change::Denied { lid, to },
+            Edit::Mask { lid, .. } => Change::Mask(lid),
+            Edit::Lines { lid, did, .. } => Change::Lines(lid, did),
+            Edit::Sound { .. } => Change::Sound,
             _ => Change::Other,
         })
     }

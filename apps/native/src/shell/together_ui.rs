@@ -589,6 +589,7 @@ mod tests {
                     can_draw: true,
                     owner: "Mina".into(),
                     asked: false,
+                    other: None,
                 }),
                 Some(Access {
                     lid: "aaaaaaaaaaaa:3".into(),
@@ -596,6 +597,7 @@ mod tests {
                     can_draw: false,
                     owner: "Sam".into(),
                     asked: false,
+                    other: None,
                 }),
                 None,
                 None,

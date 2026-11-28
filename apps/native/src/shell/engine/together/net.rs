@@ -709,4 +709,37 @@ mod tests {
         );
         assert_eq!(clean_invite("nothing here"), None);
     }
+
+    /// Tiles cleared go as the current app sends them (all in the first edit, with its
+    /// first 48 set) while that's an edit its own check takes (set and cleared 4 × 48 at
+    /// most); past that the current app's own edit would be refused by every app, so they
+    /// go in more edits, each one both take.
+    #[test]
+    fn cleared_tiles_go_as_the_current_app_sends_them() {
+        let px = vec![255u8; TILE_BYTES];
+        let set: Vec<(i32, i32, Vec<u8>)> = (0..60).map(|i| (i, 0, px.clone())).collect();
+        let clear: Vec<(i32, i32)> = (0..100).map(|i| (i, 1)).collect();
+        let e = tile_edits(
+            false,
+            "aaaaaaaaaaaa:1",
+            "aaaaaaaaaaaa:2",
+            set.clone(),
+            clear,
+        );
+        assert_eq!(e.len(), 2);
+        assert_eq!(e[0]["set"].as_array().unwrap().len(), 48);
+        assert_eq!(e[0]["clear"].as_array().unwrap().len(), 100);
+        assert_eq!(e[1]["clear"], json!([]));
+        // a big erase: every edit within the limit, and checked as edits
+        let clear: Vec<(i32, i32)> = (0..400).map(|i| (i, 2)).collect();
+        let e = tile_edits(false, "aaaaaaaaaaaa:1", "aaaaaaaaaaaa:2", set, clear);
+        let mut cleared = 0;
+        for x in &e {
+            let n = x["set"].as_array().unwrap().len() + x["clear"].as_array().unwrap().len();
+            assert!(n <= 4 * TILES_PER_EDIT);
+            assert!(pencilpilot_together::parse_edit(x).is_some());
+            cleared += x["clear"].as_array().unwrap().len();
+        }
+        assert_eq!(cleared, 400);
+    }
 }

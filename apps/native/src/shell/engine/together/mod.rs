@@ -104,6 +104,8 @@ pub struct Access {
     pub can_draw: bool,
     pub owner: String,
     pub asked: bool,
+    /// a kind of layer this version doesn't draw (made in the current app): what it is
+    pub other: Option<&'static str>,
 }
 
 /// A shared layer as the dialog lists it.
@@ -226,6 +228,9 @@ pub struct Stats {
     pub snapshot_last_ns: Option<u64>,
 }
 
+/// A layer's mask as it travels: whether it has one, and its tiles on the wire.
+type Mask = (bool, std::collections::BTreeMap<(i32, i32), String>);
+
 /// A tile as it came over the wire: where, and its bytes.
 type WireTile = ((i32, i32), std::sync::Arc<super::frames::store::FileTile>);
 
@@ -243,6 +248,9 @@ enum Job {
         /// when the change was made (its stroke's end), ns
         t_ns: u64,
     },
+    /// a message to one member, in turn (a snapshot's masks and line strokes, after its
+    /// tiles)
+    Message(String, Value),
     /// the snapshot's end (after its tiles)
     End(String),
 }
@@ -297,7 +305,18 @@ pub struct Together {
     outbox: VecDeque<Job>,
     cursors: HashMap<String, (f32, f32, Instant)>,
     cursor_sent: Option<((f32, f32), Instant)>,
-    tl_sent: String,
+    /// the session's timeline as it was last received or sent (all of it), and this app's
+    /// tracks as they were then: only what changes here goes into it
+    session_tl: Option<Value>,
+    /// what this app doesn't draw itself, kept as it came so nothing of it is lost (and a
+    /// joiner gets it from this app too): each layer's mask (on, and its tiles on the
+    /// wire), line strokes' edits in order per drawing, sound files' pieces
+    masks: HashMap<String, Mask>,
+    lines: HashMap<(String, String), Vec<Value>>,
+    sounds: Vec<Value>,
+    /// each shared drawing's layer (every drawing the session has, any scene or cut)
+    did_lid: HashMap<String, String>,
+    tl_base: serde_json::Map<String, Value>,
     tl_check: Option<Instant>,
     looks_sent: HashMap<String, (bool, f32)>,
     /// layer removals and moves that couldn't happen yet (the painter busy)
@@ -967,6 +986,7 @@ fn start_host(e: &mut Engine, s: &mut State) {
         let lid = e.together.lid_of(*id).cloned().unwrap_or_default();
         for d in drawings_of(e, s, *id) {
             let did = e.together.did_of(d);
+            e.together.did_lid.insert(did.clone(), lid.clone());
             e.together.outbox.push_back(Job::Drawing {
                 to: None,
                 lid: lid.clone(),
@@ -977,9 +997,9 @@ fn start_host(e: &mut Engine, s: &mut State) {
             });
         }
     }
-    let tl = shared_timeline(e, s);
-    e.together.tl_sent = tl.to_string();
-    e.together.edit(json!({"k": "timeline", "tl": tl}));
+    if let Some(tl) = timeline_out(e, s) {
+        e.together.edit(json!({"k": "timeline", "tl": tl}));
+    }
     e.together.synced = true;
     s.together.synced = true;
     e.together.stats.synced_ns = Some(now_ns());
@@ -1004,16 +1024,15 @@ fn drawings_of(e: &Engine, s: &State, layer: u32) -> Vec<u32> {
     v
 }
 
-/// The open cut's timeline as it travels (together.ts's `SharedTimeline`): one scene,
-/// one cut, the shared layers' tracks by their ids, drawings by theirs.
-fn shared_timeline(e: &mut Engine, s: &State) -> Value {
-    let mut tracks = serde_json::Map::new();
-    let mut statics = Vec::new();
-    let mut kinds = serde_json::Map::new();
+/// Each shared layer's track in the cut this app shows, as the timeline carries it: its
+/// cels, whether it's static, its drawings' kinds (lid → that).
+fn native_tracks(e: &mut Engine, s: &State) -> serde_json::Map<String, Value> {
+    let mut out = serde_json::Map::new();
     for t in &s.sheet.tracks {
         let Some(lid) = e.together.lid_of(t.layer).cloned() else {
             continue;
         };
+        let mut kinds = serde_json::Map::new();
         let cels: Vec<Value> = t
             .cels
             .iter()
@@ -1023,25 +1042,116 @@ fn shared_timeline(e: &mut Engine, s: &State) -> Value {
                 } else {
                     String::new()
                 };
-                if c.drawing != 0
-                    && let Some(k) = mark_name(c.mark)
-                {
-                    kinds.insert(d.clone(), json!(k));
+                if c.drawing != 0 {
+                    kinds.insert(
+                        d.clone(),
+                        mark_name(c.mark).map_or(Value::Null, |k| json!(k)),
+                    );
                 }
                 json!({"d": d, "n": c.hold.max(1)})
             })
             .collect();
-        if t.kind == 'S' {
-            statics.push(json!(lid));
+        // a static layer's one drawing shows all cut long here (its length follows the
+        // cut): the session's own length for it stays
+        let mut cels = cels;
+        if t.kind == 'S'
+            && let Some(was) = e
+                .together
+                .session_tl
+                .as_ref()
+                .and_then(|tl| tl["scenes"][0]["cuts"][0]["tracks"][lid.as_str()].as_array())
+            && was.len() == 1
+            && cels.len() == 1
+            && was[0]["d"] == cels[0]["d"]
+        {
+            cels = was.clone();
         }
-        tracks.insert(lid, Value::Array(cels));
+        out.insert(
+            lid,
+            json!({"cels": cels, "static": t.kind == 'S', "kinds": kinds}),
+        );
     }
+    out
+}
+
+/// A timeline with nothing in it but one scene and one cut (hosting: the session has
+/// none yet).
+fn skeleton(s: &State) -> Value {
     json!({
-        "scenes": [{"name": s.project.scene, "cuts": [{"name": s.cut_name, "tracks": tracks}]}],
-        "statics": statics,
+        "scenes": [{"name": s.project.scene, "cuts": [{"name": s.cut_name, "tracks": {}}]}],
+        "statics": [],
         "mouths": [],
-        "kinds": kinds,
+        "kinds": {},
     })
+}
+
+/// What changed here in the timeline, put into the session's own (everything this app
+/// doesn't show or know of, other scenes and cuts, markers, sound clips, notes, kept as it
+/// came): the timeline to send, or None when nothing changed.
+fn timeline_out(e: &mut Engine, s: &State) -> Option<Value> {
+    let now = native_tracks(e, s);
+    let changed: Vec<(&String, &Value)> = now
+        .iter()
+        .filter(|(lid, v)| e.together.tl_base.get(*lid) != Some(*v))
+        .collect();
+    if changed.is_empty() {
+        return None;
+    }
+    let mut tl = e.together.session_tl.clone().unwrap_or_else(|| skeleton(s));
+    if !tl.is_object() {
+        tl = skeleton(s);
+    }
+    // (the cut this app shows: the first scene's first; made when it's missing)
+    if !tl["scenes"].is_array() || tl["scenes"].as_array().is_some_and(Vec::is_empty) {
+        tl["scenes"] = skeleton(s)["scenes"].clone();
+    }
+    let scene = &mut tl["scenes"][0];
+    if !scene["cuts"].is_array() || scene["cuts"].as_array().is_some_and(Vec::is_empty) {
+        scene["cuts"] = json!([{"name": s.cut_name, "tracks": {}}]);
+    }
+    if !scene["cuts"][0]["tracks"].is_object() {
+        scene["cuts"][0]["tracks"] = json!({});
+    }
+    for (lid, v) in &changed {
+        tl["scenes"][0]["cuts"][0]["tracks"][lid.as_str()] = v["cels"].clone();
+        // static or not
+        if !tl["statics"].is_array() {
+            tl["statics"] = json!([]);
+        }
+        let statics = tl["statics"].as_array_mut().unwrap();
+        let has = statics.iter().any(|x| x.as_str() == Some(lid.as_str()));
+        let want = v["static"].as_bool().unwrap_or(false);
+        if want && !has {
+            statics.push(json!(lid));
+        } else if !want && has {
+            statics.retain(|x| x.as_str() != Some(lid.as_str()));
+        }
+        // its drawings' kinds (only theirs)
+        if !tl["kinds"].is_object() {
+            tl["kinds"] = json!({});
+        }
+        let was = e.together.tl_base.get(*lid).map(|b| b["kinds"].clone());
+        let kinds = tl["kinds"].as_object_mut().unwrap();
+        if let Some(Value::Object(was)) = was {
+            for d in was.keys() {
+                if v["kinds"].get(d).is_none() {
+                    kinds.remove(d);
+                }
+            }
+        }
+        if let Some(k) = v["kinds"].as_object() {
+            for (d, kind) in k {
+                if kind.is_null() {
+                    kinds.remove(d);
+                } else {
+                    kinds.insert(d.clone(), kind.clone());
+                }
+            }
+        }
+    }
+    e.together.tl_base = now;
+    e.together.session_tl = Some(tl.clone());
+    Some(tl)
 }
 
 fn mark_name(m: super::frames::Mark) -> Option<&'static str> {
@@ -1129,7 +1239,9 @@ fn put_timeline(e: &mut Engine, s: &mut State, tl: &Value) {
         }
     }
     super::frames::derive(s);
-    e.together.tl_sent = shared_timeline(e, s).to_string();
+    // (as it came: what this app changes later goes into it)
+    e.together.session_tl = Some(tl.clone());
+    e.together.tl_base = native_tracks(e, s);
 }
 
 // ---- joining ----
@@ -1168,6 +1280,26 @@ fn on_direct(
             true
         }
         "snap.tiles" if !e.together.synced => {
+            // a mask: kept as it came, shown once the project is in
+            if let Some(w) = &wire
+                && w.did == "mask"
+                && e.together.shared.get(&w.lid).is_some()
+            {
+                let set: Vec<Value> = w
+                    .tiles
+                    .iter()
+                    .map(|((x, y), t)| {
+                        let p = if t.deflated { "z:" } else { "r:" };
+                        json!([
+                            x,
+                            y,
+                            format!("{p}{}", data_encoding::BASE64.encode(&t.bytes))
+                        ])
+                    })
+                    .collect();
+                keep_mask(e, &w.lid, &json!({"on": true, "set": set, "clear": []}));
+                return false;
+            }
             // (kept as they came, compressed, until the drawing is shown)
             if let Some(w) = wire
                 && e.together.shared.get(&w.lid).is_some()
@@ -1176,9 +1308,36 @@ fn on_direct(
                 let t = &mut e.together;
                 t.stats.snapshot_tiles += w.tiles.len() as u64;
                 t.stats.snapshot_last_ns = Some(at_ns);
+                t.did_lid.insert(w.did.clone(), w.lid.clone());
                 t.snap_wire.entry(w.did).or_default().extend(w.tiles);
             }
             let _ = from;
+            false
+        }
+        // line strokes and sound files: kept as they came (and passed on to joiners)
+        "snap.lines" if !e.together.synced => {
+            if let (Some(lid), Some(did)) = (
+                body.get("lid").and_then(Value::as_str),
+                body.get("did").and_then(Value::as_str),
+            ) && e.together.shared.get(lid).is_some()
+                && model::is_lid(did)
+            {
+                let mut b = body.clone();
+                b["k"] = json!("lines");
+                // (checked as an edit would be)
+                if pencilpilot_together::parse_edit(&b).is_some() {
+                    let key = (lid.to_string(), did.to_string());
+                    e.together.lines.entry(key).or_default().push(b);
+                }
+            }
+            false
+        }
+        "snap.sound" if !e.together.synced => {
+            let mut b = body.clone();
+            b["k"] = json!("sound");
+            if pencilpilot_together::parse_edit(&b).is_some() {
+                keep_sound(e, b);
+            }
             false
         }
         "snap.end" if !e.together.synced => {
@@ -1238,6 +1397,10 @@ fn finish_join(e: &mut Engine, s: &mut State) {
         );
         e.frames.remote_changed(d);
     }
+    let masked: Vec<String> = e.together.masks.keys().cloned().collect();
+    for lid in masked {
+        put_mask(e, &lid);
+    }
     super::frames::tick(e, s, Instant::now());
     if let Some(tl) = e.together.snap_tl.take() {
         put_timeline(e, s, &tl);
@@ -1266,11 +1429,16 @@ fn finish_join(e: &mut Engine, s: &mut State) {
     e.together.ui_dirty = true;
 }
 
-/// A joiner asked for the project: the layers and who may draw on them, the timeline,
-/// then every shared drawing's tiles, then the end.
+/// A joiner asked for the project: the layers and who may draw on them, the timeline (the
+/// session's, all of it), the sound files, every shared drawing's tiles (any scene or cut),
+/// masks and line strokes, then the end: all a current app's host sends.
 fn send_snapshot(e: &mut Engine, s: &mut State, to: &str) {
+    // (what changed here goes in first)
+    if let Some(tl) = timeline_out(e, s) {
+        e.together.edit(json!({"k": "timeline", "tl": tl}));
+    }
     let mut snap = e.together.shared.snapshot();
-    let tl = shared_timeline(e, s);
+    let tl = e.together.session_tl.clone().unwrap_or_else(|| skeleton(s));
     snap["k"] = json!("snap.begin");
     snap["seq"] = json!(e.together.last_seq);
     snap["tl"] = tl;
@@ -1280,7 +1448,13 @@ fn send_snapshot(e: &mut Engine, s: &mut State, to: &str) {
     snap["h"] = json!(e.painter.height());
     snap["frame"] = json!(s.frame);
     e.together.send(net::Cmd::Direct(to.to_string(), snap));
-    // the drawings showing first (the joiner can draw sooner), then the rest
+    for p in &e.together.sounds {
+        let mut p = p.clone();
+        p["k"] = json!("snap.sound");
+        e.together.send(net::Cmd::Direct(to.to_string(), p));
+    }
+    // every drawing: those on this app's cut, and every other the session has; the ones
+    // showing first (the joiner can draw sooner)
     let mut jobs: Vec<(String, String, u32, bool)> = Vec::new();
     let ids: Vec<(String, u32)> = e
         .together
@@ -1292,7 +1466,24 @@ fn send_snapshot(e: &mut Engine, s: &mut State, to: &str) {
         let shows = e.painter.layer_drawing(layer);
         for d in drawings_of(e, s, layer) {
             let did = e.together.did_of(d);
+            e.together.did_lid.insert(did.clone(), lid.clone());
             jobs.push((lid.clone(), did, d, d == shows));
+        }
+    }
+    let known: Vec<(String, String)> = e
+        .together
+        .did_lid
+        .iter()
+        .map(|(d, l)| (d.clone(), l.clone()))
+        .collect();
+    for (did, lid) in known {
+        if jobs.iter().any(|j| j.1 == did) || e.together.shared.get(&lid).is_none() {
+            continue;
+        }
+        if let Some(&d) = e.together.dids.get(&did)
+            && (e.painter.has_drawing(d) || e.frames.store.drawings.contains_key(&d))
+        {
+            jobs.push((lid, did, d, false));
         }
     }
     jobs.sort_by_key(|j| !j.3);
@@ -1305,6 +1496,39 @@ fn send_snapshot(e: &mut Engine, s: &mut State, to: &str) {
             keys: None,
             t_ns: 0,
         });
+    }
+    // masks, as the current app sends them (tiles of the drawing "mask")
+    let masks: Vec<(String, Vec<Value>)> = e
+        .together
+        .masks
+        .iter()
+        .filter(|(lid, (on, _))| *on && e.together.shared.get(lid).is_some())
+        .map(|(lid, (_, t))| {
+            (
+                lid.clone(),
+                t.iter().map(|((x, y), px)| json!([x, y, px])).collect(),
+            )
+        })
+        .collect();
+    for (lid, set) in masks {
+        for c in set.chunks(net::TILES_PER_EDIT) {
+            e.together.outbox.push_back(Job::Message(
+                to.to_string(),
+                json!({"k": "snap.tiles", "lid": lid, "did": "mask", "set": c}),
+            ));
+        }
+    }
+    // line strokes: their edits again, in order
+    let lines: Vec<Value> = e
+        .together
+        .lines
+        .iter()
+        .filter(|((lid, _), _)| e.together.shared.get(lid).is_some())
+        .flat_map(|(_, v)| v.iter().cloned())
+        .collect();
+    for mut l in lines {
+        l["k"] = json!("snap.lines");
+        e.together.outbox.push_back(Job::Message(to.to_string(), l));
     }
     e.together.outbox.push_back(Job::End(to.to_string()));
 }
@@ -1364,12 +1588,15 @@ fn on_edit(
                 let visible = look.visible;
                 let opacity = look.opacity.clamp(0.0, 1.0) as f32;
                 let blend = brush::Blend::parse(&look.blend);
+                let (alpha_lock, clip) = (look.alpha_lock, look.clip);
                 e.together
                     .looks_sent
                     .insert(lid.clone(), (visible, opacity));
                 set_props(e, id, |p| {
                     p.visible = visible;
                     p.opacity = opacity;
+                    p.alpha_lock = alpha_lock;
+                    p.clip = clip;
                     if let Some(b) = blend {
                         p.blend = b;
                     }
@@ -1377,7 +1604,25 @@ fn on_edit(
             }
             true
         }
+        Change::Mask(lid) => {
+            keep_mask(e, &lid, &body);
+            if from != me {
+                put_mask(e, &lid);
+            }
+            true
+        }
+        Change::Lines(lid, did) => {
+            e.together.lines.entry((lid, did)).or_default().push(body);
+            false
+        }
+        Change::Sound => {
+            keep_sound(e, body);
+            false
+        }
         Change::Removed(lid) => {
+            e.together.masks.remove(&lid);
+            e.together.lines.retain(|(l, _), _| *l != lid);
+            e.together.did_lid.retain(|_, l| *l != lid);
             if let Some(id) = e.together.ids.remove(&lid) {
                 if !e.painter.remove_layer_silent(id) {
                     e.together.structure.push(format!("remove {id}"));
@@ -1408,7 +1653,7 @@ fn on_edit(
             let Some(tl) = body.get("tl") else {
                 return false;
             };
-            if from == me && shared_timeline(e, s) == *tl {
+            if from == me && e.together.session_tl.as_ref() == Some(tl) {
                 return false;
             }
             put_timeline(e, s, tl);
@@ -1523,8 +1768,89 @@ fn place(e: &mut Engine, lid: &str) {
 fn refresh_lock(e: &mut Engine, lid: &str) {
     let t = &e.together;
     let Some(&id) = t.ids.get(lid) else { return };
-    let locked = !t.shared.can_draw(lid, &t.me);
+    // (a line layer or an adjustment layer can't be drawn on faithfully here: their tiles
+    // would undo their strokes or settings for the others; they stay locked)
+    let other_kind = t
+        .shared
+        .get(lid)
+        .is_some_and(|l| l.lines || l.adjust.is_some());
+    let locked = !t.shared.can_draw(lid, &t.me) || other_kind;
     set_props(e, id, |p| p.locked = locked);
+}
+
+/// A mask edit kept: whether the layer has a mask, and its tiles as they travel.
+fn keep_mask(e: &mut Engine, lid: &str, body: &Value) {
+    let on = body.get("on") != Some(&Value::Bool(false));
+    let m = e.together.masks.entry(lid.to_string()).or_default();
+    m.0 = on;
+    if !on {
+        m.1.clear();
+        return;
+    }
+    let int = |v: Option<&Value>| v.and_then(Value::as_i64).map(|n| n as i32);
+    for c in body
+        .get("clear")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let (Some(x), Some(y)) = (int(c.get(0)), int(c.get(1))) {
+            m.1.remove(&(x, y));
+        }
+    }
+    for t in body
+        .get("set")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let (Some(x), Some(y), Some(px)) = (
+            int(t.get(0)),
+            int(t.get(1)),
+            t.get(2).and_then(Value::as_str),
+        ) {
+            m.1.insert((x, y), px.to_string());
+        }
+    }
+}
+
+/// A piece of a sound file kept (once each).
+fn keep_sound(e: &mut Engine, mut body: Value) {
+    body["k"] = json!("sound");
+    let key = |v: &Value| (v.get("file").cloned(), v.get("i").cloned());
+    if !e.together.sounds.iter().any(|x| key(x) == key(&body)) {
+        e.together.sounds.push(body);
+    }
+}
+
+/// A layer's mask as kept, shown (later if the painter's busy).
+fn put_mask(e: &mut Engine, lid: &str) {
+    let Some(&id) = e.together.ids.get(lid) else {
+        return;
+    };
+    let packed = match e.together.masks.get(lid) {
+        Some((true, tiles)) => {
+            let mut out = Vec::new();
+            let mut n = 0u32;
+            out.extend_from_slice(&0u32.to_le_bytes());
+            for ((x, y), s) in tiles {
+                if let Some(px) = net::decode_tile(s) {
+                    out.extend_from_slice(&x.to_le_bytes());
+                    out.extend_from_slice(&y.to_le_bytes());
+                    out.extend_from_slice(&px);
+                    n += 1;
+                }
+            }
+            out[..4].copy_from_slice(&n.to_le_bytes());
+            out
+        }
+        _ => Vec::new(),
+    };
+    if e.painter.put_mask_tiles(id, &packed) {
+        e.frames.gpu.forget_mask(id);
+    } else {
+        e.together.structure.push(format!("mask {lid}"));
+    }
 }
 
 /// Someone's tiles put into the drawing they're for (decoded already: this only swaps
@@ -1540,6 +1866,7 @@ fn put_tiles(
     kind: &'static str,
 ) -> bool {
     let d = local_of(e, &t.did);
+    e.together.did_lid.insert(t.did.clone(), t.lid.clone());
     // drawing on that drawing now (granted to two): theirs goes in once the stroke ends
     if e.is_stroking() && e.painter.layer_drawing(e.painter.active_layer()) == d {
         e.together.stats.deferred += 1;
@@ -1595,6 +1922,9 @@ fn retry(e: &mut Engine, s: &mut State) -> bool {
                     e.painter.clear_history();
                     changed = true;
                 }
+            } else if let Some(lid) = op.strip_prefix("mask ") {
+                put_mask(e, lid);
+                changed = true;
             } else if let Some(lid) = op.strip_prefix("place ") {
                 place(e, lid);
                 changed = true;
@@ -1643,6 +1973,7 @@ fn local_changes(e: &mut Engine, s: &mut State, now: Instant) {
             continue;
         }
         let did = e.together.did_of(d);
+        e.together.did_lid.insert(did.clone(), lid.clone());
         e.together.outbox.push_back(Job::Drawing {
             to: None,
             lid,
@@ -1677,10 +2008,21 @@ fn local_changes(e: &mut Engine, s: &mut State, now: Instant) {
             e.together
                 .looks_sent
                 .insert(lid.clone(), (visible, opacity));
-            e.together.edit(json!({"k": "look", "lid": lid, "look": {
-                "visible": visible, "opacity": opacity, "blend": blend,
-                "alphaLock": false, "clip": false
-            }}));
+            // (everything else as the session has it: alpha lock, clipping, style)
+            let mut look = e
+                .together
+                .shared
+                .get(&lid)
+                .and_then(|l| l.look.as_ref())
+                .map(|l| l.to_json())
+                .unwrap_or_else(|| {
+                    json!({"visible": true, "opacity": 1, "blend": blend,
+                        "alphaLock": false, "clip": false})
+                });
+            look["visible"] = json!(visible);
+            look["opacity"] = json!(opacity);
+            e.together
+                .edit(json!({"k": "look", "lid": lid, "look": look}));
         }
     }
     // the layers' locks show access (unlocking someone else's layer here changes nothing)
@@ -1691,10 +2033,7 @@ fn local_changes(e: &mut Engine, s: &mut State, now: Instant) {
     // the timeline, now and then
     if e.together.tl_check.is_none_or(|t| now >= t) {
         e.together.tl_check = Some(now + TIMELINE_EVERY);
-        let tl = shared_timeline(e, s);
-        let text = tl.to_string();
-        if text != e.together.tl_sent {
-            e.together.tl_sent = text;
+        if let Some(tl) = timeline_out(e, s) {
             e.together.edit(json!({"k": "timeline", "tl": tl}));
         }
     }
@@ -1744,6 +2083,9 @@ fn send_out(e: &mut Engine, _s: &State, until: Instant) {
             Job::End(to) => {
                 e.together
                     .send(net::Cmd::Direct(to, json!({"k": "snap.end"})));
+            }
+            Job::Message(to, body) => {
+                e.together.send(net::Cmd::Direct(to, body));
             }
             Job::Drawing {
                 to,
@@ -1825,6 +2167,13 @@ fn refresh_ui(e: &Engine, s: &mut State) {
                     .asks()
                     .iter()
                     .any(|a| a.lid == *lid && a.from == t.me),
+                other: if l.adjust.is_some() {
+                    Some("Adjustment layer, made in another version: not shown here")
+                } else if l.lines {
+                    Some("Line layer, made in another version: shown, not editable here")
+                } else {
+                    None
+                },
             })
         })
         .collect();
