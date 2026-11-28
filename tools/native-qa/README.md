@@ -116,3 +116,59 @@ Measuring notes:
 - One `PENCILPILOT_DIALOG_ANSWER` answers every dialog, so the windowed export opens a copy of the project and the export's answer is that copy's name (the export swaps the extension).
 - PSS in the library tests is the test process: a project's memory is measured one per process.
 - Plain FFmpeg on the reference frames (libx264 CRF 18, yuv420p) gives 40.4 dB (500 drawings) and 35.0 dB (20 layers at 4K) at worst: an export near those adds no loss of its own.
+
+## Drawing together (Phase 6)
+
+The gate: the current app and the native app share one live session, both ways.
+
+| File | What it does |
+|---|---|
+| `phase6.py` | The scenarios below, every app on a headless mutter of its own, on a private D-Bus session that starts no services (no portal, no notifications), sound servers pointed nowhere, no relays (`PENCILPILOT_RELAY=off` in the current app, `Relays::Off` in the native app and `qa_peer`). |
+| `../../crates/share/examples/qa_peer.rs` | A scripted member: hosts or joins over the session's own protocol, logs every event with its CLOCK_MONOTONIC arrival, sends what the script says (unknown kinds, AI-made content, many members, a snapshot request). |
+| `together_oracle.mjs` | The current app's `together.ts`, bundled as is, as the oracle for the native port: a seeded generator of edits (well made and broken), and what `parseEdit` and `Shared.apply` make of each. |
+
+**The current app** is the real one (Tauri + WebKitGTK, built from `dev`), driven over WebDriver
+as `tools/baseline/run.mjs` does: its home's Recent list opens a copy of a test project (so Save
+needs no dialog), the Draw together dialog hosts and joins, pen strokes go to its canvas as pen
+pointer events, and a hook in the page logs each session event with the page's clock (realtime,
+converted to CLOCK_MONOTONIC) and the next two animation frames (drawn, then on screen, as the
+baseline counts it). A thin peer running `together.ts` in node was the other choice; the real
+app was preferred because it exercises the canvas, the frame store and `share.rs` as shipped.
+
+```sh
+PP_STUDIO=apps/studio/src-tauri/target/release/pencilpilot-studio \
+PP_PEER=target/release/examples/qa_peer PP_PROJECTS=<fixtures.py's folder> \
+PP_NATIVE=target/release/pencilpilot \
+python3 -I tools/native-qa/phase6.py /tmp/claude-1000/q6/run [scenario …]
+```
+
+Measuring notes:
+- **Pixels** are compared from saved `.ppstudio` files, layer by layer (by name) and frame by
+  frame, transparent tiles left out. The current app keeps pixels premultiplied: a tile put into
+  it comes back with alpha exact and straight colour off by up to 5 where alpha is under 16
+  (premultiplied, by at most 1). That is the current app against itself, so a receiving current
+  app is judged "same premultiplied ±1, alpha exact" (`samePremul1`); everything else is
+  byte-equal (`equal`).
+- **Latency** is pen (the sender's input) to the receiver: the live stroke's arrival, its frame
+  on screen, and the stroke's tiles arriving after its last point. All on CLOCK_MONOTONIC.
+- The current app sends a stroke's tiles 120 ms after the canvas settles (its batching), about
+  145–165 ms after the stroke's last point, so "final tiles within 100 ms" can only hold where
+  the native app sends.
+
+Scenarios (`phase6.py`; `PP_HZ` sets the headless display's rate; `name#tag` repeats one):
+
+| Scenario | What |
+|---|---|
+| `x-pair-native-hosts`, `x-pair-studio-hosts` | The two apps (the native app windowed) in one session, a scripted member watching the wire: pen to the other's screen (live stroke), stroke end to its tiles, both saved projects compared layer by layer and with the wire. |
+| `x-crowd` | Eight members (native host, current app, six scripted) drawing at once: native pen to screen and rate with and without them, others' edits to screen, no edit dropped, every layer in both saved copies, memory. |
+| `x-access` | Chat both ways; two ask for one layer, one is let in, the other's tiles count nowhere; taking access back mid-stroke; the native app asking for the current app's layer; a deny. |
+| `x-timeline-merge`, `x-first-strokes` | Timelines from several members (a layer's track from who may draw on it; a timeline right after its layer), the native app's first strokes on a blank frame. |
+| `x-join4k-*` | Joining the 4K, 20-layer project: native → native, current app → native, native → current app (after the host has shared its layers). |
+| `x-host-leaves-*`, `x-offline5`, `x-offline40`, `x-join-midstroke` | The host leaving (hand-over), a member stalled 5 s and 40 s, joining during a long stroke. |
+| `x-garbage-native`, `x-undo`, `x-groups`, `x-import4k`, `x-solo` | Edits no app may take (unknown kinds, AI-made content, broken), undo is your own, groups, a 4K picture arriving while drawing, a solo project's sockets. |
+| `studio-*` | The current app against itself (wire, pair, eight members, garbage, revoke): the reference. |
+
+`../../apps/native/tests/phase6_peer_qa.rs` is the native engine as a member without its window
+(`PP_NATIVE_PEER`: its test binary), for the scenarios that need many native members or access
+and chat actions; `../../crates/together/tests/phase6_oracle_qa.rs` reads the oracle's corpus
+through the port.
