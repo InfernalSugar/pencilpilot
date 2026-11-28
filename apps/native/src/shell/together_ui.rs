@@ -104,7 +104,7 @@ fn height(f: &mut Frame, s: &State) -> f32 {
             rows.push(16.0);
         } else if !x.rows.is_empty() {
             rows.push(18.0);
-            rows.push(layers_h(&x.rows));
+            rows.push(layers_h(&x.rows, f.theme().gap));
         }
         rows.push(lines_h(f, LIVE_NOTE, inner));
         rows.push(44.0);
@@ -127,17 +127,19 @@ fn members_h(n: usize) -> f32 {
 }
 
 /// One layer row's height: its line, and a line per ask and for who else draws.
-fn row_h(r: &Row) -> f32 {
-    36.0 + r.asks.len() as f32 * 36.0
-        + if r.mine && !r.writers.is_empty() {
-            36.0
-        } else {
-            0.0
-        }
+fn row_h(r: &Row, gap: f32) -> f32 {
+    // its line; per ask, what they ask and the answers; who else draws, and taking it back
+    let asks = r.asks.len() as f32 * (22.0 + 36.0 + 2.0 * gap);
+    let writers = if r.mine && !r.writers.is_empty() {
+        22.0 + 36.0 + 2.0 * gap
+    } else {
+        0.0
+    };
+    36.0 + gap + asks + writers
 }
 
-fn layers_h(rows: &[Row]) -> f32 {
-    rows.iter().map(row_h).sum::<f32>().min(220.0)
+fn layers_h(rows: &[Row], gap: f32) -> f32 {
+    rows.iter().map(|r| row_h(r, gap)).sum::<f32>().min(240.0)
 }
 
 /// Not in a session: the name, Host, Join with a code.
@@ -255,8 +257,9 @@ fn live(f: &mut Frame, s: &mut State, actions: &mut Vec<Action>) {
     } else if !s.together.rows.is_empty() {
         small(f, "Layers", t.ink, 18.0);
         let rows = s.together.rows.clone();
-        let content: f32 = rows.iter().map(row_h).sum();
-        let h = layers_h(&rows);
+        let gap = f.theme().gap;
+        let content: f32 = rows.iter().map(|r| row_h(r, gap)).sum();
+        let h = layers_h(&rows, gap);
         f.scroll_area("together/layers", h, content, |f| {
             for r in &rows {
                 layer_row(f, r, actions);
@@ -307,6 +310,7 @@ fn layer_row(f: &mut Frame, r: &Row, actions: &mut Vec<Action>) {
         line(f, &r.name, if r.mine { "yours" } else { &r.owner });
     });
     for (who, name, text, own, draw) in &r.asks {
+        f.row(22.0, |f| line(f, name, text));
         f.row(36.0, |f| {
             f.then_right();
             let k = format!("{} {who}", r.lid);
@@ -333,10 +337,12 @@ fn layer_row(f: &mut Frame, r: &Row, actions: &mut Vec<Action>) {
                     actions.push(Action::Other(format!("{}{k}", ops::LET)));
                 }
             }
-            line(f, name, text);
         });
     }
     if r.mine && !r.writers.is_empty() {
+        let names: Vec<&str> = r.writers.iter().map(|(_, n)| n.as_str()).collect();
+        let also = format!("Also drawing: {}", names.join(", "));
+        f.row(22.0, |f| line(f, &also, ""));
         f.row(36.0, |f| {
             f.then_right();
             for (who, name) in &r.writers {
@@ -351,7 +357,6 @@ fn layer_row(f: &mut Frame, r: &Row, actions: &mut Vec<Action>) {
                     actions.push(Action::Other(format!("{}{k}", ops::REVOKE)));
                 }
             }
-            line(f, "Also drawing", "");
         });
     }
 }
