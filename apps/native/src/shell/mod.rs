@@ -609,6 +609,10 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             pacer.shown(&p);
             if let Some(r) = recs.iter_mut().rev().find(|r| r.frame == p.frame) {
                 r.shown_ns = Some(p.at_ns);
+                // (the sound follows the frames as they reach the screen)
+                if let Some(e) = &mut eng {
+                    e.sound.shown(r.sheet_frame, p.at_ns);
+                }
             }
             presented += 1;
             first_shown.get_or_insert(started.elapsed().as_secs_f64() * 1e3);
@@ -860,8 +864,13 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
                 k.uploads
             )
         });
+        // what the sound played (the silent output's buffers, in checks)
+        let sound = eng.as_mut().map_or_else(
+            || "null".to_string(),
+            |e| e.sound.stats_json(s.sound.cut_start, s.fps),
+        );
         let json = format!(
-            "{{\"seconds\": {:.3}, \"gpuLayers\": {gpu_layers}, \"startupToFirstFrameMs\": {}, \"framesDrawn\": {drawn}, \"framesPresented\": {presented}, \"drawingLate\": {}, \"marginMs\": {:.2}, \"framesLate\": {}, \"coolDowns\": {},\n \"view\": {{\"zoom\": {}, \"angle\": {}, \"flip\": {}, \"pan\": [{}, {}], \"docSize\": [{}, {}]}},\n \"canvasRect\": [{}, {}, {}, {}],\n \"state\": {{\"workspace\": {:?}, \"tool\": \"{:?}\", \"activeLayer\": {}, \"frame\": {}, \"playing\": {}, \"colour\": {:?}, \"layers\": [{}]}},\n \"frames\": [\n  {}\n ]}}\n",
+            "{{\"seconds\": {:.3}, \"gpuLayers\": {gpu_layers}, \"startupToFirstFrameMs\": {}, \"framesDrawn\": {drawn}, \"framesPresented\": {presented}, \"drawingLate\": {}, \"marginMs\": {:.2}, \"framesLate\": {}, \"coolDowns\": {},\n \"view\": {{\"zoom\": {}, \"angle\": {}, \"flip\": {}, \"pan\": [{}, {}], \"docSize\": [{}, {}]}},\n \"canvasRect\": [{}, {}, {}, {}],\n \"state\": {{\"workspace\": {:?}, \"tool\": \"{:?}\", \"activeLayer\": {}, \"frame\": {}, \"playing\": {}, \"colour\": {:?}, \"layers\": [{}]}},\n \"sound\": {},\n \"frames\": [\n  {}\n ]}}\n",
             started.elapsed().as_secs_f64(),
             first_shown.map_or("null".into(), |v| format!("{v:.1}")),
             pacer.drawing_late(),
@@ -886,6 +895,7 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             s.playing,
             s.colour,
             layers.join(", "),
+            sound,
             frames.join(",\n  ")
         );
         std::fs::write(path, json)?;

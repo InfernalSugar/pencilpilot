@@ -4,7 +4,9 @@
 //! - this file: what the dialog asks for, the frames to write (the plan), and feeding the
 //!   export from the window's painter;
 //! - [`worker`]: the export itself, off the window thread: a painter of its own renders
-//!   each frame, another thread writes them (`crates/export`: FFmpeg, GIF, PNG).
+//!   each frame, another thread writes them (`crates/export`: FFmpeg, GIF, PNG); a video
+//!   gets the scene's sound under the same frames (`engine/sound`);
+//! - [`psd`]: the frame showing as a Photoshop file, with its layers.
 //!
 //! The window's painter stays on the window thread and is never locked: each drawing an
 //! export needs is copied out of it (a memory copy of its tiles,
@@ -13,6 +15,7 @@
 //! shows it. So the export holds only the drawings in use around the frame it's on, and the
 //! window pays a copy per drawing, spread over its ticks.
 
+mod psd;
 mod resize;
 #[cfg(test)]
 mod tests;
@@ -42,7 +45,13 @@ pub mod ops {
 }
 
 /// The formats offered, in the dialog's order.
-pub const FORMATS: [Format; 4] = [Format::Mp4, Format::Webm, Format::Gif, Format::Png];
+pub const FORMATS: [Format; 5] = [
+    Format::Mp4,
+    Format::Webm,
+    Format::Gif,
+    Format::Png,
+    Format::Psd,
+];
 
 /// The sizes offered: the document's, half of it, or a height (the width follows the
 /// document's shape).
@@ -148,6 +157,7 @@ pub fn format_name(f: Format) -> &'static str {
         Format::Png => "PNG",
         Format::Apng => "APNG",
         Format::Prores => "ProRes",
+        Format::Psd => "PSD",
     }
 }
 
@@ -284,6 +294,8 @@ pub struct Exporter {
     run: Option<Run>,
     /// the last export's outcome and measurements (for checks)
     pub last: Option<worker::Outcome>,
+    /// a Photoshop file being written (its outcome comes once)
+    psd: Option<mpsc::Receiver<Result<PathBuf, String>>>,
     /// the window's time spent copying drawings for the export: the longest tick, in all
     pub feed_max: Duration,
     pub feed_total: Duration,
@@ -435,7 +447,20 @@ fn show_in_folder(p: &std::path::Path) {
 }
 
 /// Starts writing to `path` what the dialog asks for.
-fn start(e: &mut Engine, s: &mut State, path: PathBuf) {
+pub(crate) fn start(e: &mut Engine, s: &mut State, path: PathBuf) {
+    if s.export.format == Format::Psd {
+        let mut path = path;
+        if path
+            .extension()
+            .is_none_or(|x| !x.eq_ignore_ascii_case("psd"))
+        {
+            path.set_extension("psd");
+        }
+        e.exporter.psd = Some(psd::start(e, path));
+        s.export.status = Status::Running { done: 0, total: 1 };
+        s.export_progress = Some((0, 1));
+        return;
+    }
     let x = &s.export;
     let (first, last) = range(s, x.loop_only);
     let plan = Plan::new(s, first, last);
@@ -465,6 +490,10 @@ fn start(e: &mut Engine, s: &mut State, path: PathBuf) {
         runs: runs.clone(),
         // (x264 with frame threads takes 1.4 GB at 1080p, 2 GB at 4K; sliced: 0.45, 1.2)
         lean: true,
+        // a video: the sound of the same frames
+        sound: is_video(x.format)
+            .then(|| crate::shell::engine::sound::for_export(e, s, first, last))
+            .flatten(),
     };
     let total = job.total;
     let (tx, shared, done) = worker::spawn(job);
@@ -702,6 +731,16 @@ fn tick_(e: &mut Engine, s: &mut State) -> bool {
             None => s.export.status = Status::Idle,
         }
     }
+    if let Some(rx) = &e.exporter.psd
+        && let Ok(r) = rx.try_recv()
+    {
+        e.exporter.psd = None;
+        s.export.status = match r {
+            Ok(p) => Status::Done(p),
+            Err(m) => Status::Failed(m),
+        };
+        s.export_progress = None;
+    }
     feed(e);
     if let Some(r) = &e.exporter.run {
         let done = r.shared.written.load(Ordering::Relaxed);
@@ -734,5 +773,6 @@ fn tick_(e: &mut Engine, s: &mut State) -> bool {
 /// When [`tick`] next has something to do.
 pub fn next_tick_at(e: &Engine, _s: &State) -> Option<Instant> {
     let x = &e.exporter;
-    (x.looking.is_some() || x.asked.is_some() || x.run.is_some()).then(|| Instant::now() + POLL)
+    (x.looking.is_some() || x.asked.is_some() || x.run.is_some() || x.psd.is_some())
+        .then(|| Instant::now() + POLL)
 }

@@ -169,6 +169,8 @@ pub struct State {
     pub export_progress: Option<(u32, u32)>,
     /// the cut's exposure sheet (`shell/engine/frames.rs`)
     pub sheet: crate::shell::engine::frames::Sheet,
+    /// the scene's sound: its clips on the timeline (`shell/engine/sound`)
+    pub sound: crate::shell::engine::sound::SoundUi,
     /// each shell piece's own state (each defined in its piece's file)
     pub header: crate::shell::header::HeaderState,
     pub tools: crate::shell::tools::ToolsState,
@@ -284,6 +286,7 @@ impl State {
             doc_id: 0,
             quit_now: false,
             sheet: crate::shell::engine::frames::Sheet::demo(),
+            sound: crate::shell::engine::sound::SoundUi::demo(),
             header: Default::default(),
             tools: Default::default(),
             panel: Default::default(),

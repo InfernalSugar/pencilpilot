@@ -1,0 +1,13 @@
+[package]
+name = "pencilpilot-sound"
+description = "A project's sounds: decoded once, waveforms, played in step with the picture, mixed for export"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[dependencies]
+symphonia = { version = "0.6", default-features = false, features = ["adpcm", "flac", "mkv", "ogg", "pcm", "vorbis", "wav", "mp3", "aac", "isomp4", "aiff", "caf", "alac"] }
+cpal = "0.18"
+rtrb = "0.4"
+rayon = "1"

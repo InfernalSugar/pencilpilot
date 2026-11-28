@@ -52,6 +52,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let check = a.iter().any(|x| x == "--quit-after" || x == "--stats");
     if !check {
         shell::dialog::allow_system_windows();
+        // (and the system's sound output: a check plays to a silent one)
+        shell::engine::sound::allow_sound();
     }
     shell::run_window(shell::RunOptions {
         quit_after: val("--quit-after").and_then(|v| v.parse::<f64>().ok()),
