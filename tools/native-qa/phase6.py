@@ -732,6 +732,78 @@ return true;""", code)
         self.mutter.stop()
 
 
+class NativePeer:
+    """The native app's engine as a member, without its window (apps/native/tests/
+    phase6_peer_qa.rs, `PP_NATIVE_PEER`: its test binary), driven by appending commands to a
+    file; answers read from its log."""
+
+    def __init__(self, binary, out, tag):
+        self.home = os.path.join(out, f"npeer-{tag}")
+        shutil.rmtree(self.home, ignore_errors=True)
+        os.makedirs(self.home)
+        self.cmds = os.path.join(self.home, "cmds.jsonl")
+        self.log = os.path.join(self.home, "log.jsonl")
+        open(self.cmds, "w").close()
+        e = {k: v for k, v in os.environ.items() if k not in ("DISPLAY", "WAYLAND_DISPLAY")}
+        e.update(NOWHERE)
+        e.update({"PP_QA_PEER_CMDS": self.cmds, "PP_QA_PEER_LOG": self.log,
+                  "XDG_CONFIG_HOME": os.path.join(self.home, "config"),
+                  "XDG_STATE_HOME": os.path.join(self.home, "state"),
+                  "XDG_DATA_HOME": os.path.join(self.home, "data"),
+                  "PENCILPILOT_SHARE_DIR": os.path.join(self.home, "share")})
+        self.p = subprocess.Popen([binary, "--include-ignored", "--exact", "native_peer", "--nocapture"],
+                                  env=e, stdout=open(os.path.join(self.home, "stdout.log"), "w"),
+                                  stderr=subprocess.STDOUT)
+        self.pid = self.p.pid
+        self.n = 0
+
+    def answers(self):
+        out = []
+        try:
+            for line in open(self.log):
+                try:
+                    out.append(json.loads(line))
+                except ValueError:
+                    pass
+        except OSError:
+            pass
+        return out
+
+    def do(self, secs=60, **c):
+        """A command and its answer."""
+        have = len(self.answers())
+        with open(self.cmds, "a") as f:
+            f.write(json.dumps(c) + "\n")
+        t = time.monotonic()
+        while time.monotonic() - t < secs:
+            a = self.answers()
+            if len(a) > have:
+                return a[have]
+            if self.p.poll() is not None:
+                raise RuntimeError(f"native peer gone ({self.p.returncode}): {open(os.path.join(self.home, 'stdout.log')).read()[-800:]}")
+            time.sleep(0.01)
+        raise TimeoutError(f"native peer: {c}")
+
+    def state(self):
+        return self.do(cmd="state")["state"]
+
+    def until(self, pred, secs=30):
+        t = time.monotonic()
+        while time.monotonic() - t < secs:
+            st = self.state()
+            if pred(st):
+                return st
+            time.sleep(0.05)
+        return None
+
+    def quit(self):
+        try:
+            self.do(secs=10, cmd="quit")
+            self.p.wait(10)
+        except Exception:
+            kill_tree(self.pid)
+
+
 # ------------------------------------------------------------------------------------------
 # qa_peer: a scripted member
 
