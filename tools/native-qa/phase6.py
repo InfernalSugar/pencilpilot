@@ -2225,19 +2225,22 @@ def tiles_of(path, name):
 
 def scenario_x_undo(out):
     """Undo is your own: the native app and the current app each draw on their own layer;
-    each undoes; only the undoer's stroke goes, in both apps."""
+    each undoes; only the undoer's stroke goes, in both apps. (The native app hosts the
+    small project, whose layer already has drawings: its strokes don't start new ones, which
+    `x-first-strokes` covers.)"""
     projects = env_bin("PP_PROJECTS")
     res = {"load": load()}
     a = NativePeer(np_bin(), out, "undo")
     s = None
     try:
-        a.do(cmd="open", path=os.path.join(projects, "empty.ppstudio"))
+        a.do(cmd="open", path=os.path.join(projects, "tiny.ppstudio"))
         invite = a.do(cmd="host", name="Nat")["state"]["info"]["invite"]
-        s = Studio(env_bin("PP_STUDIO"), out, "undo", project=os.path.join(projects, "tiny.ppstudio"), name="Stu")
+        s = Studio(env_bin("PP_STUDIO"), out, "undo", project=os.path.join(projects, "empty.ppstudio"), name="Stu")
         s.open()
         s.join(invite)
         time.sleep(2.0)
         a.do(cmd="stroke", y=300)
+        time.sleep(0.5)
         a.do(cmd="stroke", y=420)
         s.pen([wave(0, y0=0.6), wave(1, y0=0.75)])
         time.sleep(2.5)
@@ -2255,13 +2258,13 @@ def scenario_x_undo(out):
         a.do(cmd="save", path=p3)
         s3 = s.save()
         rows = lambda t: sorted(set(k[1] for k in t))
-        res["native"] = {"before": {"nat": rows(tiles_of(p1, "Layer 1")), "stu": rows(tiles_of(p1, "Stu’s layer"))},
-                         "afterNativeUndo": {"nat": rows(tiles_of(p2, "Layer 1")), "stu": rows(tiles_of(p2, "Stu’s layer"))},
-                         "afterStudioUndo": {"nat": rows(tiles_of(p3, "Layer 1")), "stu": rows(tiles_of(p3, "Stu’s layer"))}}
-        res["studio"] = {"before": {"nat": rows(tiles_of(s1, "Layer 1")), "stu": rows(tiles_of(s1, "Stu’s layer"))},
-                         "afterNativeUndo": {"nat": rows(tiles_of(s2, "Layer 1")), "stu": rows(tiles_of(s2, "Stu’s layer"))},
-                         "afterStudioUndo": {"nat": rows(tiles_of(s3, "Layer 1")), "stu": rows(tiles_of(s3, "Stu’s layer"))}}
-        res["sameAfterEach"] = [compare_projects(x, y, ["Layer 1", "Stu’s layer"])["samePremul1"]
+        res["native"] = {"before": {"nat": rows(tiles_of(p1, "Ink")), "stu": rows(tiles_of(p1, "Stu’s layer"))},
+                         "afterNativeUndo": {"nat": rows(tiles_of(p2, "Ink")), "stu": rows(tiles_of(p2, "Stu’s layer"))},
+                         "afterStudioUndo": {"nat": rows(tiles_of(p3, "Ink")), "stu": rows(tiles_of(p3, "Stu’s layer"))}}
+        res["studio"] = {"before": {"nat": rows(tiles_of(s1, "Ink")), "stu": rows(tiles_of(s1, "Stu’s layer"))},
+                         "afterNativeUndo": {"nat": rows(tiles_of(s2, "Ink")), "stu": rows(tiles_of(s2, "Stu’s layer"))},
+                         "afterStudioUndo": {"nat": rows(tiles_of(s3, "Ink")), "stu": rows(tiles_of(s3, "Stu’s layer"))}}
+        res["sameAfterEach"] = [compare_projects(x, y, ["Ink", "Stu’s layer"])["samePremul1"]
                                 for x, y in ((p1, s1), (p2, s2), (p3, s3))]
         n, st = res["native"], res["studio"]
         res["pass"] = (all(res["sameAfterEach"]) and n["afterNativeUndo"]["stu"] == n["before"]["stu"]
