@@ -1110,10 +1110,90 @@ def scenario_studio_crowd(out, members=8, strokes=30, rate=2.0):
     return res
 
 
+def oracle_corpus(out, n=600, seed=11):
+    """Edits from together_oracle.mjs's generator (well made and broken, unknown kinds and
+    AI-made content among them)."""
+    path = os.path.join(out, f"corpus-{n}-{seed}.jsonl")
+    if not os.path.exists(path):
+        with open(path, "w") as f:
+            subprocess.run(["node", os.path.join(HERE, "together_oracle.mjs"), "gen", str(n), str(seed)],
+                           stdout=f, check=True)
+    return [json.loads(l) for l in open(path)]
+
+
+GARBAGE = [
+    {"k": "ai", "prompt": "a cat", "image": "z:AAAA"},
+    {"k": "generate", "model": "qwen-image"},
+    {"k": "ai_image", "set": [], "clear": []},
+    {"k": "v2-layer", "name": "from a newer app"},
+    {"k": "tiles", "lid": "zz", "did": "zz", "set": [[1, 1, "z:%%%"]], "clear": []},
+    {"k": "tiles", "set": "x"},
+    {"k": "layer", "lid": "not-an-id", "name": "x"},
+    "just text", [1, 2, 3], None, 42, {"k": 5},
+]
+
+
+def garbage_into(app_kind, a, p, host_id, own_lid=None):
+    """qa_peer (a member) sends edits no app may take (unknown kinds, AI-made content, broken
+    ones, others' layers), then one good one: the app must still be in the session, have
+    taken nothing of the first and the good one."""
+    bodies = list(GARBAGE)
+    # the generator's broken and unknown ones (layer ids of other members: refused by rule)
+    bodies += [c["body"] for c in oracle_corpus(a.out)][:400]
+    # a member's live stroke with nonsense in it
+    for live in ({"type": "begin", "k": 1, "style": {"brushId": "x" * 500}}, {"type": "points", "k": 1, "pts": ["a", None, 1e308]},
+                 {"type": "points", "k": 99, "pts": [1, 2, 3]}, {"type": "end", "k": "x"}):
+        p.presence({"live": live})
+    p.cmd(cmd="edits", bodies=bodies, gap_ms=2)
+    time.sleep(3.0)
+    # then a good layer with tiles on it
+    lid = f"{p.id[:12]}:500"
+    p.edit({"k": "layer", "lid": lid, "name": "After garbage"})
+    did = f"{p.id[:12]}:501"
+    p.edit(peer_timeline(lid, did))
+    t = stroke_tiles(5)
+    p.edit({"k": "tiles", "lid": lid, "did": did, "set": [[x, y, encode_tile(px)] for x, y, px in t], "clear": []})
+    time.sleep(2.0)
+    return lid, t
+
+
+def scenario_studio_garbage(out):
+    """The current app (host) gets edits no app may take from a member: it stays in the
+    session and takes the good edit after them. (The reference for the native app.)"""
+    res = {"load": load()}
+    s = Studio(env_bin("PP_STUDIO"), out, "garbage", project=os.path.join(env_bin("PP_PROJECTS"), "empty.ppstudio"))
+    p = None
+    try:
+        s.open()
+        info = s.host()
+        p = Peer(env_bin("PP_PEER"), out, "garbage", invite=info["invite"], name="Mallory")
+        time.sleep(0.8)
+        lid, t = garbage_into("studio", s, p, info["me"]["id"])
+        st = s.invoke("share_status")
+        res["stillInSession"] = bool(st) and len(st["members"]) == 2
+        pp, m = project_pixels(s.save())
+        res["layers"] = [l["name"] for l in m["layers"]]
+        have = (pp.get("After garbage") or [[None]])[-1]
+        want = {(x, y): px for x, y, px in t}
+        c = compare_tiles(want, (have[0] if have else None) or {})
+        res["goodEditTaken"] = c["samePremul1"]
+        # (the current app saves others' live-stroke preview layer, "… (drawing now)", into
+        # the file: noted, not counted here)
+        res["livePreviewSaved"] = [n for n in res["layers"] if n.endswith("(drawing now)")]
+        real = [n for n in res["layers"] if not n.endswith("(drawing now)")]
+        res["pass"] = res["stillInSession"] and res["goodEditTaken"] and len(real) == 2
+    finally:
+        if p:
+            p.leave()
+        s.quit()
+    return res
+
+
 SCENARIOS = {
     "studio-wire": scenario_studio_wire,
     "studio-pair": scenario_studio_pair,
     "studio-crowd": scenario_studio_crowd,
+    "studio-garbage": scenario_studio_garbage,
 }
 
 
