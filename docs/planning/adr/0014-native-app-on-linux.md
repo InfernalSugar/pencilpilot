@@ -461,6 +461,30 @@ for a mixed session:** the native app never destroys or alters what it doesn't s
 - **Identity:** the current app's key file (`$XDG_DATA_HOME/app.pencilpilot.studio/share/key`).
   **Checks never use a relay**; `--host` / `--join <code>` / `--name` start a session without the
   interface, for checks only; `PENCILPILOT_WIRE_LOG` writes what this app sends (no pixels).
+- **Measured** (release, native ↔ native on loopback, each on a headless mutter and D-Bus of
+  its own; 3 runs, load average 2.4–3.6 except the 8-member runs, whose 16 processes load the
+  machine themselves to 4–11):
+
+  | What | Budget | 165 Hz | 60 Hz |
+  |---|---|---|---|
+  | Pen to the other's screen (live), p99 | 50 ms | 6.2–6.6 ms | 13.3–13.5 ms (one run 29.7) |
+  | Stroke's end to its tiles shown there, worst | 100 ms | 15–21 ms | 30 ms |
+  | Pen to screen while the other draws, p99 | 10.06 / 20.67 ms | 8.3–9.5 ms | 18.5–18.6 ms |
+  | Missed frames while both draw | 0 | 0–3 | 0–1 |
+  | Joining 4K × 20 layers: connected → drawable | 3 s | 1.8–3.7 s (launch → drawable 2.5–4.5 s) | |
+  | — memory, peak PSS (joiner / host) | 600 MiB | **699–710 / 645–669 MiB: over** | |
+  | 8 members drawing at once | none lost | every edit; all 8 pictures the same | |
+  | — pen to screen meanwhile, p99 | 10.06 ms | **10.2–21.3 ms: over** (0–10 missed) | |
+
+  With the current app (QA's harness, run here): first strokes, timeline merges, the whole
+  timeline both ways (but the current app's copy of a file a native host shares, below),
+  offline 5 s and 40 s, big erases pass.
+- **Open:** memory and join time on big projects: `Together` keeps every drawing of the session
+  as RGBA (232 MiB for 4K × 20 layers) beside the app's own copies, and decodes them one by one
+  on joining (most of the 1.8 s); a compressed cache in `crates/together` would bring both
+  apps' copies down. The current app joining a native host that opened a file with several
+  scenes saves no pixels for that file's layers, though they're on the wire (native joiners
+  get them). The pen while 8 draw at 165 Hz.
 - **Phase 7 parity (not yet):** rejoining a session from the project file (the current app keeps
   it in `extra.share`); drawing on line layers and editing groups natively; layer styles drawn;
   adjustment layers shown; the invite as a QR code.
