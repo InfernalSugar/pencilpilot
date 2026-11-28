@@ -20,6 +20,11 @@ use crate::shell::engine::frames::store::{FileTile, Job};
 /// A tile as kept exactly (straight RGBA8, raw deflate).
 pub type Exact = Arc<FileTile>;
 
+/// A tile as it came over the wire (raw deflate), and where.
+type Wire = ((i32, i32), Arc<[u8]>);
+/// A tile from the wire decoded for the painter, and as it came (None: nothing in it).
+type Decoded = ((i32, i32), Option<(brush::DecodedTile, Exact)>);
+
 /// What a remote edit's tiles were, for `--stats` (who, when it came, the sender's time).
 #[derive(Debug, Clone, Default)]
 pub struct Stamp {
@@ -100,6 +105,8 @@ pub struct RemotePort {
     ask: Box<dyn Fn(Ask) -> bool + Send>,
     /// each drawing's tiles as last put in or read (a hash each)
     hashes: HashMap<u32, HashMap<(i32, i32), u64>>,
+    /// …and as last put in as they came over the wire (a hash of their bytes)
+    zhashes: HashMap<u32, HashMap<(i32, i32), u64>>,
     /// sound files the session has (from others)
     sounds: HashMap<String, (Arc<Vec<u8>>, String)>,
     /// the remote edit being put in (for `--stats`)
@@ -118,6 +125,7 @@ impl RemotePort {
         RemotePort {
             ask: Box::new(ask),
             hashes: HashMap::new(),
+            zhashes: HashMap::new(),
             sounds: HashMap::new(),
             stamp: None,
             gone: std::cell::Cell::new(false),
@@ -266,8 +274,68 @@ impl CanvasPort for RemotePort {
         });
         if ok {
             self.hashes.insert(drawing, now);
+            self.zhashes.remove(&drawing);
         }
         ok
+    }
+    fn put_deflated(&mut self, drawing: u32, tiles: &[((i32, i32), Arc<[u8]>)]) -> Option<bool> {
+        use rayon::prelude::*;
+        // (as they came over the wire: kept as they are, inflated and decoded here only
+        // where they changed; known by a hash of their bytes as they came)
+        let was = self.zhashes.get(&drawing).cloned().unwrap_or_default();
+        let now: HashMap<(i32, i32), u64> = tiles.par_iter().map(|(k, b)| (*k, hash(b))).collect();
+        let changed: Vec<&Wire> = tiles
+            .iter()
+            .filter(|(k, _)| was.get(k) != now.get(k))
+            .collect();
+        let decoded: Vec<Decoded> = changed
+            .par_iter()
+            .map(|(k, b)| {
+                let px = miniz_oxide::inflate::decompress_to_vec_with_limit(
+                    b,
+                    pencilpilot_together::TILE_BYTES,
+                )
+                .ok()
+                .filter(|p| p.len() == pencilpilot_together::TILE_BYTES);
+                let t = px.and_then(|p| brush::decode_tile(&p)).map(|t| {
+                    (
+                        t,
+                        Arc::new(FileTile {
+                            deflated: true,
+                            bytes: b.to_vec().into_boxed_slice(),
+                        }),
+                    )
+                });
+                (*k, t)
+            })
+            .collect();
+        let mut clear: Vec<(i32, i32)> = was
+            .keys()
+            .filter(|k| !now.contains_key(k))
+            .copied()
+            .collect();
+        let mut set = Vec::with_capacity(decoded.len());
+        for (k, t) in decoded {
+            match t {
+                Some((t, x)) => set.push((k, t, x)),
+                None => clear.push(k),
+            }
+        }
+        if !set.is_empty() || !clear.is_empty() {
+            let stamp = self.stamp.clone();
+            if !self.bool(Req::Put {
+                d: drawing,
+                set,
+                clear,
+                stamp,
+            }) {
+                return Some(false);
+            }
+        }
+        self.zhashes.insert(drawing, now);
+        // (the pixels' hashes no longer say what's there)
+        self.hashes.remove(&drawing);
+        Some(true)
     }
     fn select(&mut self, id: u32) {
         self.call(Req::Select(id));
@@ -334,6 +402,7 @@ impl RemotePort {
     /// Joining: a new, empty project in place of the one open (of this size).
     pub fn new_doc(&mut self, size: Option<(u32, u32)>) {
         self.hashes.clear();
+        self.zhashes.clear();
         self.call(Req::NewDoc(size));
     }
 

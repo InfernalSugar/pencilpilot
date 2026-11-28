@@ -49,6 +49,14 @@
 //! - While [`Together::waiting`], call [`Together::retry`] every tick or so (the studio
 //!   tries every 50 ms). Tiles, groups and layer moves that came while the canvas was busy
 //!   (a stroke here, or someone's live stroke) go in then, even if nothing changes here.
+//! - The synced tiles are kept small ([`cache`]): each tile is its hash plus its deflated
+//!   bytes where it has them, never its pixels. A tile this app never sent (a host's
+//!   project as it was when hosting started) is read back from [`CanvasPort::packed`] when a
+//!   joiner needs it. [`Together::cache_bytes`] says what they take (`Together::cache` is no
+//!   longer public).
+//! - An app that keeps tiles compressed, or decodes them on threads of its own, can take a
+//!   drawing that came over the wire as it came: [`CanvasPort::put_deflated`] (each tile's
+//!   raw deflate). Without it, tiles come inflated through [`CanvasPort::put`].
 //! - Chat bodies (`{k: 'chat'}`) arrive as direct messages too. Check
 //!   [`chat::chat_text`] first, and hand the rest to [`Together::on_direct`].
 //!
@@ -63,6 +71,7 @@
 //! - Call [`Together::local_changed`] about 40 ms after the canvas settles, as the studio
 //!   now does: a stroke's tiles then reach the others within 100 ms of its end.
 
+pub mod cache;
 pub mod chat;
 pub mod edit;
 pub mod js;

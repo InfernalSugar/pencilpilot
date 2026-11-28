@@ -13,6 +13,7 @@ use std::sync::Arc;
 use indexmap::{IndexMap, IndexSet};
 use serde_json::Value;
 
+use crate::cache::{Changes, Tile, Tiles, deflate};
 use crate::edit::{
     Edit, Look, SOUND_CHUNK, SOUND_MAX, TILES_PER_EDIT, TileClear, TileSet, Why, parse_edit,
     same_look,
@@ -21,7 +22,7 @@ use crate::js::{self, from_base64, is_lid, to_base64};
 use crate::lines::{LineStroke, apply_line_edit, line_edits, read_line_edit, with_base};
 use crate::saved::{SavedMember, SavedShare};
 use crate::shared::{Shared, made_by};
-use crate::tiles::{TileMap, decode_tile, diff_tiles, encode_tile, pack, unpack};
+use crate::tiles::{TileKey, TileMap, pack, unpack};
 use crate::timeline::{Timeline, from_shared, to_shared};
 
 /// A drawing's line strokes, as the app keeps them (shared, so an unchanged list is
@@ -95,6 +96,12 @@ pub trait CanvasPort {
     fn packed(&mut self, drawing: u32) -> Vec<u8>;
     /// Put a drawing's tiles (packed).
     fn put(&mut self, drawing: u32, packed: &[u8]) -> bool;
+    /// Put a drawing's tiles as they came over the wire (each tile's raw deflate, as "z:"
+    /// carries it), for an app that keeps tiles compressed or decodes them on threads of its
+    /// own. `None`: not taken this way (the default): they come through [`CanvasPort::put`].
+    fn put_deflated(&mut self, _drawing: u32, _tiles: &[(TileKey, Arc<[u8]>)]) -> Option<bool> {
+        None
+    }
     fn select(&mut self, id: u32);
     /// Remove a layer (clears undo).
     fn remove_layer(&mut self, id: u32) -> bool;
@@ -260,6 +267,24 @@ pub fn tile_parts<'a, S, C>(set: &'a [S], clear: &'a [C]) -> Vec<(&'a [S], &'a [
         .collect()
 }
 
+/// Each tile to send, deflated (the wire's bytes).
+fn wire_of(d: &Changes) -> Vec<Arc<[u8]>> {
+    d.set.iter().map(|(_, _, px)| deflate(px).into()).collect()
+}
+
+/// "z:" and the bytes in base64.
+fn wire_text(z: &[u8]) -> String {
+    format!("z:{}", to_base64(z))
+}
+
+fn tile_sets(d: &Changes, wire: &[Arc<[u8]>]) -> Vec<TileSet> {
+    d.set
+        .iter()
+        .zip(wire)
+        .map(|((x, y, _), z)| (*x, *y, wire_text(z)))
+        .collect()
+}
+
 fn key(lid: &str, did: &str) -> String {
     format!("{lid}|{did}")
 }
@@ -302,7 +327,7 @@ pub struct Together {
     /// shared group → the canvas's group here
     pub gids: IndexMap<String, u32>,
     /// each shared drawing's tiles as last synced ("lid|did" → tiles; "lid|mask": its mask)
-    pub cache: IndexMap<String, TileMap>,
+    cache: IndexMap<String, Tiles>,
     dids: IndexMap<String, u32>,
     did_of: HashMap<u32, String>,
     pending: IndexSet<String>,
@@ -331,6 +356,8 @@ pub struct Together {
     notices: Vec<Notice>,
     /// joiners who asked for the project before this app had it: answered once it has
     askers: Vec<String>,
+    /// edits sent from here that the session hasn't handed back yet
+    unseen: usize,
 }
 
 impl Together {
@@ -375,7 +402,14 @@ impl Together {
             out: Vec::new(),
             notices: Vec::new(),
             askers: Vec::new(),
+            unseen: 0,
         }
+    }
+
+    /// Bytes the synced tiles take here (each tile's hash, and its deflated bytes where it
+    /// has them).
+    pub fn cache_bytes(&self) -> usize {
+        self.cache.values().map(Tiles::bytes).sum()
     }
 
     /// Whether this app has the project (hosting, or joined and caught up).
@@ -394,7 +428,20 @@ impl Together {
     }
 
     fn edit(&mut self, e: Value) {
+        self.unseen += 1;
         self.out.push(Out::Edit(e));
+    }
+
+    /// Answer who asked for the project, once this app has it and has its own edits back
+    /// (a snapshot taken before would leave out the layers on their way, and the tiles
+    /// that go only with it).
+    fn answer(&mut self, c: &mut dyn CanvasPort) {
+        if !self.synced || self.unseen > 0 {
+            return;
+        }
+        for to in std::mem::take(&mut self.askers) {
+            self.send_snapshot(c, &to);
+        }
     }
 
     fn direct(&mut self, to: &str, body: Value) {
@@ -539,12 +586,9 @@ impl Together {
             for d in unique(std::iter::once(first).chain(c.drawings_of_layer(id))) {
                 let tiles = unpack(&c.packed(d));
                 let did = self.did_of(d);
-                let set: Vec<(i32, i32, Vec<u8>)> =
-                    tiles.iter().map(|(k, px)| (k.0, k.1, px.clone())).collect();
-                self.cache.insert(key(&lid, &did), tiles);
-                if !set.is_empty() {
-                    self.send_tiles(&lid, &did, &set, &[]);
-                }
+                // (kept, not sent: no one is in the session yet, and whoever joins gets
+                // them with the project)
+                self.cache.insert(key(&lid, &did), Tiles::local(&tiles));
                 self.send_lines(c, &lid, id, d, true);
             }
         }
@@ -557,9 +601,7 @@ impl Together {
     /// This app has the project: joiners who asked meanwhile get it.
     fn now_synced(&mut self, c: &mut dyn CanvasPort) {
         self.synced = true;
-        for to in std::mem::take(&mut self.askers) {
-            self.send_snapshot(c, &to);
-        }
+        self.answer(c);
     }
 
     /// This app's groups, shared (hosting): each with its layers, then its settings.
@@ -665,7 +707,8 @@ impl Together {
             let first = c.drawing_of(id);
             for d in unique(std::iter::once(first).chain(c.drawings_of_layer(id))) {
                 let did = self.did_of(d);
-                self.cache.insert(key(&lid, &did), unpack(&c.packed(d)));
+                self.cache
+                    .insert(key(&lid, &did), Tiles::local(&unpack(&c.packed(d))));
                 // editable strokes too, so joiners get them (a line layer's; a plain
                 // layer's, with the pixels under them)
                 if c.has_lines() && (c.is_line_layer(id) || c.plain_strokes(d)) {
@@ -1242,6 +1285,16 @@ impl Together {
     /// A numbered edit from the session (this app's own come back too). Put them in in
     /// the order the session numbered them.
     pub fn on_edit(&mut self, c: &mut dyn CanvasPort, seq: u64, from: &str, body: &Value) {
+        if from == self.me {
+            self.unseen = self.unseen.saturating_sub(1);
+        }
+        self.take_edit(c, seq, from, body);
+        if !self.askers.is_empty() {
+            self.answer(c);
+        }
+    }
+
+    fn take_edit(&mut self, c: &mut dyn CanvasPort, seq: u64, from: &str, body: &Value) {
         if !self.synced {
             self.buffer.push((seq, from.into(), body.clone()));
             return;
@@ -1316,12 +1369,12 @@ impl Together {
                         self.cache.shift_remove(&k);
                     } else {
                         let t = self.cache.entry(k.clone()).or_default();
-                        for (x, y) in clear {
-                            t.shift_remove(&(x, y));
+                        for xy in clear {
+                            t.remove(&xy);
                         }
                         for (x, y, s) in set {
-                            if let Some(px) = decode_tile(&s) {
-                                t.insert((x, y), px);
+                            if let Some(tile) = Tile::wire(&s) {
+                                t.put((x, y), tile);
                             }
                         }
                     }
@@ -1572,11 +1625,10 @@ impl Together {
         match k {
             "snap.req" => {
                 // (asked before this app has the project: answered once it has)
-                if self.synced {
-                    self.send_snapshot(c, from)
-                } else if !self.askers.iter().any(|a| a == from) {
+                if !self.askers.iter().any(|a| a == from) {
                     self.askers.push(from.into());
                 }
+                self.answer(c);
             }
             "snap.begin" if !self.synced => {
                 let arr = |k: &str| body.get(k).and_then(Value::as_array).unwrap_or(&empty);
@@ -1628,8 +1680,8 @@ impl Together {
                     ) else {
                         continue;
                     };
-                    if let Some(px) = decode_tile(s) {
-                        t.insert((x as i32, y as i32), px);
+                    if let Some(tile) = Tile::wire(s) {
+                        t.put((x as i32, y as i32), tile);
                     }
                 }
                 if late {
@@ -1765,9 +1817,7 @@ impl Together {
             self.add_own_layer("", false);
         }
         self.changed();
-        for to in std::mem::take(&mut self.askers) {
-            self.send_snapshot(c, &to);
-        }
+        self.answer(c);
     }
 
     /// Whether something waits to go into the canvas (it was busy). While it does, call
@@ -1881,17 +1931,21 @@ impl Together {
             let on = !packed.is_empty();
             let next = if on { unpack(&packed) } else { TileMap::new() };
             let mk = key(&lid, "mask");
-            let d = diff_tiles(self.cache.get(&mk).unwrap_or(&TileMap::new()), &next);
+            let d = self.cache.entry(mk.clone()).or_default().changes(&next);
             if on == self.mask_on.get(&lid).copied().unwrap_or(false) && d.is_empty() {
+                if self.cache.get(&mk).is_some_and(Tiles::is_empty) && !on {
+                    self.cache.shift_remove(&mk);
+                }
                 continue;
             }
             self.mask_on.insert(lid.clone(), on);
+            let wire = wire_of(&d);
             if on {
-                self.cache.insert(mk, next);
+                self.cache.get_mut(&mk).unwrap().sent(&d, &wire);
             } else {
                 self.cache.shift_remove(&mk);
             }
-            self.send_mask(&lid, on, &d.set, &d.clear);
+            self.send_mask(&lid, on, &d, &wire);
         }
         // layer settings changed here (opacity, blend…) on layers this app may change
         let now: HashMap<u32, Option<Look>> =
@@ -1980,12 +2034,13 @@ impl Together {
             let did = self.did_of(d);
             let next = unpack(&c.packed(d));
             let k = key(&lid, &did);
-            let diff = diff_tiles(self.cache.get(&k).unwrap_or(&TileMap::new()), &next);
+            let diff = self.cache.entry(k.clone()).or_default().changes(&next);
             if diff.is_empty() {
                 continue;
             }
-            self.cache.insert(k, next);
-            self.send_tiles(&lid, &did, &diff.set, &diff.clear);
+            let wire = wire_of(&diff);
+            self.cache.get_mut(&k).unwrap().sent(&diff, &wire);
+            self.send_tiles(&lid, &did, &diff, &wire);
         }
         // line layers: their strokes, and a layer turned into pixels
         for (&d, &id) in &look {
@@ -2039,25 +2094,14 @@ impl Together {
         }
     }
 
-    fn encode_set(set: &[(i32, i32, Vec<u8>)]) -> Vec<TileSet> {
-        set.iter()
-            .map(|(x, y, px)| (*x, *y, encode_tile(px)))
-            .collect()
-    }
-
-    fn send_tiles(
-        &mut self,
-        lid: &str,
-        did: &str,
-        set: &[(i32, i32, Vec<u8>)],
-        clear: &[TileClear],
-    ) {
-        for (part, gone) in tile_parts(set, clear) {
+    fn send_tiles(&mut self, lid: &str, did: &str, d: &Changes, wire: &[Arc<[u8]>]) {
+        let set = tile_sets(d, wire);
+        for (part, gone) in tile_parts(&set, &d.clear) {
             self.edit(
                 Edit::Tiles {
                     lid: lid.into(),
                     did: did.into(),
-                    set: Self::encode_set(part),
+                    set: part.to_vec(),
                     clear: gone.to_vec(),
                 }
                 .to_json(),
@@ -2065,13 +2109,14 @@ impl Together {
         }
     }
 
-    fn send_mask(&mut self, lid: &str, on: bool, set: &[(i32, i32, Vec<u8>)], clear: &[TileClear]) {
-        for (part, gone) in tile_parts(set, clear) {
+    fn send_mask(&mut self, lid: &str, on: bool, d: &Changes, wire: &[Arc<[u8]>]) {
+        let set = tile_sets(d, wire);
+        for (part, gone) in tile_parts(&set, &d.clear) {
             self.edit(
                 Edit::Mask {
                     lid: lid.into(),
                     on,
-                    set: Self::encode_set(part),
+                    set: part.to_vec(),
                     clear: gone.to_vec(),
                 }
                 .to_json(),
@@ -2096,23 +2141,28 @@ impl Together {
         let tl = self.shared_timeline(c);
         self.share_sounds(c, &tl, Some(to));
         let mut msgs = Vec::new();
-        for (k, t) in &self.cache {
-            let (lid, did) = split_key(k);
-            if !self.shared.layers.contains_key(lid) {
-                continue;
-            }
-            let tiles: Vec<_> = t.iter().collect();
+        let keys: Vec<String> = self
+            .cache
+            .keys()
+            .filter(|k| self.shared.layers.contains_key(split_key(k).0))
+            .cloned()
+            .collect();
+        for k in keys {
+            let (lid, did) = split_key(&k);
+            // (each tile's bytes as they came or went; a tile never sent, from this app's canvas)
+            let mut t = std::mem::take(self.cache.get_mut(&k).unwrap());
+            let tiles = {
+                let mut here = || self.canvas_tiles(c, lid, did);
+                t.for_wire(&mut here)
+            };
+            *self.cache.get_mut(&k).unwrap() = t;
             let mut i = 0;
             while i < tiles.len().max(1) {
                 let set: Vec<Value> = tiles
                     [i.min(tiles.len())..(i + TILES_PER_EDIT).min(tiles.len())]
                     .iter()
-                    .map(|((x, y), px)| {
-                        Value::from(vec![
-                            Value::from(*x),
-                            Value::from(*y),
-                            encode_tile(px).into(),
-                        ])
+                    .map(|((x, y), z)| {
+                        Value::from(vec![Value::from(*x), Value::from(*y), wire_text(z).into()])
                     })
                     .collect();
                 msgs.push(js::object(vec![
@@ -2194,19 +2244,20 @@ impl Together {
         // drawing on it too: send this app's own changes first, so putting theirs in keeps them
         if self.ids.contains_key(lid) && self.shared.can_draw(lid, &self.me) {
             let next = unpack(&c.packed(d));
-            let diff = diff_tiles(self.cache.get(&k).unwrap_or(&TileMap::new()), &next);
+            let diff = self.cache.entry(k.clone()).or_default().changes(&next);
             if !diff.is_empty() {
-                self.cache.insert(k.clone(), next);
-                self.send_tiles(lid, did, &diff.set, &diff.clear);
+                let wire = wire_of(&diff);
+                self.cache.get_mut(&k).unwrap().sent(&diff, &wire);
+                self.send_tiles(lid, did, &diff, &wire);
             }
         }
         let t = self.cache.entry(k.clone()).or_default();
         for xy in clear {
-            t.shift_remove(xy);
+            t.remove(xy);
         }
         for (x, y, s) in set {
-            if let Some(px) = decode_tile(s) {
-                t.insert((*x, *y), px);
+            if let Some(tile) = Tile::wire(s) {
+                t.put((*x, *y), tile);
             }
         }
         self.put_key(c, &k);
@@ -2353,6 +2404,18 @@ impl Together {
         }
     }
 
+    /// This app's own copy of a shared drawing's tiles (a mask's: did "mask").
+    fn canvas_tiles(&mut self, c: &mut dyn CanvasPort, lid: &str, did: &str) -> TileMap {
+        if did == "mask" {
+            return self
+                .ids
+                .get(lid)
+                .map_or_else(TileMap::new, |id| unpack(&c.mask_packed(*id)));
+        }
+        let d = local_of(&mut self.dids, &mut self.did_of, c, did);
+        unpack(&c.packed(d))
+    }
+
     /// Put a shared drawing's synced tiles into the canvas ("lid|did").
     fn put_key(&mut self, c: &mut dyn CanvasPort, k: &str) {
         let (lid, did) = split_key(k);
@@ -2360,10 +2423,15 @@ impl Together {
             let Some(id) = self.ids.get(lid).copied() else {
                 return;
             };
-            let t = self.cache.get(k);
-            let on = self.mask_on.get(lid).copied().unwrap_or(t.is_some());
+            let on = self
+                .mask_on
+                .get(lid)
+                .copied()
+                .unwrap_or(self.cache.contains_key(k));
             let bytes = if on {
-                pack(t.unwrap_or(&TileMap::new()))
+                let t = self.cache.get(k).cloned().unwrap_or_default();
+                let mut here = || self.canvas_tiles(c, lid, did);
+                pack(&t.pixels(&mut here))
             } else {
                 Vec::new()
             };
@@ -2372,9 +2440,18 @@ impl Together {
             let Some(t) = self.cache.get(k) else {
                 return;
             };
-            let bytes = pack(t);
             let d = local_of(&mut self.dids, &mut self.did_of, c, did);
-            c.put(d, &bytes)
+            // (all as they came over the wire: the app may take them as they are)
+            let quick = t.all_deflated().and_then(|z| c.put_deflated(d, &z));
+            match quick {
+                Some(ok) => ok,
+                None => {
+                    let t = t.clone();
+                    let mut here = || self.canvas_tiles(c, lid, did);
+                    let bytes = pack(&t.pixels(&mut here));
+                    c.put(d, &bytes)
+                }
+            }
         };
         if ok {
             self.pending.shift_remove(k);

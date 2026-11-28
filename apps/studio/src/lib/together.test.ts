@@ -1560,6 +1560,9 @@ describe('drawing together: mixed sessions (fixes from the native app’s QA)', 
 		expect(bo.synced).toBe(false);
 		await hosting;
 		await session.settle();
+		// (the answer goes once the host's own edits are back: a moment later)
+		await new Promise((r) => setTimeout(r, 20));
+		await session.settle();
 		expect(bo.synced).toBe(true);
 		expect(bc.pixel(bc.byName('Sky').id, 0, 0)).toBe(50);
 		expect(bc.layers().map((l) => l.name)).toEqual(['Sky', 'Sea', 'Bo’s layer']);
@@ -1819,5 +1822,88 @@ describe('drawing together: a busy canvas', () => {
 		bc.busy = false;
 		await new Promise((r) => setTimeout(r, 120));
 		expect(bo.waiting).toBe(false);
+	});
+});
+
+describe('drawing together: a big project', () => {
+	it('a joiner handed the project’s messages as they come keeps every tile (the end waits for them)', async () => {
+		const hc = new FakeCanvas(['Sky']);
+		const sky = hc.byName('Sky').id;
+		for (let i = 0; i < 300; i++) hc.paint(sky, i % 20, Math.floor(i / 20), (i % 250) + 1);
+		const directs: unknown[] = [];
+		const edits: unknown[] = [];
+		const host = new Together(A, 'Ana', hc, {
+			edit: (e) => edits.push(e),
+			direct: (_to, b) => directs.push(structuredClone(b))
+		});
+		await host.startHost();
+		// (hosting sends the layers and the timeline; the tiles go with the project)
+		expect(edits.some((e) => (e as { k: string }).k === 'tiles')).toBe(false);
+		for (const [i, e] of edits.entries()) await host.onEdit(i + 1, A, e);
+		await host.onDirect(B, { k: 'snap.req' });
+		const bc = new FakeCanvas([]);
+		const bo = new Together(B, 'Bo', bc, { edit: () => {}, direct: () => {} });
+		bo.startJoin(A);
+		// as the page hands them in: each as it comes, none awaited
+		await Promise.all(directs.map((m) => bo.onDirect(A, m)));
+		expect(bo.synced).toBe(true);
+		const bs = bc.byName('Sky');
+		expect(bc.drawings.get(bs.drawing)?.size).toBe(300);
+		expect(bc.pixel(bs.id, 19, 14)).toBe((299 % 250) + 1);
+	});
+});
+
+describe('drawing together: a faster inflater', () => {
+	it('decodes tiles the same with one, junk left out as without it', async () => {
+		const { inflateRawSync } = await import('node:zlib');
+		const { useInflater } = await import('./together');
+		let calls = 0;
+		useInflater((zs) => {
+			calls++;
+			return zs.map((z) => {
+				try {
+					return new Uint8Array(inflateRawSync(z));
+				} catch {
+					return null;
+				}
+			});
+		});
+		try {
+			const session = new FakeSession();
+			const hc = new FakeCanvas(['Sky']);
+			const sky = hc.byName('Sky').id;
+			for (let i = 0; i < 60; i++) hc.paint(sky, i % 10, Math.floor(i / 10), i + 1);
+			const host = new Together(A, 'Ana', hc, session.net(A));
+			session.apps.set(A, host);
+			await host.startHost();
+			await session.settle();
+			const bc = new FakeCanvas([]);
+			const bo = new Together(B, 'Bo', bc, session.net(B));
+			session.apps.set(B, bo);
+			bo.startJoin(A);
+			await session.settle();
+			expect(calls).toBeGreaterThan(0);
+			expect(bc.drawings.get(bc.byName('Sky').drawing)?.size).toBe(60);
+			expect(bc.pixel(bc.byName('Sky').id, 9, 5)).toBe(60);
+			// junk: no tile, the one before stays
+			const lid = host.lidOf(sky)!;
+			const did = [...host.cache.keys()][0].split('|')[1];
+			await bo.onEdit(99, A, {
+				k: 'tiles',
+				lid,
+				did,
+				set: [
+					[9, 5, 'z:@@@'],
+					[8, 5, 'z:AAAA'],
+					[7, 5, 'r:' + Buffer.from(tile(3)).toString('base64')]
+				],
+				clear: []
+			});
+			expect(bc.pixel(bc.byName('Sky').id, 9, 5)).toBe(60);
+			expect(bc.pixel(bc.byName('Sky').id, 8, 5)).toBe(59);
+			expect(bc.pixel(bc.byName('Sky').id, 7, 5)).toBe(3);
+		} finally {
+			useInflater(null);
+		}
 	});
 });
