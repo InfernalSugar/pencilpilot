@@ -3663,7 +3663,9 @@ dependencies = [
  "base64 0.22.1",
  "flate2",
  "indexmap",
+ "pencilpilot-share",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

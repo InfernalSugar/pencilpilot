@@ -12,3 +12,8 @@ base64 = "0.22"
 indexmap = "2"
 # deflate-raw for tiles; zlib-rs makes the same bytes as the studio's (zlib-ng) at level 6
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+
+[dev-dependencies]
+# a real session between two apps on this computer (no relay: loopback only)
+pencilpilot-share = { path = "../share" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
