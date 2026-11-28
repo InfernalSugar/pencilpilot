@@ -830,6 +830,12 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             dirty = true;
         }
         if changed.is_none() && !new_canvas && !canvas_dirty && !resized {
+            // input that had nothing to show (the pointer moving over the canvas before a
+            // stroke) is done with: the next frame's input is what it shows (not counted
+            // from the hover before the press, nor making the pacer think it came late)
+            if drag == Drag::None {
+                (oldest_input, events) = (None, 0);
+            }
             continue;
         }
         canvas_dirty = false;

@@ -489,9 +489,25 @@ for a mixed session:** the native app never destroys or alters what it doesn't s
   the frames' lead while not playing (it was waking at once again and again, idle);
   taking over as host in a hand-over waits 5 s for the others to come over before calling the
   session lost.
-- **Open:** pen to screen at 60 Hz misses a refresh at some stroke starts (the frame is drawn
-  for the refresh after next: the frame callback came late; no work on the window's thread
-  over 0.5 ms around them), which is what puts the 60 Hz import's p99 at 33 ms. The current app joining a native host that opened a file with several
+- **Stroke starts** (what decided the 60 Hz pen numbers): the frame for a press was counted
+  from the pointer's hover before it (a move with nothing to show, which drew no frame; now
+  dropped), so a stroke's first frame read 33.5 ms. What's left is mutter's: after a pause
+  it shows the first frame 8.4–8.6 ms after it's handed over (every time, at a phase of its
+  own), so the stroke's second frame, for the refresh after, shows ~21.6 ms after its first
+  sample came: at 60 Hz the p99 of strokes with pauses is 21.6 ms against 20.67 (165 Hz:
+  7.2–7.4 ms, 0 missed). Thumbnails of drawings kept out of the painter (the strips', made
+  when a project opens) are made on the session's low-priority threads from what's kept, not
+  by decoding each 4K drawing into the painter on the window's thread (4–12 ms a tick for the
+  first seconds: what QA saw as the frames tick during a join that came right after launch);
+  the painter's own picture catches up 32 tiles a tick (0.8 ms), and the session's questions
+  take at most 1 ms a tick while the pen is down.
+- **A live stroke's start** leaves at the pen event: the other native app receives it
+  0.15–0.31 ms after the pen goes down (passing state goes out on a thread of its own, never
+  the window's nor behind the session's work); what a native stroke's start takes to arrive
+  in the current app beyond that (0–35 ms) is spent on its side, after the datagram came.
+- **Open:** the 60 Hz stroke-start frame above; a host's pen while a 4K join is served misses a
+  refresh now and then at 60 Hz (no window-thread phase over 3 ms then; both apps and both
+  compositors share this machine). The current app joining a native host that opened a file with several
   scenes saves no pixels for that file's layers, though they're on the wire (native joiners
   get them). The pen while 8 draw at 165 Hz.
 - **Phase 7 parity (not yet):** rejoining a session from the project file (the current app keeps

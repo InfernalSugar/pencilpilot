@@ -133,6 +133,9 @@ pub struct Bytes {
 /// The session's thread, from the window's side.
 pub struct Net {
     tx: tokio::sync::mpsc::UnboundedSender<Cmd>,
+    /// passing state, to a thread of its own that sends it (the connections' locks and the
+    /// encryption are never on the window's thread, nor behind the session thread's work)
+    presence: mpsc::Sender<Value>,
     rx: mpsc::Receiver<In>,
     pub bytes: Arc<Bytes>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -211,11 +214,9 @@ impl Net {
         let thread = std::thread::Builder::new()
             .name("together".into())
             .spawn(move || {
-                super::port::behind();
                 let rt = match tokio::runtime::Builder::new_multi_thread()
                     .worker_threads(2)
                     .thread_name("together-io")
-                    .on_thread_start(super::port::behind)
                     .enable_all()
                     .build()
                 {
@@ -229,8 +230,22 @@ impl Net {
                 rt.block_on(run(start, id, name, relays, crx, out, b, stamp));
             })
             .ok();
+        let (presence, prx) = mpsc::channel::<Value>();
+        let pb = bytes.clone();
+        let _ = std::thread::Builder::new()
+            .name("together-presence".into())
+            .spawn(move || {
+                // (ends when the window's side is dropped)
+                while let Ok(body) = prx.recv() {
+                    let p = pb.presencer.lock().unwrap().clone();
+                    if let Some(p) = p {
+                        p.send(body);
+                    }
+                }
+            });
         Net {
             tx,
+            presence,
             rx,
             bytes,
             thread,
@@ -239,14 +254,10 @@ impl Net {
 
     pub fn send(&self, c: Cmd) -> bool {
         if let Cmd::Presence(body) = c {
-            let p = self.bytes.presencer.lock().unwrap().clone();
-            return match p {
-                Some(p) => {
-                    p.send(body);
-                    true
-                }
-                None => self.tx.send(Cmd::Presence(body)).is_ok(),
-            };
+            if self.bytes.presencer.lock().unwrap().is_some() {
+                return self.presence.send(body).is_ok();
+            }
+            return self.tx.send(Cmd::Presence(body)).is_ok();
         }
         self.tx.send(c).is_ok()
     }

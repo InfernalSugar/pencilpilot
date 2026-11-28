@@ -60,6 +60,7 @@ const CURSOR_GAP: Duration = Duration::from_millis(50);
 const CURSOR_STALE: Duration = Duration::from_secs(4);
 /// The canvas's answers to the session's thread a tick may give (the rest wait a tick).
 const TICK_BUDGET: Duration = Duration::from_millis(3);
+const TICK_BUDGET_DRAWING: Duration = Duration::from_millis(1);
 /// Taking over as host with others in the session, how long until they've come over
 /// (a hand-over takes moments; past this, this app is the one that lost touch).
 const ALONE_GRACE: Duration = Duration::from_secs(5);
@@ -619,7 +620,13 @@ pub fn tick(e: &mut Engine, s: &mut State, now: Instant) -> bool {
     if !e.together.live() {
         return false;
     }
-    let until = Instant::now() + TICK_BUDGET;
+    // (the pen down: the canvas's answers take at most a millisecond of each tick)
+    let until = Instant::now()
+        + if e.is_stroking() {
+            TICK_BUDGET_DRAWING
+        } else {
+            TICK_BUDGET
+        };
     let mut changed = false;
     let mut served = false;
     // what the session's thread sent (its questions answered within the tick's room)
@@ -660,10 +667,13 @@ pub fn tick(e: &mut Engine, s: &mut State, now: Instant) -> bool {
         // joining asks hundreds, one after another. Never while the pen draws.)
         // (joining, nothing else to do: the whole tick's room)
         let room = until.saturating_duration_since(Instant::now());
-        let wait = if e.together.view.synced {
+        // (and none while the pen is in use: the frames' time is the pen's)
+        let wait = if !e.together.view.synced {
+            room
+        } else if crate::shell::engine::frames::gpu::pen_quiet(e) {
             room.min(ASK_FOLLOWS)
         } else {
-            room
+            Duration::ZERO
         };
         let msg = if served && !e.is_stroking() && !wait.is_zero() {
             e.together.net.as_ref().and_then(|n| n.recv_timeout(wait))
