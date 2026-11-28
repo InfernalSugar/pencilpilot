@@ -171,6 +171,8 @@ pub struct Ui {
     /// the last input (the system's fonts join only once it's been calm for a while)
     last_input: Instant,
     now: Instant,
+    /// when the system's fonts joined (the pass that took them lays all text out again)
+    pub fonts_joined: Option<Instant>,
 }
 
 impl Default for Ui {
@@ -200,6 +202,7 @@ impl Ui {
             next_at: None,
             last_input: Instant::now(),
             now: Instant::now(),
+            fonts_joined: None,
         }
     }
 
@@ -290,6 +293,7 @@ impl Ui {
             && !self.pointer.down
             && self.last_input.elapsed() >= FONTS_JOIN_WHEN_CALM;
         if calm && self.text.poll_fonts() {
+            self.fonts_joined = Some(Instant::now());
             // the atlas started over: icons go in again, and the screen is redrawn
             self.icons.clear();
             self.pictures.clear();

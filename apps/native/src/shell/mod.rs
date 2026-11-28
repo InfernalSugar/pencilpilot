@@ -264,6 +264,8 @@ struct FrameRec {
     at_once: bool,
     /// playback: when this frame was due on screen (its place on the cut's clock), ns
     due_ns: Option<u64>,
+    /// playback: how long it was held back once made, until due (not in work or GPU), ns
+    held_ns: u64,
 }
 
 pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
@@ -336,7 +338,11 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
         let ahead = if s.playing {
             // (the slowest recent one and half again: a busy GPU makes some slower; at most
             // 20 ms, half a frame of a 24 fps cut)
-            let most = play_work.iter().copied().max().unwrap_or(2_000_000);
+            // (the 90th percentile of the recent ones: one hitch mustn't hold every frame
+            // after it back by 20 ms)
+            let mut w: Vec<u64> = play_work.iter().copied().collect();
+            w.sort_unstable();
+            let most = w.get(w.len() * 9 / 10).copied().unwrap_or(2_000_000);
             std::time::Duration::from_nanos((most * 3 / 2 + 500_000).min(20_000_000))
         } else {
             std::time::Duration::ZERO
@@ -666,6 +672,11 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
         let (lw, lh) = win.logical_size();
         ui.scale = win.scale() as f32;
         let (w, h) = (lw as f32, lh as f32);
+        // playing counts as busy: the system's fonts joining (every text laid out and drawn
+        // again, ~70 ms at 4K × 20 layers) waits until it stops
+        if s.playing {
+            ui.active();
+        }
         let pass_from = pencilpilot_window::clock::now_ns();
         let first = ui.pass(&mut r, w, h, |f| {
             (mark, canvas_rect) = build(f, &mut s, w, h);
@@ -788,6 +799,8 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
         let moved_on = s.playing && s.frame != last_sheet_frame;
         let at_once = plan.is_none();
         let mut due_ns = None;
+        // how long the frame was held back once made (not part of making it)
+        let mut held_ns = 0u64;
         if moved_on && plan.is_none() {
             let made = pencilpilot_window::clock::now_ns().saturating_sub(work_from);
             play_work.push_back(made);
@@ -805,6 +818,7 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
                 let hold = due.checked_sub(lead_shown).unwrap_or(due);
                 let wait = hold.saturating_duration_since(std::time::Instant::now());
                 if !wait.is_zero() && wait < std::time::Duration::from_millis(50) {
+                    held_ns = wait.as_nanos() as u64;
                     std::thread::sleep(wait);
                 }
             }
@@ -816,7 +830,9 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
         let frame = win.present()?;
         (view_moved, drew) = (false, false);
 
-        let work_ns = pencilpilot_window::clock::now_ns().saturating_sub(work_from);
+        let work_ns = pencilpilot_window::clock::now_ns()
+            .saturating_sub(work_from)
+            .saturating_sub(held_ns);
         pacer.drawn(
             frame,
             plan.take(),
@@ -831,7 +847,10 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             drawn_ns: pencilpilot_window::clock::now_ns(),
             sheet_frame: s.frame,
             work_ns,
-            gpu_ns: pencilpilot_window::clock::now_ns().saturating_sub(gpu_from),
+            gpu_ns: pencilpilot_window::clock::now_ns()
+                .saturating_sub(gpu_from)
+                .saturating_sub(held_ns),
+            held_ns,
             wake_ns: woke.saturating_sub(work_from),
             pass_ns,
             asked_ns: asked as i64 - work_from as i64,
@@ -856,7 +875,7 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             .iter()
             .map(|r| {
                 format!(
-                    "{{\"frame\": {}, \"inputMs\": {}, \"receivedNs\": {}, \"events\": {}, \"drawnNs\": {}, \"shownNs\": {}, \"sheetFrame\": {}, \"workNs\": {}, \"gpuNs\": {}, \"wakeNs\": {}, \"passNs\": {}, \"askedNs\": {}, \"doc\": [{}, {}], \"docGen\": {}, \"export\": {}, \"dueNs\": {}}}",
+                    "{{\"frame\": {}, \"inputMs\": {}, \"receivedNs\": {}, \"events\": {}, \"drawnNs\": {}, \"shownNs\": {}, \"sheetFrame\": {}, \"workNs\": {}, \"gpuNs\": {}, \"wakeNs\": {}, \"passNs\": {}, \"askedNs\": {}, \"doc\": [{}, {}], \"docGen\": {}, \"export\": {}, \"dueNs\": {}, \"heldNs\": {}}}",
                     r.frame,
                     opt(r.input.map(|i| i.0 as u64)),
                     opt(r.input.map(|i| i.1)),
@@ -874,7 +893,8 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
                     r.doc_gen,
                     r.export
                         .map_or("null".to_string(), |(d, n)| format!("[{d}, {n}]")),
-                    opt(r.due_ns)
+                    opt(r.due_ns),
+                    r.held_ns
                 )
             })
             .collect();
@@ -904,8 +924,14 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
                 k.uploads
             )
         });
+        let fonts_joined = ui.fonts_joined.map_or("null".to_string(), |t| {
+            format!(
+                "{:.1}",
+                t.saturating_duration_since(started).as_secs_f64() * 1e3
+            )
+        });
         let json = format!(
-            "{{\"seconds\": {:.3}, \"gpuLayers\": {gpu_layers}, \"startupToFirstFrameMs\": {}, \"framesDrawn\": {drawn}, \"framesPresented\": {presented}, \"drawingLate\": {}, \"marginMs\": {:.2}, \"framesLate\": {}, \"coolDowns\": {},\n \"view\": {{\"zoom\": {}, \"angle\": {}, \"flip\": {}, \"pan\": [{}, {}], \"docSize\": [{}, {}]}},\n \"canvasRect\": [{}, {}, {}, {}],\n \"state\": {{\"workspace\": {:?}, \"tool\": \"{:?}\", \"activeLayer\": {}, \"frame\": {}, \"playing\": {}, \"colour\": {:?}, \"layers\": [{}]}},\n \"sound\": {},\n \"frames\": [\n  {}\n ]}}\n",
+            "{{\"seconds\": {:.3}, \"fontsJoinedMs\": {fonts_joined}, \"gpuLayers\": {gpu_layers}, \"startupToFirstFrameMs\": {}, \"framesDrawn\": {drawn}, \"framesPresented\": {presented}, \"drawingLate\": {}, \"marginMs\": {:.2}, \"framesLate\": {}, \"coolDowns\": {},\n \"view\": {{\"zoom\": {}, \"angle\": {}, \"flip\": {}, \"pan\": [{}, {}], \"docSize\": [{}, {}]}},\n \"canvasRect\": [{}, {}, {}, {}],\n \"state\": {{\"workspace\": {:?}, \"tool\": \"{:?}\", \"activeLayer\": {}, \"frame\": {}, \"playing\": {}, \"colour\": {:?}, \"layers\": [{}]}},\n \"sound\": {},\n \"frames\": [\n  {}\n ]}}\n",
             started.elapsed().as_secs_f64(),
             first_shown.map_or("null".into(), |v| format!("{v:.1}")),
             pacer.drawing_late(),
