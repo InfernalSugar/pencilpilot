@@ -297,7 +297,8 @@ class WebDriverError(Exception):
 class Studio:
     """The current app on a headless mutter of its own, driven over WebDriver."""
 
-    def __init__(self, binary, out, tag, hz=60, project=None, name="Studio", size="1920x1080"):
+    def __init__(self, binary, out, tag, hz=None, project=None, name="Studio", size="1920x1080"):
+        hz = hz or int(os.environ.get("PP_HZ", "60"))
         self.out, self.tag = out, tag
         self.mutter = Mutter(out, f"studio-{tag}", size, hz, own_bus=True)
         self.home = os.path.join(out, f"studio-{tag}")
@@ -355,7 +356,12 @@ class Studio:
             self.mutter.stop()
             raise
         self.sid = s["sessionId"]
-        self.wd("POST", f"/session/{self.sid}/timeouts", {"script": 600_000, "pageLoad": 120_000})
+        for attempt in range(10):
+            try:
+                self.wd("POST", f"/session/{self.sid}/timeouts", {"script": 600_000, "pageLoad": 120_000})
+                break
+            except (OSError, http.client.HTTPException):
+                time.sleep(0.3)
         self.pid = self.app_pid(binary)
 
     # -- plumbing
