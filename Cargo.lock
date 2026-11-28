@@ -3660,6 +3660,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pencilpilot-together"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "flate2",
+ "indexmap",
+ "serde_json",
+]
+
+[[package]]
 name = "pencilpilot-ui"
 version = "0.1.0"
 dependencies = [
