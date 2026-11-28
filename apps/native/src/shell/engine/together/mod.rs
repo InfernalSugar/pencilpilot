@@ -1403,13 +1403,16 @@ fn on_edit(
             }
         }
         Change::Timeline => {
-            if from != me
-                && let Some(tl) = body.get("tl")
-            {
-                put_timeline(e, s, tl);
-                return true;
+            // everyone's, this app's own too, in the session's order: all end the same
+            // (several sent at once: the last numbered wins everywhere)
+            let Some(tl) = body.get("tl") else {
+                return false;
+            };
+            if from == me && shared_timeline(e, s) == *tl {
+                return false;
             }
-            false
+            put_timeline(e, s, tl);
+            true
         }
         Change::Access(lid) => {
             refresh_lock(e, &lid);
