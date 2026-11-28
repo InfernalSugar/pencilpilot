@@ -1,0 +1,23 @@
+[package]
+name = "pencilpilot-together"
+version = "0.1.0"
+edition.workspace = true
+description = "Drawing together, the drawing side: shared layers, who may draw on each, and their pixels kept the same in every app (wire-compatible with the studio's together.ts)"
+license.workspace = true
+
+[dependencies]
+serde_json = "1"
+base64 = "0.22"
+# maps that keep the order things came in, as JavaScript's do (tiles go out in that order)
+indexmap = "2"
+# tiles kept as their hash (and deflated bytes where they have them), not as pixels
+blake3 = "1"
+# deflate-raw for tiles; zlib-rs makes the same bytes as the studio's (zlib-ng) at level 6
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+
+[dev-dependencies]
+# a real session between two apps on this computer (no relay: loopback only)
+pencilpilot-share = { path = "../share" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+# (the memory measure reads a real project: tests/memory.rs)
+pencilpilot-ppstudio = { path = "../ppstudio" }

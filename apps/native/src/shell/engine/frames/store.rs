@@ -28,7 +28,8 @@ pub type Key = (i32, i32);
 pub struct FileTile {
     /// raw deflate (else stored)
     pub deflated: bool,
-    pub bytes: Box<[u8]>,
+    /// (shared: the session's own copy of a tile from the wire is this one)
+    pub bytes: Arc<[u8]>,
 }
 
 /// A drawing kept out of the painter.
@@ -38,12 +39,19 @@ pub enum Kept {
     File(Vec<(i32, i32, String)>),
     /// the painter's own pixels, each tile deflated
     Raw(Vec<(Key, Box<[u8]>)>),
+    /// as they came from others (drawing together): straight RGBA8, each tile raw deflate
+    /// (or stored), as the wire carries them
+    Wire(Vec<(Key, Arc<FileTile>)>),
 }
 
 #[derive(Debug, Default)]
 pub struct Store {
     /// drawings kept here: not in the painter, or in it unchanged since they came back
     pub drawings: HashMap<u32, Arc<Kept>>,
+    /// tiles of drawings in the painter as they came from others (drawing together):
+    /// straight RGBA8, compressed, exactly as sent; saving and passing them on uses these
+    /// (the painter's own pixels would round them), until a tile is changed here
+    pub exact: HashMap<u32, HashMap<Key, Arc<FileTile>>>,
     /// the project file's tiles, compressed, by hash
     pub file: HashMap<String, Arc<FileTile>>,
     /// where each drawing read from the file had its tiles (kept through changes: a save
@@ -89,7 +97,8 @@ fn inflate(b: &[u8], limit: usize) -> Option<Vec<u8>> {
     miniz_oxide::inflate::decompress_to_vec_with_limit(b, limit).ok()
 }
 
-fn file_rgba(t: &FileTile) -> Option<Vec<u8>> {
+/// A tile kept as the file (or the wire) has it, as RGBA8 (16 384 bytes).
+pub fn file_rgba(t: &FileTile) -> Option<Vec<u8>> {
     let px = if t.deflated {
         inflate(&t.bytes, RGBA_TILE)?
     } else {
@@ -130,6 +139,24 @@ impl Job {
                     Some((*k, DecodedTile::from_bytes(&raw)?))
                 })
                 .collect(),
+            Kept::Wire(tiles) => tiles
+                .par_iter()
+                .filter_map(|(k, t)| Some((*k, brush::decode_tile(&file_rgba(t)?)?)))
+                .collect(),
+        }
+    }
+
+    /// Its tiles as straight RGBA8, compressed, when it's kept that way (as the file or the
+    /// wire has them): they go to others as they are, nothing decoded or compressed again.
+    pub fn rgba_tiles(&self) -> Option<Vec<(Key, Arc<FileTile>)>> {
+        match &*self.kept {
+            Kept::File(refs) => Some(
+                refs.iter()
+                    .filter_map(|(x, y, h)| Some(((*x, *y), self.file.get(h)?.clone())))
+                    .collect(),
+            ),
+            Kept::Wire(tiles) => Some(tiles.clone()),
+            Kept::Raw(_) => None,
         }
     }
 }
@@ -153,7 +180,7 @@ impl Store {
                 .iter()
                 .filter_map(|(_, _, h)| Some((h.clone(), self.file.get(h)?.clone())))
                 .collect(),
-            Kept::Raw(_) => HashMap::new(),
+            Kept::Raw(_) | Kept::Wire(_) => HashMap::new(),
         };
         Some(Job { d, kept, file })
     }
@@ -176,6 +203,7 @@ impl Store {
         match self.drawings.get(&d).map(|k| &**k) {
             Some(Kept::File(r)) => r.len(),
             Some(Kept::Raw(t)) => t.len(),
+            Some(Kept::Wire(t)) => t.len(),
             None => 0,
         }
     }
@@ -188,6 +216,7 @@ impl Store {
             .map(|k| match &**k {
                 Kept::Raw(t) => t.iter().map(|(_, b)| b.len()).sum(),
                 Kept::File(r) => r.len() * 48,
+                Kept::Wire(t) => t.iter().map(|(_, b)| b.bytes.len()).sum(),
             })
             .sum();
         raw + self.file.values().map(|t| t.bytes.len()).sum::<usize>()

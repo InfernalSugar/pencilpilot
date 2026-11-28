@@ -22,6 +22,7 @@ pub mod store;
 mod thumbs;
 
 use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub use sheet::{Cel, Mark, Sheet, Thumb, Track, derive};
@@ -101,6 +102,13 @@ pub struct Frames {
     opacity: Option<(u32, brush::LayerProps, Instant)>,
     /// drawings whose thumbnails are out of date
     stale: BTreeSet<u32>,
+    /// a thumbnail being made on another thread (a drawing kept out of the painter): which,
+    /// from what, and where it comes
+    thumb_going: Option<(
+        u32,
+        Arc<store::Kept>,
+        std::sync::mpsc::Receiver<Option<Thumb>>,
+    )>,
     /// the painter's history as last seen (undo / redo change drawings)
     history: (bool, bool, u32, u32),
     /// copied cels and the layer they're from
@@ -123,6 +131,9 @@ pub struct Frames {
     ahead_due: bool,
     /// the picture made on the GPU ([`gpu`])
     pub gpu: gpu::GpuFrames,
+    /// layers that show others' strokes as they draw them (drawing together): no
+    /// drawings, no exposures, left as they are when frames change
+    pub previews: std::collections::HashSet<u32>,
 }
 
 /// Drawings decoded ahead (on another thread).
@@ -157,6 +168,13 @@ impl Frames {
         if self.onion_key.chunks(3).any(|e| e[0] == drawing) {
             self.onion_key.clear();
         }
+    }
+
+    /// A drawing changed from outside (someone else's tiles, drawing together): its
+    /// thumbnail and onion skin are made again, and its GPU copy (unless a layer shows it:
+    /// its changed tiles go up then).
+    pub fn remote_changed(&mut self, drawing: u32) {
+        self.mark(drawing);
     }
 
     /// The painter's id for the interface's layer `i`.
@@ -357,6 +375,9 @@ fn show(e: &mut Engine, s: &State) -> bool {
     let mut pairs = Vec::new();
     for (i, t) in s.sheet.tracks.iter().enumerate() {
         let id = e.frames.id(s, i);
+        if e.frames.previews.contains(&id) {
+            continue;
+        }
         let mut d = t.drawing_at(s.frame);
         // a drawing just started on a blank frame stays until the sheet takes it
         let shows = e.painter.layer_drawing(id);
@@ -404,6 +425,13 @@ fn show(e: &mut Engine, s: &State) -> bool {
         return true;
     }
     false
+}
+
+/// The exposures changed from outside (drawing together: someone's timeline): each layer
+/// shows its drawing for the frame again.
+pub fn sheet_changed(e: &mut Engine, s: &mut State) -> bool {
+    sync(e, s);
+    show(e, s)
 }
 
 /// The painter shows the frame's drawings now (the GPU may have shown them without it, while
@@ -1039,9 +1067,57 @@ pub fn tick(e: &mut Engine, s: &mut State, now: Instant) -> bool {
         if let Some(d) = e.frames.painted.take() {
             e.frames.mark(d);
         }
+        // a thumbnail made on another thread: in, if what it was made from is still kept
+        if let Some((d, kept, rx)) = &e.frames.thumb_going {
+            let (d, kept) = (*d, kept.clone());
+            match rx.try_recv() {
+                Ok(t) => {
+                    e.frames.thumb_going = None;
+                    let same = e
+                        .frames
+                        .store
+                        .drawings
+                        .get(&d)
+                        .is_some_and(|k| Arc::ptr_eq(k, &kept));
+                    match t {
+                        Some(t) if same => {
+                            if s.sheet.thumbs.get(&d) != Some(&t) {
+                                s.sheet.thumbs.insert(d, t);
+                                changed = true;
+                            }
+                        }
+                        _ => {
+                            e.frames.stale.insert(d);
+                        }
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(_) => e.frames.thumb_going = None,
+            }
+        }
+        // a drawing kept out of the painter: its thumbnail is made from what's kept, on
+        // another thread (decoding a 4K drawing into the painter for it took 4–12 ms of the
+        // window's, a pen's press landing behind it)
+        if !s.playing
+            && e.frames.thumb_going.is_none()
+            && let Some(&d) = e.frames.stale.first()
+            && !e.painter.has_drawing(d)
+            && let Some(job) = e.frames.store.job(d)
+            && job.rgba_tiles().is_some()
+        {
+            e.frames.stale.remove(&d);
+            let (tx, rx) = std::sync::mpsc::channel();
+            let kept = job.kept().clone();
+            let (w, h) = (e.painter.width(), e.painter.height());
+            crate::shell::engine::together::port::pool().spawn(move || {
+                let _ = tx.send(thumbs::of_job(&job, w, h));
+            });
+            e.frames.thumb_going = Some((d, kept, rx));
+        }
         // one thumbnail a tick (a frame), none while playing, and none until the pen rests (a
         // 4K drawing's takes milliseconds of the window's thread: not between strokes)
         if !s.playing
+            && e.frames.thumb_going.is_none()
             && gpu::pen_quiet(e)
             && let Some(d) = e.frames.stale.pop_first()
         {
@@ -1114,6 +1190,7 @@ fn idle(e: &Engine, s: &State) -> bool {
         && f.opacity.is_none()
         && f.painted.is_none()
         && f.stale.is_empty()
+        && f.thumb_going.is_none()
         && f.seen == (s.frame, s.active_layer, e.painter.layers().len())
         && history(e) == f.history
         && f.last.len() == s.layers.len()
@@ -1154,7 +1231,7 @@ pub fn next_tick_at(e: &Engine, s: &State) -> Option<Instant> {
     }
     // decoding ahead: its results are picked up at the next tick; while playing that's the next
     // frame's own (no extra wakes between frames), otherwise every few milliseconds
-    if (f.prefetch.is_some() || f.ahead_due) && !s.playing {
+    if (f.prefetch.is_some() || f.ahead_due || f.thumb_going.is_some()) && !s.playing {
         at.push(now + Duration::from_millis(4));
     }
     if let Some(t) = f.trim_at {

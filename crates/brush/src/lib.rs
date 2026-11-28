@@ -119,6 +119,14 @@ impl DrawingCopy {
         TileBuffers(over.into_values().collect())
     }
 
+    /// Its tiles, as decoded tiles (to encode on another thread, say).
+    pub fn into_decoded(self) -> Vec<((i32, i32), DecodedTile)> {
+        self.0
+            .into_iter()
+            .map(|(k, t)| (k, DecodedTile(t)))
+            .collect()
+    }
+
     /// Its tiles' memory, for more copies.
     pub fn into_buffers(self) -> TileBuffers {
         TileBuffers(self.0.into_values().collect())
@@ -435,6 +443,11 @@ pub struct Group {
 }
 
 impl Layer {
+    /// The group it's in (0: none).
+    pub fn group(&self) -> u32 {
+        self.group
+    }
+
     fn new(id: u32, props: LayerProps) -> Self {
         Self {
             id,
@@ -696,6 +709,9 @@ pub struct Painter {
     /// strokes from other people (shared canvases), drawn alongside the local
     /// one: key → (layer id, brush state). Never in the undo history.
     remote: HashMap<u32, (u32, BrushState)>,
+    /// drawings' tiles changed by recorded edits (strokes, fills, undo…) since last taken,
+    /// when asked to keep track ([`Painter::track_edits`]): what drawing together sends
+    edited: Option<HashMap<u32, HashSet<TileKey>>>,
     width: u32,
     height: u32,
     rgba: Vec<u8>,
@@ -776,6 +792,7 @@ impl Painter {
             next_group: 1,
             state: BrushState::default(),
             remote: HashMap::new(),
+            edited: None,
             width,
             height,
             rgba: vec![255; (width * height * 4) as usize],
@@ -2180,6 +2197,7 @@ impl Painter {
     fn push_step(&mut self, mut e: Edit) {
         self.edits += 1;
         self.tag_drawings(&mut e);
+        self.note_edited(&e);
         self.undo.push(e);
         if self.undo.len() > self.undo_limit {
             self.undo.remove(0);
@@ -4081,6 +4099,104 @@ impl Painter {
 
     // ---- shared canvases: other people's strokes ----
 
+    /// Keep track of which drawings' tiles recorded edits change (strokes, fills,
+    /// transforms, undo and redo), for [`Painter::take_edited`]; off forgets them.
+    pub fn track_edits(&mut self, on: bool) {
+        self.edited = on.then(HashMap::new);
+    }
+
+    /// The drawings whose colour tiles recorded edits changed since the last call (with
+    /// [`Painter::track_edits`] on), and those tiles. A layer showing no drawing counts
+    /// as drawing 0 (its own pixels).
+    pub fn take_edited(&mut self) -> Vec<(u32, Vec<(i32, i32)>)> {
+        let Some(m) = &mut self.edited else {
+            return Vec::new();
+        };
+        m.drain()
+            .map(|(d, k)| (d, k.into_iter().collect()))
+            .collect()
+    }
+
+    fn note_edited(&mut self, e: &Edit) {
+        if self.edited.is_none() {
+            return;
+        }
+        match e {
+            Edit::Tiles {
+                layer,
+                snap,
+                mask: false,
+                drawing,
+            } => {
+                let d = if *drawing != 0 {
+                    *drawing
+                } else {
+                    self.layers
+                        .iter()
+                        .find(|l| l.id == *layer)
+                        .map_or(0, |l| l.drawing)
+                };
+                if let Some(m) = &mut self.edited {
+                    m.entry(d).or_default().extend(snap.keys().copied());
+                }
+            }
+            Edit::Batch(list) => {
+                for e in list {
+                    self.note_edited(e);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Put tiles decoded ahead into a drawing (others' changes; not an undo step): `set`
+    /// replaces those tiles, `clear` empties those. The drawing may be showing (the layer's
+    /// changed tiles are marked for the picture) or kept. False when it's the drawing the
+    /// local stroke is painting (try again once it ends).
+    pub fn patch_drawing(
+        &mut self,
+        drawing: u32,
+        set: Vec<((i32, i32), DecodedTile)>,
+        clear: &[(i32, i32)],
+    ) -> bool {
+        if drawing == 0 {
+            return false;
+        }
+        if let Some(idx) = self.layers.iter().position(|l| l.drawing == drawing) {
+            if !self.idle() && self.layers[idx].id == self.active {
+                return false;
+            }
+            let l = &mut self.layers[idx];
+            for k in clear {
+                if l.surface.tiles.remove(k).is_some() {
+                    l.surface.dirty.insert(*k);
+                }
+            }
+            for (k, t) in set {
+                l.surface.tiles.insert(k, t.0);
+                l.surface.dirty.insert(k);
+            }
+            self.unstyle(idx);
+            return true;
+        }
+        let Some(tiles) = self.cels.get_mut(&drawing) else {
+            // (a drawing new here: its tiles; nothing to clear in one that has none)
+            if !set.is_empty() {
+                self.next_drawing = self.next_drawing.max(drawing + 1);
+                self.cels
+                    .insert(drawing, set.into_iter().map(|(k, t)| (k, t.0)).collect());
+            }
+            return true;
+        };
+        for k in clear {
+            tiles.remove(k);
+        }
+        for (k, t) in set {
+            tiles.insert(k, t.0);
+        }
+        true
+    }
+
     /// Add a layer without an undo step (e.g. a layer for another person). Returns its id.
     pub fn add_layer_silent(&mut self, name: &str) -> u32 {
         if self.layers.len() >= MAX_LAYERS {
@@ -4904,6 +5020,7 @@ impl Painter {
         };
         self.edits += 1;
         let inv = self.apply(e);
+        self.note_edited(&inv);
         self.redo.push(inv);
         true
     }
@@ -4922,6 +5039,7 @@ impl Painter {
         };
         self.edits += 1;
         let inv = self.apply(e);
+        self.note_edited(&inv);
         self.undo.push(inv);
         true
     }
@@ -6252,8 +6370,15 @@ pub fn decode_tile(rgba: &[u8]) -> Option<DecodedTile> {
     if rgba.len() != ts * ts * 4 {
         return None;
     }
-    // (the sRGB curve of each 8-bit value, looked up: the same numbers premul_fix15 makes,
-    // without three powf a pixel)
+    let (t, any) = premul_tile(rgba);
+    any.then_some(DecodedTile(t))
+}
+
+/// Straight-alpha sRGB RGBA8 (a whole tile) as the painter keeps it, and whether anything
+/// is in it. (The sRGB curve of each 8-bit value, looked up: the same numbers
+/// [`premul_fix15`] makes, without three `powf` a pixel.)
+fn premul_tile(rgba: &[u8]) -> (Box<TilePixels>, bool) {
+    let ts = TILE_SIZE;
     static LINEAR: std::sync::OnceLock<[f32; 256]> = std::sync::OnceLock::new();
     let lin = LINEAR.get_or_init(|| {
         std::array::from_fn(|v| hokusai::color::srgb_to_linear((v as f32 / 255.0).clamp(0.0, 1.0)))
@@ -6270,7 +6395,7 @@ pub fn decode_tile(rgba: &[u8]) -> Option<DecodedTile> {
         let f = |v: u8| (lin[v as usize] * a * one).round() as u16;
         t[k / ts][k % ts] = [f(px[0]), f(px[1]), f(px[2]), (a * one).round() as u16];
     }
-    any.then_some(DecodedTile(t))
+    (t, any)
 }
 
 /// A decoded tile back as straight-alpha sRGB RGBA8 (16 384 bytes into `out`), as the
@@ -6311,15 +6436,8 @@ pub(crate) fn unpack_tiles(packed: &[u8]) -> Option<TileMap> {
         let tx = i32::from_le_bytes(packed[at..at + 4].try_into().unwrap());
         let ty = i32::from_le_bytes(packed[at + 4..at + 8].try_into().unwrap());
         let src = &packed[at + 8..at + 8 + tile_bytes];
-        let mut t = empty_tile();
-        for (k, px) in src.as_chunks::<4>().0.iter().enumerate() {
-            if px[3] == 0 {
-                continue;
-            }
-            let c = [px[0], px[1], px[2]].map(|v| v as f32 / 255.0);
-            t[k / ts][k % ts] = premul_fix15(c, px[3] as f32 / 255.0);
-        }
-        tiles.insert((tx, ty), t);
+        // (the same numbers premul_fix15 makes: see decode_tile_matches_premul_fix15)
+        tiles.insert((tx, ty), premul_tile(src).0);
     }
     Some(tiles)
 }
@@ -6345,6 +6463,37 @@ mod decode_tile_tests {
                 let c = [p[0], p[1], p[2]].map(|v| v as f32 / 255.0);
                 let want = premul_fix15(c, p[3] as f32 / 255.0);
                 assert_eq!(t.0[k / TILE_SIZE][k % TILE_SIZE], want, "{p:?}");
+            }
+        }
+    }
+
+    /// Packed tiles (drawing together's, a frame store's) go in as premul_fix15 makes them,
+    /// every value and alpha, empty tiles kept.
+    #[test]
+    fn unpack_tiles_matches_premul_fix15() {
+        let mut packed = Vec::new();
+        packed.extend_from_slice(&256u32.to_le_bytes());
+        for a in 0..=255u32 {
+            packed.extend_from_slice(&(a as i32).to_le_bytes());
+            packed.extend_from_slice(&(-(a as i32)).to_le_bytes());
+            for k in 0..TILE_SIZE * TILE_SIZE {
+                let v = ((k as u32 * 7 + a) % 256) as u8;
+                packed.extend_from_slice(&[v, 255 - v, v / 2, a as u8]);
+            }
+        }
+        let tiles = unpack_tiles(&packed).unwrap();
+        assert_eq!(tiles.len(), 256);
+        for a in 0..=255u32 {
+            let t = &tiles[&(a as i32, -(a as i32))];
+            for k in 0..TILE_SIZE * TILE_SIZE {
+                let v = ((k as u32 * 7 + a) % 256) as u8;
+                let c = [v, 255 - v, v / 2].map(|x| x as f32 / 255.0);
+                let want = if a == 0 {
+                    [0; 4]
+                } else {
+                    premul_fix15(c, a as f32 / 255.0)
+                };
+                assert_eq!(t[k / TILE_SIZE][k % TILE_SIZE], want, "{v} {a}");
             }
         }
     }

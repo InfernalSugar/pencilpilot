@@ -12,6 +12,7 @@ pub mod header;
 pub mod layout;
 pub mod panel;
 pub mod strips;
+pub mod together_ui;
 pub mod tools;
 pub mod view;
 
@@ -32,9 +33,11 @@ pub fn build(f: &mut Frame, s: &mut State, width: f32, height: f32) -> (usize, R
     let canvas = canvas::card(f, r.canvas, s);
     let mark = f.mark();
     canvas::overlays(f, r.canvas, s);
+    together_ui::canvas(f, r.canvas, s);
     panel::build(f, r.panel, s);
     strips::build(f, r.strip, s);
     export_ui::build(f, s);
+    together_ui::build(f, s);
     (mark, canvas)
 }
 
@@ -228,6 +231,10 @@ pub struct RunOptions {
     pub workspace: Option<crate::state::Workspace>,
     /// open this project once started
     pub open: Option<String>,
+    /// host (printing the invite to stdout) or join a session once started (checks)
+    pub together: Option<engine::together::net::Start>,
+    /// the name others see in a session
+    pub name: Option<String>,
 }
 
 /// A frame drawn, for `--stats`.
@@ -353,6 +360,8 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             // (not while input comes in: scrubbing, drawing; playing, until the next frame)
             if let (Some(e), Some(k)) = (&mut eng, &mut comp)
                 && last_input.elapsed() > std::time::Duration::from_millis(100)
+                // (not while the session's thread waits on the canvas: joining asks hundreds)
+                && !e.together.busy()
             {
                 let room = match e.next_tick_at(&s) {
                     Some(t) if s.playing => t
@@ -366,10 +375,16 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
                     e.gpu_ahead(&s, &gpu, k, room.min(std::time::Duration::from_millis(8)));
                 }
             }
-            let tick = eng
-                .as_ref()
-                .and_then(|e| e.next_tick_at(&s))
-                .map(|t| t.checked_sub(lead).unwrap_or(t));
+            // (playing, early by the frames' lead; otherwise when due: with the lead, work
+            // due within it, a store's poll or a live stroke's next datagram, would wake the
+            // loop at once again and again, a spin taking the processor from the pen)
+            let tick = eng.as_ref().and_then(|e| e.next_tick_at(&s)).map(|t| {
+                if s.playing {
+                    t.checked_sub(lead).unwrap_or(t)
+                } else {
+                    t
+                }
+            });
             let next = [ui.next_pass_at(), deadline, tick]
                 .into_iter()
                 .flatten()
@@ -412,11 +427,23 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
                     let engine_here = |x: f64, y: f64, s: &State, ui: &Ui| {
                         engine::Engine::takes_canvas_input(s)
                             && !ui.overlay_open()
+                            && !ui.over_overlay(x as f32, y as f32)
                             && cr.contains(x as f32, y as f32)
                     };
                     // a press here moves the view (the Hand, Space held, the middle button, Review)
                     let view_here = |x: f64, y: f64, ui: &Ui| {
-                        !ui.overlay_open() && cr.contains(x as f32, y as f32)
+                        !ui.overlay_open()
+                            && !ui.over_overlay(x as f32, y as f32)
+                            && cr.contains(x as f32, y as f32)
+                    };
+                    // drawing together: where the pointer is over the document, for the
+                    // others' cursors
+                    let pointer_at = |s: &mut State, x: f64, y: f64| {
+                        if s.together.live() {
+                            s.together.pointer = cr
+                                .contains(x as f32, y as f32)
+                                .then(|| s.view.to_doc(cr, x as f32, y as f32));
+                        }
                     };
                     let sample =
                         |s: &State, x: f64, y: f64, pressure: f32, tilt: (f32, f32), ms: u32| {
@@ -430,32 +457,38 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
                             }
                         };
                     match ev {
-                        InputEvent::Pointer(PointerEvent::Move { x, y, time_ms }) => match drag {
-                            Drag::Engine => {
-                                if let Some(e) = &mut eng {
-                                    let p = sample(&s, x, y, 0.5, (0.0, 0.0), time_ms);
-                                    e.pointer(&mut s, engine::Phase::Move, p);
-                                    drew = true;
+                        InputEvent::Pointer(PointerEvent::Move { x, y, time_ms }) => {
+                            pointer_at(&mut s, x, y);
+                            match drag {
+                                Drag::Engine => {
+                                    if let Some(e) = &mut eng {
+                                        let p = sample(&s, x, y, 0.5, (0.0, 0.0), time_ms);
+                                        e.pointer(&mut s, engine::Phase::Move, p);
+                                        drew = true;
+                                    }
                                 }
+                                Drag::Pan(lx, ly) => {
+                                    s.view.pan_by(x as f32 - lx, y as f32 - ly);
+                                    view_moved = true;
+                                    drag = Drag::Pan(x as f32, y as f32);
+                                }
+                                Drag::Rotate(a) => {
+                                    let c = (cr.x + cr.w / 2.0, cr.y + cr.h / 2.0);
+                                    let now = (y as f32 - c.1).atan2(x as f32 - c.0);
+                                    s.view.rotate_about(cr, c, now - a);
+                                    view_moved = true;
+                                    drag = Drag::Rotate(now);
+                                }
+                                Drag::None => ui.pointer_moved(x as f32, y as f32),
                             }
-                            Drag::Pan(lx, ly) => {
-                                s.view.pan_by(x as f32 - lx, y as f32 - ly);
-                                view_moved = true;
-                                drag = Drag::Pan(x as f32, y as f32);
-                            }
-                            Drag::Rotate(a) => {
-                                let c = (cr.x + cr.w / 2.0, cr.y + cr.h / 2.0);
-                                let now = (y as f32 - c.1).atan2(x as f32 - c.0);
-                                s.view.rotate_about(cr, c, now - a);
-                                view_moved = true;
-                                drag = Drag::Rotate(now);
-                            }
-                            Drag::None => ui.pointer_moved(x as f32, y as f32),
-                        },
+                        }
                         InputEvent::Pointer(PointerEvent::Enter { x, y }) => {
                             ui.pointer_moved(x as f32, y as f32)
                         }
-                        InputEvent::Pointer(PointerEvent::Leave) => ui.pointer_left(),
+                        InputEvent::Pointer(PointerEvent::Leave) => {
+                            s.together.pointer = None;
+                            ui.pointer_left()
+                        }
                         InputEvent::Pointer(PointerEvent::Button {
                             button: button @ (0x110 | 0x112),
                             pressed,
@@ -520,6 +553,7 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
                         }
                         InputEvent::Pen(p) => {
                             let (x, y) = (p.sample.x, p.sample.y);
+                            pointer_at(&mut s, x, y);
                             let tilt = (p.sample.tilt_x / 90.0, p.sample.tilt_y / 90.0);
                             let down = p.phase == PenPhase::Down && p.buttons == 0;
                             if down && view_here(x, y, &ui) && moves_view(&s, space) {
@@ -590,6 +624,12 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
                             if !k.pressed {
                                 continue;
                             }
+                            // pasting into a text field: the system's clipboard (it comes as
+                            // a paste a moment later)
+                            if k.mods.ctrl && k.name.eq_ignore_ascii_case("v") && ui.typing() {
+                                win.request_paste();
+                                continue;
+                            }
                             if k.mods.ctrl && k.name.eq_ignore_ascii_case("z") {
                                 s.actions.push(if k.mods.shift {
                                     Action::Redo
@@ -603,6 +643,18 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
                                 ctrl: k.mods.ctrl,
                                 shift: k.mods.shift,
                             });
+                        }
+                        InputEvent::Paste(text) => {
+                            // (one line: a code or a name)
+                            let line = text.lines().map(str::trim).find(|l| !l.is_empty());
+                            if let Some(line) = line {
+                                ui.key(pencilpilot_ui::ui::Key {
+                                    name: "paste".into(),
+                                    text: Some(line.to_string()),
+                                    ctrl: false,
+                                    shift: false,
+                                });
+                            }
                         }
                         _ => {}
                     }
@@ -703,6 +755,9 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
                 s.quit_now = true;
             }
         }
+        if let Some(text) = s.together.copy_out.take() {
+            win.set_clipboard(&text);
+        }
         if std::mem::take(&mut s.quit_now) {
             win.close();
             break;
@@ -739,6 +794,15 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
         if new_canvas {
             s.view.reset(canvas_rect);
             let mut e = engine::Engine::new(cw, ch);
+            // drawing together: woken by the session's thread; a check never uses a relay
+            e.together.waker = Some(win.waker());
+            e.together.offline = quit_after.is_some() || stats.is_some();
+            e.together.stats_on = stats.is_some();
+            e.together.print_invite = true;
+            e.together.auto = opts.together.clone();
+            if let Some(n) = &opts.name {
+                s.together.name = n.clone();
+            }
             // set up (layers, drawings) before the first input reaches it; this may open a
             // project (the file named at start), so the picture takes the painter's size
             e.tick(&mut s, std::time::Instant::now());
@@ -766,6 +830,12 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             dirty = true;
         }
         if changed.is_none() && !new_canvas && !canvas_dirty && !resized {
+            // input that had nothing to show (the pointer moving over the canvas before a
+            // stroke) is done with: the next frame's input is what it shows (not counted
+            // from the hover before the press, nor making the pacer think it came late)
+            if drag == Drag::None {
+                (oldest_input, events) = (None, 0);
+            }
             continue;
         }
         canvas_dirty = false;
@@ -862,6 +932,20 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             due_ns,
         });
     }
+    // (a session in progress ends: the others see this app leave)
+    // (each remote edit's shown time: the first frame drawn after it went in)
+    let shown_after = |ns: u64| {
+        recs.iter()
+            .find(|r| r.drawn_ns >= ns)
+            .and_then(|r| r.shown_ns)
+    };
+    let together_stats = eng.as_ref().map_or_else(
+        || "null".to_string(),
+        |e| engine::together::stats_json(e, &s, &shown_after),
+    );
+    if let Some(e) = &mut eng {
+        engine::together::leave(e, &mut s, None);
+    }
     if let (Some(path), Some(e)) = (&opts.save_doc, &mut eng) {
         // (the painter's own picture catches up with what the GPU composited)
         engine::frames::catch_up(e, &s);
@@ -931,7 +1015,7 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             )
         });
         let json = format!(
-            "{{\"seconds\": {:.3}, \"fontsJoinedMs\": {fonts_joined}, \"gpuLayers\": {gpu_layers}, \"startupToFirstFrameMs\": {}, \"framesDrawn\": {drawn}, \"framesPresented\": {presented}, \"drawingLate\": {}, \"marginMs\": {:.2}, \"framesLate\": {}, \"coolDowns\": {},\n \"view\": {{\"zoom\": {}, \"angle\": {}, \"flip\": {}, \"pan\": [{}, {}], \"docSize\": [{}, {}]}},\n \"canvasRect\": [{}, {}, {}, {}],\n \"state\": {{\"workspace\": {:?}, \"tool\": \"{:?}\", \"activeLayer\": {}, \"frame\": {}, \"playing\": {}, \"colour\": {:?}, \"layers\": [{}]}},\n \"sound\": {},\n \"frames\": [\n  {}\n ]}}\n",
+            "{{\"seconds\": {:.3}, \"fontsJoinedMs\": {fonts_joined}, \"gpuLayers\": {gpu_layers}, \"together\": {together_stats}, \"startupToFirstFrameMs\": {}, \"framesDrawn\": {drawn}, \"framesPresented\": {presented}, \"drawingLate\": {}, \"marginMs\": {:.2}, \"framesLate\": {}, \"coolDowns\": {},\n \"view\": {{\"zoom\": {}, \"angle\": {}, \"flip\": {}, \"pan\": [{}, {}], \"docSize\": [{}, {}]}},\n \"canvasRect\": [{}, {}, {}, {}],\n \"state\": {{\"workspace\": {:?}, \"tool\": \"{:?}\", \"activeLayer\": {}, \"frame\": {}, \"playing\": {}, \"colour\": {:?}, \"layers\": [{}]}},\n \"sound\": {},\n \"frames\": [\n  {}\n ]}}\n",
             started.elapsed().as_secs_f64(),
             first_shown.map_or("null".into(), |v| format!("{v:.1}")),
             pacer.drawing_late(),

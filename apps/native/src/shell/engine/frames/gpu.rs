@@ -51,6 +51,13 @@ pub struct GpuFrames {
     pub input_at: Option<std::time::Instant>,
 }
 
+impl GpuFrames {
+    /// A layer's mask changed from outside (drawing together): the GPU's copy goes up again.
+    pub fn forget_mask(&mut self, layer: u32) {
+        self.forget_now.push(mask_source(layer));
+    }
+}
+
 /// How long the pen rests before the painter's own picture catches up (it takes the
 /// window's thread a few milliseconds a tick: not between strokes).
 pub const INPUT_QUIET: std::time::Duration = std::time::Duration::from_millis(400);
@@ -58,8 +65,9 @@ pub const INPUT_QUIET: std::time::Duration = std::time::Duration::from_millis(40
 /// How long the CPU composites after the GPU couldn't (no room for a frame's tiles).
 const BACK_OFF: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// Tiles of the painter's own picture composited a tick while it catches up.
-pub const CATCH_UP_TILES: usize = 96;
+/// Tiles of the painter's own picture composited a tick while it catches up (about 0.8 ms
+/// of the window's thread: a press landing behind it waits no longer than that).
+pub const CATCH_UP_TILES: usize = 32;
 
 /// Whether the painter's own picture is to catch up now: the GPU makes the picture, the
 /// frame rests (not playing, not scrubbing, no stroke) and tiles are left.

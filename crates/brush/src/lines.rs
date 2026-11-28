@@ -1231,6 +1231,7 @@ impl Painter {
 
     /// Put `e` (the undo of a change just made) into the last undo step.
     pub(crate) fn join_last(&mut self, e: Edit) {
+        self.note_edited(&e);
         if let Some(last) = self.undo.pop() {
             self.undo.push(Edit::Batch(vec![e, last]));
         }

@@ -224,7 +224,7 @@ pub fn open(e: &mut Engine, s: &mut State, path: &Path) -> Result<(Doc, OpenTime
                     *h,
                     std::sync::Arc::new(FileTile {
                         deflated,
-                        bytes: bytes.into_boxed_slice(),
+                        bytes: bytes.into(),
                     }),
                 ))
             },

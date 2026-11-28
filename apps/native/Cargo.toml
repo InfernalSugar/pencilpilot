@@ -32,6 +32,13 @@ libc = "0.2"
 # the desktop portal (the system file dialog), over D-Bus
 zbus = "5"
 # (an export runs at a lower priority than the window)
+# drawing together: the live session (peer to peer), on its own thread and runtime
+pencilpilot-share = { path = "../../crates/share" }
+# …and its drawing side: the edits, who may draw where, tiles on the wire (the current app's)
+pencilpilot-together = { path = "../../crates/together" }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+data-encoding = "2"
+blake3 = "1"
 
 [dev-dependencies]
 # (the export checks build an engine from the measuring fixtures)

@@ -159,7 +159,12 @@ pub fn build(f: &mut Frame, r: Rect, s: &mut State) {
 
     // ---- right: Undo, Redo, Draw together, Export ----
     let export_text = f.lay_out("Export", &label(t.on_coral), None);
-    let together_text = f.lay_out("Draw together", &label(t.ink), None);
+    // (in a session: how many are here)
+    let together = match &s.together.info {
+        Some(i) => format!("Together · {}", i.members.len()),
+        None => "Draw together".to_string(),
+    };
+    let together_text = f.lay_out(&together, &label(t.ink), None);
     let ew = export_text.width + 36.0;
     l.export = Rect::new(r.right() - ew, cy - 22.0, ew, 44.0);
     let tw = together_text.width + 32.0;

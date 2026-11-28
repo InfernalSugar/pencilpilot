@@ -3507,6 +3507,7 @@ name = "pencilpilot-brush-wasm"
 version = "0.1.0"
 dependencies = [
  "hokusai",
+ "miniz_oxide 0.9.1",
  "pencilpilot-brush",
  "wasm-bindgen",
 ]
@@ -3563,7 +3564,9 @@ dependencies = [
 name = "pencilpilot-native"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "cosmic-text",
+ "data-encoding",
  "gif",
  "hokusai",
  "libc",
@@ -3572,12 +3575,15 @@ dependencies = [
  "pencilpilot-export",
  "pencilpilot-gpu",
  "pencilpilot-ppstudio",
+ "pencilpilot-share",
  "pencilpilot-sound",
+ "pencilpilot-together",
  "pencilpilot-ui",
  "pencilpilot-window",
  "png",
  "rayon",
  "serde_json",
+ "tokio",
  "zbus",
 ]
 
@@ -3654,6 +3660,20 @@ dependencies = [
  "rayon",
  "rtrb",
  "symphonia",
+]
+
+[[package]]
+name = "pencilpilot-together"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "blake3",
+ "flate2",
+ "indexmap",
+ "pencilpilot-ppstudio",
+ "pencilpilot-share",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

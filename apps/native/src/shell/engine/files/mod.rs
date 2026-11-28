@@ -543,7 +543,12 @@ fn mark_saved(e: &mut Engine, s: &mut State) {
 
 /// A new, empty project: 1920 × 1080, 24 fps, one layer, one empty cel.
 pub fn new(e: &mut Engine, s: &mut State) {
-    replace(e, s, Painter::new(1920, 1080));
+    new_sized(e, s, 1920, 1080);
+}
+
+/// A new, empty project `w` × `h` (joining a shared project opens one of its size).
+pub fn new_sized(e: &mut Engine, s: &mut State, w: u32, h: u32) {
+    replace(e, s, Painter::new(w, h));
     s.layers = vec![Layer {
         name: "Layer 1".into(),
         visible: true,

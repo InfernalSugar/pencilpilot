@@ -868,9 +868,17 @@ fn drawings_not_showing_stay_out_of_the_painter() {
             assert!(*v == after.drawings[k], "drawing {k}");
         }
     }
-    // thumbnails: every drawing has one
-    for _ in 0..40 {
+    // thumbnails: every drawing has one (those kept out of the painter made on other threads)
+    let all = |s: &State| {
+        s.sheet
+            .tracks
+            .iter()
+            .all(|t| t.drawings().iter().all(|d| s.sheet.thumbs.contains_key(d)))
+    };
+    let t0 = Instant::now();
+    while !all(&s2) && t0.elapsed() < Duration::from_secs(10) {
         e2.tick(&mut s2, Instant::now());
+        std::thread::sleep(Duration::from_millis(2));
     }
     for t in &s2.sheet.tracks {
         for dd in t.drawings() {
