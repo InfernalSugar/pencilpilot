@@ -1025,8 +1025,10 @@ def wire_frames(events):
 
 def compare_with_wire(saved, events, names):
     """A saved project's layers against what the wire carried (frame by frame)."""
-    pp, _ = project_pixels(saved)
+    pp, man = project_pixels(saved)
     wf = wire_frames(events)
+    cw, ch = man["canvas"]["width"], man["canvas"]["height"]
+    wf = {n: [on_canvas(f, cw, ch) if f is not None else None for f in fr] for n, fr in wf.items()}
     res = {}
     for n in names:
         if n not in pp or n not in wf:
@@ -1122,6 +1124,24 @@ def frames_of(m):
     return out
 
 
+def on_canvas(tiles, w, h):
+    """Only what's on the canvas: tiles past it left out, the edge tiles' pixels past it
+    cleared (file writers drop off-canvas paint; the wire may carry it)."""
+    import numpy as np
+    out = {}
+    for (x, y), px in tiles.items():
+        if x < 0 or y < 0 or x * 64 >= w or y * 64 >= h:
+            continue
+        if (x + 1) * 64 > w or (y + 1) * 64 > h:
+            a = np.frombuffer(px, np.uint8).reshape(64, 64, 4).copy()
+            a[max(0, h - y * 64):] = 0
+            a[:, max(0, w - x * 64):] = 0
+            px = a.tobytes()
+        if any(px):
+            out[(x, y)] = px
+    return out
+
+
 def project_pixels(path):
     """A .ppstudio: layer name → [[tiles per frame] per layer of that name] ({(x, y): bytes},
     transparent tiles left out; None: no drawing), and the manifest."""
@@ -1137,7 +1157,7 @@ def project_pixels(path):
                 px = z.read(f"tiles/{e['hash']}")
                 if any(px):
                     t[(e["x"], e["y"])] = px
-            cache[did] = t
+            cache[did] = on_canvas(t, m["canvas"]["width"], m["canvas"]["height"])
         return cache[did]
     fr = frames_of(m)
     out = {}
