@@ -235,7 +235,8 @@ fn blank(px: &TilePx) -> bool {
 
 impl Compositor {
     /// A compositor for a `width` × `height` picture. `lut` is the brush engine's table from
-    /// linear fix15 (0..=32768) to sRGB 0–1. `budget` caps the tiles' GPU memory (bytes).
+    /// linear fix15 (0..=32768) to sRGB 0–1. `budget` caps all the GPU memory it takes (bytes):
+    /// the tiles get what the picture, the kept bottom layers and the uploads leave.
     pub fn new(gpu: &Gpu, width: u32, height: u32, lut: &[f32], budget: u64) -> Result<Compositor> {
         if lut.len() != 32769 {
             return Err(Error::Missing("the colour table"));
@@ -253,8 +254,15 @@ impl Compositor {
             .map(|h| h.size)
             .max()
             .unwrap_or(budget * 4);
-        let max_slots =
-            (budget.min(max_range).min(heap / 4) / TILE_BYTES).max(ntiles as u64) as u32;
+        let picture = width as u64 * height as u64 * 4;
+        // the picture, the kept bottom layers (16 bytes a pixel), the staging buffer, the
+        // frame's description and the colour table
+        let fixed = picture * 5
+            + STAGING_TILES as u64 * TILE_BYTES
+            + (DIRTY_AT + ntiles * (1 + 2 * MAX_LAYERS + MAX_ONION)) as u64 * 4
+            + 32769 * 4;
+        let max_slots = (budget.min(heap / 4).saturating_sub(fixed).min(max_range) / TILE_BYTES)
+            .max(ntiles as u64) as u32;
         let capacity = (2 * ntiles as u32).clamp(256, max_slots);
         let frame_words = DIRTY_AT + ntiles * (1 + 2 * MAX_LAYERS + MAX_ONION);
         let storage = vk::BufferUsageFlags::STORAGE_BUFFER;
@@ -452,10 +460,25 @@ impl Compositor {
         self.sources.get_mut(&id).map(|s| s.used = stamp).is_some()
     }
 
-    /// Whether `tiles` more fit without putting anything away (with an eighth of the most
-    /// the tiles may take left over).
+    /// Whether `tiles` more fit without putting anything away (with a picture's worth of
+    /// tiles left over, for what a frame changes).
     pub fn room(&self, tiles: usize) -> bool {
-        self.tiles_held() as u64 + tiles as u64 <= self.max_slots as u64 * 7 / 8
+        self.tiles_held() as u64 + tiles as u64 + self.ntiles as u64 <= self.max_slots as u64
+    }
+
+    /// Room for `tiles` more and some to spare, made now (the atlas grown, if it may): for
+    /// work between frames, so a frame that shows new drawings doesn't wait for it.
+    pub fn reserve(&mut self, gpu: &Gpu, tiles: usize) -> Result<()> {
+        let spare = (tiles + 2048) as u64;
+        let free = (self.capacity - self.top) as u64 + self.free.len() as u64;
+        if free < spare && self.capacity < self.max_slots {
+            let want = self.capacity as u64 + spare - free;
+            let to = want
+                .max(self.capacity as u64 + (self.capacity / 4) as u64)
+                .min(self.max_slots as u64) as u32;
+            self.grow(gpu, to)?;
+        }
+        Ok(())
     }
 
     /// Whether a source is here (without counting it as wanted in this frame).
@@ -584,7 +607,8 @@ impl Compositor {
             return Ok(self.top - 1);
         }
         if self.capacity < self.max_slots {
-            let to = (self.capacity * 2).min(self.max_slots);
+            // (a quarter more at a time: doubling would leave up to half of it unused)
+            let to = (self.capacity + (self.capacity / 4).max(1024)).min(self.max_slots);
             self.grow(gpu, to)?;
             return self.slot(gpu);
         }
@@ -713,8 +737,9 @@ impl Compositor {
     pub fn set_frame(&mut self, gpu: &Gpu, layers: &[GpuLayer], onion: &[OnionLayer]) {
         let layers = &layers[..layers.len().min(MAX_LAYERS)];
         let onion = &onion[..onion.len().min(MAX_ONION)];
-        self.frames += 1;
-        let now = self.frames;
+        // (frames are counted when something changes: a pause doesn't make the layers that
+        // change on every other frame look still)
+        let now = self.frames + 1;
         let mut changed = [false; MAX_LAYERS];
         for (l, c) in changed.iter_mut().enumerate().take(layers.len()) {
             *c = self.touched.contains(&layers[l].source)
@@ -796,11 +821,15 @@ impl Compositor {
                 }
             }
         }
+        if changed.iter().any(|c| *c) {
+            self.frames = now;
+        }
         for (l, c) in changed.iter().enumerate() {
             if *c {
                 self.changed_at[l] = now;
             }
         }
+        let now = self.frames;
         // the prefix: the bottom layers unchanged lately
         let mut k = (0..self.layers.len())
             .take_while(|&l| self.changed_at[l] + STABLE_FRAMES <= now)

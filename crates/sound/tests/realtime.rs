@@ -87,6 +87,7 @@ fn rendering_neither_allocates_nor_frees() {
     remote.send(Cmd::Play {
         voices: voices.clone(),
         clock,
+        start: None,
     });
     for _ in 0..300 {
         render(&mut mixer);
@@ -94,6 +95,7 @@ fn rendering_neither_allocates_nor_frees() {
     remote.send(Cmd::Play {
         voices: voices[..1].to_vec(),
         clock,
+        start: None,
     });
     for _ in 0..50 {
         render(&mut mixer);

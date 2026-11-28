@@ -236,8 +236,8 @@ Each step is its own PR, with tests that need no window on the screen.
   - **Tiles kept on the GPU:** a drawing goes up once (64 × 64 tiles, premultiplied linear
     fix15, as the painter keeps them); after that only tiles the painter says changed, each
     checked against a hash. Going to another frame only points the shader at other tiles.
-    Up to 1 GiB (or a quarter of the GPU's memory) of tiles; past that, the least recently
-    shown drawings make room. Drawings not showing stay compressed on the CPU as before.
+    The compositor takes at most 920 MiB of GPU memory, everything included (or a quarter of
+    the GPU's memory); past that, the least recently shown drawings make room. Drawings not showing stay compressed on the CPU as before.
   - **Going up ahead:** the drawings of the frames around the current one (then the whole
     cut, while there's room) go up between frames and while nothing else happens, decoded on
     another thread; nothing goes up while input comes in.
@@ -295,8 +295,36 @@ Each step is its own PR, with tests that need no window on the screen.
 - **Budgets:** scrubbing at the display's rate, playback (0 skipped, on the nearest display
   frame, first frame under 0.5 s), CPU while playing, and memory pass for both test projects at
   165 and 60 Hz. Pen to screen is unchanged.
-- **Open:** VRAM has no budget yet (the tiles may take 1 GiB; a smaller GPU gets a quarter of
-  its memory and evicts); a project whose one frame needs more tiles than that goes back to the
+- **Follow-up after QA's gate on the combined branch** (QA's `tools/native-qa/phase4.py`, 3
+  runs each, release, headless mutter):
+  - **Pen to screen at 4K × 20 layers had regressed** (strokes on the top layer: 165 Hz p99 8.5
+    → 13.0 ms with 6–8 misses; 60 Hz 25.6 → 37.3 ms). Cause: when a stroke ended, its drawing
+    was marked changed (for its thumbnail) and the GPU's copy of it thrown away, so the whole
+    drawing went up again and was composited again in the next frame, every stroke; the late
+    frames widened the pacer's margin. A drawing a layer shows is kept up to date tile by tile,
+    so now only one changed out of sight is sent up again. Thumbnails and the painter's own
+    picture also wait until the pen has rested 0.4 s (each takes milliseconds of the window's
+    thread at 4K; they had landed between strokes). Now: **165 Hz p99 8.35–8.45 ms, 0–1 missed;
+    60 Hz 19.1–19.8 ms, 0 missed** (before the GPU layers: 8.5 / 19.3–26.3 ms).
+  - **4K scrubbing's slowest frame change** (6.5 ms): a pause made the layers that change every
+    other frame count as still, so the kept bottom layers were rebuilt on the next two frame
+    changes. Layers' stillness is now counted in frames where something changed. The atlas
+    grows between frames (ahead of what goes up), not in a frame. Now 4K 165 Hz work p99
+    4.5–6.5 ms (median 4.8), key to shown p99 7.3–12.1 ms, never shown 0; 500 drawings work
+    p99 4.6–4.7 ms.
+  - **GPU memory:** the cap now covers all the compositor takes (tiles, picture, kept bottom
+    layers, staging), and the atlas grows a quarter at a time (doubling left up to half
+    unused). The whole app, from amdgpu's fdinfo (resident VRAM + GTT; QA's sampler adds both
+    `drm-memory-*` and `drm-resident-*` lines, which double counts: its 1584 / 2273 MiB are
+    792 / 1137 MiB): **4K × 20 layers 768 MiB (VRAM 702 + GTT 66), up to ~890 MiB while playing
+    (the kept bottom layers, 127 MiB, made at the first frame change); 500 drawings 948 MiB
+    (906 + 42)**. At 4K the compositor is 662 MiB: tiles 486 (14 854 held), kept bottom layers
+    127, picture 32, staging 16; the rest of the app ~100 MiB (the canvas image 32 and its
+    staging 32, the window's buffers, the interface's atlas and its staging).
+  - Playback and memory unchanged: 0 skipped, all frames on time, 3–4 % of a core, PSS 333 /
+    164 MiB.
+- **Open:** VRAM has no budget yet (the compositor takes up to 920 MiB; a smaller GPU gets a
+  quarter of its memory and evicts); a project whose one frame needs more tiles than that goes back to the
   CPU path for 3 s at a time; layer styles and adjustment layers are still composited on the CPU;
   on a real display (Hyprland, a vblank grid) playback's lead is measured the same way but not
   checked yet.
@@ -311,11 +339,17 @@ Each step is its own PR, with tests that need no window on the screen.
   - **Output:** cpal (ALSA, which reaches PipeWire and PulseAudio through their ALSA plugins). The
     mixer runs in cpal's callback and never allocates, locks or frees there (a test counts it):
     commands come through a lock-free ring (rtrb) and go back the same way to be dropped. The
-    output opens at the first play or scrub and pauses 1.5 s after the sound stops, so idle stays
-    at 0 frames and 0 % CPU.
+    output is opened (not playing) when a project with sound opens, plays from Play or a scrub,
+    and pauses 1.5 s after the sound stops, so idle stays at 0 frames and 0 % CPU. The device's
+    own buffer size is used (a fixed 480 underran every cycle under PipeWire's 1024 quantum).
   - **In step with the picture:** the mixer knows when each buffer will be heard (cpal's
-    latency) and plays the scene sample playback's clock says is due then, warping its time by
-    at most 0.2 % to follow the clock (no drift, no pitch change). Frames reach the screen a
+    stream timestamps, mapped to the app's clock by their smallest offset seen: cpal's
+    callback time is when the device last reported, up to a quantum ago) and plays the scene
+    sample playback's clock says is due then, warping its time by at most 0.2 % to follow the
+    clock (no drift, no pitch change); a jump over 3 ms (an underrun) is taken at once.
+  - **Starting:** a play's clock starts when its first sound can be heard (the mixer says
+    when; the frame showing holds that long, the output's latency), so a sound on the first
+    frame is heard from its start, as in today's app. Frames reach the screen a
     little away from the clock's time (on mutter, 0.6–0.8 of a refresh early: playback's lead
     overestimates the show delay); the sound follows the frames as presented (the median of the
     play's latest 48 frames' presentation times, from its third frame; kept for the next play).
@@ -352,10 +386,29 @@ Each step is its own PR, with tests that need no window on the screen.
   | Export with sound, 4K MP4 peak | 1 GB | 652 MiB (WebM 1.19 GB: libvpx, as without sound) |
   | Exported sound vs the mix | — | lag 0 ms; correlation 1.000 (AAC), 0.984 (Opus) |
 
+- **Measured through PipeWire** (QA's harness, `tools/native-qa/phase4.py sync` and
+  `sound-start` on `native/p4-qa-work`: the app's ALSA `null` device is a private, device-less
+  PipeWire null sink recorded on its own sample clock; clicks every 12 frames for 10 s, 3 runs
+  each at 165 and 60 Hz, two projects; offsets less what the recorder adds):
+
+  | What | Budget | Quantum 1024 (the owner's) | Quantum 256 |
+  |---|---|---|---|
+  | Click vs its frame shown, p50 | ±1 display frame | −0.48 to −0.03 ms | −0.44 to −0.05 ms |
+  | Click vs its frame shown, worst after the first | ±6.06 / 16.67 ms | −0.93 to +0.01 ms | within ±4.7 ms (all clicks) |
+  | The first click (on the frame showing at Play) | — | +11 to +20 ms after that frame first showed: it holds until the sound can be heard | +0 to +4.7 ms |
+  | Play to sound heard | 50 ms | 36–48 ms | 7–19 ms |
+  | A tone from frame 0: its start not heard | 0 | 0–1 ms (5 runs), once 21 ms heard early | 0–5 ms |
+
+  Before the fix (QA's gate): clicks −0.1 to +19.4 ms late at quantum 1024 (a fixed 480-sample
+  buffer underran every cycle or two, and the mixer took 20 ms jumps as drift to warp
+  through), and the first 19–26 ms of a play weren't heard. One of the twelve 1024 runs at
+  165 Hz isn't matched by the harness: its picture skipped frames 11–12 under load (load
+  average 5), which leaves no anchor frame.
+
 - **Fixed on the way:** a video scaled while written lost its sound (the sound's `-i` came after
   `-vf`, which FFmpeg refuses); `-shortest` held up to 10 s of frames back (1 GB at 1080p): the
   mix is made as long as the frames instead.
-- **Open:** the first play of a session at 165 Hz (its first frame 2 ms past the budget, until
-  the frames' timing is known); the real device's latency on the owner's PipeWire (only ALSA
+- **Open:** the first play of a session at 165 Hz on the silent output (its first frame 2 ms past
+  the budget, until the frames' timing is known); the real device's latency on the owner's PipeWire (only ALSA
   `null` was opened here); adding sounds and lip-sync (the current app's) aren't ported yet;
   undo for clip moves.
