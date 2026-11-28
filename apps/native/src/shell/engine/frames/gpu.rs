@@ -49,6 +49,19 @@ pub struct GpuFrames {
 /// How long the CPU composites after the GPU couldn't (no room for a frame's tiles).
 const BACK_OFF: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// Tiles of the painter's own picture composited a tick while it catches up.
+pub const CATCH_UP_TILES: usize = 96;
+
+/// Whether the painter's own picture is to catch up now: the GPU makes the picture, the
+/// frame rests (not playing, not scrubbing, no stroke) and tiles are left.
+pub fn painter_behind(e: &Engine, s: &State) -> bool {
+    e.frames.gpu.on
+        && !s.playing
+        && e.frames.gpu.view.is_none()
+        && !e.is_stroking()
+        && e.painter.stale_tiles() > 0
+}
+
 /// How long a frame rests before the painter shows its drawings too.
 pub const REST: std::time::Duration = std::time::Duration::from_millis(80);
 

@@ -369,3 +369,33 @@ fn the_bottom_layers_kept_composited_match_the_cpu() {
     e.up();
     check("painted under the animation", &mut e, &s, &g, &mut comp);
 }
+
+#[test]
+fn the_painters_own_picture_catches_up_at_rest() {
+    let Some(g) = gpu() else { return };
+    let mut comp = new_comp(&g);
+    let (mut e, mut s) = engine();
+    for f in [3, 9, 15] {
+        assert!(apply(&mut e, &mut s, &Action::GoToFrame(f)));
+        assert!(on_gpu(&mut e, &s, &g, &mut comp));
+    }
+    let gp = comp.read_back(&g).unwrap();
+    let mut t = Instant::now() + REST * 2;
+    for _ in 0..64 {
+        tick(&mut e, &mut s, t);
+        assert!(on_gpu(&mut e, &s, &g, &mut comp));
+        if e.painter.stale_tiles() == 0 {
+            break;
+        }
+        t += std::time::Duration::from_millis(10);
+    }
+    assert_eq!(e.painter.stale_tiles(), 0, "caught up");
+    // what it shows is the GPU's picture (without the onion skin: none here)
+    let most = gp
+        .chunks(4)
+        .zip(e.painter.rgba().chunks(4))
+        .map(|(a, b)| (0..3).map(|c| a[c].abs_diff(b[c])).max().unwrap())
+        .max()
+        .unwrap();
+    assert!(most <= 1, "the painter's picture differs by {most}");
+}

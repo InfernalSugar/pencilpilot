@@ -1054,6 +1054,12 @@ pub fn tick(e: &mut Engine, s: &mut State, now: Instant) -> bool {
     if shown {
         changed = true;
     }
+    // the painter's own picture catches up with what the GPU composited, a little at a time
+    // once the frame rests (for what reads it: the eyedropper, a fill of what's seen, the
+    // file's thumbnail)
+    if gpu::painter_behind(e, s) {
+        e.painter.flush_some(gpu::CATCH_UP_TILES);
+    }
     // (more asked for once this frame is drawn, not while: their decoding would slow it)
     prefetch(e, s, !shown);
     if e.frames.trim_at.is_some_and(|t| now >= t || s.playing) {
@@ -1079,6 +1085,7 @@ fn idle(e: &Engine, s: &State) -> bool {
     let f = &e.frames;
     f.ready
         && f.gpu.view.is_none()
+        && !gpu::painter_behind(e, s)
         && f.prefetch.is_none()
         && f.trim_at.is_none()
         && !f.ahead_due
@@ -1136,6 +1143,9 @@ pub fn next_tick_at(e: &Engine, s: &State) -> Option<Instant> {
     // the painter catches up with the GPU's frame once it rests
     if let (Some(_), Some(t), false) = (&f.gpu.view, f.gpu.view_at, s.playing) {
         at.push(t + gpu::REST);
+    }
+    if gpu::painter_behind(e, s) {
+        at.push(now + Duration::from_millis(8));
     }
     // drawings going up to the GPU ahead (between frames while playing)
     if f.gpu.warm.busy() && !s.playing {

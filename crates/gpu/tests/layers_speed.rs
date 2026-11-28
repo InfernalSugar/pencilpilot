@@ -61,4 +61,22 @@ fn composite_4k_20_layers() {
         "4K, 20 layers, every tile: {:.2} ms median, {:.2} fastest",
         times[10], times[0]
     );
+    // a stroke's frame: a few tiles of one layer changed
+    let mut times = Vec::new();
+    for i in 0..40u16 {
+        px[0][0][0] = i;
+        let t = std::time::Instant::now();
+        for k in 0..10 {
+            c.put_tile(&gpu, 19, (k + (i % 7) as i32, 3), Some(&px))
+                .unwrap();
+        }
+        c.set_frame(&gpu, &layers, &[]);
+        c.composite_pending(&gpu).unwrap();
+        times.push(t.elapsed().as_secs_f64() * 1e3);
+    }
+    times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    eprintln!(
+        "10 tiles of one layer: {:.3} ms median, {:.3} fastest",
+        times[20], times[0]
+    );
 }
