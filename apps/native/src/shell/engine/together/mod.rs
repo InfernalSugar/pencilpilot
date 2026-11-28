@@ -840,8 +840,10 @@ fn take(e: &mut Engine, s: &mut State, msg: net::In) -> bool {
             members,
             invite,
         } => {
-            let before = s.together.info.as_ref().map_or(0, |i| i.members.len());
-            let alone = you && members.len() == 1 && before > 1;
+            // (this app took over as host, and no one else is here: the host (and the others)
+            // may have dropped it, not the session)
+            let was_host = s.together.info.as_ref().is_some_and(|i| i.host);
+            let alone = you && !was_host && members.len() == 1;
             if let Some(info) = &mut s.together.info {
                 info.members = members;
                 info.host = you;
@@ -1177,7 +1179,7 @@ pub fn stats_json(e: &Engine, s: &State, shown_after: &dyn Fn(u64) -> Option<u64
     let members = s.together.info.as_ref().map_or(0, |i| i.members.len());
     let tl = t.win.full_tl.as_ref().map_or(0, |tl| tl.scenes.len());
     format!(
-        "{{\"host\": {}, \"members\": {members}, \"membersPeak\": {}, \"startedNs\": {}, \"joinedNs\": {}, \"syncedNs\": {}, \"bytesSent\": {sent}, \"bytesReceived\": {received}, \"liveSent\": {}, \"tilesSent\": {}, \"deferred\": {}, \"sharedLayers\": {}, \"scenes\": {}, \"edits\": [{}]}}",
+        "{{\"host\": {}, \"members\": {members}, \"membersPeak\": {}, \"startedNs\": {}, \"joinedNs\": {}, \"syncedNs\": {}, \"bytesSent\": {sent}, \"bytesReceived\": {received}, \"liveSent\": {}, \"tilesSent\": {}, \"deferred\": {}, \"cacheMiB\": {:.1}, \"sharedLayers\": {}, \"scenes\": {}, \"edits\": [{}]}}",
         s.together.info.as_ref().is_some_and(|i| i.host),
         t.stats.members_peak,
         opt(t.stats.started_ns),
@@ -1186,6 +1188,7 @@ pub fn stats_json(e: &Engine, s: &State, shown_after: &dyn Fn(u64) -> Option<u64
         t.stats.live_sent,
         t.stats.tiles_sent,
         t.stats.deferred,
+        t.view.cache_bytes as f64 / (1 << 20) as f64,
         t.view.shared.layers.len(),
         tl,
         edits.join(", ")

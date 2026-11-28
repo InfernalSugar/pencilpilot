@@ -55,6 +55,8 @@ pub struct SharedView {
     /// shared layer → the painter's layer
     pub ids: Vec<(String, u32)>,
     pub synced: bool,
+    /// bytes `Together` keeps of the project's pixels (its copy of every drawing)
+    pub cache_bytes: usize,
 }
 
 /// What reaches the window.
@@ -398,6 +400,11 @@ impl Pump {
             shared: t.shared.clone(),
             ids: t.ids.iter().map(|(k, v)| (k.clone(), *v)).collect(),
             synced: t.synced(),
+            cache_bytes: t
+                .cache
+                .values()
+                .map(|m| m.values().map(Vec::len).sum::<usize>())
+                .sum(),
         }));
     }
 }
