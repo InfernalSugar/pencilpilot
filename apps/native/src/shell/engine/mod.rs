@@ -230,6 +230,7 @@ impl Engine {
     /// A pointer on the canvas (pen or mouse, pressed). The Brush and the Eraser paint;
     /// the other tools are [`tools`]'.
     pub fn pointer(&mut self, s: &mut State, phase: Phase, p: Sample) {
+        self.frames.gpu.input_at = Some(std::time::Instant::now());
         if phase == Phase::Down {
             // (the painter shows the frame's drawings: the GPU may have shown them alone)
             frames::catch_up(self, s);

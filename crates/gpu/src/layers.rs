@@ -235,7 +235,8 @@ fn blank(px: &TilePx) -> bool {
 
 impl Compositor {
     /// A compositor for a `width` × `height` picture. `lut` is the brush engine's table from
-    /// linear fix15 (0..=32768) to sRGB 0–1. `budget` caps the tiles' GPU memory (bytes).
+    /// linear fix15 (0..=32768) to sRGB 0–1. `budget` caps all the GPU memory it takes (bytes):
+    /// the tiles get what the picture, the kept bottom layers and the uploads leave.
     pub fn new(gpu: &Gpu, width: u32, height: u32, lut: &[f32], budget: u64) -> Result<Compositor> {
         if lut.len() != 32769 {
             return Err(Error::Missing("the colour table"));
@@ -253,8 +254,15 @@ impl Compositor {
             .map(|h| h.size)
             .max()
             .unwrap_or(budget * 4);
-        let max_slots =
-            (budget.min(max_range).min(heap / 4) / TILE_BYTES).max(ntiles as u64) as u32;
+        let picture = width as u64 * height as u64 * 4;
+        // the picture, the kept bottom layers (16 bytes a pixel), the staging buffer, the
+        // frame's description and the colour table
+        let fixed = picture * 5
+            + STAGING_TILES as u64 * TILE_BYTES
+            + (DIRTY_AT + ntiles * (1 + 2 * MAX_LAYERS + MAX_ONION)) as u64 * 4
+            + 32769 * 4;
+        let max_slots = (budget.min(heap / 4).saturating_sub(fixed).min(max_range) / TILE_BYTES)
+            .max(ntiles as u64) as u32;
         let capacity = (2 * ntiles as u32).clamp(256, max_slots);
         let frame_words = DIRTY_AT + ntiles * (1 + 2 * MAX_LAYERS + MAX_ONION);
         let storage = vk::BufferUsageFlags::STORAGE_BUFFER;
@@ -584,7 +592,8 @@ impl Compositor {
             return Ok(self.top - 1);
         }
         if self.capacity < self.max_slots {
-            let to = (self.capacity * 2).min(self.max_slots);
+            // (a quarter more at a time: doubling would leave up to half of it unused)
+            let to = (self.capacity + (self.capacity / 4).max(1024)).min(self.max_slots);
             self.grow(gpu, to)?;
             return self.slot(gpu);
         }

@@ -30,8 +30,11 @@ pub struct GpuFrames {
     doc: u32,
     /// each layer's source (and mask's) last composited
     last: Vec<(u64, Option<u64>)>,
-    /// sources to forget before the next frame (changed out of sight)
+    /// drawings that changed (thumbnails made again): forgotten before the next frame unless
+    /// a layer shows them (then their changes come tile by tile)
     pub(super) forget: Vec<u64>,
+    /// sources to forget before the next frame whatever shows (changes not taken)
+    forget_now: Vec<u64>,
     /// tiles changed some other way since the last frame (`Changes::other`)
     other: Vec<(i32, i32)>,
     /// drawings going up ahead
@@ -44,7 +47,13 @@ pub struct GpuFrames {
     pub catching_up: bool,
     /// the GPU couldn't make a frame: the CPU does until then
     cpu_until: Option<std::time::Instant>,
+    /// when the pen or mouse last reached the canvas (catching up waits for a pause)
+    pub input_at: Option<std::time::Instant>,
 }
+
+/// How long the pen rests before the painter's own picture catches up (it takes the
+/// window's thread a few milliseconds a tick: not between strokes).
+pub const INPUT_QUIET: std::time::Duration = std::time::Duration::from_millis(400);
 
 /// How long the CPU composites after the GPU couldn't (no room for a frame's tiles).
 const BACK_OFF: std::time::Duration = std::time::Duration::from_secs(3);
@@ -60,6 +69,39 @@ pub fn painter_behind(e: &Engine, s: &State) -> bool {
         && e.frames.gpu.view.is_none()
         && !e.is_stroking()
         && e.painter.stale_tiles() > 0
+        && e.frames
+            .gpu
+            .input_at
+            .is_none_or(|t| t.elapsed() >= INPUT_QUIET)
+}
+
+/// Whether the pen or mouse has rested on the canvas long enough for work that would take
+/// the window's thread between strokes.
+pub fn pen_quiet(e: &Engine) -> bool {
+    e.frames
+        .gpu
+        .input_at
+        .is_none_or(|t| t.elapsed() >= INPUT_QUIET)
+}
+
+/// When the pen will have rested long enough ([`pen_quiet`]).
+pub fn quiet_at(e: &Engine) -> std::time::Instant {
+    let now = std::time::Instant::now();
+    e.frames
+        .gpu
+        .input_at
+        .map_or(now, |t| (t + INPUT_QUIET).max(now))
+}
+
+/// When the painter's own picture is next to catch up (see [`painter_behind`]).
+pub fn catch_up_at(e: &Engine, s: &State) -> Option<std::time::Instant> {
+    let g = &e.frames.gpu;
+    let waiting =
+        g.on && !s.playing && g.view.is_none() && !e.is_stroking() && e.painter.stale_tiles() > 0;
+    let now = std::time::Instant::now();
+    waiting.then(|| {
+        (now + std::time::Duration::from_millis(8)).max(g.input_at.map_or(now, |t| t + INPUT_QUIET))
+    })
 }
 
 /// How long a frame rests before the painter shows its drawings too.
@@ -121,14 +163,14 @@ pub(super) fn before_show(e: &mut Engine) {
     };
     let g = &mut e.frames.gpu;
     for (id, _) in &ch.colour {
-        g.forget.extend(src(*id));
+        g.forget_now.extend(src(*id));
     }
     for (id, _) in &ch.mask {
-        g.forget.push(mask_source(*id));
+        g.forget_now.push(mask_source(*id));
     }
     if !ch.other.is_empty() {
-        g.forget.extend(src(active));
-        g.forget.push(mask_source(active));
+        g.forget_now.extend(src(active));
+        g.forget_now.push(mask_source(active));
         g.other.extend(ch.other);
     }
 }
@@ -218,7 +260,17 @@ fn compose(
         e.frames.painted = Some(active_drawing);
     }
     let g = &mut e.frames.gpu;
+    // (a drawing a layer shows is kept up to date tile by tile from the painter's changes:
+    // its strokes, its undo; only one changed out of sight is sent up again)
     for id in std::mem::take(&mut g.forget) {
+        let showing = layers
+            .iter()
+            .any(|l| l.drawing != 0 && drawing_source(l.drawing) == id);
+        if !showing {
+            comp.forget(id);
+        }
+    }
+    for id in std::mem::take(&mut g.forget_now) {
         comp.forget(id);
     }
     // each layer's source: what the painter shows, or the GPU's own view of the frame
