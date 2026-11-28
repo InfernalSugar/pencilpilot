@@ -20,6 +20,11 @@ use crate::shell::engine::frames::store::{FileTile, Job};
 /// A tile as kept exactly (straight RGBA8, raw deflate).
 pub type Exact = Arc<FileTile>;
 
+/// A tile as it came over the wire (raw deflate), and where.
+type Wire = ((i32, i32), Arc<[u8]>);
+/// A tile from the wire decoded for the painter, and as it came (None: nothing in it).
+type Decoded = ((i32, i32), Option<(brush::DecodedTile, Exact)>);
+
 /// What a remote edit's tiles were, for `--stats` (who, when it came, the sender's time).
 #[derive(Debug, Clone, Default)]
 pub struct Stamp {
@@ -279,11 +284,11 @@ impl CanvasPort for RemotePort {
         // where they changed; known by a hash of their bytes as they came)
         let was = self.zhashes.get(&drawing).cloned().unwrap_or_default();
         let now: HashMap<(i32, i32), u64> = tiles.par_iter().map(|(k, b)| (*k, hash(b))).collect();
-        let changed: Vec<&((i32, i32), Arc<[u8]>)> = tiles
+        let changed: Vec<&Wire> = tiles
             .iter()
             .filter(|(k, _)| was.get(k) != now.get(k))
             .collect();
-        let decoded: Vec<((i32, i32), Option<(brush::DecodedTile, Exact)>)> = changed
+        let decoded: Vec<Decoded> = changed
             .par_iter()
             .map(|(k, b)| {
                 let px = miniz_oxide::inflate::decompress_to_vec_with_limit(
