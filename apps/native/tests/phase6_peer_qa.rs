@@ -102,7 +102,12 @@ impl Peer {
                 "lid": t.access.get(i).and_then(|a| a.as_ref()).map(|a| a.lid.clone()),
             })).collect::<Vec<_>>(),
             "active": self.s.active_layer,
-            "rows": t.rows.iter().map(|r| format!("{r:?}")).collect::<Vec<_>>(),
+            "rows": t.rows.iter().map(|r| json!({
+                "lid": r.lid, "name": r.name, "owner": r.owner, "mine": r.mine,
+                "canDraw": r.can_draw, "asked": r.asked,
+                "writers": r.writers.iter().map(|w| w.0.clone()).collect::<Vec<_>>(),
+                "asks": r.asks.iter().map(|a| json!({"id": a.0, "name": a.1, "text": a.2, "own": a.3, "draw": a.4})).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>(),
             "chat": t.chat.iter().map(|c| json!({"name": c.name, "text": c.text, "mine": c.mine, "system": c.system})).collect::<Vec<_>>(),
             "note": t.note.as_ref().map(|n| n.0.clone()),
             "error": t.error,
@@ -183,7 +188,9 @@ fn native_peer() {
             }
             "stroke" => {
                 if let Some(l) = c["layer"].as_u64() {
+                    // as the layers panel picks one: the next passes make it the painter's
                     p.s.active_layer = l as usize;
+                    p.run_for(Duration::from_millis(60));
                 }
                 let (t0, t1) = p.stroke(
                     c["y"].as_f64().unwrap_or(400.0) as f32,

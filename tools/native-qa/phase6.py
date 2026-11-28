@@ -619,7 +619,7 @@ class Studio:
         return took
 
     def share_dialog(self):
-        self.js("const b = [...document.querySelectorAll('button')].find((x) => /Draw together|Drawing together|people/.test(x.textContent));"
+        self.js("const b = document.querySelector('button[title=\"Draw with others, live\"]');"
                 "b?.click(); return !!b;")
         time.sleep(0.2)
 
@@ -668,6 +668,64 @@ return true;""", code)
                 "b?.click(); return !!b;")
         time.sleep(0.5)
         self.close_dialog()
+
+    def dialog_click(self, text, layer=None):
+        """In the Draw together dialog: the button reading `text` (in the row of `layer`,
+        when given). True when pressed."""
+        self.share_dialog()
+        ok = self.js(r"""
+const [text, layer] = arguments;
+let scope = document;
+if (layer) scope = [...document.querySelectorAll('ul.layers li')].find((li) => li.querySelector('.lname')?.textContent.trim() === layer);
+if (!scope) return false;
+const b = [...scope.querySelectorAll('button')].find((x) => x.textContent.trim().startsWith(text) && !x.disabled);
+b?.click();
+return !!b;""", text, layer)
+        time.sleep(0.15)
+        self.close_dialog()
+        return ok
+
+    def dialog_rows(self):
+        self.share_dialog()
+        r = self.js(r"""return [...document.querySelectorAll('ul.layers li')].map((li) => ({
+  name: li.querySelector('.lname')?.textContent.trim(), owner: li.querySelector('.owner')?.textContent.trim(),
+  text: li.textContent.replace(/\s+/g, ' ').trim() }));""")
+        self.close_dialog()
+        return r
+
+    def pick_layer(self, name):
+        """The layers panel: make the layer called `name` the active one."""
+        return self.js(r"""
+const b = [...document.querySelectorAll('ul.list button.name')].find((x) => x.querySelector('.label')?.textContent.trim() === arguments[0]);
+b?.click(); return !!b;""", name)
+
+    def layer_names(self):
+        return self.js(r"""return [...document.querySelectorAll('ul.list button.name .label')].map((x) => x.textContent.trim());""")
+
+    def chat(self, text):
+        """Chat through the chat card: open it, type, Enter."""
+        ok = self.js(r"""
+const sec = document.querySelector('section.chat');
+if (!sec) return false;
+if (!sec.querySelector('input')) sec.querySelector('button.head').click();
+return true;""")
+        if not ok:
+            return False
+        time.sleep(0.1)
+        return self.js(r"""
+const input = document.querySelector('section.chat input');
+if (!input) return false;
+const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+set.call(input, arguments[0]);
+input.dispatchEvent(new Event('input', { bubbles: true }));
+input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+return true;""", text)
+
+    def chat_lines(self):
+        return self.js("return [...document.querySelectorAll('section.chat ul.lines li')].map((x) => x.textContent.replace(/\\s+/g, ' ').trim());")
+
+    def chats(self):
+        return self.js("return window.__q6.ev.filter((e) => e.kind === 'direct' && e.body && e.body.k === 'chat').map((e) => e.body.text);")
 
     def pen(self, strokes, hz=240, gap_ms=250):
         """Strokes (lists of (x, y, pressure), viewport fractions); per stroke, when each
@@ -1544,6 +1602,180 @@ def scenario_x_pair(out, native_hosts=True, strokes=5):
     return res
 
 
+def np_bin():
+    return env_bin("PP_NATIVE_PEER")
+
+
+def layer_index(st, name=None, lid=None):
+    for i, l in enumerate(st["layers"]):
+        if (name and l["name"] == name) or (lid and l["lid"] == lid):
+            return i
+    return None
+
+
+def scenario_x_access(out):
+    """The native app (engine) hosts; the current app and a scripted member join. Chat both
+    ways; the current app asks to draw on the native app's layer, the scripted member asks
+    too; the native app lets the current app in only; it draws there; the scripted member's
+    tiles on it count nowhere; the native app takes it back while the current app draws; the
+    native app asks for the current app's layer and draws there; a deny."""
+    projects = env_bin("PP_PROJECTS")
+    res = {"load": load()}
+    a = NativePeer(np_bin(), out, "acc")
+    s = probe = None
+    checks = {}
+    try:
+        a.do(cmd="open", path=os.path.join(projects, "empty.ppstudio"))
+        h = a.do(cmd="host", name="Nat")
+        info = h["state"]["info"]
+        s = Studio(env_bin("PP_STUDIO"), out, "acc", project=os.path.join(projects, "tiny.ppstudio"), name="Stu")
+        s.open()
+        sinfo, _ = s.join(info["invite"])
+        sid = sinfo["me"]["id"]
+        probe = Peer(env_bin("PP_PEER"), out, "acc", invite=info["invite"], name="Pro")
+        time.sleep(2.0)
+        st = a.state()
+        checks["membersAtNative"] = len(st["info"]["members"])
+        checks["studioLayers"] = s.layer_names()
+        nat_lid = next(r["lid"] for r in st["rows"] if r["mine"])
+        # chat both ways
+        s.chat("hello from the current app")
+        a.do(cmd="say", text="hello from the native app ✓")
+        time.sleep(1.0)
+        st = a.state()
+        checks["chatAtNative"] = [c["text"] for c in st["chat"] if not c["system"]]
+        checks["chatAtStudio"] = s.chat_lines()
+        res["chatBothWays"] = ("hello from the current app" in checks["chatAtNative"]
+                               and any("hello from the native app ✓" in l for l in checks["chatAtStudio"]))
+        # two ask for the same layer
+        checks["studioAsked"] = s.dialog_click("Ask to draw here", "Layer 1")
+        probe.edit({"k": "ask", "lid": nat_lid, "why": "draw", "own": False})
+        st = a.until(lambda st: sum(len(r["asks"]) for r in st["rows"]) >= 2, 10) or a.state()
+        checks["asksAtNative"] = [[x["name"] for x in r["asks"]] for r in st["rows"] if r["mine"]]
+        a.do(cmd="op", op=f"Together: let {nat_lid} {sid}")
+        time.sleep(1.0)
+        st = a.state()
+        checks["writersAtNative"] = [r["writers"] for r in st["rows"] if r["lid"] == nat_lid]
+        res["onlyTheGrantedMayDraw"] = checks["writersAtNative"] == [[sid]]
+        # the current app draws on the native app's layer
+        checks["studioPicked"] = s.pick_layer("Layer 1")
+        s.pen([wave(i, y0=0.25) for i in range(2)])
+        # the scripted member wasn't let in: its tiles count nowhere
+        rogue = stroke_tiles(777)
+        probe.edit({"k": "tiles", "lid": nat_lid, "did": f"{nat_lid.split(':')[0]}:1",
+                    "set": [[x, y, encode_tile(px)] for x, y, px in rogue], "clear": []})
+        time.sleep(2.5)
+        p_n = os.path.join(a.home, "after-grant.ppstudio")
+        a.do(cmd="save", path=p_n)
+        p_s = s.save()
+        c = compare_projects(p_s, p_n, ["Layer 1"])
+        res["grantedStrokeSame"] = c
+        pn, _ = project_pixels(p_n)
+        ps, _ = project_pixels(p_s)
+        rogue_keys = {(x, y) for x, y, _ in rogue}
+
+        def has_rogue(pp):
+            for fr in pp.get("Layer 1", [[]])[-1]:
+                for k, px in (fr or {}).items():
+                    if k in rogue_keys and px in [t[2] for t in rogue]:
+                        return True
+            return False
+        res["rogueTilesTaken"] = {"native": has_rogue(pn), "studio": has_rogue(ps)}
+        # taken back while the current app draws
+        th = __import__("threading").Thread(target=lambda: s.pen([wave(3, n=600, y0=0.5)], hz=240))
+        th.start()
+        time.sleep(0.8)
+        a.do(cmd="op", op=f"Together: revoke {nat_lid} {sid}")
+        th.join()
+        time.sleep(1.0)
+        s.pen([wave(5, y0=0.7)])
+        time.sleep(2.5)
+        st = a.state()
+        checks["writersAfterRevoke"] = [r["writers"] for r in st["rows"] if r["lid"] == nat_lid]
+        p_n2 = os.path.join(a.home, "after-revoke.ppstudio")
+        a.do(cmd="save", path=p_n2)
+        p_s2 = s.save()
+        res["afterRevokeSame"] = compare_projects(p_s2, p_n2, ["Layer 1"])
+        # the native app asks for the current app's layer
+        st = a.state()
+        stu_row = next((r for r in st["rows"] if not r["mine"] and r["owner"] and "Stu" in r["name"]), None)
+        checks["studioRowAtNative"] = stu_row and {k: stu_row[k] for k in ("name", "owner", "canDraw")}
+        if stu_row:
+            a.do(cmd="op", op=f"Together: ask {stu_row['lid']}")
+            time.sleep(1.0)
+            checks["studioRows"] = s.dialog_rows()
+            checks["studioLet"] = s.dialog_click("Let them draw", stu_row["name"])
+            st = a.until(lambda st: any(r["lid"] == stu_row["lid"] and r["canDraw"] for r in st["rows"]), 15) or a.state()
+            checks["rowAtNativeAfterLet"] = [r for r in st["rows"] if r["lid"] == stu_row["lid"]]
+            i = layer_index(st, lid=stu_row["lid"])
+            checks["layerAtNativeAfterLet"] = st["layers"][i] if i is not None else None
+            checks["unlockedAtNative"] = i is not None and not st["layers"][i]["locked"]
+            a.do(cmd="stroke", y=800, layer=i)
+            time.sleep(2.5)
+            p_n3 = os.path.join(a.home, "native-on-studio.ppstudio")
+            a.do(cmd="save", path=p_n3)
+            p_s3 = s.save()
+            res["nativeOnStudioLayerSame"] = compare_projects(p_s3, p_n3, [stu_row["name"]])
+        # a deny
+        probe.edit({"k": "ask", "lid": nat_lid, "why": "draw", "own": False})
+        time.sleep(0.8)
+        a.do(cmd="op", op=f"Together: deny {nat_lid} {probe.id}")
+        time.sleep(0.8)
+        res["denySeenByAsker"] = any((e.get("body") or {}).get("k") == "deny" and e["body"].get("to") == probe.id
+                                     for e in probe.events())
+        res["checks"] = checks
+    finally:
+        if probe:
+            probe.leave()
+        a.quit()
+        if s:
+            s.quit()
+    return res
+
+
+def scenario_studio_revoke(out):
+    """Two current apps: B asks for A's layer, A lets it, B draws a long stroke and A takes
+    it back mid-stroke, B draws again. Whether both still hold the same pixels (the
+    reference for the native app's revoke)."""
+    projects = env_bin("PP_PROJECTS")
+    res = {"load": load()}
+    a = Studio(env_bin("PP_STUDIO"), out, "ra", project=os.path.join(projects, "empty.ppstudio"), name="Ana")
+    b = None
+    try:
+        b = Studio(env_bin("PP_STUDIO"), out, "rb", project=os.path.join(projects, "tiny.ppstudio"), name="Bo")
+        a.open()
+        b.open()
+        info = a.host()
+        b.join(info["invite"])
+        time.sleep(1.5)
+        res["asked"] = b.dialog_click("Ask to draw here", "Layer 1")
+        time.sleep(1.0)
+        res["let"] = a.dialog_click("Let them draw", "Layer 1")
+        time.sleep(1.5)
+        res["picked"] = b.pick_layer("Layer 1")
+        time.sleep(0.3)
+        b.pen([wave(0, y0=0.25)])
+        th = __import__("threading").Thread(target=lambda: b.pen([wave(3, n=600, y0=0.5)], hz=240))
+        th.start()
+        time.sleep(0.8)
+        res["revoked"] = a.dialog_click("Take back from", "Layer 1")
+        th.join()
+        time.sleep(1.0)
+        b.pen([wave(5, y0=0.7)])
+        time.sleep(2.5)
+        pa, pb = a.save(), b.save()
+        res["compare"] = compare_projects(pa, pb, ["Layer 1"])
+        res["tileRows"] = {}
+        for tag, f in (("A", pa), ("B", pb)):
+            pp, _ = project_pixels(f)
+            res["tileRows"][tag] = {n: sorted(set(k[1] for fr in v[-1] if fr for k in fr)) for n, v in pp.items()}
+    finally:
+        a.quit()
+        if b:
+            b.quit()
+    return res
+
+
 SCENARIOS = {
     "studio-wire": scenario_studio_wire,
     "studio-pair": scenario_studio_pair,
@@ -1551,6 +1783,8 @@ SCENARIOS = {
     "studio-garbage": scenario_studio_garbage,
     "x-pair-native-hosts": lambda out: scenario_x_pair(out, True),
     "x-pair-studio-hosts": lambda out: scenario_x_pair(out, False),
+    "x-access": scenario_x_access,
+    "studio-revoke": scenario_studio_revoke,
 }
 
 
