@@ -48,7 +48,11 @@ impl<T> Ctx<T> for std::result::Result<T, vk::Result> {
 
 /// The device extensions needed to hand images to the compositor.
 mod draw2d;
+mod layers;
 pub use draw2d::{ATLAS_SIZE, Quad, Renderer2d};
+pub use layers::{
+    Compositor, GpuLayer, MAX_LAYERS as MAX_GPU_LAYERS, OnionLayer, TILE_BYTES, TilePx, tile_hash,
+};
 
 const DEVICE_EXTENSIONS: &[&CStr] = &[
     khr::external_memory_fd::NAME,

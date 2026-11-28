@@ -139,6 +139,14 @@ fn height(f: &mut Frame, s: &State) -> f32 {
             let l = f.lay_out(m, &Style::body(13.0, SUBTLE), Some(WIDTH - 2.0 * PAD));
             vec![28.0, l.height, 44.0]
         }
+        _ if x.format == Format::Psd => {
+            let mut v = vec![28.0, 16.0, 44.0, 16.0, 16.0];
+            if note(x).is_some() {
+                v.push(16.0);
+            }
+            v.push(44.0);
+            v
+        }
         _ => {
             let mut v = vec![28.0, 16.0, 44.0, 16.0, 44.0, 16.0, 44.0, 16.0];
             if x.can_be_transparent() {
@@ -195,6 +203,26 @@ fn settings(f: &mut Frame, s: &mut State, actions: &mut Vec<Action>) {
     if f.tabs("export/format", &names, &mut picked).changed {
         s.export.format = offered[picked];
     }
+    if s.export.format == Format::Psd {
+        // the frame showing, at the document's size, with its layers
+        small(f, "This frame", SUBTLE, 16.0);
+        small(
+            f,
+            &format!(
+                "Frame {} · {} × {} · layers, groups and masks",
+                s.frame + 1,
+                s.view.doc_w,
+                s.view.doc_h
+            ),
+            t.ink,
+            16.0,
+        );
+        if let Some(n) = note(&s.export) {
+            small(f, n, SUBTLE, 16.0);
+        }
+        buttons(f, s, actions);
+        return;
+    }
     // the frames: the cut, or the loop range
     let (first, last) = range(s, true);
     small(f, "Frames", SUBTLE, 16.0);
@@ -237,6 +265,11 @@ fn settings(f: &mut Frame, s: &mut State, actions: &mut Vec<Action>) {
     if let Some(n) = note(&s.export) {
         small(f, n, SUBTLE, 16.0);
     }
+    buttons(f, s, actions);
+}
+
+/// Export… and Cancel.
+fn buttons(f: &mut Frame, s: &State, actions: &mut Vec<Action>) {
     let asking = s.export.status == Status::Asking;
     let can = s.export.available(s.export.format) && !asking;
     f.row(44.0, |f| {
@@ -364,6 +397,9 @@ mod tests {
         let mut s = base();
         s.export.status = Status::Failed("ffmpeg stopped: No space left on device".into());
         shots.push(("failed", s));
+        let mut s = base();
+        s.export.format = Format::Psd;
+        shots.push(("settings-psd", s));
         for (name, mut s) in shots {
             crate::shell::render_png(&mut s, 1440, 900, 1.0, &format!("{dir}/export-{name}.png"))
                 .unwrap();

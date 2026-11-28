@@ -32,7 +32,7 @@ mod text;
 pub mod texture;
 pub mod vectorise;
 
-pub use layers::{Blend, LayerProps};
+pub use layers::{Blend, LayerProps, srgb_table};
 use layers::{
     TileSource, composite_pixel_on, json_str, mask_value, merge_pixel, premul_fix15, unpremul_srgb,
 };
@@ -366,6 +366,35 @@ pub struct Rect {
     pub h: u32,
 }
 
+/// What changed in the painter since it last said ([`Painter::take_changes`]).
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Changes {
+    /// per layer (id): tiles whose colour pixels changed
+    pub colour: Vec<(u32, Vec<(i32, i32)>)>,
+    /// per layer: tiles whose mask changed
+    pub mask: Vec<(u32, Vec<(i32, i32)>)>,
+    /// tiles changed some other way: any layer's pixels may have changed there
+    pub other: Vec<(i32, i32)>,
+}
+
+/// A layer as the compositor combines it ([`Painter::composite_layers`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LayerComposite {
+    pub id: u32,
+    /// the drawing it shows (0: none yet; its pixels are the layer's own)
+    pub drawing: u32,
+    /// its own opacity times its group's
+    pub opacity: f32,
+    pub blend: Blend,
+    /// shown: its eye, its group's, not left out by the view, opacity above 0
+    pub visible: bool,
+    pub clip: bool,
+    pub has_mask: bool,
+    /// no adjustment, no style, its mask not being painted: just its pixels (through
+    /// its mask), its opacity and its blend mode
+    pub plain: bool,
+}
+
 /// Most layers a drawing can have.
 pub const MAX_LAYERS: usize = 32;
 
@@ -688,6 +717,9 @@ pub struct Painter {
     alpha_lock_stroke: bool,
     /// tiles to recomposite (structural changes); strokes use each surface's own set
     dirty: HashSet<TileKey>,
+    /// tiles a compositor of the app's own took ([`Painter::take_changes`]) that this
+    /// picture (`rgba`) hasn't been composited for yet: `flush` does them too
+    stale: HashSet<TileKey>,
     /// layers the view leaves out (an app's "show one stage"): not part of the document,
     /// never an undo step; they show and take paint as hidden layers do
     view_hidden: HashSet<u32>,
@@ -758,6 +790,7 @@ impl Painter {
             stroke_brush: None,
             alpha_lock_stroke: false,
             dirty: HashSet::new(),
+            stale: HashSet::new(),
             view_hidden: HashSet::new(),
             selection: None,
             adjusting: None,
@@ -5013,6 +5046,7 @@ impl Painter {
 
     pub fn flush(&mut self) -> Option<Rect> {
         self.restyle();
+        self.dirty.extend(self.stale.drain());
         for l in &mut self.layers {
             self.dirty.extend(l.surface.dirty.drain());
             if let Some(m) = l.mask.as_mut() {
@@ -5063,6 +5097,149 @@ impl Painter {
 
     pub fn rgba(&self) -> &[u8] {
         &self.rgba
+    }
+
+    // ---- for a compositor of the app's own (the GPU) ----------------------------------
+
+    /// What changed since the last call (or `flush`), for a compositor of the app's own:
+    /// per layer, the tiles whose colour or mask pixels changed; and tiles changed some
+    /// other way (a layer's settings, the order, a transform writing straight into a
+    /// layer's tiles), where any layer's pixels may have changed. This picture (`rgba`)
+    /// is composited for all of them at the next `flush`.
+    pub fn take_changes(&mut self) -> Changes {
+        self.restyle();
+        let mut ch = Changes::default();
+        for l in self.layers.iter_mut() {
+            let surface: Vec<TileKey> = l.surface.dirty.drain().collect();
+            let mask: Vec<TileKey> = l
+                .mask
+                .as_mut()
+                .map(|m| m.dirty.drain().collect())
+                .unwrap_or_default();
+            // (editing the mask, the surface holds the mask)
+            let (colour, mask) = if l.editing_mask {
+                (mask, surface)
+            } else {
+                (surface, mask)
+            };
+            self.stale.extend(colour.iter().chain(&mask).copied());
+            if !colour.is_empty() {
+                ch.colour.push((l.id, colour));
+            }
+            if !mask.is_empty() {
+                ch.mask.push((l.id, mask));
+            }
+        }
+        ch.other = self.dirty.drain().collect();
+        self.stale.extend(ch.other.iter().copied());
+        ch
+    }
+
+    /// Tiles of this picture (`rgba`) not composited yet since a compositor of the app's own
+    /// took their changes ([`Painter::take_changes`]).
+    pub fn stale_tiles(&self) -> usize {
+        self.stale.len()
+    }
+
+    /// Composite up to `most` of those tiles into this picture (on every core natively): it
+    /// catches up a little at a time, while nothing else happens.
+    pub fn flush_some(&mut self, most: usize) {
+        let keys: Vec<TileKey> = self.stale.iter().copied().take(most).collect();
+        for k in &keys {
+            self.stale.remove(k);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        let done: Vec<ComposedTile> = {
+            use rayon::prelude::*;
+            keys.par_iter()
+                .filter_map(|&k| self.composite_tile(k))
+                .collect()
+        };
+        #[cfg(target_arch = "wasm32")]
+        let done: Vec<ComposedTile> = keys
+            .iter()
+            .filter_map(|&k| self.composite_tile(k))
+            .collect();
+        let w = self.width as i32;
+        for t in done {
+            let tw = (t.x1 - t.x0) as usize;
+            for (row, y) in (t.y0..t.y1).enumerate() {
+                let dst = ((y * w + t.x0) * 4) as usize;
+                for (i, px) in t.px[row * tw..(row + 1) * tw].iter().enumerate() {
+                    self.rgba[dst + i * 4..dst + i * 4 + 3].copy_from_slice(px);
+                    self.rgba[dst + i * 4 + 3] = 255;
+                }
+            }
+        }
+    }
+
+    /// Each layer as the compositor combines it, bottom first: its group's eye and
+    /// opacity and the view's hidden layers applied, as `flush` does.
+    pub fn composite_layers(&self) -> Vec<LayerComposite> {
+        self.layers
+            .iter()
+            .map(|l| {
+                let (gv, go) = self.group_of(l);
+                let opacity = l.props.opacity * go;
+                LayerComposite {
+                    id: l.id,
+                    drawing: l.drawing,
+                    opacity,
+                    blend: l.props.blend,
+                    visible: l.props.visible
+                        && gv
+                        && opacity > 0.0
+                        && !self.view_hidden.contains(&l.id),
+                    clip: l.props.clip,
+                    has_mask: l.mask.is_some(),
+                    plain: l.props.adjust.is_none() && !l.props.style.any() && !l.editing_mask,
+                }
+            })
+            .collect()
+    }
+
+    /// One of a layer's colour tiles as it composites (premultiplied linear fix15).
+    pub fn layer_tile(&self, id: u32, key: (i32, i32)) -> Option<&TilePixels> {
+        let l = &self.layers[self.index_of(id)?];
+        l.colour().tiles.get(&key).map(|t| &**t)
+    }
+
+    /// A layer's colour tiles.
+    pub fn layer_tiles(&self, id: u32) -> Vec<((i32, i32), &TilePixels)> {
+        self.index_of(id).map_or_else(Vec::new, |i| {
+            self.layers[i]
+                .colour()
+                .tiles
+                .iter()
+                .map(|(k, t)| (*k, &**t))
+                .collect()
+        })
+    }
+
+    /// One of a layer's mask tiles (None: no mask, or nothing painted there).
+    pub fn mask_tile(&self, id: u32, key: (i32, i32)) -> Option<&TilePixels> {
+        let l = &self.layers[self.index_of(id)?];
+        l.mask_surface()?.tiles.get(&key).map(|t| &**t)
+    }
+
+    /// A layer's mask tiles.
+    pub fn mask_tiles(&self, id: u32) -> Vec<((i32, i32), &TilePixels)> {
+        self.index_of(id)
+            .and_then(|i| self.layers[i].mask_surface())
+            .map_or_else(Vec::new, |m| {
+                m.tiles.iter().map(|(k, t)| (*k, &**t)).collect()
+            })
+    }
+
+    /// One of a drawing's tiles, wherever it is here (showing or kept).
+    pub fn drawing_tile(&self, drawing: u32, key: (i32, i32)) -> Option<&TilePixels> {
+        self.drawing_tiles(drawing)?.get(&key).map(|t| &**t)
+    }
+
+    /// A drawing's tiles, wherever it is here (showing or kept).
+    pub fn drawing_tiles_px(&self, drawing: u32) -> Vec<((i32, i32), &TilePixels)> {
+        self.drawing_tiles(drawing)
+            .map_or_else(Vec::new, |m| m.iter().map(|(k, t)| (*k, &**t)).collect())
     }
 
     /// The layer's kept styled pixels match it (nothing changed since `flush`).
@@ -6027,6 +6204,11 @@ pub struct DecodedTile(Box<TilePixels>);
 impl DecodedTile {
     /// Bytes in [`DecodedTile::to_bytes`].
     pub const BYTES: usize = TILE_SIZE * TILE_SIZE * 8;
+
+    /// Its pixels, as the painter keeps them (premultiplied linear fix15).
+    pub fn pixels(&self) -> &TilePixels {
+        &self.0
+    }
 
     /// The painter's own pixels, as bytes (premultiplied 15-bit, little-endian): kept
     /// elsewhere and put back with [`DecodedTile::from_bytes`], nothing changes (no

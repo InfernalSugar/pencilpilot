@@ -191,8 +191,9 @@ pub struct StripsState {
     pub open_tray: Option<usize>,
     /// each tray's current option
     pub picked: [usize; 6],
-    /// the cut's sound: first frame and length
-    pub sound: (u32, u32),
+    /// a sound clip being dragged along the scene: which, where the pointer went down, and
+    /// the clip's start then
+    sound_drag: Option<(usize, f32, i64)>,
     /// the grid's horizontal scroll, logical pixels
     pub scroll_x: f32,
     pub show: usize,
@@ -221,7 +222,7 @@ impl Default for StripsState {
             open_tray: None,
             // Scene 1, Cut 2, New drawing, Hold on 2s, Key, Insert frame
             picked: [0, 1, 0, 1, 0, 0],
-            sound: (6, 22),
+            sound_drag: None,
             scroll_x: 0.0,
             show: 0,
             onion_range: 1,
@@ -752,7 +753,7 @@ const RULER_H: f32 = 24.0;
 
 fn grid_area(f: &mut Frame, g: Rect, strip: Rect, s: &mut State) {
     put(f, Quad::rect(g.x, g.y, g.w, g.h, GRID).radius(12.0));
-    let rows = s.layers.len() + 1;
+    let rows = s.layers.len() + s.sound.clips.len().max(1);
     let rh = ((g.h - RULER_H) / rows as f32).clamp(20.0, 31.0);
     let cw = s.frame_width.clamp(ZOOM_MIN, ZOOM_MAX);
     let fx = g.x + NAMES_W;
@@ -990,22 +991,8 @@ fn grid_area(f: &mut Frame, g: Rect, strip: Rect, s: &mut State) {
             }
         }
     }
-    // the sound
-    let y = g.y + RULER_H + s.layers.len() as f32 * rh;
-    put(f, Quad::rect(g.x, y, g.w, 1.0, GRID_LINE));
-    let sy = y + 1.0 + (rh - 1.0) / 2.0;
-    icon(f, WAVE, g.x + 8.0, sy - 7.0, 14.0, MUTED);
-    let dl = text(f, "dialogue", 12.0, 600, ON_DARK);
-    text_at(f, &dl, g.x + 8.0 + 14.0 + 6.0, sy);
-    let (ss, sl) = s.strips.sound;
-    if sl > 0 {
-        put(
-            f,
-            Quad::rect(left + ss as f32 * cw, sy - 9.0, sl as f32 * cw, 18.0, SOUND)
-                .radius(5.0)
-                .clip(clip),
-        );
-    }
+    // the sound: a row a clip
+    let y = sound_rows(f, s, g, rh, left, clip, (fx, cw));
     // the playhead, over the ruler and every row
     let ph = left + s.frame as f32 * cw;
     let bottom = (y + rh).min(g.bottom());
@@ -1038,6 +1025,182 @@ fn grid_area(f: &mut Frame, g: Rect, strip: Rect, s: &mut State) {
         go_to(s, s.strips.menu_frame);
         s.actions.push(Action::Other(p));
     }
+}
+
+/// A speaker, and one struck through (a clip muted).
+const SPEAKER: &str = "M4 9h4l5-4v14l-5-4H4Z M16 9a4 4 0 0 1 0 6 M18.5 6.5a8 8 0 0 1 0 11";
+const SPEAKER_OFF: &str = "M4 9h4l5-4v14l-5-4H4Z M16 9l5 6 M21 9l-5 6";
+/// A sound clip's colours: the clip, its waveform.
+const WAVEFORM: [f32; 4] = hex(0x9FD3B6);
+const CLIP_FILL: [f32; 4] = hex(0x2C4A3B);
+
+/// The sound's rows under the layers: a clip each (its name, mute and remove; the clip
+/// along the frames with its waveform, dragged to move it along the scene). Returns the
+/// last row's top.
+fn sound_rows(
+    f: &mut Frame,
+    s: &mut State,
+    g: Rect,
+    rh: f32,
+    left: f32,
+    clip: [f32; 4],
+    (fx, cw): (f32, f32),
+) -> f32 {
+    let top = g.y + RULER_H + s.layers.len() as f32 * rh;
+    if s.sound.clips.is_empty() {
+        put(f, Quad::rect(g.x, top, g.w, 1.0, GRID_LINE));
+        let sy = top + 1.0 + (rh - 1.0) / 2.0;
+        icon(f, WAVE, g.x + 8.0, sy - 7.0, 14.0, RULER);
+        let dl = text(f, "No sound", 12.0, 600, RULER);
+        text_at(f, &dl, g.x + 8.0 + 14.0 + 6.0, sy);
+        return top;
+    }
+    let p = f.pointer();
+    let mut y = top;
+    let mut remove = None;
+    for i in 0..s.sound.clips.len() {
+        y = top + i as f32 * rh;
+        put(f, Quad::rect(g.x, y, g.w, 1.0, GRID_LINE));
+        let sy = y + 1.0 + (rh - 1.0) / 2.0;
+        let c = s.sound.clips[i].clone();
+        let heard = !c.muted && c.failed.is_none();
+        // mute
+        let mr = Rect::new(g.x + 6.0, sy - 12.0, 24.0, 24.0);
+        let mname = format!("strips/sound-mute/{i}");
+        hit(s, &mname, mr);
+        let res = act(f, id(&mname), mr);
+        if res.hovered {
+            put(f, Quad::rect(mr.x, mr.y, mr.w, mr.h, RAISED).radius(6.0));
+            let tip = if c.muted {
+                "Muted: click to hear it"
+            } else {
+                "Click to mute"
+            };
+            tooltip(f, id(&mname), tip, mr);
+        }
+        f.icon(
+            if c.muted { SPEAKER_OFF } else { SPEAKER },
+            mr.x + 4.0,
+            mr.y + 4.0,
+            16.0,
+            if heard { ON_DARK } else { RULER },
+        );
+        if res.clicked {
+            s.sound.clips[i].muted = !c.muted;
+        }
+        // remove
+        let xr = Rect::new(g.x + NAMES_W - 8.0 - 20.0, sy - 10.0, 20.0, 20.0);
+        let xname = format!("strips/sound-remove/{i}");
+        hit(s, &xname, xr);
+        let res = act(f, id(&xname), xr);
+        if res.hovered {
+            put(f, Quad::rect(xr.x, xr.y, xr.w, xr.h, RAISED).radius(6.0));
+            tooltip(f, id(&xname), "Take this sound out", xr);
+        }
+        f.icon(CLEAR, xr.x + 3.0, xr.y + 3.0, 14.0, RULER);
+        if res.clicked {
+            remove = Some(i);
+        }
+        // the name
+        let nx = mr.right() + 6.0;
+        let room = xr.x - 6.0 - nx;
+        let label = match &c.failed {
+            Some(_) => format!("{} (can't play)", c.name),
+            None => c.name.clone(),
+        };
+        let mut nl = text(f, &label, 12.0, 600, if heard { ON_DARK } else { RULER });
+        let mut n = label.chars().count();
+        while nl.width > room && n > 4 {
+            n -= 2;
+            nl = text(f, &ellipsize(&label, n), 12.0, 600, RULER);
+        }
+        text_at(f, &nl, nx, sy);
+        // the clip along the frames
+        let at = (c.start - s.sound.cut_start) as f32;
+        let cx = left + at * cw;
+        let w = c.frames as f32 * cw;
+        if c.frames == 0 || cx + w < fx || cx > g.right() {
+            continue;
+        }
+        let cr = Rect::new(cx, sy - 11.0, w, 22.0);
+        let visible = Rect::new(
+            cr.x.max(fx),
+            cr.y,
+            (cr.right().min(g.right()) - cr.x.max(fx)).max(0.0),
+            cr.h,
+        );
+        let cname = format!("strips/sound/{i}");
+        hit(s, &cname, visible);
+        let res = act(f, id(&cname), visible);
+        let dragging = s.strips.sound_drag.is_some_and(|d| d.0 == i);
+        let a = if heard { 1.0 } else { 0.45 };
+        let fill = if c.peaks.is_empty() { SOUND } else { CLIP_FILL };
+        let mut q = Quad::rect(cr.x, cr.y, cr.w, cr.h, alpha(fill, a))
+            .radius(5.0)
+            .clip(clip);
+        if dragging {
+            q = q.border(2.0, WAVEFORM);
+        }
+        put(f, q);
+        // the waveform: the loudest point of each frame, a bar each
+        if !c.peaks.is_empty() {
+            let first = ((fx - cx) / cw).floor().max(0.0) as usize;
+            let last = (((g.right() - cx) / cw).ceil().max(0.0) as usize).min(c.peaks.len());
+            for k in first..last {
+                let v = c.peaks[k];
+                if v < 0.004 {
+                    continue;
+                }
+                let bh = (v * (cr.h - 4.0)).max(1.0);
+                put(
+                    f,
+                    Quad::rect(
+                        cx + k as f32 * cw + 1.0,
+                        sy - bh / 2.0,
+                        (cw - 2.0).max(1.0),
+                        bh,
+                        alpha(WAVEFORM, a),
+                    )
+                    .clip(clip),
+                );
+            }
+        }
+        if res.hovered && s.strips.sound_drag.is_none() {
+            tooltip(
+                f,
+                id(&cname),
+                &format!(
+                    "{}: from scene frame {} · drag to move it",
+                    c.name,
+                    c.start + 1
+                ),
+                visible,
+            );
+        }
+        // dragging moves it along the scene, a frame at a time
+        if !drawing() {
+            if res.held && p.pressed {
+                s.strips.sound_drag = Some((i, p.x, c.start));
+            }
+            if let Some((k, x0, start0)) = s.strips.sound_drag
+                && k == i
+            {
+                if res.held {
+                    let to = start0 + ((p.x - x0) / cw).round() as i64;
+                    s.sound.clips[i].start = to;
+                } else {
+                    s.strips.sound_drag = None;
+                }
+            }
+        }
+    }
+    if let Some(i) = remove
+        && !drawing()
+    {
+        s.sound.clips.remove(i);
+        s.strips.sound_drag = None;
+    }
+    y
 }
 
 fn ruler_menu(s: &State, frame: u32) -> Vec<M> {

@@ -132,6 +132,12 @@ fn lut() -> &'static [f32] {
     })
 }
 
+/// The table compositing reads colours through: linear fix15 (0..=32768) → sRGB 0–1. For a
+/// compositor of the app's own (the GPU's) to do the same arithmetic.
+pub fn srgb_table() -> &'static [f32] {
+    lut()
+}
+
 /// A premultiplied fix15 pixel as (unpremultiplied sRGB colour, alpha), alpha 0–1.
 #[inline]
 pub fn unpremul_srgb(p: [u16; 4]) -> ([f32; 3], f32) {

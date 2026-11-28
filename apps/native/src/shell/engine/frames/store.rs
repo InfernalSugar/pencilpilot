@@ -106,6 +106,11 @@ pub struct Job {
 }
 
 impl Job {
+    /// What it decodes (to tell later whether the store still has that).
+    pub fn kept(&self) -> &Arc<Kept> {
+        &self.kept
+    }
+
     /// Its tiles, ready for the painter (decoded on every core).
     pub fn decode(&self) -> Vec<((i32, i32), DecodedTile)> {
         match &*self.kept {

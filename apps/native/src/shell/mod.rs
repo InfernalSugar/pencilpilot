@@ -15,7 +15,7 @@ pub mod strips;
 pub mod tools;
 pub mod view;
 
-use pencilpilot_gpu::{Canvas, DmabufImage, Gpu, Renderer2d};
+use pencilpilot_gpu::{Canvas, Compositor, DmabufImage, Gpu, Renderer2d};
 use pencilpilot_ui::ui::{Frame, Rect, Ui};
 
 use crate::state::State;
@@ -131,14 +131,33 @@ fn sync_moving(
     Ok(moved)
 }
 
-/// The engine's picture to the GPU: what changed in it, or all of it in a new GPU picture when
-/// the document's size changed (a project opened, a new one; the view is fitted again).
-/// Returns (something went up, the picture was remade).
+/// The layers' compositor on the GPU for a `w` × `h` document (none if the GPU can't make
+/// one: the CPU composites then). It may take up to `PENCILPILOT_GPU_LAYERS_MB` of GPU memory,
+/// its tiles and buffers together (920 MiB if not set: the whole app stays under 1 GiB).
+fn compositor(gpu: &Gpu, w: u32, h: u32) -> Option<Compositor> {
+    let mb: u64 = std::env::var("PENCILPILOT_GPU_LAYERS_MB")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(920);
+    match Compositor::new(gpu, w, h, brush::srgb_table(), mb << 20) {
+        Ok(c) => Some(c),
+        Err(err) => {
+            eprintln!("pencilpilot: layers composited on the CPU ({err})");
+            None
+        }
+    }
+}
+
+/// The engine's picture to the GPU: composited there (`comp`) where it can be, otherwise what
+/// changed in the painter's picture goes up; or all of it in a new GPU picture when the
+/// document's size changed (a project opened, a new one; the view is fitted again). Returns
+/// (something went up or is to be composited, the picture was remade).
 fn upload_picture(
     gpu: &Gpu,
     e: &mut engine::Engine,
     s: &mut State,
     canvas: &mut Option<Canvas>,
+    comp: &mut Option<Compositor>,
     card: Rect,
 ) -> Result<(bool, bool), Box<dyn std::error::Error>> {
     let Some(c) = canvas else {
@@ -149,20 +168,33 @@ fn upload_picture(
         (s.view.doc_w, s.view.doc_h) = (pw, ph);
         s.view.reset(card);
         let mut c = Canvas::new(gpu, pw, ph)?;
-        match e.picture(s) {
-            // (a whole picture of the new size, or the painter's when nothing's new)
-            Some((rgba, _)) if rgba.len() == (pw * ph * 4) as usize => c.upload_all(rgba),
-            _ => c.upload_all(e.painter.rgba()),
+        *comp = compositor(gpu, pw, ph);
+        let on_gpu = matches!(
+            comp.as_mut().map(|k| e.picture_gpu(s, gpu, k)),
+            Some(engine::frames::gpu::Pic::Gpu(_))
+        );
+        if !on_gpu {
+            e.painter.flush();
+            match e.picture(s) {
+                // (a whole picture of the new size, or the painter's when nothing's new)
+                Some((rgba, _)) if rgba.len() == (pw * ph * 4) as usize => c.upload_all(rgba),
+                _ => c.upload_all(e.painter.rgba()),
+            }
         }
         *canvas = Some(c);
         return Ok((true, true));
     }
-    match e.picture(s) {
-        Some((rgba, [x, y, w, h])) => {
+    let pic = match comp.as_mut() {
+        Some(k) => e.picture_gpu(s, gpu, k),
+        None => engine::frames::gpu::Pic::Cpu(e.picture(s)),
+    };
+    match pic {
+        engine::frames::gpu::Pic::Gpu(changed) => Ok((changed, false)),
+        engine::frames::gpu::Pic::Cpu(Some((rgba, [x, y, w, h]))) => {
             c.upload(rgba, x, y, w, h);
             Ok((true, false))
         }
-        None => Ok((false, false)),
+        engine::frames::gpu::Pic::Cpu(None) => Ok((false, false)),
     }
 }
 
@@ -227,6 +259,13 @@ struct FrameRec {
     export: Option<(u32, u32)>,
     /// when it reached the screen, ns
     shown_ns: Option<u64>,
+    /// drawn as soon as it could be (not late, for the pen): how long such frames take to
+    /// reach the screen once handed over is what playback leads by
+    at_once: bool,
+    /// playback: when this frame was due on screen (its place on the cut's clock), ns
+    due_ns: Option<u64>,
+    /// playback: how long it was held back once made, until due (not in work or GPU), ns
+    held_ns: u64,
 }
 
 pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
@@ -249,6 +288,15 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
         s.workspace = w;
     }
     let mut canvas: Option<Canvas> = None;
+    // how long the last frames playback moved on took to make, ns
+    let mut play_work: std::collections::VecDeque<u64> = std::collections::VecDeque::new();
+    // how long the last frames drawn at once took from being handed over to being shown, ns
+    let mut shown_delay: std::collections::VecDeque<u64> = std::collections::VecDeque::new();
+    // the timeline frame last handed over; when input last came
+    let mut last_sheet_frame = u32::MAX;
+    let mut last_input = std::time::Instant::now();
+    // the layers composited on the GPU (made with the canvas)
+    let mut comp: Option<Compositor> = None;
     let mut recs: Vec<FrameRec> = Vec::new();
     // the document's GPU picture was remade (another size) since the last frame
     let mut resized_now = false;
@@ -271,11 +319,53 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
     let deadline = quit_after.map(|s| started + std::time::Duration::from_secs_f64(s));
     while win.is_open() && deadline.is_none_or(|d| std::time::Instant::now() < d) {
         // playback goes by when frames are shown: a frame started now shows after about
-        // `show_delay`; half a refresh more picks the refresh nearest each frame's time
-        let lead = std::time::Duration::from_nanos(
-            pacer.show_delay_ns(pencilpilot_window::clock::now_ns()) + pacer.refresh_ns() / 2,
-        );
+        // `show_delay`; half a refresh more picks the refresh nearest each frame's time.
+        // While playing, frames are made a little ahead (as long as the slowest recent one
+        // took) and handed over when due (`hold`), so how long one takes doesn't move it.
+        // (playing, frames are drawn at once and handed over when due: a frame handed over
+        // at a moment shows at the first refresh after the compositor's own delay, on
+        // average that delay and half a refresh later, which is what's measured; handed
+        // over that long before its time it shows on the refresh nearest its time)
+        let lead_ns = match (s.playing, shown_delay.len()) {
+            (true, n) if n > 0 => shown_delay.iter().sum::<u64>() / n as u64,
+            // (nothing measured yet: half a refresh, the delay with no compositor latency)
+            (true, _) => pacer.refresh_ns() / 2,
+            (false, _) => {
+                pacer.show_delay_ns(pencilpilot_window::clock::now_ns()) + pacer.refresh_ns() / 2
+            }
+        };
+        let lead_shown = std::time::Duration::from_nanos(lead_ns);
+        let ahead = if s.playing {
+            // (the slowest recent one and half again: a busy GPU makes some slower; at most
+            // 20 ms, half a frame of a 24 fps cut)
+            // (the 90th percentile of the recent ones: one hitch mustn't hold every frame
+            // after it back by 20 ms)
+            let mut w: Vec<u64> = play_work.iter().copied().collect();
+            w.sort_unstable();
+            let most = w.get(w.len() * 9 / 10).copied().unwrap_or(2_000_000);
+            std::time::Duration::from_nanos((most * 3 / 2 + 500_000).min(20_000_000))
+        } else {
+            std::time::Duration::ZERO
+        };
+        let lead = lead_shown + ahead;
         if !win.wants_frame() || !(dirty || canvas_dirty) {
+            // nothing to draw: the drawings of the frames around go up to the GPU meanwhile
+            // (not while input comes in: scrubbing, drawing; playing, until the next frame)
+            if let (Some(e), Some(k)) = (&mut eng, &mut comp)
+                && last_input.elapsed() > std::time::Duration::from_millis(100)
+            {
+                let room = match e.next_tick_at(&s) {
+                    Some(t) if s.playing => t
+                        .checked_sub(lead)
+                        .unwrap_or(t)
+                        .saturating_duration_since(std::time::Instant::now())
+                        .saturating_sub(std::time::Duration::from_millis(3)),
+                    _ => std::time::Duration::from_millis(3),
+                };
+                if !room.is_zero() {
+                    e.gpu_ahead(&s, &gpu, k, room.min(std::time::Duration::from_millis(8)));
+                }
+            }
             let tick = eng
                 .as_ref()
                 .and_then(|e| e.next_tick_at(&s))
@@ -313,6 +403,7 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
                         _ => None,
                     };
                     if let Some(t) = t {
+                        last_input = std::time::Instant::now();
                         ui.active();
                         events += 1;
                         oldest_input.get_or_insert((t, pencilpilot_window::clock::now_ns()));
@@ -531,7 +622,7 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
         }
         // the picture's changes go up to the GPU
         if let Some(e) = &mut eng {
-            let (up, re) = upload_picture(&gpu, e, &mut s, &mut canvas, canvas_rect)?;
+            let (up, re) = upload_picture(&gpu, e, &mut s, &mut canvas, &mut comp, canvas_rect)?;
             canvas_dirty |= up;
             resized_now |= re;
         }
@@ -539,6 +630,18 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             pacer.shown(&p);
             if let Some(r) = recs.iter_mut().rev().find(|r| r.frame == p.frame) {
                 r.shown_ns = Some(p.at_ns);
+                // (the sound follows the frames as they reach the screen)
+                if let Some(e) = &mut eng {
+                    e.sound.shown(r.sheet_frame, p.at_ns);
+                }
+                let delay = p.at_ns.saturating_sub(r.drawn_ns);
+                // (one that missed a refresh or two says nothing about the compositor's delay)
+                if r.at_once && delay < 2 * pacer.refresh_ns().max(1) {
+                    shown_delay.push_back(delay);
+                    if shown_delay.len() > 64 {
+                        shown_delay.pop_front();
+                    }
+                }
             }
             presented += 1;
             first_shown.get_or_insert(started.elapsed().as_secs_f64() * 1e3);
@@ -548,9 +651,10 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
         }
         // drawn late: just before the refresh it's for, with the newest input
         let now = pencilpilot_window::clock::now_ns();
-        if view_moved && !drew {
+        if (view_moved && !drew) || s.playing {
             // only the view moved: drawn at once (drawing late is for the pen's newest
-            // sample; for zooming it only risks a missed refresh)
+            // sample; for zooming it only risks a missed refresh); playing, the same (frames
+            // are made ahead and handed over when due)
             plan = None;
         } else if plan.is_none_or(|p| now > p.target) {
             plan = pacer.plan(now);
@@ -568,6 +672,11 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
         let (lw, lh) = win.logical_size();
         ui.scale = win.scale() as f32;
         let (w, h) = (lw as f32, lh as f32);
+        // playing counts as busy: the system's fonts joining (every text laid out and drawn
+        // again, ~70 ms at 4K × 20 layers) waits until it stops
+        if s.playing {
+            ui.active();
+        }
         let pass_from = pencilpilot_window::clock::now_ns();
         let first = ui.pass(&mut r, w, h, |f| {
             (mark, canvas_rect) = build(f, &mut s, w, h);
@@ -599,7 +708,7 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             break;
         }
         if let Some(e) = &mut eng {
-            let (up, re) = upload_picture(&gpu, e, &mut s, &mut canvas, canvas_rect)?;
+            let (up, re) = upload_picture(&gpu, e, &mut s, &mut canvas, &mut comp, canvas_rect)?;
             canvas_dirty |= up;
             resized_now |= re;
         }
@@ -641,12 +750,13 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             let mut c = Canvas::new(&gpu, pw, ph)?;
             c.upload_all(e.painter.rgba());
             canvas = Some(c);
+            comp = compositor(&gpu, pw, ph);
             eng = Some(e);
         }
         // a document of another size (a project opened, a new one) whose picture hasn't
         // changed since (no upload went through the check above)
         if let Some(e) = &mut eng {
-            let (up, re) = upload_picture(&gpu, e, &mut s, &mut canvas, canvas_rect)?;
+            let (up, re) = upload_picture(&gpu, e, &mut s, &mut canvas, &mut comp, canvas_rect)?;
             canvas_dirty |= up;
             resized_now |= re;
         }
@@ -669,23 +779,60 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
                 read_input!();
             }
             if let Some(e) = &mut eng {
-                let (_, re) = upload_picture(&gpu, e, &mut s, &mut canvas, canvas_rect)?;
+                let (_, re) = upload_picture(&gpu, e, &mut s, &mut canvas, &mut comp, canvas_rect)?;
                 resized_now |= re;
             }
         }
         let gpu_from = pencilpilot_window::clock::now_ns();
         let img = win.acquire(&gpu)?;
-        r.draw_canvases(
+        let on_gpu = eng.as_ref().is_some_and(|e| e.frames.gpu.on);
+        r.draw_composited(
             &gpu,
             img,
             ui.theme.paper,
             ui.shown(),
             canvas.as_mut(),
             float_tex.as_mut().map(|(c, _)| c),
+            comp.as_mut().filter(|_| on_gpu),
         )?;
+        // playback: a new frame drawn at once is handed over when due (it was made ahead)
+        let moved_on = s.playing && s.frame != last_sheet_frame;
+        let at_once = plan.is_none();
+        let mut due_ns = None;
+        // how long the frame was held back once made (not part of making it)
+        let mut held_ns = 0u64;
+        if moved_on && plan.is_none() {
+            let made = pencilpilot_window::clock::now_ns().saturating_sub(work_from);
+            play_work.push_back(made);
+            if play_work.len() > 48 {
+                play_work.pop_front();
+            }
+            if let Some(due) = eng.as_ref().and_then(engine::frames::play_due) {
+                let now = std::time::Instant::now();
+                due_ns = Some(if due >= now {
+                    pencilpilot_window::clock::now_ns() + (due - now).as_nanos() as u64
+                } else {
+                    pencilpilot_window::clock::now_ns()
+                        .saturating_sub((now - due).as_nanos() as u64)
+                });
+                let hold = due.checked_sub(lead_shown).unwrap_or(due);
+                let wait = hold.saturating_duration_since(std::time::Instant::now());
+                if !wait.is_zero() && wait < std::time::Duration::from_millis(50) {
+                    held_ns = wait.as_nanos() as u64;
+                    std::thread::sleep(wait);
+                }
+            }
+        }
+        if !s.playing {
+            play_work.clear();
+        }
+        last_sheet_frame = s.frame;
         let frame = win.present()?;
         (view_moved, drew) = (false, false);
-        let work_ns = pencilpilot_window::clock::now_ns().saturating_sub(work_from);
+
+        let work_ns = pencilpilot_window::clock::now_ns()
+            .saturating_sub(work_from)
+            .saturating_sub(held_ns);
         pacer.drawn(
             frame,
             plan.take(),
@@ -700,7 +847,10 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             drawn_ns: pencilpilot_window::clock::now_ns(),
             sheet_frame: s.frame,
             work_ns,
-            gpu_ns: pencilpilot_window::clock::now_ns().saturating_sub(gpu_from),
+            gpu_ns: pencilpilot_window::clock::now_ns()
+                .saturating_sub(gpu_from)
+                .saturating_sub(held_ns),
+            held_ns,
             wake_ns: woke.saturating_sub(work_from),
             pass_ns,
             asked_ns: asked as i64 - work_from as i64,
@@ -708,9 +858,14 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             doc_gen: s.doc_id,
             export: s.export_progress,
             shown_ns: None,
+            at_once,
+            due_ns,
         });
     }
-    if let (Some(path), Some(e)) = (&opts.save_doc, &eng) {
+    if let (Some(path), Some(e)) = (&opts.save_doc, &mut eng) {
+        // (the painter's own picture catches up with what the GPU composited)
+        engine::frames::catch_up(e, &s);
+        e.painter.flush();
         save_png(path, e.painter.rgba(), s.view.doc_w, s.view.doc_h)?;
     }
     if let Some(path) = stats {
@@ -720,7 +875,7 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             .iter()
             .map(|r| {
                 format!(
-                    "{{\"frame\": {}, \"inputMs\": {}, \"receivedNs\": {}, \"events\": {}, \"drawnNs\": {}, \"shownNs\": {}, \"sheetFrame\": {}, \"workNs\": {}, \"gpuNs\": {}, \"wakeNs\": {}, \"passNs\": {}, \"askedNs\": {}, \"doc\": [{}, {}], \"docGen\": {}, \"export\": {}}}",
+                    "{{\"frame\": {}, \"inputMs\": {}, \"receivedNs\": {}, \"events\": {}, \"drawnNs\": {}, \"shownNs\": {}, \"sheetFrame\": {}, \"workNs\": {}, \"gpuNs\": {}, \"wakeNs\": {}, \"passNs\": {}, \"askedNs\": {}, \"doc\": [{}, {}], \"docGen\": {}, \"export\": {}, \"dueNs\": {}, \"heldNs\": {}}}",
                     r.frame,
                     opt(r.input.map(|i| i.0 as u64)),
                     opt(r.input.map(|i| i.1)),
@@ -737,7 +892,9 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
                     r.doc.1,
                     r.doc_gen,
                     r.export
-                        .map_or("null".to_string(), |(d, n)| format!("[{d}, {n}]"))
+                        .map_or("null".to_string(), |(d, n)| format!("[{d}, {n}]")),
+                    opt(r.due_ns),
+                    r.held_ns
                 )
             })
             .collect();
@@ -752,8 +909,29 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             })
             .collect();
         let c = canvas_rect;
+        // what the sound played (the silent output's buffers, in checks)
+        let sound = eng.as_mut().map_or_else(
+            || "null".to_string(),
+            |e| e.sound.stats_json(s.sound.cut_start, s.fps),
+        );
+        let gpu_layers = comp.as_ref().map_or("null".to_string(), |k| {
+            format!(
+                "{{\"on\": {}, \"gpuMiB\": {:.1}, \"tiles\": {}, \"sources\": {}, \"uploads\": {}}}",
+                eng.as_ref().is_some_and(|e| e.frames.gpu.on),
+                k.gpu_bytes() as f64 / (1 << 20) as f64,
+                k.tiles_held(),
+                k.sources_held(),
+                k.uploads
+            )
+        });
+        let fonts_joined = ui.fonts_joined.map_or("null".to_string(), |t| {
+            format!(
+                "{:.1}",
+                t.saturating_duration_since(started).as_secs_f64() * 1e3
+            )
+        });
         let json = format!(
-            "{{\"seconds\": {:.3}, \"startupToFirstFrameMs\": {}, \"framesDrawn\": {drawn}, \"framesPresented\": {presented}, \"drawingLate\": {}, \"marginMs\": {:.2}, \"framesLate\": {}, \"coolDowns\": {},\n \"view\": {{\"zoom\": {}, \"angle\": {}, \"flip\": {}, \"pan\": [{}, {}], \"docSize\": [{}, {}]}},\n \"canvasRect\": [{}, {}, {}, {}],\n \"state\": {{\"workspace\": {:?}, \"tool\": \"{:?}\", \"activeLayer\": {}, \"frame\": {}, \"playing\": {}, \"colour\": {:?}, \"layers\": [{}]}},\n \"frames\": [\n  {}\n ]}}\n",
+            "{{\"seconds\": {:.3}, \"fontsJoinedMs\": {fonts_joined}, \"gpuLayers\": {gpu_layers}, \"startupToFirstFrameMs\": {}, \"framesDrawn\": {drawn}, \"framesPresented\": {presented}, \"drawingLate\": {}, \"marginMs\": {:.2}, \"framesLate\": {}, \"coolDowns\": {},\n \"view\": {{\"zoom\": {}, \"angle\": {}, \"flip\": {}, \"pan\": [{}, {}], \"docSize\": [{}, {}]}},\n \"canvasRect\": [{}, {}, {}, {}],\n \"state\": {{\"workspace\": {:?}, \"tool\": \"{:?}\", \"activeLayer\": {}, \"frame\": {}, \"playing\": {}, \"colour\": {:?}, \"layers\": [{}]}},\n \"sound\": {},\n \"frames\": [\n  {}\n ]}}\n",
             started.elapsed().as_secs_f64(),
             first_shown.map_or("null".into(), |v| format!("{v:.1}")),
             pacer.drawing_late(),
@@ -778,6 +956,7 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             s.playing,
             s.colour,
             layers.join(", "),
+            sound,
             frames.join(",\n  ")
         );
         std::fs::write(path, json)?;

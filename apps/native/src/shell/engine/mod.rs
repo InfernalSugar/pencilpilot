@@ -14,6 +14,7 @@
 pub mod export;
 pub mod files;
 pub mod frames;
+pub mod sound;
 pub mod tools;
 
 use brush::{Painter, set_brush_rgb};
@@ -129,6 +130,8 @@ pub struct Engine {
     pub files: files::Files,
     /// an export in progress ([`export`])
     pub exporter: export::Exporter,
+    /// the scene's sound ([`sound`])
+    pub sound: sound::Sounds,
     lifts: u64,
 }
 
@@ -145,6 +148,7 @@ impl Engine {
             lifts: 0,
             files: files::Files::default(),
             exporter: export::Exporter::default(),
+            sound: sound::Sounds::default(),
         }
     }
 
@@ -226,6 +230,11 @@ impl Engine {
     /// A pointer on the canvas (pen or mouse, pressed). The Brush and the Eraser paint;
     /// the other tools are [`tools`]'.
     pub fn pointer(&mut self, s: &mut State, phase: Phase, p: Sample) {
+        self.frames.gpu.input_at = Some(std::time::Instant::now());
+        if phase == Phase::Down {
+            // (the painter shows the frame's drawings: the GPU may have shown them alone)
+            frames::catch_up(self, s);
+        }
         if Engine::paints(s) || self.is_stroking() {
             // pixels still being moved are put down first (the painter takes no stroke while
             // they float), as picking the brush would have
@@ -257,10 +266,25 @@ impl Engine {
     /// Carries out what the interface asked for. Returns whether the picture may have
     /// changed (the shell then shows it).
     pub fn apply(&mut self, s: &mut State, a: &Action) -> bool {
+        // going from frame to frame needs nothing of the painter; anything else is done on
+        // the drawings it shows (the GPU may have shown the frame alone)
+        if !matches!(
+            a,
+            Action::GoToFrame(_)
+                | Action::NextFrame
+                | Action::PreviousFrame
+                | Action::NextDrawing
+                | Action::PreviousDrawing
+                | Action::Play
+                | Action::Stop
+        ) {
+            frames::catch_up(self, s);
+        }
         match a {
             Action::Undo => self.painter.undo(),
             Action::Redo => self.painter.redo(),
             _ => {
+                sound::apply(self, s, a);
                 files::apply(self, s, a)
                     || export::apply(self, s, a)
                     || tools::apply(self, s, a)
@@ -274,7 +298,10 @@ impl Engine {
     pub fn tick(&mut self, s: &mut State, now: std::time::Instant) -> bool {
         let f = files::tick(self, s, now);
         let x = export::tick(self, s, now);
-        frames::tick(self, s, now) | f | x
+        let p = frames::tick(self, s, now);
+        // (after playback's: it follows the clock playback has just set)
+        let n = sound::tick(self, s, now);
+        p | f | x | n
     }
 
     /// When [`Engine::tick`] next has something to do (the shell sleeps until then).
@@ -283,6 +310,7 @@ impl Engine {
             frames::next_tick_at(self, s),
             files::next_tick_at(self, s),
             export::next_tick_at(self, s),
+            sound::next_tick_at(self, s),
         ]
         .into_iter()
         .flatten()
@@ -293,6 +321,29 @@ impl Engine {
     /// the last call (x, y, w, h), if anything.
     pub fn picture(&mut self, s: &State) -> Option<(&[u8], [u32; 4])> {
         frames::picture(self, s)
+    }
+
+    /// The canvas's picture made on the GPU into `comp` where it can be, otherwise the
+    /// painter's as [`Engine::picture`] gives it ([`frames::gpu`]).
+    pub fn picture_gpu(
+        &mut self,
+        s: &State,
+        gpu: &pencilpilot_gpu::Gpu,
+        comp: &mut pencilpilot_gpu::Compositor,
+    ) -> frames::gpu::Pic<'_> {
+        frames::gpu::picture(self, s, gpu, comp)
+    }
+
+    /// The drawings of the frames around this one go up to the GPU ahead of being shown,
+    /// for `budget` at most ([`frames::gpu::ahead`]). Whether there's more to do.
+    pub fn gpu_ahead(
+        &mut self,
+        s: &State,
+        gpu: &pencilpilot_gpu::Gpu,
+        comp: &mut pencilpilot_gpu::Compositor,
+        budget: std::time::Duration,
+    ) -> bool {
+        frames::gpu::ahead(self, s, gpu, comp, budget)
     }
 
     /// The brush to paint with now: the picked one, in the picked colour and size, erasing
@@ -331,6 +382,7 @@ impl Engine {
 
     /// A stroke's sample (canvas pixels; pressure 0–1; tilt −1–1; the input's time in ms).
     pub fn down(&mut self, s: &State, x: f32, y: f32, pressure: f32, tilt: (f32, f32), ms: u32) {
+        frames::catch_up(self, s);
         let Some(b) = Engine::brush(s) else { return };
         self.painter.begin_stroke();
         self.painter

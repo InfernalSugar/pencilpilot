@@ -125,6 +125,8 @@ struct Snapshot {
     palette: (String, Vec<(String, [f32; 4])>),
     notes: Vec<Note>,
     cut: String,
+    /// the sound's clips (moved, muted)
+    sound: Vec<(String, String, i64, u32, bool)>,
 }
 
 impl Snapshot {
@@ -143,6 +145,7 @@ impl Snapshot {
             palette: (s.palette_name.clone(), s.palette.clone()),
             notes: s.notes.clone(),
             cut: s.cut_name.clone(),
+            sound: s.sound.clips.iter().map(|c| c.key()).collect(),
         }
     }
 }
@@ -529,6 +532,8 @@ pub(super) fn replace(e: &mut Engine, s: &mut State, painter: Painter) {
 
 /// What's open now is what's saved.
 fn mark_saved(e: &mut Engine, s: &mut State) {
+    // (a document just opened or made: its sound's clips first, as they're saved)
+    super::sound::load_doc(e, s, Instant::now());
     e.files.saved_edits = e.painter.history_changes();
     e.files.saved = Some(Snapshot::of(s));
     e.files.unsaved_since = None;
@@ -583,6 +588,15 @@ fn open_file(e: &mut Engine, s: &mut State, path: &Path, listed: bool) -> bool {
             s.project.name = stem(path);
             s.project.path = Some(path.to_path_buf());
             s.project.note.clear();
+            // (the painter holds so many layers: the rest aren't opened, and the person is told)
+            let all = e.files.doc.base.as_ref().map_or(0, |m| m.layers.len());
+            if all > brush::MAX_LAYERS {
+                let left = all - brush::MAX_LAYERS;
+                s.project.note = format!(
+                    "{left} of its {all} layers weren't opened: this version holds {} at most.",
+                    brush::MAX_LAYERS
+                );
+            }
             s.project.recovery = None;
             mark_saved(e, s);
             if listed {
@@ -627,6 +641,9 @@ fn write_in_background(
     settle(e, s);
     let mut doc = std::mem::take(&mut e.files.doc);
     let made = save::project(e, s, &mut doc);
+    // (the painter's own picture catches up with what the GPU composited)
+    super::frames::catch_up(e, s);
+    e.painter.flush();
     let thumb = save::thumbnail(e);
     let source = doc.source.take();
     e.files.doc = doc;

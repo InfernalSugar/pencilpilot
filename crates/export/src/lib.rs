@@ -17,6 +17,8 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 
 use serde::{Deserialize, Serialize};
 
+pub mod psd;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Format {
@@ -26,6 +28,8 @@ pub enum Format {
     Mp4,
     Prores,
     Webm,
+    /// a Photoshop file of one frame, with its layers ([`psd`]; not written by [`Job`])
+    Psd,
 }
 
 impl Format {
@@ -36,6 +40,7 @@ impl Format {
             Format::Mp4 => "mp4",
             Format::Prores => "mov",
             Format::Webm => "webm",
+            Format::Psd => "psd",
         }
     }
 }
@@ -270,22 +275,20 @@ fn ffmpeg_args(spec: &Spec, out: &Path) -> Vec<String> {
         );
     }
     a.extend(["-i".into(), "-".into()]);
+    // (the sound is the second input: before any output option, such as the scaling)
+    if let Some(wav) = &spec.audio {
+        a.extend(["-i".into(), wav.to_string_lossy().into_owned()]);
+    }
     if (iw, ih) != (spec.width, spec.height) {
         a.extend([
             "-vf".into(),
             format!("scale={}:{}:flags=lanczos", spec.width, spec.height),
         ]);
     }
-    if let Some(wav) = &spec.audio {
-        a.extend([
-            "-i".into(),
-            wav.to_string_lossy().into_owned(),
-            "-map".into(),
-            "0:v".into(),
-            "-map".into(),
-            "1:a".into(),
-            "-shortest".into(),
-        ]);
+    if spec.audio.is_some() {
+        a.extend(["-map".into(), "0:v".into(), "-map".into(), "1:a".into()]);
+        // (no -shortest: the sound is made as long as the frames, and -shortest holds up to
+        // 10 s of frames back to line the streams up, 0.75 GB at 1080p)
         let sound: &[&str] = match spec.format {
             Format::Mp4 => &["-c:a", "aac", "-b:a", "192k"],
             Format::Prores => &["-c:a", "pcm_s16le"],
@@ -439,6 +442,7 @@ impl Job {
             ))
         };
         let writer = match spec.format {
+            Format::Psd => return Err("a PSD is one frame: psd::write_psd writes it".into()),
             Format::Png => {
                 let stem = path.with_extension("");
                 let digits = spec.total.max(spec.frames).to_string().len().max(4);
@@ -1027,6 +1031,62 @@ mod tests {
             .output()
         {
             assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "16,8");
+        }
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    /// A video scaled while it's written keeps its sound (the sound goes in as FFmpeg's
+    /// second input, before the scaling: an output option).
+    #[test]
+    fn scaled_videos_keep_their_sound() {
+        let mut s = spec(Format::Mp4, Path::new("/x"), "a.mp4", 1);
+        s.input = Some((16, 12));
+        s.audio = Some(PathBuf::from("/x/s.wav"));
+        let a = ffmpeg_args(&s, Path::new("/x/a.mp4"));
+        let at = |k: &str| a.iter().position(|x| x == k).unwrap();
+        assert!(at("/x/s.wav") < at("-vf"), "{a:?}");
+        let Some(ff) = find_ffmpeg() else { return };
+        if !video_formats(&ff).contains(&Format::Mp4) {
+            return;
+        }
+        let d = tmp();
+        let wav = d.join("s.wav");
+        let mut w = Vec::new();
+        for (tag, v) in [(b"RIFF", 36 + 24000 * 4u32), (b"WAVE", 0)] {
+            w.extend_from_slice(tag);
+            if tag == b"RIFF" {
+                w.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        w.extend_from_slice(b"fmt ");
+        w.extend_from_slice(&16u32.to_le_bytes());
+        for v in [1u16, 2] {
+            w.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in [48000u32, 48000 * 4] {
+            w.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in [4u16, 16] {
+            w.extend_from_slice(&v.to_le_bytes());
+        }
+        w.extend_from_slice(b"data");
+        w.extend_from_slice(&(24000u32 * 4).to_le_bytes());
+        w.extend(
+            (0..24000 * 2).flat_map(|i: i32| (((i / 2) % 100 - 50) as i16 * 300).to_le_bytes()),
+        );
+        std::fs::write(&wav, &w).unwrap();
+        let mut s = spec(Format::Mp4, &d, "half.mp4", 1);
+        (s.width, s.height, s.input, s.audio) = (16, 8, Some((32, 16)), Some(wav.clone()));
+        let mut j = Job::begin(s).unwrap();
+        j.frame(&[0, 0, 0, 255].repeat(32 * 16), 6).unwrap();
+        let p = j.end().unwrap();
+        assert!(!wav.exists(), "the sound file goes once it's in");
+        if let Ok(out) = Command::new(ff.with_file_name("ffprobe"))
+            .args(["-v", "error", "-select_streams", "a:0", "-show_entries"])
+            .args(["stream=codec_name", "-of", "csv=p=0", &p])
+            .output()
+        {
+            assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "aac");
         }
         std::fs::remove_dir_all(d).unwrap();
     }

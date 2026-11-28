@@ -10,9 +10,12 @@
 //!   the onion skin is laid under the picture.
 //! - [`thumbs`]: the drawings' small pictures for the strips; [`demo`]: the demo's drawings;
 //! - [`store`]: drawings not showing, kept compressed out of the painter ([`load_drawings`]
-//!   brings them back, [`trim`] puts away what isn't wanted).
+//!   brings them back, [`trim`] puts away what isn't wanted);
+//! - [`gpu`]: the picture composited on the GPU (each drawing's tiles kept there), the
+//!   painter's own picture ([`picture`]) where the GPU can't.
 
 mod demo;
+pub mod gpu;
 mod onion;
 pub mod sheet;
 pub mod store;
@@ -118,16 +121,38 @@ pub struct Frames {
     trim_at: Option<Instant>,
     /// drawings around the frame are to be asked for ahead (next tick)
     ahead_due: bool,
+    /// the picture made on the GPU ([`gpu`])
+    pub gpu: gpu::GpuFrames,
 }
 
 /// Drawings decoded ahead (on another thread).
 type Prefetched = Vec<(u32, Vec<((i32, i32), brush::DecodedTile)>)>;
 
 impl Frames {
+    /// Playback's clock, for the sound (`engine/sound`): when frame `from` shows (on the
+    /// shown frames' time: ticks run that far ahead), `from`, and the rate; None while not
+    /// playing (or before the first tick of a play).
+    pub fn play_clock(&self) -> Option<(Instant, u32, u32)> {
+        self.play.map(|p| (p.t0, p.from, p.fps))
+    }
+
+    /// A play that hasn't moved on yet starts its clock at `t0` instead, when that's later
+    /// (the sound's output can only be heard from then: its first frame holds until it is).
+    pub fn hold_play_until(&mut self, t0: Instant) {
+        if let Some(p) = &mut self.play
+            && p.n == 0
+            && t0 > p.t0
+        {
+            p.t0 = t0;
+        }
+    }
+
     /// A drawing changed: its thumbnail and onion skin are made again.
     fn mark(&mut self, drawing: u32) {
         self.stale.insert(drawing);
         self.onion.forget(drawing);
+        self.gpu.forget.push(drawing as u64);
+        self.gpu.warm.done = None;
         // (the onion skin showing it is made again too)
         if self.onion_key.chunks(3).any(|e| e[0] == drawing) {
             self.onion_key.clear();
@@ -345,11 +370,28 @@ fn show(e: &mut Engine, s: &State) -> bool {
         .any(|p| e.painter.layer_drawing(p[0]) != p[1]);
     if !need {
         e.frames.asked = pairs;
-        return false;
+        // (back on what the painter shows: the GPU's own view of the frame goes)
+        let was = e.frames.gpu.view.take().is_some();
+        e.frames.showed = was;
+        return was;
     }
+    // composited on the GPU: the painter shows these drawings later, once the frame rests
+    // or something is to be done on it (`catch_up`); the GPU shows them now
+    if gpu::lazy(e) {
+        if e.frames.gpu.view.as_ref() == Some(&pairs) {
+            return false;
+        }
+        e.frames.gpu.view = Some(pairs);
+        e.frames.gpu.view_at = Some(Instant::now());
+        e.frames.showed = true;
+        return true;
+    }
+    e.frames.gpu.view = None;
     let wanted: Vec<u32> = pairs.chunks(2).map(|p| p[1]).collect();
     load_drawings(e, &wanted);
+    gpu::before_show(e);
     if e.painter.show_drawings(&pairs) {
+        gpu::after_show(e);
         e.frames.asked = pairs;
         e.frames.showed = true;
         // (putting away waits for a pause: frame changes stay quick while scrubbing; unless
@@ -362,6 +404,17 @@ fn show(e: &mut Engine, s: &State) -> bool {
         return true;
     }
     false
+}
+
+/// The painter shows the frame's drawings now (the GPU may have shown them without it, while
+/// scrubbing or playing): before anything is done on the frame.
+pub fn catch_up(e: &mut Engine, s: &State) {
+    if e.frames.gpu.view.is_none() {
+        return;
+    }
+    e.frames.gpu.catching_up = true;
+    show(e, s);
+    e.frames.gpu.catching_up = false;
 }
 
 /// Drawings brought back into the painter from the store (those it hasn't), decoded on
@@ -487,7 +540,8 @@ fn prefetch(e: &mut Engine, s: &State, more: bool) -> bool {
             Err(_) => e.frames.prefetch = None,
         }
     }
-    if e.is_stroking() || !more {
+    // (playing on the GPU, the painter needn't have the drawings: they go up ahead instead)
+    if e.is_stroking() || !more || (s.playing && e.frames.gpu.on) {
         e.frames.ahead_due = !more;
         return arrived;
     }
@@ -558,7 +612,7 @@ fn play_position(from: u32, n: u64, a: u32, b: u32, mode: usize) -> (u32, bool) 
 }
 
 /// The frames playback goes over: the loop range, else the cut.
-fn play_range(s: &State) -> (u32, u32) {
+pub fn play_range(s: &State) -> (u32, u32) {
     let last = s.frames.saturating_sub(1);
     match s.sheet.loop_range {
         Some((a, b)) if a.min(last) <= b.min(last) => (a.min(last), b.min(last)),
@@ -985,8 +1039,10 @@ pub fn tick(e: &mut Engine, s: &mut State, now: Instant) -> bool {
         if let Some(d) = e.frames.painted.take() {
             e.frames.mark(d);
         }
-        // one thumbnail a tick (a frame), and none while playing
+        // one thumbnail a tick (a frame), none while playing, and none until the pen rests (a
+        // 4K drawing's takes milliseconds of the window's thread: not between strokes)
         if !s.playing
+            && gpu::pen_quiet(e)
             && let Some(d) = e.frames.stale.pop_first()
         {
             load_drawings(e, &[d]);
@@ -1007,9 +1063,22 @@ pub fn tick(e: &mut Engine, s: &mut State, now: Instant) -> bool {
         }
     }
     e.frames.seen = (s.frame, s.active_layer, e.painter.layers().len());
+    // the frame rested (not playing): the painter shows its drawings too
+    if !s.playing
+        && e.frames.gpu.view_at.is_some_and(|t| now >= t + gpu::REST)
+        && e.frames.gpu.view.is_some()
+    {
+        catch_up(e, s);
+    }
     let shown = show(e, s);
     if shown {
         changed = true;
+    }
+    // the painter's own picture catches up with what the GPU composited, a little at a time
+    // once the frame rests (for what reads it: the eyedropper, a fill of what's seen, the
+    // file's thumbnail)
+    if gpu::painter_behind(e, s) {
+        e.painter.flush_some(gpu::CATCH_UP_TILES);
     }
     // (more asked for once this frame is drawn, not while: their decoding would slow it)
     prefetch(e, s, !shown);
@@ -1035,6 +1104,8 @@ pub fn tick(e: &mut Engine, s: &mut State, now: Instant) -> bool {
 fn idle(e: &Engine, s: &State) -> bool {
     let f = &e.frames;
     f.ready
+        && f.gpu.view.is_none()
+        && gpu::catch_up_at(e, s).is_none_or(|t| t > Instant::now())
         && f.prefetch.is_none()
         && f.trim_at.is_none()
         && !f.ahead_due
@@ -1055,6 +1126,13 @@ fn idle(e: &Engine, s: &State) -> bool {
             .asked
             .chunks(2)
             .any(|p| p[1] == 0 && e.painter.layer_drawing(p[0]) != 0)
+}
+
+/// When the frame playback shows now is due, on the timeline [`tick`] is given (when it
+/// should be on screen); None when not playing.
+pub fn play_due(e: &Engine) -> Option<Instant> {
+    let p = e.frames.play?;
+    Some(p.t0 + Duration::from_secs_f64(p.n as f64 / p.fps.max(1) as f64))
 }
 
 /// When [`tick`] next has something to do.
@@ -1082,15 +1160,25 @@ pub fn next_tick_at(e: &Engine, s: &State) -> Option<Instant> {
     if let Some(t) = f.trim_at {
         at.push(t);
     }
+    // the painter catches up with the GPU's frame once it rests
+    if let (Some(_), Some(t), false) = (&f.gpu.view, f.gpu.view_at, s.playing) {
+        at.push(t + gpu::REST);
+    }
+    if let Some(t) = gpu::catch_up_at(e, s) {
+        at.push(t);
+    }
+    // drawings going up to the GPU ahead (between frames while playing)
+    if f.gpu.warm.busy() && !s.playing {
+        at.push(now + Duration::from_millis(4));
+    }
     if !e.is_stroking() {
         let adopt = s.sheet.tracks.iter().any(|t| {
             f.asked.chunks(2).any(|p| p == [t.layer, 0]) && e.painter.layer_drawing(t.layer) != 0
         });
-        if (!f.stale.is_empty() && !s.playing)
-            || f.painted.is_some()
-            || adopt
-            || history(e) != f.history
-        {
+        if !f.stale.is_empty() && !s.playing {
+            at.push(gpu::quiet_at(e).max(now));
+        }
+        if f.painted.is_some() || adopt || history(e) != f.history {
             at.push(now);
         }
     }
