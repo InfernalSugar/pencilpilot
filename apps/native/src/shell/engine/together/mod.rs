@@ -317,6 +317,9 @@ pub struct Together {
     /// each shared drawing's layer (every drawing the session has, any scene or cut)
     did_lid: HashMap<String, String>,
     tl_base: serde_json::Map<String, Value>,
+    /// this app's track changes sent and not back yet (numbered), and how many sends
+    tl_mine: serde_json::Map<String, Value>,
+    tl_inflight: usize,
     tl_check: Option<Instant>,
     looks_sent: HashMap<String, (bool, f32)>,
     /// layer removals and moves that couldn't happen yet (the painter busy)
@@ -1085,21 +1088,16 @@ fn skeleton(s: &State) -> Value {
     })
 }
 
-/// What changed here in the timeline, put into the session's own (everything this app
-/// doesn't show or know of, other scenes and cuts, markers, sound clips, notes, kept as it
-/// came): the timeline to send, or None when nothing changed.
-fn timeline_out(e: &mut Engine, s: &State) -> Option<Value> {
-    let now = native_tracks(e, s);
-    let changed: Vec<(&String, &Value)> = now
-        .iter()
-        .filter(|(lid, v)| e.together.tl_base.get(*lid) != Some(*v))
-        .collect();
-    if changed.is_empty() {
-        return None;
-    }
-    let mut tl = e.together.session_tl.clone().unwrap_or_else(|| skeleton(s));
+/// These tracks of this app's (lid → its track as [`native_tracks`] makes them) put into
+/// a session timeline; `base`: what they were before (for their drawings' kinds).
+fn patch_tracks(
+    tl: &mut Value,
+    s: &State,
+    changed: &serde_json::Map<String, Value>,
+    base: &serde_json::Map<String, Value>,
+) {
     if !tl.is_object() {
-        tl = skeleton(s);
+        *tl = skeleton(s);
     }
     // (the cut this app shows: the first scene's first; made when it's missing)
     if !tl["scenes"].is_array() || tl["scenes"].as_array().is_some_and(Vec::is_empty) {
@@ -1112,7 +1110,7 @@ fn timeline_out(e: &mut Engine, s: &State) -> Option<Value> {
     if !scene["cuts"][0]["tracks"].is_object() {
         scene["cuts"][0]["tracks"] = json!({});
     }
-    for (lid, v) in &changed {
+    for (lid, v) in changed {
         tl["scenes"][0]["cuts"][0]["tracks"][lid.as_str()] = v["cels"].clone();
         // static or not
         if !tl["statics"].is_array() {
@@ -1130,9 +1128,8 @@ fn timeline_out(e: &mut Engine, s: &State) -> Option<Value> {
         if !tl["kinds"].is_object() {
             tl["kinds"] = json!({});
         }
-        let was = e.together.tl_base.get(*lid).map(|b| b["kinds"].clone());
         let kinds = tl["kinds"].as_object_mut().unwrap();
-        if let Some(Value::Object(was)) = was {
+        if let Some(Value::Object(was)) = base.get(lid).map(|b| &b["kinds"]) {
             for d in was.keys() {
                 if v["kinds"].get(d).is_none() {
                     kinds.remove(d);
@@ -1149,6 +1146,35 @@ fn timeline_out(e: &mut Engine, s: &State) -> Option<Value> {
             }
         }
     }
+}
+
+/// What changed here in the timeline, put into the session's own (everything this app
+/// doesn't show or know of, other scenes and cuts, markers, sound clips, notes, kept as it
+/// came): the timeline to send, or None when nothing changed.
+fn timeline_out(e: &mut Engine, s: &State) -> Option<Value> {
+    let now = native_tracks(e, s);
+    let mut changed = serde_json::Map::new();
+    for (lid, v) in &now {
+        match e.together.tl_base.get(lid) {
+            Some(b) if b == v => {}
+            // (a layer new here with nothing on it: nothing to say about its track)
+            None if v["cels"].as_array().is_none_or(Vec::is_empty) => {}
+            _ => {
+                changed.insert(lid.clone(), v.clone());
+            }
+        }
+    }
+    if changed.is_empty() {
+        e.together.tl_base = now;
+        return None;
+    }
+    let mut tl = e.together.session_tl.clone().unwrap_or_else(|| skeleton(s));
+    let base = e.together.tl_base.clone();
+    patch_tracks(&mut tl, s, &changed, &base);
+    // (in flight until it comes back numbered: a timeline from someone else meanwhile gets
+    // these put into it again)
+    e.together.tl_mine.extend(changed);
+    e.together.tl_inflight += 1;
     e.together.tl_base = now;
     e.together.session_tl = Some(tl.clone());
     Some(tl)
@@ -1239,6 +1265,7 @@ fn put_timeline(e: &mut Engine, s: &mut State, tl: &Value) {
         }
     }
     super::frames::derive(s);
+    super::frames::sheet_changed(e, s);
     // (as it came: what this app changes later goes into it)
     e.together.session_tl = Some(tl.clone());
     e.together.tl_base = native_tracks(e, s);
@@ -1653,10 +1680,32 @@ fn on_edit(
             let Some(tl) = body.get("tl") else {
                 return false;
             };
-            if from == me && e.together.session_tl.as_ref() == Some(tl) {
-                return false;
+            if from == me {
+                let t = &mut e.together;
+                t.tl_inflight = t.tl_inflight.saturating_sub(1);
+                if t.tl_inflight == 0 {
+                    t.tl_mine.clear();
+                }
+                // (a newer one of this app's is on its way, made on top of what came
+                // meanwhile: this one is passed over here)
+                if t.session_tl.as_ref() == Some(tl) || t.tl_inflight > 0 {
+                    return false;
+                }
+                put_timeline(e, s, tl);
+                return true;
             }
             put_timeline(e, s, tl);
+            // this app's changes not numbered yet go into it again, and go again: whole
+            // timelines replace each other, and theirs came before this app's
+            if e.together.tl_inflight > 0 {
+                let mine = e.together.tl_mine.clone();
+                let mut merged = tl.clone();
+                let base = e.together.tl_base.clone();
+                patch_tracks(&mut merged, s, &mine, &base);
+                put_timeline(e, s, &merged);
+                e.together.tl_inflight += 1;
+                e.together.edit(json!({"k": "timeline", "tl": merged}));
+            }
             true
         }
         Change::Access(lid) => {
