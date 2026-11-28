@@ -894,7 +894,7 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             || "null".to_string(),
             |e| e.sound.stats_json(s.sound.cut_start, s.fps),
         );
-                let gpu_layers = comp.as_ref().map_or("null".to_string(), |k| {
+        let gpu_layers = comp.as_ref().map_or("null".to_string(), |k| {
             format!(
                 "{{\"on\": {}, \"gpuMiB\": {:.1}, \"tiles\": {}, \"sources\": {}, \"uploads\": {}}}",
                 eng.as_ref().is_some_and(|e| e.frames.gpu.on),
