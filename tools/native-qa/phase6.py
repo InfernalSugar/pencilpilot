@@ -1535,7 +1535,7 @@ def native_live_latency(sent, st):
     return {k: dist(v) for k, v in out.items()}
 
 
-def scenario_x_pair(out, native_hosts=True, strokes=5):
+def scenario_x_pair(out, native_hosts=True, strokes=8):
     """The native app and the current app in one session. The host draws `strokes` strokes,
     the joiner some on its own layer; the other shows them live, then the tiles; both save,
     and every shared layer must hold the same pixels in both files."""
@@ -2215,6 +2215,259 @@ def scenario_x_solo(out):
     return res
 
 
+def tiles_of(path, name):
+    pp, _ = project_pixels(path)
+    fr = (pp.get(name) or [[None]])[-1]
+    return (fr[0] if fr else None) or {}
+
+
+def scenario_x_undo(out):
+    """Undo is your own: the native app and the current app each draw on their own layer;
+    each undoes; only the undoer's stroke goes, in both apps."""
+    projects = env_bin("PP_PROJECTS")
+    res = {"load": load()}
+    a = NativePeer(np_bin(), out, "undo")
+    s = None
+    try:
+        a.do(cmd="open", path=os.path.join(projects, "empty.ppstudio"))
+        invite = a.do(cmd="host", name="Nat")["state"]["info"]["invite"]
+        s = Studio(env_bin("PP_STUDIO"), out, "undo", project=os.path.join(projects, "tiny.ppstudio"), name="Stu")
+        s.open()
+        s.join(invite)
+        time.sleep(2.0)
+        a.do(cmd="stroke", y=300)
+        a.do(cmd="stroke", y=420)
+        s.pen([wave(0, y0=0.6), wave(1, y0=0.75)])
+        time.sleep(2.5)
+        p1 = os.path.join(a.home, "1.ppstudio")
+        a.do(cmd="save", path=p1)
+        s1 = s.save()
+        a.do(cmd="undo")
+        time.sleep(2.0)
+        p2 = os.path.join(a.home, "2.ppstudio")
+        a.do(cmd="save", path=p2)
+        s2 = s.save()
+        s.js("document.body.dispatchEvent(new KeyboardEvent('keydown', {key: 'z', code: 'KeyZ', ctrlKey: true, bubbles: true})); return true;")
+        time.sleep(2.5)
+        p3 = os.path.join(a.home, "3.ppstudio")
+        a.do(cmd="save", path=p3)
+        s3 = s.save()
+        rows = lambda t: sorted(set(k[1] for k in t))
+        res["native"] = {"before": {"nat": rows(tiles_of(p1, "Layer 1")), "stu": rows(tiles_of(p1, "Stu’s layer"))},
+                         "afterNativeUndo": {"nat": rows(tiles_of(p2, "Layer 1")), "stu": rows(tiles_of(p2, "Stu’s layer"))},
+                         "afterStudioUndo": {"nat": rows(tiles_of(p3, "Layer 1")), "stu": rows(tiles_of(p3, "Stu’s layer"))}}
+        res["studio"] = {"before": {"nat": rows(tiles_of(s1, "Layer 1")), "stu": rows(tiles_of(s1, "Stu’s layer"))},
+                         "afterNativeUndo": {"nat": rows(tiles_of(s2, "Layer 1")), "stu": rows(tiles_of(s2, "Stu’s layer"))},
+                         "afterStudioUndo": {"nat": rows(tiles_of(s3, "Layer 1")), "stu": rows(tiles_of(s3, "Stu’s layer"))}}
+        res["sameAfterEach"] = [compare_projects(x, y, ["Layer 1", "Stu’s layer"])["samePremul1"]
+                                for x, y in ((p1, s1), (p2, s2), (p3, s3))]
+        n, st = res["native"], res["studio"]
+        res["pass"] = (all(res["sameAfterEach"]) and n["afterNativeUndo"]["stu"] == n["before"]["stu"]
+                       and n["afterNativeUndo"]["nat"] != n["before"]["nat"]
+                       and n["afterStudioUndo"]["nat"] == n["afterNativeUndo"]["nat"]
+                       and n["afterStudioUndo"]["stu"] != n["afterNativeUndo"]["stu"])
+    finally:
+        a.quit()
+        if s:
+            s.quit()
+    return res
+
+
+def scenario_x_join_midstroke(out):
+    """The native app joins while the current app (host) is in the middle of a long stroke:
+    afterwards both hold the same pixels."""
+    projects = env_bin("PP_PROJECTS")
+    res = {"load": load()}
+    s = Studio(env_bin("PP_STUDIO"), out, "mid", project=os.path.join(projects, "empty.ppstudio"), name="Stu")
+    a = None
+    try:
+        s.open()
+        invite = s.host()["invite"]
+        th = __import__("threading").Thread(target=lambda: s.pen([wave(0, n=720, y0=0.4)], hz=240))
+        th.start()
+        time.sleep(1.0)
+        a = NativePeer(np_bin(), out, "mid")
+        a.do(cmd="open", path=os.path.join(projects, "tiny.ppstudio"))
+        j = a.do(cmd="join", code=invite, name="Nat")
+        res["joinedSynced"] = j["state"]["synced"]
+        th.join()
+        time.sleep(2.5)
+        p = os.path.join(a.home, "after.ppstudio")
+        a.do(cmd="save", path=p)
+        res["compare"] = compare_projects(s.save(), p, ["Layer 1"])
+        res["pass"] = res["compare"]["samePremul1"]
+    finally:
+        if a:
+            a.quit()
+        s.quit()
+    return res
+
+
+def scenario_x_offline(out, secs=5):
+    """The native app (joined) stops answering for `secs` (SIGSTOP: as a laptop lid or a
+    network drop) while the current app (host) draws, then comes back: does it catch up,
+    or rejoin, and end with the same pixels?"""
+    projects = env_bin("PP_PROJECTS")
+    res = {"load": load(), "offlineS": secs}
+    s = Studio(env_bin("PP_STUDIO"), out, f"off{secs}", project=os.path.join(projects, "empty.ppstudio"), name="Stu")
+    a = None
+    try:
+        s.open()
+        invite = s.host()["invite"]
+        a = NativePeer(np_bin(), out, f"off{secs}")
+        a.do(cmd="open", path=os.path.join(projects, "tiny.ppstudio"))
+        a.do(cmd="join", code=invite, name="Nat")
+        time.sleep(1.0)
+        os.kill(a.pid, signal.SIGSTOP)
+        t0 = time.monotonic()
+        s.pen([wave(i, y0=0.3) for i in range(3)])
+        while time.monotonic() - t0 < secs:
+            time.sleep(0.1)
+        os.kill(a.pid, signal.SIGCONT)
+        time.sleep(4.0)
+        st = a.state()
+        res["nativeAfter"] = {"live": st["live"], "synced": st["synced"],
+                              "members": len((st["info"] or {}).get("members", [])), "error": st["error"],
+                              "note": st["note"]}
+        res["studioMembers"] = len(s.invoke("share_status")["members"])
+        # one more stroke after coming back
+        s.pen([wave(4, y0=0.6)])
+        time.sleep(2.5)
+        p = os.path.join(a.home, "after.ppstudio")
+        a.do(cmd="save", path=p)
+        res["compare"] = compare_projects(s.save(), p, ["Layer 1"])
+        res["pass"] = res["compare"]["samePremul1"]
+    finally:
+        if a:
+            try:
+                os.kill(a.pid, signal.SIGCONT)
+            except OSError:
+                pass
+            a.quit()
+        s.quit()
+    return res
+
+
+def picture_tiles(w=3840, h=2160):
+    """A 4K "imported picture": every tile opaque, smooth colour (compresses like a photo
+    more or less), as {(x, y): bytes}."""
+    import numpy as np
+    out = {}
+    for ty in range((h + 63) // 64):
+        for tx in range((w + 63) // 64):
+            yy, xx = np.mgrid[0:64, 0:64]
+            px = np.zeros((64, 64, 4), np.uint8)
+            px[..., 0] = (xx + tx * 64) * 255 // w
+            px[..., 1] = (yy + ty * 64) * 255 // h
+            px[..., 2] = ((xx * 7 + yy * 3 + tx * 13 + ty * 17) % 256)
+            px[..., 3] = 255
+            out[(tx, ty)] = px.tobytes()
+    return out
+
+
+def scenario_x_import4k(out):
+    """A member puts a 4K picture on its shared layer (2040 tiles, in edits of 48, as an
+    import travels) while the native app (windowed, hosting a 4K canvas) draws: its pen to
+    screen and rate meanwhile, how long until the picture is all in and shown, the pixels."""
+    projects = env_bin("PP_PROJECTS")
+    hz = int(os.environ.get("PP_HZ", "60"))
+    res = {"load": load(), "hz": hz}
+    n = p = None
+    try:
+        n = Native(env_bin("PP_NATIVE"), out, "imp", 45, project=os.path.join(projects, "layers20-4k.ppstudio"),
+                   host=True, name="Nat", args=["--workspace", "draw"])
+        p = Peer(env_bin("PP_PEER"), out, "imp", invite=n.invite, name="Imp")
+        time.sleep(2.0)
+        lid = peer_layer(p, name="Picture")
+        did = f"{p.id[:12]}:900"
+        time.sleep(0.5)
+        p.edit(peer_timeline(lid, did))
+        time.sleep(0.5)
+        pic = picture_tiles()
+        items = list(pic.items())
+        bodies = []
+        for i in range(0, len(items), 48):
+            bodies.append({"k": "tiles", "lid": lid, "did": did,
+                           "set": [[x, y, encode_tile(px)] for (x, y), px in items[i:i + 48]], "clear": []})
+        res["edits"] = len(bodies)
+        res["wireMB"] = round(sum(len(json.dumps(b)) for b in bodies) / 1e6, 2)
+        th = __import__("threading").Thread(target=lambda: native_drawing(n, 4.0))
+        t0 = mono_ns()
+        p.cmd(cmd="edits", bodies=bodies, gap_ms=0)
+        b0 = mono_ns()
+        d0, d1, _ = native_drawing(n, 4.0)
+        time.sleep(3.0)
+        res["pssMiB"] = round((n.pss_kib() or 0) / 1024, 1)
+        n.inp.combo("Control_L", "s")
+        time.sleep(4.0)
+        st = n.wait()
+        n = None
+        ev = [e for e in native_edits(st) if e["kind"] == "tiles" and e["receivedNs"] >= t0]
+        res["tilesEditsIn"] = len(ev)
+        res["lastShownAfterSendMs"] = ev and max(e["shownNs"] or 0 for e in ev) and round((max(e["shownNs"] or 0 for e in ev) - t0) / 1e6, 1)
+        res["pen"] = pen_numbers(st, d0, d1, hz)
+        res["incoming"] = incoming_numbers(st, t0, d1 + 3_000_000_000, hz)
+        have = tiles_of(os.path.join(out, "native-imp", "layers20-4k.ppstudio"), "Picture")
+        # (the native app keeps no pixels outside the canvas: rows past 2160 left out of both)
+        import numpy as np
+        cut = {}
+        for (x, y), px in pic.items():
+            a_ = np.frombuffer(px, np.uint8).reshape(64, 64, 4).copy()
+            if (y + 1) * 64 > 2160:
+                a_[2160 - y * 64:] = 0
+            cut[(x, y)] = a_.tobytes()
+        c = compare_tiles(cut, have)
+        res["picture"] = {k: c[k] for k in ("equal", "samePremul1", "tiles", "maxPremulDiff")}
+    finally:
+        if p:
+            p.leave()
+        if n:
+            n.kill()
+    return res
+
+
+def scenario_x_groups(out):
+    """The current app hosts with two of its layers in a group (and changes the group's
+    opacity); the native app joins: the group as the session has it (the native app's saved
+    copy, and the snapshot it would pass on), and the native app's own stroke after it."""
+    projects = env_bin("PP_PROJECTS")
+    res = {"load": load()}
+    s = Studio(env_bin("PP_STUDIO"), out, "grp", project=os.path.join(projects, "empty.ppstudio"), name="Stu")
+    a = probe = None
+    try:
+        s.open()
+        s.js("document.querySelector('button[aria-label=\"New layer\"]').click(); return true;")
+        time.sleep(0.5)
+        invite = s.host()["invite"]
+        s.pen([wave(0, y0=0.3)])
+        res["grouped"] = s.js("const b = document.querySelector('button[title=\"Put this layer in a new group\"]'); b?.click(); return !!b;")
+        time.sleep(1.5)
+        res["studioLayers"] = s.layer_names()
+        probe = Peer(env_bin("PP_PEER"), out, "grp", invite=invite, name="Probe")
+        a = NativePeer(np_bin(), out, "grp")
+        a.do(cmd="open", path=os.path.join(projects, "tiny.ppstudio"))
+        a.do(cmd="join", code=invite, name="Nat")
+        time.sleep(2.0)
+        res["groupEdits"] = [e["body"] for e in probe.events() if (e.get("body") or {}).get("k") in ("group", "gset", "place")]
+        p = os.path.join(a.home, "after.ppstudio")
+        a.do(cmd="save", path=p)
+        ps = s.save()
+        mn = json.loads(zipfile.ZipFile(p).read("manifest.json"))
+        ms = json.loads(zipfile.ZipFile(ps).read("manifest.json"))
+        res["nativeGroups"] = mn.get("groups")
+        res["studioGroups"] = ms.get("groups")
+        res["nativeLayerGroups"] = [(l["name"], l.get("group")) for l in mn["layers"]]
+        res["studioLayerGroups"] = [(l["name"], l.get("group")) for l in ms["layers"]]
+        res["pass"] = bool(mn.get("groups")) == bool(ms.get("groups"))
+    finally:
+        if probe:
+            probe.leave()
+        if a:
+            a.quit()
+        s.quit()
+    return res
+
+
 SCENARIOS = {
     "studio-wire": scenario_studio_wire,
     "studio-pair": scenario_studio_pair,
@@ -2233,6 +2486,12 @@ SCENARIOS = {
     "x-host-leaves-studio": lambda out: scenario_x_host_leaves(out, "studio"),
     "x-host-leaves-native": lambda out: scenario_x_host_leaves(out, "native"),
     "x-solo": scenario_x_solo,
+    "x-undo": scenario_x_undo,
+    "x-join-midstroke": scenario_x_join_midstroke,
+    "x-offline5": lambda out: scenario_x_offline(out, 5),
+    "x-offline40": lambda out: scenario_x_offline(out, 40),
+    "x-import4k": scenario_x_import4k,
+    "x-groups": scenario_x_groups,
 }
 
 
