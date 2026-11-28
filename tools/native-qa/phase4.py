@@ -441,38 +441,35 @@ def proc_cpu_s(pid):
 
 
 def vram_kib(pid):
-    """The DRM clients' VRAM and GTT of a process (amdgpu fdinfo), in KiB, or None."""
-    vram = gtt = 0
-    seen = set()
-    found = False
+    """The process's GPU memory (amdgpu fdinfo), KiB: each DRM client counted once, its
+    `drm-total-vram` and `drm-total-gtt` (older kernels: `drm-memory-*`; the two are the same
+    memory, never added together). None when the driver says nothing."""
+    per_client = {}
     try:
         fds = os.listdir(f"/proc/{pid}/fdinfo")
     except OSError:
         return None
+    unit = {"KiB": 1, "MiB": 1024, "GiB": 1024 * 1024}
     for fd in fds:
         try:
             with open(f"/proc/{pid}/fdinfo/{fd}") as f:
                 txt = f.read()
         except OSError:
             continue
-        if "drm-client-id" not in txt:
-            continue
-        cid = next((ln.split()[1] for ln in txt.splitlines() if ln.startswith("drm-client-id")), fd)
-        if cid in seen:
-            continue
-        seen.add(cid)
+        kv = {}
         for ln in txt.splitlines():
             k, _, rest = ln.partition(":")
             parts = rest.split()
-            if len(parts) < 1:
-                continue
-            mult = {"KiB": 1, "MiB": 1024, "GiB": 1024 * 1024}.get(parts[1] if len(parts) > 1 else "KiB", 1)
-            if k in ("drm-memory-vram", "drm-resident-vram"):
-                vram = max(vram, int(parts[0]) * mult) if k == "drm-resident-vram" else vram + int(parts[0]) * mult
-                found = True
-            elif k in ("drm-memory-gtt", "drm-resident-gtt"):
-                gtt += int(parts[0]) * mult
-    return {"vramKiB": vram, "gttKiB": gtt} if found else None
+            if k.startswith("drm-") and parts:
+                kv[k] = (parts[0], parts[1] if len(parts) > 1 else "KiB")
+        if "drm-client-id" not in kv:
+            continue
+        val = lambda k: int(kv[k][0]) * unit.get(kv[k][1], 1) if k in kv else None
+        region = lambda r: next((v for v in (val(f"drm-total-{r}"), val(f"drm-memory-{r}")) if v is not None), 0)
+        per_client[kv["drm-client-id"][0]] = (region("vram"), region("gtt"))
+    if not per_client:
+        return None
+    return {"vramKiB": sum(v for v, _ in per_client.values()), "gttKiB": sum(g for _, g in per_client.values())}
 
 
 class Sampler:
@@ -939,44 +936,54 @@ def shown_at(st, frame, after_ns):
     return next((f["shownNs"] for f in fr if f["sheetFrame"] == frame), None)
 
 
-def sync_analyse(r, hz, fps=24, every_frames=12):
+def sync_analyse(r, hz, fps=24, every_frames=12, rec_add=0.0):
     """Each click (one every `every_frames` scene frames, from frame 0) at the sink against the
-    first shown frame of its scene frame: the offset, its spread and drift; Play to the
-    first sound."""
+    first shown frame of its scene frame, less what the recorder adds (`rec_add`, ms): the
+    offset, its spread and drift, over the clicks after the first. The first click (frame 0,
+    on screen already when Play is pressed) apart: against the playback clock's start as the
+    picture shows it (frame 1's shown time less one frame), and against Play."""
     st, ons, t_key = r["stats"], r["onsets"], r["keys"][0]
     ons = [o for o in ons if t_key - 50e6 <= o[0] <= r["stopNs"]]
     if not ons:
         return {"sound": False, "links": r["links"], "exit": r["exit"]}
     per = every_frames / fps * 1e9
-    # which click each onset is: from where the picture puts click 1 (its frame's shown time),
-    # so a click not heard (the first, at Play) doesn't shift the others
+    # which click each onset is: from where the picture puts click 1 (its frame's shown time)
     anchor = shown_at(st, every_frames, t_key)
     if anchor is None:
         return {"sound": True, "clicks": len(ons), "matched": 0, "exit": r["exit"]}
     anchor -= per
-    offs, ts, ks = [], [], []
+    offs, ts, ks, first = [], [], [], None
     for o, _ in ons:
         k = round((o - anchor) / per)
-        shown = shown_at(st, k * every_frames, t_key)
-        if k < 0 or shown is None:
+        if k < 0:
             continue
-        offs.append((o - shown) / 1e6)
-        ts.append((o - ons[0][0]) / 1e9)
+        if k == 0:
+            first = o - rec_add * 1e6
+            continue
+        shown = shown_at(st, k * every_frames, t_key)
+        if shown is None:
+            continue
+        offs.append((o - shown) / 1e6 - rec_add)
+        ts.append((o - anchor) / 1e9)
         ks.append(k)
     disp = 1000 / hz
-    res = {"sound": True, "clicks": len(ons), "matched": len(offs), "firstClickHeard": 0 in ks,
-           "missingClicks": (max(ks) + 1 - len(set(ks))) if ks else None,
-           "playToFirstSoundMs": round((ons[0][0] - t_key) / 1e6, 1),
-           "playToFirstFrameChangeMs": None, "displayFrameMs": round(disp, 2), "exit": r["exit"]}
+    f1 = shown_at(st, 1, t_key)
+    origin = f1 - 1e9 / fps if f1 else None
+    res = {"sound": True, "clicks": len(ons), "matched": len(offs), "firstClickHeard": first is not None,
+           "missingClicks": (max(ks) - len(set(ks))) if ks else None,
+           "playToFirstSoundMs": round((ons[0][0] - rec_add * 1e6 - t_key) / 1e6, 1),
+           "firstClickVsClockStartMs": round((first - origin) / 1e6, 2) if first and origin else None,
+           "frame1ShownAfterPlayMs": round((f1 - t_key) / 1e6, 1) if f1 else None,
+           "recorderAddsMs": rec_add, "displayFrameMs": round(disp, 2), "exit": r["exit"]}
     if offs:
         mt, mo = statistics.fmean(ts), statistics.fmean(offs)
         den = sum((t - mt) ** 2 for t in ts)
         res.update({
             "offsetMs": {"p50": round(statistics.median(offs), 2), "min": round(min(offs), 2),
                          "max": round(max(offs), 2), "maxAbs": round(max(abs(v) for v in offs), 2)},
-            "withinOneDisplayFrame": sum(1 for v in offs if abs(v) <= disp) / len(offs),
+            "withinOneDisplayFrame": round(sum(1 for v in offs if abs(v) <= disp) / len(offs), 3),
             "driftMsPerMin": round(sum((t - mt) * (o - mo) for t, o in zip(ts, offs)) / den * 60, 3) if den else None,
-            "spanS": round(ts[-1], 1),
+            "spanS": round(ts[-1] - ts[0], 1),
         })
     return res
 
@@ -985,28 +992,32 @@ def scenario_sync(binary, out):
     """Sound in step with playback: sound-60s (640 x 360) for 10 s, PP_QA_RUNS times, at 165
     and 60 Hz; budgets: offset within one display frame, Play to sound within 50 ms. The
     offsets are given as recorded and less what the recorder adds (`calibrate`)."""
-    res = {"recorderAddsMs": calibrate(out), "quantum": int(os.environ.get("PP_QA_PW_QUANTUM", "256"))}
+    cal = calibrate(out) or 0.0
+    res = {"recorderAddsMs": cal, "quantum": int(os.environ.get("PP_QA_PW_QUANTUM", "256"))}
     for name in ("sound-60s", "layers20-4k-60s-sound"):
         for hz in (165, 60):
             runs = []
             for i in range(RUNS):
                 r = sound_run(binary, out, f"p4sync-{name}-{hz}-{i}", hz, os.path.join(FIX, f"{name}.ppstudio"), 10.0)
-                a = sync_analyse(r, hz)
+                a = sync_analyse(r, hz, rec_add=cal)
                 a["load1"] = round(os.getloadavg()[0], 2)
                 runs.append(a)
             res[f"{name}-{hz}"] = {"summary": {k: nested(runs, p) for k, p in (
                 ("offsetP50", ["offsetMs", "p50"]), ("offsetMaxAbs", ["offsetMs", "maxAbs"]),
-                ("playToFirstSound", ["playToFirstSoundMs"]), ("drift", ["driftMsPerMin"]))}, "runs": runs}
+                ("playToFirstSound", ["playToFirstSoundMs"]), ("drift", ["driftMsPerMin"]),
+                ("firstClickVsClockStart", ["firstClickVsClockStartMs"]),
+                ("withinOneDisplayFrame", ["withinOneDisplayFrame"]))}, "runs": runs}
     return res
 
 
 def scenario_sound_drift(binary, out):
     """62 s of sound-60s and of 20 layers at 4K with the clicks (165 Hz; PP_QA_DRIFT_HZ)."""
     hz = int(os.environ.get("PP_QA_DRIFT_HZ", "165"))
-    res = {}
+    cal = calibrate(out) or 0.0
+    res = {"recorderAddsMs": cal, "quantum": int(os.environ.get("PP_QA_PW_QUANTUM", "256"))}
     for name in ("sound-60s", "layers20-4k-60s-sound"):
         r = sound_run(binary, out, f"p4sdrift-{name}-{hz}", hz, os.path.join(FIX, f"{name}.ppstudio"), 62.0)
-        res[f"{name}-{hz}"] = sync_analyse(r, hz)
+        res[f"{name}-{hz}"] = sync_analyse(r, hz, rec_add=cal)
     return res
 
 
@@ -1015,7 +1026,8 @@ def scenario_sound_start(binary, out):
     and how much of the tone's start isn't heard (3 s less how long it's heard for), PP_QA_RUNS
     times at 165 and 60 Hz."""
     import numpy as np
-    res = {}
+    cal = calibrate(out) or 0.0
+    res = {"recorderAddsMs": cal}
     for hz in (165, 60):
         runs = []
         for i in range(RUNS):
@@ -1040,7 +1052,8 @@ def scenario_sound_start(binary, out):
                          "frame1ShownMs": f0 and round((f0 - k) / 1e6, 1),
                          "toneHeardMs": round(heard, 1), "startLeftOutMs": round(3000 - heard, 1),
                          "alone": r["alone"]})
-        res[str(hz)] = {"summary": {kk: nested(runs, [kk]) for kk in ("playToSoundMs", "startLeftOutMs")},
+        res[str(hz)] = {"summary": {kk: nested(runs, [kk]) for kk in ("playToSoundMs", "startLeftOutMs",
+                                                                     "toneStartVsClockStartMs")},
                         "runs": runs}
     return res
 
