@@ -122,8 +122,9 @@ pub struct Text {
     glyphs: HashMap<CacheKey, Option<Slot>>,
     body: String,
     display: String,
-    /// the system's fonts, loading
-    pending: Option<std::sync::mpsc::Receiver<cosmic_text::fontdb::Database>>,
+    /// the system's fonts, loading: the whole font system made with them on that thread too
+    /// (making it takes tens of milliseconds; joining is then a swap)
+    pending: Option<std::sync::mpsc::Receiver<Box<Text>>>,
     /// text laid out this pass and the one before ([`Text::new_pass`]): the same text in the
     /// same style isn't shaped again while it stays on screen
     laid: HashMap<LaidKey, Laid>,
@@ -158,7 +159,7 @@ impl Text {
             .spawn(move || {
                 let mut db = cosmic_text::fontdb::Database::new();
                 db.load_system_fonts();
-                let _ = tx.send(db);
+                let _ = tx.send(Box::new(Text::with_db(db)));
             })
             .ok();
         let mut t = Text::with_db(cosmic_text::fontdb::Database::new());
@@ -198,18 +199,18 @@ impl Text {
     /// Take the system's fonts once they've loaded. True when they just did: text laid out
     /// before should be laid out again (it may have glyphs it lacked).
     pub fn poll_fonts(&mut self) -> bool {
-        let Some(db) = self.pending.as_ref().and_then(|rx| rx.try_recv().ok()) else {
+        let Some(t) = self.pending.as_ref().and_then(|rx| rx.try_recv().ok()) else {
             return false;
         };
         // a new font system: glyphs are keyed by font, so the atlas starts over
-        *self = Text::with_db(db);
+        *self = *t;
         true
     }
 
     /// Wait for the system's fonts (tests, and anything that must have them now).
     pub fn wait_for_fonts(&mut self) {
-        if let Some(db) = self.pending.take().and_then(|rx| rx.recv().ok()) {
-            *self = Text::with_db(db);
+        if let Some(t) = self.pending.take().and_then(|rx| rx.recv().ok()) {
+            *self = *t;
         }
     }
 
