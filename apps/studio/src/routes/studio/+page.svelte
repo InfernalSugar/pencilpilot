@@ -21,6 +21,7 @@
 		type GuideSettings
 	} from '@pencilpilot/paint/guides';
 	import { smoothTool, type SmoothTool } from '@pencilpilot/paint/stabilizer';
+	import { inflateTiles } from '@pencilpilot/paint/inflate';
 	import PaintCanvas, {
 		BLANK_STATUS,
 		type CanvasStatus,
@@ -108,6 +109,7 @@
 	import {
 		readSavedShare,
 		Together,
+		useInflater,
 		type Ask,
 		type CanvasPort,
 		type SavedShare,
@@ -2429,6 +2431,8 @@
 
 	function startTogether(info: ShareInfo, joining: boolean) {
 		if (!canvas) return;
+		// (tiles from the others inflated in the paint engine: much faster than the browser)
+		useInflater(inflateTiles);
 		together = new Together(
 			info.me.id,
 			info.me.name,

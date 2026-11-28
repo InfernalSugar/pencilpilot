@@ -1832,3 +1832,27 @@ fn takes_in_what_came_while_it_was_busy_when_retried_with_no_change_of_its_own()
     s.with(B, |t, c| t.retry(c));
     assert_eq!(s.c(B).names()[..2], ["Hills", "Sky"]);
 }
+
+// ---- drawing together: a big project ----
+
+#[test]
+fn hosting_sends_no_tiles_the_first_joiner_gets_them_all_with_the_project() {
+    let mut hc = FakeCanvas::new(&["Sky"]);
+    for i in 0..300 {
+        hc.paint(1, i % 20, i / 20, (i % 250) as u8 + 1);
+    }
+    let mut s = FakeSession::default();
+    s.add(A, "Ana", hc);
+    s.with(A, |t, c| t.start_host(c));
+    // (hosting sends the layers and the timeline; the tiles go with the project)
+    assert!(s.log.iter().all(|(_, e)| e["k"] != "tiles"));
+    // Bo asks before Ana's own edits are back: answered once they are
+    s.add(B, "Bo", FakeCanvas::new(&[]));
+    s.with(B, |t, c| t.start_join(c, A));
+    s.settle();
+    assert!(s.t(B).synced());
+    let sky = s.c(B).by_name("Sky").id;
+    let d = showing(&mut s, B, sky);
+    assert_eq!(s.c(B).drawings[&d].len(), 300);
+    assert_eq!(s.c(B).pixel(sky, 19, 14), Some(50));
+}
