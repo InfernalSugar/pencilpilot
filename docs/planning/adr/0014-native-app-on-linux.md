@@ -236,8 +236,8 @@ Each step is its own PR, with tests that need no window on the screen.
   - **Tiles kept on the GPU:** a drawing goes up once (64 × 64 tiles, premultiplied linear
     fix15, as the painter keeps them); after that only tiles the painter says changed, each
     checked against a hash. Going to another frame only points the shader at other tiles.
-    Up to 1 GiB (or a quarter of the GPU's memory) of tiles; past that, the least recently
-    shown drawings make room. Drawings not showing stay compressed on the CPU as before.
+    The compositor takes at most 920 MiB of GPU memory, everything included (or a quarter of
+    the GPU's memory); past that, the least recently shown drawings make room. Drawings not showing stay compressed on the CPU as before.
   - **Going up ahead:** the drawings of the frames around the current one (then the whole
     cut, while there's room) go up between frames and while nothing else happens, decoded on
     another thread; nothing goes up while input comes in.
@@ -295,8 +295,36 @@ Each step is its own PR, with tests that need no window on the screen.
 - **Budgets:** scrubbing at the display's rate, playback (0 skipped, on the nearest display
   frame, first frame under 0.5 s), CPU while playing, and memory pass for both test projects at
   165 and 60 Hz. Pen to screen is unchanged.
-- **Open:** VRAM has no budget yet (the tiles may take 1 GiB; a smaller GPU gets a quarter of
-  its memory and evicts); a project whose one frame needs more tiles than that goes back to the
+- **Follow-up after QA's gate on the combined branch** (QA's `tools/native-qa/phase4.py`, 3
+  runs each, release, headless mutter):
+  - **Pen to screen at 4K × 20 layers had regressed** (strokes on the top layer: 165 Hz p99 8.5
+    → 13.0 ms with 6–8 misses; 60 Hz 25.6 → 37.3 ms). Cause: when a stroke ended, its drawing
+    was marked changed (for its thumbnail) and the GPU's copy of it thrown away, so the whole
+    drawing went up again and was composited again in the next frame, every stroke; the late
+    frames widened the pacer's margin. A drawing a layer shows is kept up to date tile by tile,
+    so now only one changed out of sight is sent up again. Thumbnails and the painter's own
+    picture also wait until the pen has rested 0.4 s (each takes milliseconds of the window's
+    thread at 4K; they had landed between strokes). Now: **165 Hz p99 8.35–8.45 ms, 0–1 missed;
+    60 Hz 19.1–19.8 ms, 0 missed** (before the GPU layers: 8.5 / 19.3–26.3 ms).
+  - **4K scrubbing's slowest frame change** (6.5 ms): a pause made the layers that change every
+    other frame count as still, so the kept bottom layers were rebuilt on the next two frame
+    changes. Layers' stillness is now counted in frames where something changed. The atlas
+    grows between frames (ahead of what goes up), not in a frame. Now 4K 165 Hz work p99
+    4.5–6.5 ms (median 4.8), key to shown p99 7.3–12.1 ms, never shown 0; 500 drawings work
+    p99 4.6–4.7 ms.
+  - **GPU memory:** the cap now covers all the compositor takes (tiles, picture, kept bottom
+    layers, staging), and the atlas grows a quarter at a time (doubling left up to half
+    unused). The whole app, from amdgpu's fdinfo (resident VRAM + GTT; QA's sampler adds both
+    `drm-memory-*` and `drm-resident-*` lines, which double counts: its 1584 / 2273 MiB are
+    792 / 1137 MiB): **4K × 20 layers 768 MiB (VRAM 702 + GTT 66), up to ~890 MiB while playing
+    (the kept bottom layers, 127 MiB, made at the first frame change); 500 drawings 948 MiB
+    (906 + 42)**. At 4K the compositor is 662 MiB: tiles 486 (14 854 held), kept bottom layers
+    127, picture 32, staging 16; the rest of the app ~100 MiB (the canvas image 32 and its
+    staging 32, the window's buffers, the interface's atlas and its staging).
+  - Playback and memory unchanged: 0 skipped, all frames on time, 3–4 % of a core, PSS 333 /
+    164 MiB.
+- **Open:** VRAM has no budget yet (the compositor takes up to 920 MiB; a smaller GPU gets a
+  quarter of its memory and evicts); a project whose one frame needs more tiles than that goes back to the
   CPU path for 3 s at a time; layer styles and adjustment layers are still composited on the CPU;
   on a real display (Hyprland, a vblank grid) playback's lead is measured the same way but not
   checked yet.

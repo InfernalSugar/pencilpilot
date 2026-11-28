@@ -132,13 +132,13 @@ fn sync_moving(
 }
 
 /// The layers' compositor on the GPU for a `w` × `h` document (none if the GPU can't make
-/// one: the CPU composites then). Its tiles may take up to `PENCILPILOT_GPU_LAYERS_MB` of
-/// GPU memory (1 GiB if not set).
+/// one: the CPU composites then). It may take up to `PENCILPILOT_GPU_LAYERS_MB` of GPU memory,
+/// its tiles and buffers together (920 MiB if not set: the whole app stays under 1 GiB).
 fn compositor(gpu: &Gpu, w: u32, h: u32) -> Option<Compositor> {
     let mb: u64 = std::env::var("PENCILPILOT_GPU_LAYERS_MB")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(1024);
+        .unwrap_or(920);
     match Compositor::new(gpu, w, h, brush::srgb_table(), mb << 20) {
         Ok(c) => Some(c),
         Err(err) => {

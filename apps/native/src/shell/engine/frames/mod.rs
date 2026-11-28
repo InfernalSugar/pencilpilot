@@ -1039,8 +1039,10 @@ pub fn tick(e: &mut Engine, s: &mut State, now: Instant) -> bool {
         if let Some(d) = e.frames.painted.take() {
             e.frames.mark(d);
         }
-        // one thumbnail a tick (a frame), and none while playing
+        // one thumbnail a tick (a frame), none while playing, and none until the pen rests (a
+        // 4K drawing's takes milliseconds of the window's thread: not between strokes)
         if !s.playing
+            && gpu::pen_quiet(e)
             && let Some(d) = e.frames.stale.pop_first()
         {
             load_drawings(e, &[d]);
@@ -1103,7 +1105,7 @@ fn idle(e: &Engine, s: &State) -> bool {
     let f = &e.frames;
     f.ready
         && f.gpu.view.is_none()
-        && !gpu::painter_behind(e, s)
+        && gpu::catch_up_at(e, s).is_none_or(|t| t > Instant::now())
         && f.prefetch.is_none()
         && f.trim_at.is_none()
         && !f.ahead_due
@@ -1162,8 +1164,8 @@ pub fn next_tick_at(e: &Engine, s: &State) -> Option<Instant> {
     if let (Some(_), Some(t), false) = (&f.gpu.view, f.gpu.view_at, s.playing) {
         at.push(t + gpu::REST);
     }
-    if gpu::painter_behind(e, s) {
-        at.push(now + Duration::from_millis(8));
+    if let Some(t) = gpu::catch_up_at(e, s) {
+        at.push(t);
     }
     // drawings going up to the GPU ahead (between frames while playing)
     if f.gpu.warm.busy() && !s.playing {
@@ -1173,11 +1175,10 @@ pub fn next_tick_at(e: &Engine, s: &State) -> Option<Instant> {
         let adopt = s.sheet.tracks.iter().any(|t| {
             f.asked.chunks(2).any(|p| p == [t.layer, 0]) && e.painter.layer_drawing(t.layer) != 0
         });
-        if (!f.stale.is_empty() && !s.playing)
-            || f.painted.is_some()
-            || adopt
-            || history(e) != f.history
-        {
+        if !f.stale.is_empty() && !s.playing {
+            at.push(gpu::quiet_at(e).max(now));
+        }
+        if f.painted.is_some() || adopt || history(e) != f.history {
             at.push(now);
         }
     }
