@@ -523,9 +523,14 @@ for a mixed session:** the native app never destroys or alters what it doesn't s
   | Tiles after a stroke's end | 100 ms | native → current ≤ 10 ms; current → native 57–63 ms |
 
 - **Open at merge:**
-  - **Native → current app live stroke:** 1–3 of 8 strokes are visible at 52–65 ms. The
-    native app sends the start 0.15–0.31 ms after pen-down; the current app takes 32–34 ms to
-    show it (its own starts: 0–3 ms), so the rest is on its side.
+  - ~~**Native → current app live stroke**~~ (closed 2026-11-28): no message was lost. QA matched
+    each stroke's start by time; the current app's page clock counts whole milliseconds, so a
+    start that came at once could read slightly before pen-down and was skipped for the 20 ms
+    resend. Matched by the stroke's key, the visible max is 29–36 ms (budget 50). Separately,
+    each received stroke made the current app re-composite the whole drawing (every tile
+    marked changed), a page stall growing with every stroke (7 → 27 ms) that delayed the next
+    start; the brush engine now marks only tiles that changed (render a flat 7–9 ms; starts
+    within 10 ms).
   - **Pen during a 4K join served or a 4K picture arriving:** p99 22.8 / 11.8 ms (60 / 165 Hz)
     during a join, with 4–11 missed frames at 165 Hz; 25.9 / 11.8 ms during a 4K import. At
     60 Hz the same host was already over (21.7 ms) before the join.
