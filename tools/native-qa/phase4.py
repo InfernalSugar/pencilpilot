@@ -556,6 +556,41 @@ def analyse_play(changes, n_frames, fps, hz, t_key):
     }
 
 
+def others():
+    """Other app runs on this machine (another engineer's checks): their pids. They share the
+    GPU and the CPU with ours."""
+    me = os.getpid()
+    found = []
+    for d in os.listdir("/proc"):
+        if not d.isdigit() or int(d) == me:
+            continue
+        try:
+            exe = os.readlink(f"/proc/{d}/exe")
+            ppid = int(open(f"/proc/{d}/stat").read().rsplit(")", 1)[1].split()[1])
+        except OSError:
+            continue
+        if "pencilpilot" in os.path.basename(exe) and ppid != me:
+            found.append(int(d))
+    return found
+
+
+def wait_alone(limit_s=float(os.environ.get("PP_QA_WAIT_ALONE", "600"))):
+    """Wait (up to `limit_s`) until no other app run is going; how long it waited and who was
+    still there."""
+    t0 = time.monotonic()
+    while others() and time.monotonic() - t0 < limit_s:
+        time.sleep(2)
+    return {"waitedS": round(time.monotonic() - t0, 1), "othersAtStart": len(others()),
+            "gpuBusyPct": gpu_busy()}
+
+
+def gpu_busy():
+    try:
+        return int(open("/sys/class/drm/card1/device/gpu_busy_percent").read())
+    except (OSError, ValueError):
+        return None
+
+
 def launch(binary, m, out, tag, secs, project, env=None):
     e = quiet_env(out)
     e.update(env or {})
@@ -578,6 +613,7 @@ def wait_opened(app, timeout=8.0):
 
 
 def play_once(binary, out, tag, hz, project, secs, n_frames, fps=24):
+    alone = wait_alone()
     m = cw.Mutter(out, hz)
     try:
         app = launch(binary, m, out, tag, secs + 14, project)
@@ -604,6 +640,7 @@ def play_once(binary, out, tag, hz, project, secs, n_frames, fps=24):
         r.update({"pssAfterOpenMiB": pss_open and round(pss_open / 1024, 1),
                   "gpuMemAfterOpenMiB": vram_open and round((vram_open["vramKiB"] + vram_open["gttKiB"]) / 1024, 1),
                   "settledBeforePlay": quiet, "load1": round(load, 2), "exit": app.p.returncode,
+                  "alone": alone, "othersAtEnd": len(others()),
                   "layers": len(st["state"]["layers"])})
         return r
     finally:
@@ -665,6 +702,7 @@ def scenario_scrub(binary, out):
         for hz in (165, 60):
             runs = []
             for i in range(RUNS):
+                alone = wait_alone()
                 m = cw.Mutter(out, hz)
                 try:
                     app = launch(binary, m, out, f"p4scrub-{name}-{hz}-{i}", 12 + n * 2 / hz,
@@ -703,7 +741,8 @@ def scenario_scrub(binary, out):
                     runs.append({"steps": len(sent), "neverShown": missing, "keyToShownMs": q(lat),
                                  "workMsPerChange": q(work), "changeIntervalMs": q(gaps),
                                  "displayFrameMs": round(1000 / hz, 2), "lastSheetFrame": st["state"]["frame"],
-                                 "load1": round(os.getloadavg()[0], 2)})
+                                 "load1": round(os.getloadavg()[0], 2), "alone": alone,
+                                 "othersAtEnd": len(others())})
                 finally:
                     m.stop()
             s = {k: nested(runs, p) for k, p in (("workP50", ["workMsPerChange", "p50"]),
@@ -763,6 +802,7 @@ def scenario_latency(binary, out):
     for hz in (165, 60):
         runs = []
         for i in range(RUNS):
+            alone = wait_alone()
             m = cw.Mutter(out, hz)
             try:
                 e = quiet_env(out)
@@ -782,7 +822,8 @@ def scenario_latency(binary, out):
                 fr = cw.frame_numbers(st, t0, t1 + 50_000_000)
                 inputs = sorted((f for f in fr if f["events"] and f["shownNs"]), key=lambda f: f["shownNs"])
                 runs.append({"strokes": k, "rate": cw.rate(fr, hz), "latency": cw.latency(inputs),
-                             "budgetMs": round(1000 / hz + 4, 2), "load1": round(os.getloadavg()[0], 2)})
+                             "budgetMs": round(1000 / hz + 4, 2), "load1": round(os.getloadavg()[0], 2),
+                             "alone": alone, "othersAtEnd": len(others())})
             finally:
                 m.stop()
         s = {"penToScreenP99": nested(runs, ["latency", "fromEventTimeMs", "p99"]),
@@ -800,6 +841,7 @@ def sound_run(binary, out, tag, hz, project, secs, actions=None):
     sink's clock. `actions(inp)` drives it (default: Return, then `secs` of playing).
     Returns (stats, onsets [(ns, peak)], key times, links, recording)."""
     import numpy as np  # noqa: F401  (read_sinkclock needs it)
+    alone = wait_alone()
     pw = PrivatePW(out)
     m = cw.Mutter(out, hz)
     try:
@@ -837,7 +879,8 @@ def sound_run(binary, out, tag, hz, project, secs, actions=None):
         rec.wait(5)
         t, x = read_sinkclock(rec_path)
         return {"stats": st, "onsets": onsets(t, x), "keys": keys, "stopNs": t_stop,
-                "links": {"recorder": links_rec, "app": links_app}, "t": t, "x": x, "exit": app.p.returncode}
+                "links": {"recorder": links_rec, "app": links_app}, "t": t, "x": x, "exit": app.p.returncode,
+                "alone": alone}
     finally:
         m.stop()
         pw.stop()
