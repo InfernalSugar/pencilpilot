@@ -4,6 +4,13 @@ name: Release
 # Actions → Release → Run workflow, with that App run's id. Running it again with an
 # existing tag moves the tag to the new build and replaces the release's files. The installers aren't signed
 # yet (S11-T01), so Windows shows "Windows protected your PC": More info → Run anyway.
+#
+# It also puts the release on the website (pencilpilot.app/updates), where the installed apps
+# find it and offer it: the tag must be v<the app's version> (tauri.conf.json; bump it with
+# `node apps/studio/scripts/set-version.mjs 0.2.0`), and the App run must have been signed
+# (the TAURI_SIGNING_PRIVATE_KEY secret). The upload uses the UPDATES_TOKEN secret, the same
+# token as the website's UPDATES_TOKEN; the site is the UPDATES_URL variable (default
+# https://pencilpilot.app). Its orphan sweep keeps the newest few releases.
 
 on:
   workflow_dispatch:
@@ -17,6 +24,13 @@ on:
       systems:
         description: Which installers (Windows, Linux, macOS), space-separated
         default: Windows Linux
+      website:
+        description: Also offer it to the installed apps (the website's updates)
+        type: boolean
+        default: true
+      whats_new:
+        description: What's new, as the app shows it (empty — the commits' titles since the last release)
+        default: ''
 
 permissions:
   contents: write
@@ -28,6 +42,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
+      UPDATES_TOKEN: ${{ secrets.UPDATES_TOKEN }}
     steps:
       - name: Fetch the installers
         run: |
@@ -37,6 +52,16 @@ jobs:
           for s in ${{ inputs.systems }}; do
             gh run download "${{ inputs.run_id }}" -n "PencilPilot-$s" -D "dl/$s"
           done
+          if [ "${{ inputs.website }}" = true ]; then
+            # the updater offers what the manifest says; an app that installs it must say the same
+            version=$(gh api "repos/$GH_REPO/contents/apps/studio/src-tauri/tauri.conf.json?ref=${sha#success }" --jq .content | base64 -d | jq -r .version)
+            if [ "${{ inputs.tag }}" != "v$version" ]; then
+              echo "::error::The app at that build is $version, so the tag must be v$version (or bump it: node apps/studio/scripts/set-version.mjs)"
+              exit 1
+            fi
+            [ -n "$UPDATES_TOKEN" ] || { echo "::error::Set the UPDATES_TOKEN secret (or untick 'website')"; exit 1; }
+            echo "VERSION=$version" >> "$GITHUB_ENV"
+          fi
           mkdir out
           find dl -type f \( -name '*.exe' -o -name '*.msi' -o -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' -o -name '*.dmg' \) -exec mv {} out/ \;
           (cd out && sha256sum * > SHA256SUMS.txt && ls -la)
@@ -66,3 +91,27 @@ jobs:
             gh release create "$tag" out/* --target "$SHA" --prerelease \
               --title "PencilPilot $tag (preview)" --notes-file notes.md
           fi
+      - name: Offer it to the installed apps (the website)
+        if: inputs.website
+        env:
+          UPDATES_URL: ${{ vars.UPDATES_URL || 'https://pencilpilot.app' }}
+          WHATS_NEW: ${{ inputs.whats_new }}
+        run: |
+          # what's new: as given, or the titles of the commits since the last release
+          if [ -n "$WHATS_NEW" ]; then
+            printf '%s\n' "$WHATS_NEW" > whats-new.txt
+          else
+            prev=$(gh release list --exclude-drafts --limit 20 --json tagName --jq '.[].tagName' | grep -vxF "${{ inputs.tag }}" | head -1)
+            if [ -n "$prev" ]; then
+              gh api "repos/$GH_REPO/compare/$prev...$SHA" --jq '.commits[].commit.message | split("\n")[0]' \
+                | tac | sed -E 's/ \(#[0-9]+\)$//; s/^/- /' | head -25 > whats-new.txt
+            fi
+            [ -s whats-new.txt ] || echo "Fixes and improvements." > whats-new.txt
+          fi
+          cat whats-new.txt
+          # the installers, and the updater's packages and signatures
+          mkdir web
+          cp out/* web/
+          find dl -type f \( -name '*.sig' -o -name '*.app.tar.gz' \) -exec cp {} web/ \;
+          gh api "repos/$GH_REPO/contents/apps/web/scripts/publish-update.mjs?ref=$SHA" --jq .content | base64 -d > publish-update.mjs
+          node publish-update.mjs --version "$VERSION" --notes whats-new.txt web

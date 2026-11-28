@@ -3,6 +3,8 @@
 	import { onMount } from 'svelte';
 	import { applyLook } from '#lib/appearance.js';
 	import { isDark, keepSoon, loadSettings, settings } from '#lib/settings.svelte.js';
+	import { startChecking } from '#lib/updates.svelte.js';
+	import UpdatePrompt from '#lib/UpdatePrompt.svelte';
 
 	let { children } = $props();
 
@@ -21,11 +23,16 @@
 
 	onMount(() => {
 		void loadSettings().then(() => (ready = true));
+		// a new version on the website: offered in the corner (Settings can turn it off)
+		const stopChecking = startChecking();
 		const q = matchMedia('(prefers-color-scheme: dark)');
 		systemDark = q.matches;
 		const changed = () => (systemDark = q.matches);
 		q.addEventListener('change', changed);
-		return () => q.removeEventListener('change', changed);
+		return () => {
+			q.removeEventListener('change', changed);
+			stopChecking();
+		};
 	});
 
 	// every change is kept, wherever it's made (Settings, a bar folded away…)
@@ -54,6 +61,7 @@
 </script>
 
 {@render children()}
+<UpdatePrompt />
 
 <style>
 	:global(html, body) {

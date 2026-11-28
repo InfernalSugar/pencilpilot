@@ -643,6 +643,13 @@ pub fn run() {
         .manage(share::Sharing::default())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            // updates from the website (Settings → Prompts: "Tell me when there's a new version")
+            #[cfg(desktop)]
+            {
+                app.handle()
+                    .plugin(tauri_plugin_updater::Builder::new().build())?;
+                app.handle().plugin(tauri_plugin_process::init())?;
+            }
             // PP_BENCH=1: open the engine benchmark straight away
             if std::env::var_os("PP_BENCH").is_some()
                 && let Some(w) = app.get_webview_window("main")

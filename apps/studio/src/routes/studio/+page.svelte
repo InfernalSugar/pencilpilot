@@ -95,6 +95,7 @@
 	import TogetherChat from '#lib/TogetherChat.svelte';
 	import { capLines, chatBody, chatText, type ChatLine } from '#lib/chat.js';
 	import SaveChangesDialog from '#lib/SaveChangesDialog.svelte';
+	import { guardUpdate } from '#lib/updates.svelte.js';
 	import SettingsPanel from '#lib/SettingsPanel.svelte';
 	import CanvasSizeDialog from '#lib/CanvasSizeDialog.svelte';
 	import {
@@ -2969,7 +2970,8 @@
 		quit: 'Save before quitting?',
 		open: 'Save before opening another project?',
 		version: 'Save before opening an earlier version?',
-		leave: 'Save before leaving?'
+		leave: 'Save before leaving?',
+		update: 'Save before updating?'
 	};
 
 	/**
@@ -3946,7 +3948,16 @@
 				})
 				.then((un) => (stop = un))
 		);
-		return () => stop?.();
+		// an update restarts the app: the same question as closing it
+		const unguard = guardUpdate(async () => {
+			if (unsaved && !(await okToDrop('update'))) return false;
+			await dropRecovery(docId);
+			return true;
+		});
+		return () => {
+			stop?.();
+			unguard();
+		};
 	});
 
 	onMount(() => {

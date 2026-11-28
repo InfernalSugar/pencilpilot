@@ -21,6 +21,26 @@ export const variables = defineEnvVars({
 		description:
 			'Set to "on" to enable community critique (sharing + peer judging). Off by default.'
 	},
+	// The app's updates (lib/server/updates, served by server.js in front of the site)
+	UPDATES_DIR: {
+		schema: optional,
+		description: "Where the app's updates are kept on disk. Default: <repo>/data/updates"
+	},
+	UPDATES_TOKEN: {
+		schema: optional,
+		description:
+			'The token the Release workflow uploads updates with (its UPDATES_TOKEN secret). Uploads are off without it.'
+	},
+	UPDATES_ORIGIN: {
+		schema: optional,
+		description:
+			"The site's public address for update download links, e.g. https://pencilpilot.app (default: ORIGIN, else the request's host)"
+	},
+	UPDATES_KEEP: {
+		schema: optional,
+		description:
+			'How many releases the orphan sweep keeps (the newest, plus the current one). Default: 3'
+	},
 	REF_SERVICE_URL: {
 		schema: optional,
 		description:

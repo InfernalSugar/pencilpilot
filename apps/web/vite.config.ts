@@ -3,6 +3,7 @@ import { searchForWorkspaceRoot } from 'vite';
 import adapter from '@sveltejs/adapter-node';
 import { sveltekit } from '@sveltejs/kit/vite';
 import { attachLobbySockets } from './src/lib/server/lobby/socket';
+import { createUpdatesHandler } from './src/lib/server/updates/http';
 
 const REF_SERVICE = process.env.REF_SERVICE_URL ?? 'http://127.0.0.1:8787';
 // Endless references: the Rust ref-service (cargo run -p pencilpilot-ref-service).
@@ -34,6 +35,18 @@ export default defineConfig({
 			},
 			configurePreviewServer(s) {
 				attachLobbySockets(s.httpServer as import('node:http').Server);
+			}
+		},
+		// The app's updates (/updates/…; production: server.js does the same).
+		{
+			name: 'pencilpilot-updates',
+			configureServer(s) {
+				const serve = createUpdatesHandler();
+				s.middlewares.use((req, res, next) => serve(req, res) || next());
+			},
+			configurePreviewServer(s) {
+				const serve = createUpdatesHandler();
+				s.middlewares.use((req, res, next) => serve(req, res) || next());
 			}
 		},
 		sveltekit({
