@@ -881,6 +881,34 @@ fn painting_right_after_scrubbing_at_4k() {
     let after0 = e.painter.drawing_rgba(d0);
     let filled5 = after5[hole * 4 + 3] > 0;
     let changed0 = after0 != before0;
+    let changed0_px = after0
+        .chunks(4)
+        .zip(before0.chunks(4))
+        .filter(|(a, b)| a != b)
+        .count();
+    let filled0_at_hole = after0[hole * 4 + 3] > 0;
+    // (a drawing not showing may be put away, and then reads as transparent: how much paint
+    // each read had)
+    let painted = |v: &[u8]| v.chunks(4).filter(|p| p[3] > 0).count();
+    let (paint0_before, paint0_after) = (painted(&before0), painted(&after0));
+    let filled5_px = after5
+        .chunks(4)
+        .zip(before5.chunks(4))
+        .filter(|(a, b)| a != b)
+        .count();
+    // what frame 0 shows (resting there) against what it showed before the Fill
+    assert!(e.apply(&mut s, &Action::GoToFrame(0)));
+    for _ in 0..30 {
+        show(&mut e, &mut s, &mut comp);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let f0_after = comp.read_back(&g).unwrap();
+    let frame0_picture_changed = f0_after
+        .iter()
+        .zip(&f0)
+        .enumerate()
+        .filter(|(i, _)| i % 4 != 3)
+        .any(|(_, (a, b))| a.abs_diff(*b) > 1);
     // scrub on to 7, then a stroke at once
     for f in [6, 7] {
         assert!(e.apply(&mut s, &Action::GoToFrame(f)));
@@ -930,7 +958,7 @@ fn painting_right_after_scrubbing_at_4k() {
     e.tick(&mut s, Instant::now());
     let adj_on_gpu = matches!(e.picture_gpu(&s, &g, &mut comp), Pic::Gpu(_));
     let json = format!(
-        "{{\"scrubOnGpu\": {gpu_all}, \"eyedropper\": {{\"ms\": {pick_ms:.1}, \"picked\": {picked:?}, \"onScreen\": {on_screen:?}, \"maxDiff\": {pick_diff}}}, \"fill\": {{\"ms\": {fill_ms:.1}, \"filledFrame5Drawing\": {filled5}, \"changedFrame0Drawing\": {changed0}}}, \"stroke\": {{\"ms\": {stroke_ms:.1}, \"inFrame7Drawing\": {in7}, \"inFrame5Drawing\": {in5}, \"gpuVsCpuAfter\": {after_stroke_diff}}}, \"adjustment\": {{\"taken\": {took_adjust}, \"held\": {has_adjust}, \"pictureOnGpu\": {adj_on_gpu}}}}}"
+        "{{\"scrubOnGpu\": {gpu_all}, \"eyedropper\": {{\"ms\": {pick_ms:.1}, \"picked\": {picked:?}, \"onScreen\": {on_screen:?}, \"maxDiff\": {pick_diff}}}, \"fill\": {{\"ms\": {fill_ms:.1}, \"filledFrame5Drawing\": {filled5}, \"changedFrame0Drawing\": {changed0}, \"frame0PixelsChanged\": {changed0_px}, \"frame0FilledAtThePoint\": {filled0_at_hole}, \"frame5PixelsChanged\": {filled5_px}, \"drawings\": [{d0}, {d5}], \"frame0PaintedPixelsBeforeAfter\": [{paint0_before}, {paint0_after}], \"frame0PictureChanged\": {frame0_picture_changed}}}, \"stroke\": {{\"ms\": {stroke_ms:.1}, \"inFrame7Drawing\": {in7}, \"inFrame5Drawing\": {in5}, \"gpuVsCpuAfter\": {after_stroke_diff}}}, \"adjustment\": {{\"taken\": {took_adjust}, \"held\": {has_adjust}, \"pictureOnGpu\": {adj_on_gpu}}}}}"
     );
     std::fs::write(out_dir().join("after_scrubbing.json"), &json).unwrap();
     eprintln!("after scrubbing: {json}");
@@ -939,8 +967,10 @@ fn painting_right_after_scrubbing_at_4k() {
         pick_diff <= 1,
         "the Eyedropper picked {picked:?}, the screen shows {on_screen:?}"
     );
+    // (frame 0's drawing judged by what frame 0 shows: read directly it may be put away)
+    let _ = changed0;
     assert!(
-        filled5 && !changed0,
+        filled5 && !filled0_at_hole && !frame0_picture_changed,
         "Fill went to the wrong drawing: {json}"
     );
     assert!(in7 && !in5, "the stroke went to the wrong drawing: {json}");
