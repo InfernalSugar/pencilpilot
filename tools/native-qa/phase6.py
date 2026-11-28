@@ -1785,6 +1785,308 @@ def scenario_studio_revoke(out):
     return res
 
 
+def native_drawing(n, secs=4.0):
+    """canvas_window.py's latency run: 700 px strokes, the pointer moving every 2 ms, for
+    `secs`; (t0, t1)."""
+    import canvas_window as cw
+    t0 = mono_ns()
+    k = 0
+    while (mono_ns() - t0) < secs * 1e9:
+        y = 200 + (k % 20) * 15
+        n.inp.to(*cw.line((200, y), (900, y + 40), 200)[0])
+        time.sleep(0.02)
+        n.inp.button(BTN_LEFT, True)
+        for p in cw.line((200, y), (900, y + 40), 200)[1:]:
+            time.sleep(0.002)
+            n.inp.to(*p)
+        time.sleep(0.002)
+        n.inp.button(BTN_LEFT, False)
+        k += 1
+    return t0, mono_ns(), k
+
+
+def pen_numbers(st, t0, t1, hz):
+    import canvas_window as cw
+    fr = cw.frame_numbers(st, t0, t1 + 50_000_000)
+    inputs = sorted((f for f in fr if f["events"] and f["shownNs"]), key=lambda f: f["shownNs"])
+    return {"rate": cw.rate(fr, hz), "latency": cw.latency(inputs), "budgetMs": round(1000 / hz + 4, 2)}
+
+
+def incoming_numbers(st, t0, t1, hz):
+    """Others' edits arriving between t0 and t1: received → applied → on screen, and how
+    many waited over two display frames to show."""
+    ev = [e for e in native_edits(st) if t0 <= e["receivedNs"] <= t1]
+    shown = [(e["shownNs"] - e["receivedNs"]) / 1e6 for e in ev if e["shownNs"]]
+    period = 1000 / hz
+    kinds = {}
+    for e in ev:
+        kinds[e["kind"]] = kinds.get(e["kind"], 0) + 1
+    return {"edits": len(ev), "kinds": kinds, "receivedToShownMs": dist(shown),
+            "notShown": sum(1 for e in ev if not e["shownNs"]),
+            "over2Frames": sum(1 for v in shown if v > 2 * period)}
+
+
+def peer_live(p, k, y, n=40):
+    """A scripted member's live stroke (as the current app sends it) over ~0.4 s."""
+    p.presence({"live": {"type": "begin", "k": k, "style": {"brushId": "deevad-2b-pencil", "color": "#c0392b",
+                                                            "eraser": False, "opacity": 1, "size": 4}}})
+    for i in range(0, n, 4):
+        pts = []
+        for j in range(i, i + 4):
+            pts += [400 + j * 20, y + 10 * math.sin(j / 4), 0.6, j * 8]
+        p.presence({"live": {"type": "points", "k": k, "pts": pts}})
+        time.sleep(0.04)
+    p.presence({"live": {"type": "end", "k": k}})
+
+
+def scenario_x_crowd(out, members=8, strokes=20, rate=2.0):
+    """Eight in one session: the native app hosts (windowed), the current app and six
+    scripted members join; the six draw at once (a live stroke, then its tiles, `rate` a
+    second each) and move cursors. Meanwhile the native app draws (canvas_window.py's
+    latency run): its pen to screen and rate against the same run alone; others' edits to
+    screen; every edit reaching everyone; both apps' saved layers holding everyone's last
+    tiles; memory."""
+    projects = env_bin("PP_PROJECTS")
+    hz = int(os.environ.get("PP_HZ", "60"))
+    res = {"load": load(), "hz": hz, "members": members}
+    n = s = None
+    peers = []
+    try:
+        n = Native(env_bin("PP_NATIVE"), out, "crowd", 75, project=os.path.join(projects, "empty.ppstudio"),
+                   host=True, name="Nat", args=["--workspace", "draw"])
+        # alone first: the same drawing with nobody else drawing
+        time.sleep(1.0)
+        a0, a1, _ = native_drawing(n, 4.0)
+        s = Studio(env_bin("PP_STUDIO"), out, "crowd", project=os.path.join(projects, "tiny.ppstudio"), name="Stu")
+        s.open()
+        s.join(n.invite)
+        for i in range(members - 2):
+            peers.append(Peer(env_bin("PP_PEER"), out, f"crowd{i}", invite=n.invite, name=f"M{i}"))
+        time.sleep(2.0)
+        lids = []
+        for i, p in enumerate(peers):
+            lid = peer_layer(p)
+            did = f"{p.id[:12]}:{1000 + i}"
+            p.edit(peer_timeline(lid, did))
+            lids.append((lid, did))
+        time.sleep(1.5)
+        s.take()
+        res["pssBeforeMiB"] = round((n.pss_kib() or 0) / 1024, 1)
+        t_start = mono_ns()
+        threads = []
+        th = __import__("threading")
+
+        def member(i, p, lid, did):
+            for k in range(strokes):
+                peer_live(p, k + 1, 100 + 60 * i)
+                t = stroke_tiles(100 * i + k)
+                p.edit({"k": "tiles", "lid": lid, "did": did,
+                        "set": [[x, y, encode_tile(px)] for x, y, px in t], "clear": []})
+                p.presence({"x": 300 + k * 10, "y": 100 + 60 * i})
+                time.sleep(max(0.0, 1.0 / rate - 0.45))
+        for i, (p, (lid, did)) in enumerate(zip(peers, lids)):
+            t = th.Thread(target=member, args=(i, p, lid, did))
+            t.start()
+            threads.append(t)
+        time.sleep(1.0)
+        b0, b1, k = native_drawing(n, 4.0)
+        res["pssDuringMiB"] = round((n.pss_kib() or 0) / 1024, 1)
+        for t in threads:
+            t.join()
+        t_end = mono_ns()
+        time.sleep(3.0)
+        page = s.take()
+        res["studioTilesEdits"] = sum(1 for e in page["ev"] if e["kind"] == "edit" and e.get("k") == "tiles")
+        n.inp.combo("Control_L", "s")
+        time.sleep(2.0)
+        ps = s.save()
+        res["pssAfterMiB"] = round((n.pss_kib() or 0) / 1024, 1)
+        st = n.wait()
+        n = None
+        res["penAlone"] = pen_numbers(st, a0, a1, hz)
+        res["penWhileOthersDraw"] = pen_numbers(st, b0, b1, hz)
+        res["incoming"] = incoming_numbers(st, t_start, t_end + 3_000_000_000, hz)
+        expected = (members - 2) * strokes
+        got = []
+        for p in peers:
+            got.append(sum(1 for e in p.events() if e["ev"] == "edit" and (e.get("body") or {}).get("k") == "tiles"
+                           and e["from"] != p.id))
+        res["tilesFromPeersAtEachPeer"] = got
+        res["peerTilesSent"] = expected
+        res["nativeTilesEditsSent"] = (st or {}).get("together", {}).get("tilesSent")
+        nat = os.path.join(out, "native-crowd", "empty.ppstudio")
+        pn, _ = project_pixels(nat)
+        pst, _ = project_pixels(ps)
+        lay = {}
+        for i, p in enumerate(peers):
+            name = f"M{i} layer"
+            want = {}
+            for k2 in range(strokes):
+                for x, y, px in stroke_tiles(100 * i + k2):
+                    want[(x, y)] = px
+            for tag, pp in (("native", pn), ("studio", pst)):
+                have = pp.get(name, [[None]])[-1]
+                c = compare_tiles(want, (have[0] if have else None) or {})
+                lay[f"{tag}:{name}"] = {k3: c[k3] for k3 in ("equal", "samePremul1", "tiles", "maxPremulDiff")}
+        res["savedLayers"] = lay
+        res["everyLayerSame"] = all(v["samePremul1"] for v in lay.values())
+        res["everyLayerByteEqualNative"] = all(v["equal"] for k3, v in lay.items() if k3.startswith("native"))
+    finally:
+        for p in peers:
+            p.leave()
+        if n:
+            n.kill()
+        if s:
+            s.quit()
+    return res
+
+
+def scenario_x_timeline_merge(out):
+    """Two scripted members each make a layer and send a timeline that has only their own
+    track (as a member does before the other's new drawing reached it), then tiles. The
+    native app must keep both members' drawings on their layers: a layer's track comes from
+    those who may draw on it (the current app's rule since #340). The same against the
+    current app is the reference."""
+    res = {"load": load()}
+    for who in ("native", "studio"):
+        a = s = None
+        peers = []
+        try:
+            if who == "native":
+                a = NativePeer(np_bin(), out, "tlm")
+                a.do(cmd="open", path=os.path.join(env_bin("PP_PROJECTS"), "empty.ppstudio"))
+                invite = a.do(cmd="host", name="Nat")["state"]["info"]["invite"]
+            else:
+                s = Studio(env_bin("PP_STUDIO"), out, "tlm", project=os.path.join(env_bin("PP_PROJECTS"), "empty.ppstudio"))
+                s.open()
+                invite = s.host()["invite"]
+            peers = [Peer(env_bin("PP_PEER"), out, f"tlm-{who}{i}", invite=invite, name=f"P{i}") for i in range(2)]
+            time.sleep(1.0)
+            for i, p in enumerate(peers):
+                lid = peer_layer(p)
+                did = f"{p.id[:12]}:{50 + i}"
+                p.edit(peer_timeline(lid, did))
+                t = stroke_tiles(10 + i)
+                p.edit({"k": "tiles", "lid": lid, "did": did, "set": [[x, y, encode_tile(px)] for x, y, px in t], "clear": []})
+            time.sleep(2.0)
+            if a:
+                path = os.path.join(a.home, "saved.ppstudio")
+                a.do(cmd="save", path=path)
+            else:
+                path = s.save()
+            pp, _ = project_pixels(path)
+            res[who] = {n: [len(f) if f is not None else None for f in v[-1]] for n, v in pp.items()}
+            res[f"{who}Pass"] = all((res[who].get(f"P{i} layer") or [None])[0] == 4 for i in range(2))
+        finally:
+            for p in peers:
+                p.leave()
+            if a:
+                a.quit()
+            if s:
+                s.quit()
+    return res
+
+
+def scenario_x_join4k(out, native_joins=True):
+    """Joining a 4K project of 20 layers (the baseline's layers20-4k) on this machine: from
+    pressing Join (the native app: launched with --join) to the project in and drawable."""
+    projects = env_bin("PP_PROJECTS")
+    big = os.path.join(projects, "layers20-4k.ppstudio")
+    res = {"load": load(), "nativeJoins": native_joins}
+    s = n = None
+    tag = "j4k-n" if native_joins else "j4k-s"
+    try:
+        if native_joins:
+            s = Studio(env_bin("PP_STUDIO"), out, tag, project=big, name="Stu", size="1920x1080")
+            s.open(300)
+            info = s.host()
+            # the current app shares its layers' tiles right after hosting and drops a
+            # snapshot request that comes meanwhile (no answer, no retry): wait until it's done
+            watch = Peer(env_bin("PP_PEER"), out, tag, invite=info["invite"], name="Watch")
+            last, stable = -1, 0
+            t_h = time.monotonic()
+            while stable < 8 and time.monotonic() - t_h < 120:
+                k = sum(1 for e in watch.events() if e["ev"] == "edit")
+                stable = stable + 1 if k == last else 0
+                last = k
+                time.sleep(0.25)
+            res["hostSharingS"] = round(time.monotonic() - t_h - 2, 1)
+            res["hostSharingEdits"] = last
+            n = Native(env_bin("PP_NATIVE"), out, tag, 25, project=os.path.join(projects, "empty.ppstudio"),
+                       join=info["invite"], name="Nat", args=["--workspace", "draw"], input=False)
+            time.sleep(15)
+            res["pssMiB"] = round((n.pss_kib() or 0) / 1024, 1)
+            st = n.wait()
+            n = None
+            t = (st or {}).get("together") or {}
+            res["launchToJoinedMs"] = t.get("joinedNs") and round((t["joinedNs"] - t["startedNs"]) / 1e6, 1)
+            res["joinStartToSyncedMs"] = t.get("syncedNs") and round((t["syncedNs"] - t["startedNs"]) / 1e6, 1)
+            res["sharedLayers"] = t.get("sharedLayers")
+            res["layersShown"] = len((st or {}).get("state", {}).get("layers", []))
+            snap = [e for e in native_edits(st) if e["kind"] == "snapshot"]
+            res["snapshotShownAfterJoinMs"] = snap and snap[0]["shownNs"] and round((snap[0]["shownNs"] - t["startedNs"]) / 1e6, 1)
+        else:
+            n = Native(env_bin("PP_NATIVE"), out, tag, 40, project=big, host=True, name="Nat",
+                       args=["--workspace", "draw"], input=False)
+            s = Studio(env_bin("PP_STUDIO"), out, tag, project=os.path.join(projects, "empty.ppstudio"), name="Stu")
+            s.open()
+            time.sleep(3.0)
+            s.take()
+            jinfo, t0 = s.join(n.invite)
+            t = time.monotonic()
+            end = None
+            while time.monotonic() - t < 60:
+                ev = s.js("return window.__q6.ev.filter((e) => e.kind === 'direct' && e.k === 'snap.end').map((e) => e.t);")
+                if ev:
+                    end = s.to_mono_ns(ev[0])
+                    break
+                time.sleep(0.05)
+            res["joinClickToSnapshotEndMs"] = end and round((end - t0) / 1e6, 1)
+            # the layers there, in the panel
+            s.until("return document.querySelectorAll('ul.list button.name').length >= 20", 60)
+            res["joinClickToLayersShownMs"] = round((mono_ns() - t0) / 1e6, 1)
+            res["studioLayers"] = len(s.layer_names())
+    finally:
+        if n:
+            n.kill()
+        if s:
+            s.quit()
+    return res
+
+
+def scenario_x_join4k_nn(out):
+    """A native app joining a native app hosting the 4K, 20-layer project: launch with
+    --join to the project in and drawable (synced), and the first frame showing it."""
+    projects = env_bin("PP_PROJECTS")
+    big = os.path.join(projects, "layers20-4k.ppstudio")
+    res = {"load": load()}
+    h = j = None
+    try:
+        h = Native(env_bin("PP_NATIVE"), out, "j4k-h", 40, project=big, host=True, name="Host",
+                   args=["--workspace", "draw"], input=False)
+        time.sleep(3.0)
+        j = Native(env_bin("PP_NATIVE"), out, "j4k-j", 15, project=os.path.join(projects, "empty.ppstudio"),
+                   join=h.invite, name="Nat", args=["--workspace", "draw"], input=False)
+        time.sleep(8)
+        res["joinerPssMiB"] = round((j.pss_kib() or 0) / 1024, 1)
+        res["hostPssMiB"] = round((h.pss_kib() or 0) / 1024, 1)
+        st = j.wait()
+        j = None
+        t = (st or {}).get("together") or {}
+        res["joinStartToSyncedMs"] = t.get("syncedNs") and round((t["syncedNs"] - t["startedNs"]) / 1e6, 1)
+        snap = [e for e in native_edits(st) if e["kind"] == "snapshot"]
+        res["joinStartToSnapshotShownMs"] = (snap and snap[-1]["shownNs"] and
+                                             round((snap[-1]["shownNs"] - t["startedNs"]) / 1e6, 1))
+        res["sharedLayers"] = t.get("sharedLayers")
+        res["layersShown"] = len((st or {}).get("state", {}).get("layers", []))
+        res["bytesReceived"] = t.get("bytesReceived")
+    finally:
+        for x in (h, j):
+            if x:
+                x.kill()
+    return res
+
+
 SCENARIOS = {
     "studio-wire": scenario_studio_wire,
     "studio-pair": scenario_studio_pair,
@@ -1794,6 +2096,11 @@ SCENARIOS = {
     "x-pair-studio-hosts": lambda out: scenario_x_pair(out, False),
     "x-access": scenario_x_access,
     "studio-revoke": scenario_studio_revoke,
+    "x-crowd": scenario_x_crowd,
+    "x-timeline-merge": scenario_x_timeline_merge,
+    "x-join4k-native-joins": lambda out: scenario_x_join4k(out, True),
+    "x-join4k-studio-joins": lambda out: scenario_x_join4k(out, False),
+    "x-join4k-native-native": scenario_x_join4k_nn,
 }
 
 
