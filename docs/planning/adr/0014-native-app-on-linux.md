@@ -505,11 +505,32 @@ for a mixed session:** the native app never destroys or alters what it doesn't s
   0.15–0.31 ms after the pen goes down (passing state goes out on a thread of its own, never
   the window's nor behind the session's work); what a native stroke's start takes to arrive
   in the current app beyond that (0–35 ms) is spent on its side, after the datagram came.
-- **Open:** the 60 Hz stroke-start frame above; a host's pen while a 4K join is served misses a
-  refresh now and then at 60 Hz (no window-thread phase over 3 ms then; both apps and both
-  compositors share this machine). The current app joining a native host that opened a file with several
-  scenes saves no pixels for that file's layers, though they're on the wire (native joiners
-  get them). The pen while 8 draw at 165 Hz.
+- **QA's gate at merge** (native/phase6 @ d81c4fd, 3 runs at 60 and 165 Hz, load ≤ 3; the
+  current app built from this branch). Every functional check passes: first strokes, timeline
+  races and merges, the whole timeline both ways, joining a file, groups, big erases, undo,
+  access, chat, host leaving both ways, 5 s and 40 s outages, unknown and AI-made edits
+  dropped, solo opens no connection. Pixels: the native copy equals the bytes that travelled
+  (12/12); the current app within ±1 premultiplied (its own rounding).
+
+  | | Budget | Measured |
+  |---|---|---|
+  | Pen while 7 others draw, p99 (165 / 60 Hz) | 10.1 / 20.7 ms | 9.4 / 19.6 ms, 0–1 missed |
+  | Others' edits on screen, p99 | 2 frames | 8.3 / 18.8 ms, none later than 2 frames |
+  | 8 members | none lost | 1540 of 1540 edits everywhere |
+  | Joining 4K × 20, every direction | 3 s, 600 MiB | 0.7–1.9 s, 356–511 MiB |
+  | Live stroke shown, current app → native | 50 ms | median 23–31, max 30–43 ms |
+  | Live stroke visible, native → current app | 50 ms | median 29–30, **max 52–65 ms** |
+  | Tiles after a stroke's end | 100 ms | native → current ≤ 10 ms; current → native 57–63 ms |
+
+- **Open at merge:**
+  - **Native → current app live stroke:** 1–3 of 8 strokes are visible at 52–65 ms. The
+    native app sends the start 0.15–0.31 ms after pen-down; the current app takes 32–34 ms to
+    show it (its own starts: 0–3 ms), so the rest is on its side.
+  - **Pen during a 4K join served or a 4K picture arriving:** p99 22.8 / 11.8 ms (60 / 165 Hz)
+    during a join, with 4–11 missed frames at 165 Hz; 25.9 / 11.8 ms during a 4K import. At
+    60 Hz the same host was already over (21.7 ms) before the join.
+  - **First strokes alone at 60 Hz:** p99 20.9 ms (1 of 3 runs over): headless mutter shows the
+    first frame after a pause 8.4–8.6 ms after it's handed over.
 - **Phase 7 parity (not yet):** rejoining a session from the project file (the current app keeps
   it in `extra.share`); drawing on line layers and editing groups natively; layer styles drawn;
   adjustment layers shown; the invite as a QR code.
