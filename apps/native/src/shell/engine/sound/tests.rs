@@ -226,7 +226,7 @@ fn play_and_measure(e: &mut Engine, s: &mut State, secs: f64, lead: Duration) ->
     while start.elapsed().as_secs_f64() < secs {
         let now = Instant::now();
         e.tick(s, now + lead);
-        clock = clock.or(e.frames.play_clock());
+        clock = e.frames.play_clock().or(clock);
         if s.frame != last {
             // (it shows `lead` from now)
             shown.push((now + lead, s.frame));

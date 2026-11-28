@@ -7,11 +7,11 @@
 //!
 //! **Staying in step.** Playback's clock is the picture's ([`Clock`]: when a frame shows, and
 //! the rate). For each buffer the mixer knows when its first sample will be heard (the
-//! output's own latency, from cpal), so it knows which scene sample that is. It keeps its own
-//! estimate of that time advancing sample by sample, and pulls it gently towards the clock
-//! (at most 0.2 % faster or slower: no audible pitch change), so a sound card whose crystal
-//! runs a little fast or slow never drifts from the picture. A jump (a seek, a loop's
-//! restart, an underrun) larger than 20 ms resynchronises at once.
+//! output's own timestamps, from cpal), so it knows which scene sample that is. It keeps its
+//! own estimate of that time advancing sample by sample, and pulls it gently towards the
+//! clock (at most 0.2 % faster or slower: no audible pitch change), so a sound card whose
+//! crystal runs a little fast or slow never drifts from the picture. A jump (a seek, a loop's
+//! restart, an underrun) larger than 3 ms resynchronises at once.
 //!
 //! **Outputs.** [`Output::Device`]: the system's (cpal: ALSA, which reaches PipeWire or
 //! PulseAudio through their ALSA plugins). [`Output::Null`]: no device at all, a thread that
@@ -122,13 +122,44 @@ impl Clock {
     }
 }
 
+/// When a play's sound actually starts (see [`Cmd::Play`]'s `start`): filled once, by the
+/// mixer, with the time its first sample is heard.
+#[derive(Debug)]
+pub struct Started {
+    base: Instant,
+    /// ns after `base`; `u64::MAX` until filled
+    at: AtomicU64,
+}
+
+impl Default for Started {
+    fn default() -> Self {
+        Started {
+            base: Instant::now(),
+            at: AtomicU64::new(u64::MAX),
+        }
+    }
+}
+
+impl Started {
+    /// When the play's first sample is heard, once the mixer knows.
+    pub fn at(&self) -> Option<Instant> {
+        match self.at.load(Ordering::Acquire) {
+            u64::MAX => None,
+            ns => Some(self.base + Duration::from_nanos(ns)),
+        }
+    }
+}
+
 /// What the mixer is asked to do.
 #[derive(Debug, Clone)]
 pub enum Cmd {
-    /// play along with the picture
+    /// play along with the picture. With `start`, a play just begun: its clock's `t0` moves to
+    /// when the output's first buffer is heard, if that's later, and says so through `start`
+    /// (the picture waits for it): the first frame's sound is heard from its start.
     Play {
         voices: Vec<Voice>,
         clock: Clock,
+        start: Option<Arc<Started>>,
     },
     /// a snippet while scrubbing: `len` samples from scene sample `at`, faded in and out
     Snippet {
@@ -154,8 +185,10 @@ pub struct Rec {
 /// A snippet's fades: in over 5 ms, out over the last 10 ms (as the current app's).
 const FADE_IN: f64 = 0.005;
 const FADE_OUT: f64 = 0.010;
-/// A difference from the clock bigger than this is a jump: resynchronised at once.
-const RESYNC: f64 = 0.020;
+/// A difference from the clock bigger than this is a jump (an underrun, a seek, a loop's
+/// restart): resynchronised at once. Output timestamps are good to well under a millisecond,
+/// so anything this big is real.
+const RESYNC: f64 = 0.003;
 /// How far the mixer's time may run faster or slower than real time to follow the clock.
 const MAX_WARP: f64 = 0.002;
 /// A change of the picture's shift bigger than this is jumped to, not followed.
@@ -305,8 +338,25 @@ impl Mixer {
         let rate_f = rate.max(1) as f64;
         let mut peak = 0f32;
         let mut pos = f64::NAN;
-        match self.now.as_deref() {
-            Some(Cmd::Play { voices, clock }) => {
+        match self.now.as_deref_mut() {
+            Some(Cmd::Play {
+                voices,
+                clock,
+                start,
+            }) => {
+                // a play begun: it starts when its first sample can be heard (the window
+                // keeps its own `Started`: nothing is freed here)
+                if let Some(st) = start
+                    && st.at.load(Ordering::Relaxed) == u64::MAX
+                {
+                    if heard_at > clock.t0 {
+                        clock.t0 = heard_at;
+                    }
+                    let ns = clock.t0.saturating_duration_since(st.base).as_nanos() as u64;
+                    st.at.store(ns.min(u64::MAX - 1), Ordering::Release);
+                    self.locked = false;
+                }
+                let (voices, clock) = (&*voices, &*clock);
                 let measured = secs(clock.t0, heard_at) - clock.shift;
                 if !self.locked || (measured - self.t).abs() > RESYNC {
                     self.t = measured;
@@ -337,6 +387,7 @@ impl Mixer {
                 self.t += frames as f64 * dt;
             }
             Some(Cmd::Snippet { voices, at, len }) => {
+                let (voices, at, len) = (&*voices, &*at, &*len);
                 let step = RATE as f64 / rate_f;
                 let len = *len as f64;
                 let (fin, fout) = (FADE_IN * RATE as f64, FADE_OUT * RATE as f64);
@@ -411,6 +462,8 @@ impl Output {
 
 /// What the output's thread is told.
 enum Ctl {
+    /// open the device, not playing yet (so a play starts at once)
+    Prepare,
     Run,
     Pause,
 }
@@ -484,6 +537,28 @@ impl Player {
         self.running
     }
 
+    /// Opens the output without playing (paused, it costs nothing), so the next play or
+    /// scrub starts at once.
+    pub fn prepare(&mut self) {
+        if self.ctl.is_none() {
+            let Some(mixer) = self.mixer.take() else {
+                return;
+            };
+            self.ctl = Some(start(self.output.clone(), mixer, self.info.clone()));
+        }
+        if let Some(c) = &self.ctl {
+            let _ = c.send(Ctl::Prepare);
+        }
+    }
+
+    /// How long after it's asked the output plays (its latency once known; 50 ms until).
+    pub fn start_latency(&self) -> Duration {
+        match self.info.latency_ns.load(Ordering::Relaxed) {
+            0 => Duration::from_millis(50),
+            ns => Duration::from_nanos(ns),
+        }
+    }
+
     /// Drops what the mixer is done with (here, not in the sound's thread).
     pub fn collect(&mut self) {
         self.remote.collect();
@@ -548,7 +623,7 @@ fn null_output(
         loop {
             match rx.recv() {
                 Ok(Ctl::Run) => break,
-                Ok(Ctl::Pause) => {}
+                Ok(Ctl::Pause | Ctl::Prepare) => {}
                 Err(_) => break 'outer,
             }
         }
@@ -557,7 +632,7 @@ fn null_output(
         loop {
             match rx.try_recv() {
                 Ok(Ctl::Pause) => break,
-                Ok(Ctl::Run) => {}
+                Ok(Ctl::Run | Ctl::Prepare) => {}
                 Err(mpsc::TryRecvError::Empty) => {}
                 Err(mpsc::TryRecvError::Disconnected) => break 'outer,
             }
@@ -568,6 +643,42 @@ fn null_output(
             }
             mixer.render(&mut buf, 2, rate, due + latency);
             n += 1;
+        }
+    }
+}
+
+/// When a buffer is heard, on this process's clock, from cpal's stream timestamps.
+///
+/// cpal's `callback` time isn't "now": on ALSA it's when the device last reported its
+/// position (the last period's interrupt; with PipeWire's ALSA plugin, the graph's last
+/// cycle, up to a whole quantum ago: 21 ms at 1024), and `playback` is that plus the
+/// samples queued then. So both are mapped to [`Instant`] by the stream clock's offset from
+/// it: the smallest `now − callback` seen (a callback that ran right after the report), rising
+/// at most 1 µs a callback (the two clocks may drift apart a little).
+#[derive(Debug, Default)]
+pub struct StreamClock {
+    base: Option<Instant>,
+    /// `Instant` − stream time, seconds
+    off: f64,
+}
+
+impl StreamClock {
+    /// When the buffer of a callback run at `now` will be heard (`callback`, `playback`: the
+    /// stream's times, ns).
+    pub fn heard(&mut self, now: Instant, callback: u128, playback: u128) -> Instant {
+        let base = *self.base.get_or_insert(now);
+        let sample = now.saturating_duration_since(base).as_secs_f64() - callback as f64 / 1e9;
+        if self.base == Some(now) || sample < self.off {
+            self.off = sample;
+        } else {
+            self.off += (sample - self.off).min(1e-6);
+        }
+        let t = playback as f64 / 1e9 + self.off;
+        if t >= 0.0 {
+            base + Duration::from_secs_f64(t)
+        } else {
+            base.checked_sub(Duration::from_secs_f64(-t))
+                .unwrap_or(base)
         }
     }
 }
@@ -588,6 +699,11 @@ fn device_output(
     let mut stream: Option<cpal::Stream> = None;
     while let Ok(c) = rx.recv() {
         match c {
+            Ctl::Prepare => {
+                if stream.is_none() {
+                    stream = open_device(&mixer, &info, id).ok();
+                }
+            }
             Ctl::Run => {
                 if stream.is_none() {
                     stream = Some(open_device(&mixer, &info, id)?);
@@ -604,7 +720,8 @@ fn device_output(
                 if let Some(s) = &stream
                     && s.pause().is_err()
                 {
-                    stream = None;
+                    // (it can't pause: closed, and opened again, ready for the next play)
+                    stream = open_device(&mixer, &info, id).ok();
                 }
             }
         }
@@ -644,12 +761,9 @@ fn open_device(
         None => device.default_output_config().map_err(|e| e.to_string())?,
     };
     let format = supported.sample_format();
-    let mut config: cpal::StreamConfig = supported.config();
-    if let cpal::SupportedBufferSize::Range { min, max } = supported.buffer_size()
-        && (*min..=*max).contains(&480)
-    {
-        config.buffer_size = cpal::BufferSize::Fixed(480);
-    }
+    // (the device's own buffer size: a fixed one smaller than PipeWire's quantum, 1024 by
+    // default, underruns every cycle or two)
+    let config: cpal::StreamConfig = supported.config();
     let rate = config.sample_rate;
     let ch = config.channels as usize;
     info.rate.store(rate as u64, Ordering::Relaxed);
@@ -659,13 +773,16 @@ fn open_device(
         eprintln!("sound: {e}");
         failed.failed.store(true, Ordering::Relaxed);
     };
-    let heard = move |cb: &cpal::OutputCallbackInfo| {
+    let mut clock = StreamClock::default();
+    let mut heard = move |cb: &cpal::OutputCallbackInfo| {
         let ts = cb.timestamp();
-        let ahead = ts.playback.saturating_duration_since(ts.callback);
-        latency
-            .latency_ns
-            .store(ahead.as_nanos() as u64, Ordering::Relaxed);
-        Instant::now() + ahead
+        let now = Instant::now();
+        let at = clock.heard(now, ts.callback.as_nanos(), ts.playback.as_nanos());
+        latency.latency_ns.store(
+            at.saturating_duration_since(now).as_nanos() as u64,
+            Ordering::Relaxed,
+        );
+        at
     };
     let mx = mixer.clone();
     let stream = match format {
@@ -793,6 +910,7 @@ mod tests {
                 gain: 1.0,
             }],
             clock,
+            start: None,
         });
         let rate = 48_000.0;
         let mut buf = vec![0f32; period * 2];
@@ -839,6 +957,38 @@ mod tests {
         // big buffers too
         let (w, _) = simulate(1e-4, 0.5, 2048);
         assert!(w < 1.0, "{w} ms");
+    }
+
+    /// A device that reports its position once a quantum (1024 samples), its callbacks (480
+    /// samples) coming any time after: the time each buffer is heard comes out the same
+    /// whenever the callback ran.
+    #[test]
+    fn stream_times_map_to_when_its_heard() {
+        let mut c = StreamClock::default();
+        let base = Instant::now();
+        let q = 1024.0 / 48_000.0;
+        let lat = 0.030;
+        let mut seed = 7u64;
+        let mut worst = 0f64;
+        for k in 0..2000u64 {
+            // buffer k's first sample is truly heard at this time (from the stream's start)
+            let heard = k as f64 * 480.0 / 48_000.0 + lat;
+            // the callback runs a little before it's needed; the device last reported at the
+            // quantum boundary before that, with this much queued
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let run = heard - lat - (seed >> 40) as f64 / (1u64 << 24) as f64 * 0.004;
+            let report = (run / q).floor() * q;
+            let queued = heard - report;
+            let now = base + Duration::from_secs_f64(run.max(0.0) + 1.0);
+            let cb = ((report + 5.0) * 1e9) as u128;
+            let pb = ((report + 5.0 + queued) * 1e9) as u128;
+            let got = c.heard(now, cb, pb);
+            let want = base + Duration::from_secs_f64(heard + 1.0);
+            if k > 50 {
+                worst = worst.max(secs(want, got).abs());
+            }
+        }
+        assert!(worst < 0.0005, "{} ms", worst * 1e3);
     }
 
     #[test]
@@ -891,6 +1041,7 @@ mod tests {
                 cut_start: 0,
                 shift: 0.0,
             },
+            start: None,
         });
         std::thread::sleep(Duration::from_millis(300));
         p.run(false);
@@ -926,6 +1077,7 @@ mod tests {
                 cut_start: 0,
                 shift: 0.0,
             },
+            start: None,
         });
         std::thread::sleep(Duration::from_millis(500));
         p.run(false);

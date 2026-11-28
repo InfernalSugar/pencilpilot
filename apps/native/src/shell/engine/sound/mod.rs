@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
-use pencilpilot_sound::player::{Clock, Cmd, Mode, Output, Player, Rec, Voice};
+use pencilpilot_sound::player::{Clock, Cmd, Mode, Output, Player, Rec, Started, Voice};
 use pencilpilot_sound::{Pcm, RATE, frame_sample, mix};
 
 use super::Engine;
@@ -272,6 +272,8 @@ pub struct Sounds {
     last_shown: Option<u32>,
     lateness: std::collections::VecDeque<f64>,
     pub shift: f64,
+    /// a play begun: when its sound starts, once the mixer says
+    starting: Option<Arc<Started>>,
     /// for checks: when Play was asked for, the shift each play started with, and what the
     /// (silent) output played
     pub plays: Vec<Instant>,
@@ -296,6 +298,7 @@ impl Default for Sounds {
             last_shown: None,
             lateness: Default::default(),
             shift: 0.0,
+            starting: None,
             plays: Vec::new(),
             play_shifts: Vec::new(),
             recs: Vec::new(),
@@ -331,7 +334,8 @@ impl Sounds {
     fn player(&mut self) -> &mut Player {
         self.player.get_or_insert_with(|| {
             let out = output();
-            let record = matches!(out, Output::Null { .. });
+            // (what it plays is recorded in tests and checks, for `--stats`)
+            let record = !SOUND.load(Ordering::Relaxed);
             Player::new(out, record)
         })
     }
@@ -553,10 +557,11 @@ fn make_peaks(e: &mut Engine, file: &str, fps: u32, pcm: Arc<Pcm>) {
         });
 }
 
-/// What the interface asks for that's the sound's (Play's moment, for checks).
+/// What the interface asks for that's the sound's: Play's moment, for checks.
 pub fn apply(e: &mut Engine, _s: &mut State, a: &Action) {
     if *a == Action::Play {
-        e.sound.plays.push(Instant::now());
+        let now = Instant::now();
+        e.sound.plays.push(now);
     }
 }
 
@@ -623,6 +628,10 @@ pub fn load_doc(e: &mut Engine, s: &mut State, now: Instant) -> bool {
         .filter(|f| !f.is_empty() && !e.sound.cache.contains_key(f))
         .collect();
     decode_files(e, s, missing);
+    // the output opened now (not playing), so the first play doesn't wait for it
+    if s.sound.clips.iter().any(|c| !c.file.is_empty()) {
+        e.sound.player().prepare();
+    }
     if e.sound.sent != Sent::Nothing {
         if let Some(p) = &mut e.sound.player {
             p.send(Cmd::Stop);
@@ -671,6 +680,15 @@ pub fn tick(e: &mut Engine, s: &mut State, now: Instant) -> bool {
         make_peaks(e, &f, fps, p);
     }
     // what's heard
+    // a play begun: its clock starts when its sound can first be heard (the output's
+    // latency, a few tens of ms: its first frame holds that long), so a sound on that frame
+    // is heard from its start
+    if let Some(st) = &e.sound.starting
+        && let Some(t) = st.at()
+    {
+        e.frames.hold_play_until(t);
+        e.sound.starting = None;
+    }
     let want = if s.playing
         && let Some((t0, from, at)) = e.frames.play_clock()
     {
@@ -689,7 +707,9 @@ pub fn tick(e: &mut Engine, s: &mut State, now: Instant) -> bool {
             shift: 0.0,
         };
         // a new play: the frames shown before it say nothing about it
-        let new = !matches!(&e.sound.sent, Sent::Play(c, _) if c.same_play(&clock));
+        // (its start moved to the sound's isn't a new play)
+        let new =
+            !matches!(&e.sound.sent, Sent::Play(c, _) if c.same_play(&Clock { t0: c.t0, ..clock }));
         if new {
             e.sound.shown.clear();
             e.sound.last_shown = None;
@@ -711,14 +731,22 @@ pub fn tick(e: &mut Engine, s: &mut State, now: Instant) -> bool {
         Some(clock) => {
             let (vs, key) = voices(e, s);
             let next = Sent::Play(clock, key);
+            let begun = !matches!(e.sound.sent, Sent::Play(..));
             if next != e.sound.sent && (audible || e.sound.sent != Sent::Nothing) {
-                e.sound.player().send(Cmd::Play { voices: vs, clock });
+                let start = begun.then(|| Arc::new(Started::default()));
+                e.sound.starting = start.clone();
+                e.sound.player().send(Cmd::Play {
+                    voices: vs,
+                    clock,
+                    start,
+                });
                 e.sound.sent = next;
                 e.sound.pause_at = None;
             }
         }
         None => {
             if matches!(e.sound.sent, Sent::Play(..)) {
+                e.sound.starting = None;
                 if let Some(p) = &mut e.sound.player {
                     p.send(Cmd::Stop);
                 }

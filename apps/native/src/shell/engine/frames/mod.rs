@@ -136,6 +136,17 @@ impl Frames {
         self.play.map(|p| (p.t0, p.from, p.fps))
     }
 
+    /// A play that hasn't moved on yet starts its clock at `t0` instead, when that's later
+    /// (the sound's output can only be heard from then: its first frame holds until it is).
+    pub fn hold_play_until(&mut self, t0: Instant) {
+        if let Some(p) = &mut self.play
+            && p.n == 0
+            && t0 > p.t0
+        {
+            p.t0 = t0;
+        }
+    }
+
     /// A drawing changed: its thumbnail and onion skin are made again.
     fn mark(&mut self, drawing: u32) {
         self.stale.insert(drawing);
