@@ -490,6 +490,17 @@ fn canvas(r: &mut Real, what: &str, st: &Value) {
                 st["v"].as_u64().unwrap() as u8,
             );
         }
+        "fill" => {
+            let id = lay(r);
+            for i in 0..st["n"].as_i64().unwrap() as i32 {
+                r.c.paint(id, i % 20, i / 20, st["v"].as_u64().unwrap() as u8);
+            }
+        }
+        "wipe" => {
+            let id = lay(r);
+            let d = r.c.drawing_of(id);
+            r.c.drawings.get_mut(&d).unwrap().clear();
+        }
         "paintD" => {
             let d = drawing(r, &st["d"]);
             r.c.drawings.get_mut(&d).unwrap().insert(
@@ -1008,7 +1019,7 @@ macro_rules! goldens {
     };
 }
 
-goldens!(basics, groups, masks_sound, timeline, lines, rejoin);
+goldens!(basics, groups, masks_sound, timeline, lines, rejoin, fixes);
 
 #[allow(dead_code)]
 fn _unused(_: Map<String, Value>) {}

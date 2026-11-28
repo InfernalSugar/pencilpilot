@@ -24,8 +24,10 @@ import {
 	splitBase,
 	strokeFromShare,
 	strokeToShare,
+	tileParts,
 	toShared,
-	withBase
+	withBase,
+	cut
 } from './together';
 
 const A = 'a'.repeat(64);
@@ -1530,5 +1532,254 @@ describe('drawing together: timelines crossing', () => {
 		expect(bc.pixel(bl, 5, 5)).toBe(55);
 		expect(bc.pixel(bNova, 1, 1)).toBe(11);
 		expect(hc.pixel(hc.byName('Bo’s layer').id, 5, 5)).toBe(55);
+	});
+});
+
+describe('drawing together: mixed sessions (fixes from the native app’s QA)', () => {
+	it('answers a joiner who asks while the host is still sharing the project (and a drawing that can’t be read doesn’t stop it)', async () => {
+		const session = new FakeSession();
+		const hc = new FakeCanvas(['Sky', 'Sea']);
+		hc.paint(hc.byName('Sky').id, 0, 0, 50);
+		hc.paint(hc.byName('Sea').id, 1, 1, 60);
+		const sea = hc.drawingOf(hc.byName('Sea').id);
+		// a project opened from a file: each drawing comes from the frame store, slowly; one fails
+		const packed = hc.packed.bind(hc);
+		hc.packed = async (d: number) => {
+			await new Promise((r) => setTimeout(r, 20));
+			if (d === sea) throw new Error('the store lost it');
+			return packed(d);
+		};
+		const host = new Together(A, 'Ana', hc, session.net(A));
+		session.apps.set(A, host);
+		const hosting = host.startHost();
+		const bc = new FakeCanvas([]);
+		const bo = new Together(B, 'Bo', bc, session.net(B));
+		session.apps.set(B, bo);
+		bo.startJoin(A);
+		await session.settle();
+		expect(bo.synced).toBe(false);
+		await hosting;
+		await session.settle();
+		expect(bo.synced).toBe(true);
+		expect(bc.pixel(bc.byName('Sky').id, 0, 0)).toBe(50);
+		expect(bc.layers().map((l) => l.name)).toEqual(['Sky', 'Sea', 'Bo’s layer']);
+	});
+
+	it('takes a snapshot’s tiles that come after its end, for drawings it has nothing of', async () => {
+		const session = new FakeSession();
+		const hc = new FakeCanvas(['Sky']);
+		const host = new Together(A, 'Ana', hc, session.net(A));
+		session.apps.set(A, host);
+		await host.startHost();
+		await session.settle();
+		const lid = host.lidOf(hc.byName('Sky').id)!;
+		const bc = new FakeCanvas([]);
+		const bo = new Together(B, 'Bo', bc, session.net(B));
+		bo.startJoin(A);
+		// (a host that sends a drawing of another frame after the end)
+		await bo.onDirect(A, {
+			k: 'snap.begin',
+			seq: 0,
+			layers: host.shared.snapshot().layers,
+			asks: [],
+			tl: null
+		});
+		await bo.onDirect(A, { k: 'snap.end' });
+		const late = 'aaaaaaaaaaaa:777';
+		await bo.onDirect(A, {
+			k: 'snap.tiles',
+			lid,
+			did: late,
+			set: [[2, 2, await encodeTile(tile(9))]]
+		});
+		expect(bc.drawings.get(bo.localOf(late))?.get('2,2')?.[0]).toBe(9);
+		// a drawing it has already: not taken (what it has may be newer)
+		await bo.onDirect(A, {
+			k: 'snap.tiles',
+			lid,
+			did: late,
+			set: [[2, 2, await encodeTile(tile(1))]]
+		});
+		expect(bc.drawings.get(bo.localOf(late))?.get('2,2')?.[0]).toBe(9);
+	});
+
+	it('taken back mid-stroke: what was drawn and not sent goes, here as for everyone', async () => {
+		const session = new FakeSession();
+		const hc = new FakeCanvas(['Sky']);
+		const host = new Together(A, 'Ana', hc, session.net(A));
+		session.apps.set(A, host);
+		hc.paint(hc.byName('Sky').id, 0, 0, 10);
+		await host.startHost();
+		await session.settle();
+		const bc = new FakeCanvas([]);
+		const bo = new Together(B, 'Bo', bc, session.net(B));
+		session.apps.set(B, bo);
+		bo.startJoin(A);
+		await session.settle();
+		const sky = host.lidOf(hc.byName('Sky').id)!;
+		host.grant(sky, B);
+		await session.settle();
+		const bs = bc.byName('Sky').id;
+		bc.paint(bs, 3, 3, 33);
+		await bo.localChanged();
+		await session.settle();
+		// mid-stroke when it's taken back
+		bc.paint(bs, 4, 4, 44);
+		bc.paint(bs, 0, 0, 99);
+		bc.busy = true;
+		host.revoke(sky, B);
+		await session.settle();
+		bc.busy = false;
+		await bo.localChanged();
+		await session.settle();
+		for (const c of [hc, bc]) {
+			const id = c.byName('Sky').id;
+			expect([c.pixel(id, 0, 0), c.pixel(id, 3, 3), c.pixel(id, 4, 4)]).toEqual([
+				10,
+				33,
+				undefined
+			]);
+		}
+	});
+
+	it('hosting a saved session again shares its line strokes with joiners', async () => {
+		const session = new FakeSession();
+		const hc = new FakeCanvas(['Ink']);
+		const ink = hc.byName('Ink').id;
+		hc.setLineLayer(ink, true);
+		const d = hc.drawingOf(ink);
+		hc.setLineStrokes(d, [stroke('a', 1)]);
+		const ana = new Together(A, 'Ana', hc, session.net(A));
+		session.apps.set(A, ana);
+		await ana.startHost();
+		await session.settle();
+		const saved = readSavedShare(JSON.parse(JSON.stringify(ana.save('pp1-code', []))))!;
+		session.apps.delete(A);
+		const again = new Together(A, 'Ana', hc, session.net(A));
+		session.apps.set(A, again);
+		again.restore(saved);
+		await again.resumeHost();
+		const cc = new FakeCanvas([]);
+		const cy = new Together(C, 'Cy', cc, session.net(C));
+		session.apps.set(C, cy);
+		cy.startJoin(A);
+		await session.settle();
+		const cd = cc.byName('Ink').drawing;
+		expect(cc.lineStrokes(cd).map((s) => s.id)).toEqual(['a']);
+	});
+
+	it('a line layer duplicated or pasted is a line layer for everyone', async () => {
+		const session = new FakeSession();
+		const hc = new FakeCanvas(['Sky']);
+		const host = new Together(A, 'Ana', hc, session.net(A));
+		session.apps.set(A, host);
+		await host.startHost();
+		await session.settle();
+		const id = hc.addLayer('Ink copy');
+		hc.setLineLayer(id, true);
+		await host.localChanged();
+		await session.settle();
+		expect(host.shared.layers.get(host.lidOf(id)!)?.lines).toBe(true);
+	});
+
+	it('strokes put in another order (none changed) end in that order everywhere', () => {
+		const list = ['a', 'b', 'c', 'd', 'e'].map((id, i) => stroke(id, i));
+		const now = [list[3], list[0], list[1], list[2], list[4]];
+		const edits = lineEdits('aaaaaaaaaaaa:1', 'aaaaaaaaaaaa:5', list, now);
+		expect(edits).toHaveLength(1);
+		expect(edits[0].del).toEqual(['d']);
+		expect(edits[0].put.map(([i]) => i)).toEqual([0]);
+		let got: readonly LineStroke[] = list;
+		for (const e of edits) got = applyLineEdit(got, e);
+		expect(got.map((s) => s.id)).toEqual(['d', 'a', 'b', 'c', 'e']);
+		expect(lineEdits('aaaaaaaaaaaa:1', 'aaaaaaaaaaaa:5', list, [...list])).toEqual([]);
+	});
+
+	it('a snapshot with odd parts still joins: what isn’t a layer is left out', async () => {
+		const bc = new FakeCanvas([]);
+		const sent: unknown[] = [];
+		const bo = new Together(B, 'Bo', bc, { edit: (e) => sent.push(e), direct: () => {} });
+		bo.startJoin(A);
+		await bo.onDirect(A, {
+			k: 'snap.begin',
+			layers: [
+				null,
+				{ lid: 'aaaaaaaaaaaa:1', owner: A, name: 'Sky', writers: [A] },
+				{ lid: 'aaaaaaaaaaaa:2' },
+				5
+			],
+			groups: [null, { gid: 7 }],
+			asks: 'x',
+			tl: null
+		});
+		await bo.onDirect(A, {
+			k: 'snap.tiles',
+			lid: 'aaaaaaaaaaaa:1',
+			did: 'aaaaaaaaaaaa:3',
+			set: 'nope'
+		});
+		await bo.onDirect(A, {
+			k: 'snap.tiles',
+			lid: 'aaaaaaaaaaaa:1',
+			did: 'aaaaaaaaaaaa:3',
+			set: [['a', 'b', 'z:'], null]
+		});
+		await bo.onDirect(A, { k: 'snap.end' });
+		expect(bo.synced).toBe(true);
+		expect(bc.layers().map((l) => l.name)).toEqual(['Sky']);
+		// (and edits after it, with no number on the snapshot, are put in)
+		await bo.onEdit(1, A, { k: 'rename', lid: 'aaaaaaaaaaaa:1', name: 'Sea' });
+		expect(bc.byName('Sea')).toBeTruthy();
+		// broken pieces don't throw
+		await bo.onEdit(2, A, { k: 'sound', file: 'x.mp3', i: 0, n: 1, data: '@@@' });
+		await bo.onEdit(3, A, {
+			k: 'lines',
+			lid: 'aaaaaaaaaaaa:1',
+			did: 'aaaaaaaaaaaa:3',
+			del: [],
+			put: [],
+			base: 'A'
+		});
+	});
+
+	it('names never keep half a character', () => {
+		expect(cut('a'.repeat(59) + '😀', 60)).toBe('a'.repeat(59));
+		expect(cut('x\ud800y\udc00', 60)).toBe('xy');
+		expect(
+			parseEdit({ k: 'layer', lid: 'aaaaaaaaaaaa:1', name: 'a'.repeat(59) + '😀😀' })
+		).toMatchObject({
+			name: 'a'.repeat(59)
+		});
+	});
+
+	it('clears go in edits every app takes, however many', async () => {
+		const parts = tileParts(
+			Array.from({ length: 50 }, (_, i) => i),
+			Array.from({ length: 300 }, (_, i) => i)
+		);
+		expect(parts.map(([s, c]) => [s.length, c.length])).toEqual([
+			[48, 144],
+			[2, 144],
+			[0, 12]
+		]);
+		expect(tileParts([], [])).toEqual([[[], []]]);
+		// erasing a big area: every app takes every edit
+		const session = new FakeSession();
+		const hc = new FakeCanvas(['Sky']);
+		const sky = hc.byName('Sky').id;
+		for (let i = 0; i < 400; i++) hc.paint(sky, i % 20, Math.floor(i / 20), 5);
+		const host = new Together(A, 'Ana', hc, session.net(A));
+		session.apps.set(A, host);
+		await host.startHost();
+		await session.settle();
+		const bc = new FakeCanvas([]);
+		const bo = new Together(B, 'Bo', bc, session.net(B));
+		session.apps.set(B, bo);
+		bo.startJoin(A);
+		await session.settle();
+		hc.drawings.get(hc.drawingOf(sky))!.clear();
+		await host.localChanged();
+		await session.settle();
+		expect(bc.drawings.get(bc.byName('Sky').drawing)?.size).toBe(0);
 	});
 });

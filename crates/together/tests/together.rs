@@ -1584,3 +1584,210 @@ fn two_new_drawings_started_at_once_both_stay_on_the_timeline() {
 
 #[allow(dead_code)]
 fn _types(_: TileSet, _: Timeline, _: Look) {}
+
+// ---- drawing together: mixed sessions (fixes from the native app's QA) ----
+
+#[test]
+fn answers_a_joiner_who_asks_before_the_host_has_shared_the_project() {
+    let mut s = FakeSession::default();
+    let mut hc = FakeCanvas::new(&["Sky", "Sea"]);
+    hc.paint(1, 0, 0, 50);
+    s.add(A, "Ana", hc);
+    // (Bo's ask is in before Ana's app has shared it all)
+    s.add(B, "Bo", FakeCanvas::new(&[]));
+    s.with(B, |t, c| t.start_join(c, A));
+    s.step(1);
+    assert!(!s.t(B).synced());
+    s.with(A, |t, c| t.start_host(c));
+    s.settle();
+    assert!(s.t(B).synced());
+    let sky = s.c(B).by_name("Sky").id;
+    assert_eq!(s.c(B).pixel(sky, 0, 0), Some(50));
+    assert_eq!(s.c(B).names(), vec!["Sky", "Sea", "Bo’s layer"]);
+}
+
+#[test]
+fn takes_a_snapshots_tiles_that_come_after_its_end_for_drawings_it_has_nothing_of() {
+    let mut s = hosted(&["Sky"], |_| {});
+    let lid = s.t(A).lid_of(1).unwrap();
+    let layers = s.t(A).shared.snapshot().0;
+    let mut bc = FakeCanvas::new(&[]);
+    let mut bo = pencilpilot_together::Together::with_start(B, "Bo", 0);
+    bo.start_join(&mut bc, A);
+    bo.on_direct(
+        &mut bc,
+        A,
+        &json!({"k": "snap.begin", "seq": 0, "layers": layers, "asks": [], "tl": null}),
+    );
+    bo.on_direct(&mut bc, A, &json!({"k": "snap.end"}));
+    let late = "aaaaaaaaaaaa:777";
+    bo.on_direct(&mut bc, A, &json!({"k": "snap.tiles", "lid": lid, "did": late, "set": [[2, 2, encode_tile(&tile(9))]]}));
+    let d = bo.local_of(&mut bc, late);
+    assert_eq!(bc.drawings[&d].get(&(2, 2)).map(|t| t[0]), Some(9));
+    // a drawing it has already: not taken (what it has may be newer)
+    bo.on_direct(&mut bc, A, &json!({"k": "snap.tiles", "lid": lid, "did": late, "set": [[2, 2, encode_tile(&tile(1))]]}));
+    assert_eq!(bc.drawings[&d].get(&(2, 2)).map(|t| t[0]), Some(9));
+}
+
+#[test]
+fn taken_back_mid_stroke_what_was_drawn_and_not_sent_goes_here_as_for_everyone() {
+    let mut s = hosted(&["Sky"], |hc| {
+        hc.paint(1, 0, 0, 10);
+    });
+    join(&mut s, B, "Bo", FakeCanvas::new(&[]));
+    let sky = s.t(A).lid_of(1).unwrap();
+    s.with(A, |t, _| t.grant(&sky, B, false));
+    s.settle();
+    let bs = s.c(B).by_name("Sky").id;
+    s.c(B).paint(bs, 3, 3, 33);
+    s.with(B, |t, c| t.local_changed(c));
+    s.settle();
+    // mid-stroke when it's taken back
+    s.c(B).paint(bs, 4, 4, 44);
+    s.c(B).paint(bs, 0, 0, 99);
+    s.c(B).busy = true;
+    s.with(A, |t, _| t.revoke(&sky, B));
+    s.settle();
+    s.c(B).busy = false;
+    s.with(B, |t, c| t.local_changed(c));
+    s.settle();
+    for who in [A, B] {
+        let id = s.c(who).by_name("Sky").id;
+        let c = s.c(who);
+        assert_eq!(
+            [c.pixel(id, 0, 0), c.pixel(id, 3, 3), c.pixel(id, 4, 4)],
+            [Some(10), Some(33), None]
+        );
+    }
+}
+
+#[test]
+fn hosting_a_saved_session_again_shares_its_line_strokes_with_joiners() {
+    let mut s = hosted(&["Ink"], |hc| {
+        hc.set_line_layer(1, true);
+        let d = hc.drawing_of(1);
+        hc.set_strokes(d, vec![stroke("a", 1.0)], false);
+    });
+    let saved = SavedShare::read(
+        &serde_json::from_str(&s.t(A).save("pp1-code", &[]).to_json().to_string()).unwrap(),
+    )
+    .unwrap();
+    let App { c: hc, .. } = s.remove(A);
+    s.add(A, "Ana", hc);
+    s.with(A, |t, c| t.restore(c, &saved));
+    s.with(A, |t, c| t.resume_host(c));
+    join(&mut s, C, "Cy", FakeCanvas::new(&[]));
+    let ink = s.c(C).by_name("Ink").id;
+    let cd = showing(&mut s, C, ink);
+    assert_eq!(s.c(C).stroke_ids(cd), vec!["a"]);
+}
+
+#[test]
+fn a_line_layer_duplicated_or_pasted_is_a_line_layer_for_everyone() {
+    let mut s = hosted(&["Sky"], |_| {});
+    let id = s.c(A).add_layer("Ink copy", None);
+    s.c(A).set_line_layer(id, true);
+    s.with(A, |t, c| t.local_changed(c));
+    s.settle();
+    let lid = s.t(A).lid_of(id).unwrap();
+    assert!(s.t(A).shared.layers[lid.as_str()].lines);
+}
+
+#[test]
+fn strokes_put_in_another_order_none_changed_end_in_that_order_everywhere() {
+    let list: Vec<LineStroke> = ["a", "b", "c", "d", "e"]
+        .iter()
+        .enumerate()
+        .map(|(i, id)| stroke(id, i as f32))
+        .collect();
+    let now = vec![
+        list[3].clone(),
+        list[0].clone(),
+        list[1].clone(),
+        list[2].clone(),
+        list[4].clone(),
+    ];
+    let edits = line_edits("aaaaaaaaaaaa:1", "aaaaaaaaaaaa:5", &list, &now);
+    assert_eq!(edits.len(), 1);
+    let Edit::Lines { del, put, .. } = &edits[0] else {
+        panic!()
+    };
+    assert_eq!(del, &["d"]);
+    assert_eq!(put.iter().map(|p| p.0).collect::<Vec<_>>(), vec![0]);
+    let got = apply_line_edit(&list, del, put);
+    assert_eq!(
+        got.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+        vec!["d", "a", "b", "c", "e"]
+    );
+    assert_eq!(
+        line_edits("aaaaaaaaaaaa:1", "aaaaaaaaaaaa:5", &list, &list),
+        vec![]
+    );
+}
+
+#[test]
+fn a_snapshot_with_odd_parts_still_joins_what_isnt_a_layer_is_left_out() {
+    let mut bc = FakeCanvas::new(&[]);
+    let mut bo = pencilpilot_together::Together::with_start(B, "Bo", 0);
+    bo.start_join(&mut bc, A);
+    bo.on_direct(&mut bc, A, &json!({
+        "k": "snap.begin",
+        "layers": [null, {"lid": "aaaaaaaaaaaa:1", "owner": A, "name": "Sky", "writers": [A]}, {"lid": "aaaaaaaaaaaa:2"}, 5],
+        "groups": [null, {"gid": 7}], "asks": "x", "tl": null
+    }));
+    bo.on_direct(&mut bc, A, &json!({"k": "snap.tiles", "lid": "aaaaaaaaaaaa:1", "did": "aaaaaaaaaaaa:3", "set": "nope"}));
+    bo.on_direct(&mut bc, A, &json!({"k": "snap.tiles", "lid": "aaaaaaaaaaaa:1", "did": "aaaaaaaaaaaa:3", "set": [["a", "b", "z:"], null]}));
+    bo.on_direct(&mut bc, A, &json!({"k": "snap.end"}));
+    assert!(bo.synced());
+    assert_eq!(bc.names(), vec!["Sky"]);
+    // (and edits after it, with no number on the snapshot, are put in)
+    bo.on_edit(
+        &mut bc,
+        1,
+        A,
+        &json!({"k": "rename", "lid": "aaaaaaaaaaaa:1", "name": "Sea"}),
+    );
+    assert!(bc.has("Sea"));
+    bo.on_edit(
+        &mut bc,
+        2,
+        A,
+        &json!({"k": "sound", "file": "x.mp3", "i": 0, "n": 1, "data": "@@@"}),
+    );
+    bo.on_edit(&mut bc, 3, A, &json!({"k": "lines", "lid": "aaaaaaaaaaaa:1", "did": "aaaaaaaaaaaa:3", "del": [], "put": [], "base": "A"}));
+}
+
+#[test]
+fn names_never_keep_half_a_character() {
+    let e = parse_edit(
+        &json!({"k": "layer", "lid": "aaaaaaaaaaaa:1", "name": format!("{}😀😀", "a".repeat(59))}),
+    );
+    assert_eq!(e, Some(layer_edit("aaaaaaaaaaaa:1", &"a".repeat(59))));
+}
+
+#[test]
+fn clears_go_in_edits_every_app_takes_however_many() {
+    use pencilpilot_together::tile_parts;
+    let set: Vec<u32> = (0..50).collect();
+    let clear: Vec<u32> = (0..300).collect();
+    let parts: Vec<(usize, usize)> = tile_parts(&set, &clear)
+        .iter()
+        .map(|(s, c)| (s.len(), c.len()))
+        .collect();
+    assert_eq!(parts, vec![(48, 144), (2, 144), (0, 12)]);
+    assert_eq!(tile_parts::<u32, u32>(&[], &[]).len(), 1);
+    // erasing a big area: every app takes every edit
+    let mut s = hosted(&["Sky"], |hc| {
+        for i in 0..400 {
+            hc.paint(1, i % 20, i / 20, 5);
+        }
+    });
+    join(&mut s, B, "Bo", FakeCanvas::new(&[]));
+    let d = s.c(A).drawing_of(1);
+    s.c(A).drawings.get_mut(&d).unwrap().clear();
+    s.with(A, |t, c| t.local_changed(c));
+    s.settle();
+    let sky = s.c(B).by_name("Sky").id;
+    let bd = showing(&mut s, B, sky);
+    assert!(s.c(B).drawings[&bd].is_empty());
+}

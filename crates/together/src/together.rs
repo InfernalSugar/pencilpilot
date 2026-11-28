@@ -240,6 +240,26 @@ enum AfterSend {
     },
 }
 
+/// `tileParts`: tiles to set and clear cut into edits every app takes: at most
+/// [`TILES_PER_EDIT`] set and, with them, at most four times that in all (more clears go
+/// in edits of their own). Always one edit at least.
+pub fn tile_parts<'a, S, C>(set: &'a [S], clear: &'a [C]) -> Vec<(&'a [S], &'a [C])> {
+    let clears = 4 * TILES_PER_EDIT - TILES_PER_EDIT;
+    let n = set
+        .len()
+        .div_ceil(TILES_PER_EDIT)
+        .max(clear.len().div_ceil(clears))
+        .max(1);
+    (0..n)
+        .map(|i| {
+            let s = &set
+                [(i * TILES_PER_EDIT).min(set.len())..((i + 1) * TILES_PER_EDIT).min(set.len())];
+            let c = &clear[(i * clears).min(clear.len())..((i + 1) * clears).min(clear.len())];
+            (s, c)
+        })
+        .collect()
+}
+
 fn key(lid: &str, did: &str) -> String {
     format!("{lid}|{did}")
 }
@@ -309,6 +329,8 @@ pub struct Together {
     lines_synced: IndexMap<String, Strokes>,
     out: Vec<Out>,
     notices: Vec<Notice>,
+    /// joiners who asked for the project before this app had it: answered once it has
+    askers: Vec<String>,
 }
 
 impl Together {
@@ -352,6 +374,7 @@ impl Together {
             lines_synced: IndexMap::new(),
             out: Vec::new(),
             notices: Vec::new(),
+            askers: Vec::new(),
         }
     }
 
@@ -528,7 +551,15 @@ impl Together {
         let tl = self.shared_timeline(c);
         self.share_sounds(c, &tl, None);
         self.edit(Edit::Timeline { tl }.to_json());
+        self.now_synced(c);
+    }
+
+    /// This app has the project: joiners who asked meanwhile get it.
+    fn now_synced(&mut self, c: &mut dyn CanvasPort) {
         self.synced = true;
+        for to in std::mem::take(&mut self.askers) {
+            self.send_snapshot(c, &to);
+        }
     }
 
     /// This app's groups, shared (hosting): each with its layers, then its settings.
@@ -635,12 +666,17 @@ impl Together {
             for d in unique(std::iter::once(first).chain(c.drawings_of_layer(id))) {
                 let did = self.did_of(d);
                 self.cache.insert(key(&lid, &did), unpack(&c.packed(d)));
+                // editable strokes too, so joiners get them (a line layer's; a plain
+                // layer's, with the pixels under them)
+                if c.has_lines() && (c.is_line_layer(id) || c.plain_strokes(d)) {
+                    self.lines_synced.insert(key(&lid, &did), c.line_strokes(d));
+                }
             }
         }
         for lid in self.ids.keys().cloned().collect::<Vec<_>>() {
             self.refresh_lock(c, &lid);
         }
-        self.synced = true;
+        self.now_synced(c);
         self.changed();
     }
 
@@ -1214,6 +1250,8 @@ impl Together {
         let Some(e) = parse_edit(body) else {
             return;
         };
+        let could =
+            self.shared.layers.contains_key(e.lid()) && self.shared.can_draw(e.lid(), &self.me);
         if !self.shared.apply(from, &e) {
             return;
         }
@@ -1380,11 +1418,20 @@ impl Together {
             }
             Edit::Grant { lid, to, .. } => {
                 self.refresh_lock(c, &lid);
+                // taken back (or handed on): what was drawn here and not sent doesn't count
+                if could && !self.shared.can_draw(&lid, &self.me) {
+                    self.revert(c, &lid);
+                }
                 if to == self.me {
                     self.try_waiting(c);
                 }
             }
-            Edit::Revoke { lid, .. } => self.refresh_lock(c, &lid),
+            Edit::Revoke { lid, .. } => {
+                self.refresh_lock(c, &lid);
+                if could && !self.shared.can_draw(&lid, &self.me) {
+                    self.revert(c, &lid);
+                }
+            }
             Edit::Deny { lid, to } => {
                 if to == self.me {
                     let was = self.waiting.len();
@@ -1523,17 +1570,29 @@ impl Together {
         };
         let empty = Vec::new();
         match k {
-            "snap.req" if self.synced => self.send_snapshot(c, from),
+            "snap.req" => {
+                // (asked before this app has the project: answered once it has)
+                if self.synced {
+                    self.send_snapshot(c, from)
+                } else if !self.askers.iter().any(|a| a == from) {
+                    self.askers.push(from.into());
+                }
+            }
             "snap.begin" if !self.synced => {
                 let arr = |k: &str| body.get(k).and_then(Value::as_array).unwrap_or(&empty);
                 self.shared.load(arr("layers"), arr("groups"), arr("asks"));
-                self.snap_seq = body.get("seq").and_then(Value::as_f64).unwrap_or(f64::NAN);
+                // (no number: everything after the snapshot is put in, again if need be)
+                self.snap_seq = body
+                    .get("seq")
+                    .and_then(Value::as_f64)
+                    .filter(|s| s.is_finite())
+                    .unwrap_or(0.0);
                 self.snap_tl = body
                     .get("tl")
                     .filter(|t| t.is_object() || t.is_array())
                     .cloned();
             }
-            "snap.tiles" if !self.synced => {
+            "snap.tiles" => {
                 let Some(lid) = body.get("lid").and_then(Value::as_str) else {
                     return;
                 };
@@ -1544,14 +1603,24 @@ impl Together {
                 else {
                     return;
                 };
+                let Some(set) = body.get("set").and_then(Value::as_array) else {
+                    return;
+                };
                 if !self.shared.layers.contains_key(lid) {
+                    return;
+                }
+                let k = key(lid, did);
+                // a snapshot's tiles after its end (a host that sends some later): taken for
+                // a drawing this app has nothing of yet (anything newer would have made it one)
+                let late = self.synced;
+                if late && self.cache.contains_key(&k) {
                     return;
                 }
                 if did == "mask" {
                     self.mask_on.insert(lid.into(), true);
                 }
-                let t = self.cache.entry(key(lid, did)).or_default();
-                for s in body.get("set").and_then(Value::as_array).unwrap_or(&empty) {
+                let t = self.cache.entry(k.clone()).or_default();
+                for s in set {
                     let (Some(x), Some(y), Some(s)) = (
                         js::int6(s.get(0)),
                         js::int6(s.get(1)),
@@ -1562,6 +1631,9 @@ impl Together {
                     if let Some(px) = decode_tile(s) {
                         t.insert((x as i32, y as i32), px);
                     }
+                }
+                if late {
+                    self.put_key(c, &k);
                 }
             }
             "snap.lines" if !self.synced => {
@@ -1693,11 +1765,14 @@ impl Together {
             self.add_own_layer("", false);
         }
         self.changed();
+        for to in std::mem::take(&mut self.askers) {
+            self.send_snapshot(c, &to);
+        }
     }
 
     /// The canvas changed here: send this app's changed tiles, settings, strokes and
     /// masks (and share layers made here). Call it a moment after changes (the studio
-    /// waits 120 ms of quiet), and after the canvas stops being busy.
+    /// waits 40 ms of quiet), and after the canvas stops being busy.
     pub fn local_changed(&mut self, c: &mut dyn CanvasPort) {
         if !self.synced {
             return;
@@ -1740,12 +1815,14 @@ impl Together {
             }
             let lid = self.new_lid();
             self.ids.insert(lid.clone(), l.id);
+            // (a line layer stays one: duplicated, pasted or imported)
+            let lines = l.adjust.is_none() && c.is_line_layer(l.id);
             self.edit(
                 Edit::Layer {
                     lid: lid.clone(),
                     name: l.name.clone(),
                     adjust: l.adjust.clone(),
-                    lines: false,
+                    lines,
                 }
                 .to_json(),
             );
@@ -1952,36 +2029,30 @@ impl Together {
         set: &[(i32, i32, Vec<u8>)],
         clear: &[TileClear],
     ) {
-        let mut i = 0;
-        while i < set.len().max(1) {
-            let part = &set[i.min(set.len())..(i + TILES_PER_EDIT).min(set.len())];
+        for (part, gone) in tile_parts(set, clear) {
             self.edit(
                 Edit::Tiles {
                     lid: lid.into(),
                     did: did.into(),
                     set: Self::encode_set(part),
-                    clear: if i == 0 { clear.to_vec() } else { Vec::new() },
+                    clear: gone.to_vec(),
                 }
                 .to_json(),
             );
-            i += TILES_PER_EDIT;
         }
     }
 
     fn send_mask(&mut self, lid: &str, on: bool, set: &[(i32, i32, Vec<u8>)], clear: &[TileClear]) {
-        let mut i = 0;
-        while i < set.len().max(1) {
-            let part = &set[i.min(set.len())..(i + TILES_PER_EDIT).min(set.len())];
+        for (part, gone) in tile_parts(set, clear) {
             self.edit(
                 Edit::Mask {
                     lid: lid.into(),
                     on,
                     set: Self::encode_set(part),
-                    clear: if i == 0 { clear.to_vec() } else { Vec::new() },
+                    clear: gone.to_vec(),
                 }
                 .to_json(),
             );
-            i += TILES_PER_EDIT;
         }
     }
 
@@ -2116,6 +2187,26 @@ impl Together {
             }
         }
         self.put_key(c, &k);
+    }
+
+    /// A layer this app may no longer draw on, back to the session's copy (its drawings'
+    /// tiles, its mask and its strokes as last synced; a drawing the session has nothing
+    /// of, empty). Mid-stroke, once the stroke is done.
+    fn revert(&mut self, c: &mut dyn CanvasPort, lid: &str) {
+        let Some(id) = self.ids.get(lid).copied() else {
+            return;
+        };
+        let first = c.drawing_of(id);
+        for d in unique(std::iter::once(first).chain(c.drawings_of_layer(id))) {
+            let k = key(lid, &self.did_of(d));
+            self.cache.entry(k.clone()).or_default();
+            self.put_key(c, &k);
+            if let Some(lines) = self.lines_synced.get(&k).cloned() {
+                let plain = !self.shared.layers.get(lid).is_some_and(|l| l.lines);
+                c.set_line_strokes(d, lines, plain);
+            }
+        }
+        self.put_key(c, &key(lid, "mask"));
     }
 
     fn make_layer(&mut self, c: &mut dyn CanvasPort, lid: &str) {
