@@ -889,7 +889,12 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             })
             .collect();
         let c = canvas_rect;
-        let gpu_layers = comp.as_ref().map_or("null".to_string(), |k| {
+        // what the sound played (the silent output's buffers, in checks)
+        let sound = eng.as_mut().map_or_else(
+            || "null".to_string(),
+            |e| e.sound.stats_json(s.sound.cut_start, s.fps),
+        );
+                let gpu_layers = comp.as_ref().map_or("null".to_string(), |k| {
             format!(
                 "{{\"on\": {}, \"gpuMiB\": {:.1}, \"tiles\": {}, \"sources\": {}, \"uploads\": {}}}",
                 eng.as_ref().is_some_and(|e| e.frames.gpu.on),
@@ -899,11 +904,6 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
                 k.uploads
             )
         });
-        // what the sound played (the silent output's buffers, in checks)
-        let sound = eng.as_mut().map_or_else(
-            || "null".to_string(),
-            |e| e.sound.stats_json(s.sound.cut_start, s.fps),
-        );
         let json = format!(
             "{{\"seconds\": {:.3}, \"gpuLayers\": {gpu_layers}, \"startupToFirstFrameMs\": {}, \"framesDrawn\": {drawn}, \"framesPresented\": {presented}, \"drawingLate\": {}, \"marginMs\": {:.2}, \"framesLate\": {}, \"coolDowns\": {},\n \"view\": {{\"zoom\": {}, \"angle\": {}, \"flip\": {}, \"pan\": [{}, {}], \"docSize\": [{}, {}]}},\n \"canvasRect\": [{}, {}, {}, {}],\n \"state\": {{\"workspace\": {:?}, \"tool\": \"{:?}\", \"activeLayer\": {}, \"frame\": {}, \"playing\": {}, \"colour\": {:?}, \"layers\": [{}]}},\n \"sound\": {},\n \"frames\": [\n  {}\n ]}}\n",
             started.elapsed().as_secs_f64(),
