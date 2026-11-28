@@ -124,6 +124,13 @@ pub struct Frames {
 type Prefetched = Vec<(u32, Vec<((i32, i32), brush::DecodedTile)>)>;
 
 impl Frames {
+    /// Playback's clock, for the sound (`engine/sound`): when frame `from` shows (on the
+    /// shown frames' time: ticks run that far ahead), `from`, and the rate; None while not
+    /// playing (or before the first tick of a play).
+    pub fn play_clock(&self) -> Option<(Instant, u32, u32)> {
+        self.play.map(|p| (p.t0, p.from, p.fps))
+    }
+
     /// A drawing changed: its thumbnail and onion skin are made again.
     fn mark(&mut self, drawing: u32) {
         self.stale.insert(drawing);
@@ -558,7 +565,7 @@ fn play_position(from: u32, n: u64, a: u32, b: u32, mode: usize) -> (u32, bool) 
 }
 
 /// The frames playback goes over: the loop range, else the cut.
-fn play_range(s: &State) -> (u32, u32) {
+pub fn play_range(s: &State) -> (u32, u32) {
     let last = s.frames.saturating_sub(1);
     match s.sheet.loop_range {
         Some((a, b)) if a.min(last) <= b.min(last) => (a.min(last), b.min(last)),

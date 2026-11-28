@@ -17,6 +17,8 @@ pencilpilot-window = { path = "../../crates/window" }
 hokusai = { version = "0.3", default-features = false, features = ["myb-json"] }
 pencilpilot-ui = { path = "../../crates/ui" }
 pencilpilot-export = { path = "../../crates/export" }
+# sound: decoding, playing in step with the picture, the export's mix
+pencilpilot-sound = { path = "../../crates/sound" }
 png = "0.18"
 cosmic-text = "0.19"
 rayon = "1"

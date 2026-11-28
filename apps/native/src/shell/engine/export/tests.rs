@@ -704,3 +704,78 @@ fn fixtures_png_exact() {
         let _ = std::fs::remove_dir_all(out);
     }
 }
+
+/// PSD: the frame showing, its layers (names, order) and the flattened picture, written off
+/// the window thread.
+#[test]
+fn psd_of_the_frame_showing() {
+    let (mut e, mut s) = demo();
+    let d = tmp("psd");
+    let out = d.join("frame");
+    s.export.format = Format::Psd;
+    start(&mut e, &mut s, out.clone());
+    let t = Instant::now();
+    while !matches!(s.export.status, Status::Done(_) | Status::Failed(_))
+        && t.elapsed() < Duration::from_secs(60)
+    {
+        e.tick(&mut s, Instant::now());
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let path = out.with_extension("psd");
+    assert_eq!(s.export.status, Status::Done(path.clone()));
+    let b = std::fs::read(&path).unwrap();
+    assert_eq!(&b[..4], b"8BPS");
+    let be32 = |at: usize| u32::from_be_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]);
+    assert_eq!(
+        (be32(18), be32(14)),
+        (e.painter.width(), e.painter.height())
+    );
+    // the layer records: one a layer (no groups here), with their names, bottom first
+    let li = 26 + 8 + 4 + 4;
+    let count = u16::from_be_bytes([b[li], b[li + 1]]) as usize;
+    assert_eq!(count, e.painter.layers().len());
+    let utf16 =
+        |name: &str| -> Vec<u8> { name.encode_utf16().flat_map(|u| u.to_be_bytes()).collect() };
+    let mut at = 0;
+    for l in e.painter.layers() {
+        let n = utf16(&l.props.name);
+        let found = b[at..].windows(n.len()).position(|w| w == n.as_slice());
+        let Some(i) = found else {
+            panic!("layer {} not in order", l.props.name)
+        };
+        at += i + n.len();
+    }
+    // the flattened picture: the frame as the window's painter renders it
+    let want = e.painter.render_frame(&[], 1, &[]);
+    let (w, h) = (e.painter.width() as usize, e.painter.height() as usize);
+    let lm = be32(26 + 8) as usize;
+    let mut p = 26 + 8 + 4 + lm;
+    assert_eq!(u16::from_be_bytes([b[p], b[p + 1]]), 1);
+    p += 2;
+    let counts: Vec<usize> = (0..h * 3)
+        .map(|i| u16::from_be_bytes([b[p + i * 2], b[p + i * 2 + 1]]) as usize)
+        .collect();
+    p += h * 6;
+    let mut flat = Vec::with_capacity(w * h * 3);
+    for n in counts {
+        let end = p + n;
+        while p < end {
+            let c = b[p];
+            p += 1;
+            if c < 128 {
+                flat.extend_from_slice(&b[p..p + c as usize + 1]);
+                p += c as usize + 1;
+            } else if c > 128 {
+                flat.extend(std::iter::repeat_n(b[p], 257 - c as usize));
+                p += 1;
+            }
+        }
+    }
+    assert_eq!(p, b.len());
+    for (i, px) in want.as_chunks::<4>().0.iter().enumerate().step_by(997) {
+        for c in 0..3 {
+            assert_eq!(flat[c * w * h + i], px[c], "pixel {i}, channel {c}");
+        }
+    }
+    let _ = std::fs::remove_dir_all(d);
+}

@@ -230,6 +230,12 @@ pub fn project(e: &Engine, s: &State, doc: &mut Doc) -> Result<(Project, SaveTim
         .ok_or("the open cut isn't in the project")?;
     cut.name = cut_name;
     cut.tracks = tracks;
+    // the scene's sound as the timeline has it (clips moved, muted)
+    if s.sound.from_file
+        && let Some(sc) = scenes.get_mut(doc.scene)
+    {
+        sc.audio = s.sound.file_clips();
+    }
     // the other cuts: only layers that are still there
     for c in scenes.iter_mut().flat_map(|sc| sc.cuts.iter_mut()) {
         c.tracks.retain(|l, _| here.contains(l));

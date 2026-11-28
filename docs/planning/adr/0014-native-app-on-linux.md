@@ -225,3 +225,64 @@ Each step is its own PR, with tests that need no window on the screen.
   composited on the CPU — the next step moves that to the GPU); pen to screen while an export runs
   (p99 ~16 ms at 165 Hz); 4K WebM peaks ~1.5 GB (libvpx); 4K MP4 files are ~40 % larger at the same
   quality (the encoder settings that keep the export under 1 GB).
+
+## Phase 4: animation (2026-11-28)
+
+### Sound and PSD
+
+- **Sound** (`crates/sound`, `apps/native/.../engine/sound`):
+  - **Decoding:** Symphonia (pure Rust) reads WAV, AIFF, MP3, FLAC, Ogg Vorbis, AAC-LC (ADTS,
+    MP4/M4A) and ALAC, once, off the window's thread; everything is kept at 48 kHz (other rates
+    resampled once, a Kaiser-windowed sinc). What Symphonia can't read — Opus (`.opus`, Ogg or
+    WebM) and HE-AAC — FFmpeg decodes when it's installed (it already is for video export).
+  - **Output:** cpal (ALSA, which reaches PipeWire and PulseAudio through their ALSA plugins). The
+    mixer runs in cpal's callback and never allocates, locks or frees there (a test counts it):
+    commands come through a lock-free ring (rtrb) and go back the same way to be dropped. The
+    output opens at the first play or scrub and pauses 1.5 s after the sound stops, so idle stays
+    at 0 frames and 0 % CPU.
+  - **In step with the picture:** the mixer knows when each buffer will be heard (cpal's
+    latency) and plays the scene sample playback's clock says is due then, warping its time by
+    at most 0.2 % to follow the clock (no drift, no pitch change). Frames reach the screen a
+    little away from the clock's time (on mutter, 0.6–0.8 of a refresh early: playback's lead
+    overestimates the show delay); the sound follows the frames as presented (the median of the
+    play's latest 48 frames' presentation times, from its third frame; kept for the next play).
+  - **Scrubbing** plays the frame's snippet (1/12 s or two frames, faded); the timeline shows a
+    row per clip with its waveform (made once, off-thread), mutes, moves (dragged by frames) and
+    removes clips; saving writes them back.
+  - **Export:** a video gets the cut's (or loop range's) mix: clips by scene frame, cuts one
+    after another, gain, mute, negative starts, sample-exact (tests), written to a WAV a second
+    at a time on the export's thread; MP4 gets AAC, WebM Opus.
+  - **No sound in tests and checks:** the system's output opens only for a normal start;
+    `PENCILPILOT_NO_SOUND`, `PENCILPILOT_NO_SYSTEM_WINDOWS`, `--stats` and `--quit-after` play to
+    a silent output (no device) that records what it played. Only ALSA's `null` device was
+    opened to prove the device path.
+- **PSD export** (`crates/export` `psd`): the export dialog's PSD writes the frame showing with
+  its layers (names, opacity, blend, visibility, clipping, masks, groups, styles drawn in,
+  adjustments kept hidden by name) and the flattened picture: the current app's writer, ported;
+  for the same document its bytes are the same (a fixture written by `psd.ts`), and it reads back
+  (a reader after `psd-read.ts`). Layers are asked for one at a time, on a thread of its own.
+- **Proposed budgets** (new with this step): sound against the frame shown within ±1 display
+  frame; no drift over 60 s; sound heard within 50 ms of Play.
+- **Measured** (release, headless mutter, private D-Bus, the silent output at 20 ms latency;
+  a 1500-frame cut at 24 fps under 65 s of music, `tools/native-qa/sound_window.py`):
+
+  | What | Budget | Measured |
+  |---|---|---|
+  | Sound vs the frame shown, 60 s, 165 Hz | ±6.06 ms | p50 0.0, p95 0.17, worst 3.6 ms (1463 frames) |
+  | Sound vs the frame shown, 60 s, 60 Hz | ±16.67 ms | p50 0.13, p95 0.40, worst 2.9 ms |
+  | Drift over the minute | none | 0.02 / 0.27 ms a minute (165 / 60 Hz) |
+  | The session's first play, its first two frames | as above | −8.2, −4.4 ms at 165 Hz (−11.2, −8.9 at 60); the rest as above |
+  | Play to sound heard | 50 ms | 31.5–31.8 ms (20 ms of it the output's latency) |
+  | Simulated sound card ±200 ppm, 1 ms callback jitter, 60 s (unit test) | — | under 1 ms throughout, under 0.5 ms at the end (the test's bounds) |
+  | Idle, project with sound open | 0 frames, ~0 CPU | 0 frames, 0.0 % of a core |
+  | Export with sound, 1080p (62.5 s): MP4 / WebM peak | 1 GB | 384 / 460 MiB; streams 62.5 s, AAC / Opus |
+  | Export with sound, 4K MP4 peak | 1 GB | 652 MiB (WebM 1.19 GB: libvpx, as without sound) |
+  | Exported sound vs the mix | — | lag 0 ms; correlation 1.000 (AAC), 0.984 (Opus) |
+
+- **Fixed on the way:** a video scaled while written lost its sound (the sound's `-i` came after
+  `-vf`, which FFmpeg refuses); `-shortest` held up to 10 s of frames back (1 GB at 1080p): the
+  mix is made as long as the frames instead.
+- **Open:** the first play of a session at 165 Hz (its first frame 2 ms past the budget, until
+  the frames' timing is known); the real device's latency on the owner's PipeWire (only ALSA
+  `null` was opened here); adding sounds and lip-sync (the current app's) aren't ported yet;
+  undo for clip moves.
