@@ -2,7 +2,7 @@
 """A PSD from the native app against today's app's writer, byte for byte, and read back.
 
     python3 -I psd_check.py <native.psd> <out-dir> [--psd-ts <packages/paint/src/psd.ts>]
-                            [--project <project.ppstudio> --frame N]
+                            [--composite <the CPU's picture, raw RGBA>]
 
 1. The native PSD is read here (a reader of its own, written from the format: header,
    layer records with their masks, names (Unicode `luni`), folders (`lsct`), channel data
@@ -255,8 +255,15 @@ def main():
                    for r in recs],
         "items": [{k: v for k, v in i.items() if k in ("kind", "name")} for i in doc["items"]],
     }
+    if "--composite" in a:
+        # the flattened picture against the CPU's picture of the frame (RGB, alpha left out)
+        want = open(a[a.index("--composite") + 1], "rb").read()
+        diffs = [abs(x - y) for i, (x, y) in enumerate(zip(comp, want)) if i % 4 != 3]
+        res["compositeVsCpu"] = {"maxDiff": max(diffs) if diffs else None,
+                                 "over1": sum(1 for v in diffs if v > 1), "sameSize": len(comp) == len(want)}
     json.dump(res, open(os.path.join(out, "psd-check.json"), "w"), indent=1)
-    print(json.dumps({k: res[k] for k in ("bytes", "tsBytes", "identical", "firstDifference", "where")}))
+    print(json.dumps({k: res.get(k) for k in ("bytes", "tsBytes", "identical", "firstDifference", "where",
+                                              "compositeVsCpu")}))
 
 
 if __name__ == "__main__":

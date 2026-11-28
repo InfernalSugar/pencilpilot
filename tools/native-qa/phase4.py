@@ -1059,24 +1059,26 @@ def decode(path, rate=RATE):
     return np.frombuffer(p.stdout, "<f4").reshape(-1, 2)
 
 
-def clip_parts(spec, fps):
+def clip_parts(spec, fps, only=None):
     """Each cut of the project's spec as a part (its scene's clips, its first scene frame,
-    its length): every cut one after another, as an export of the whole film plays them."""
+    its length): every cut one after another, as an export of the whole film plays them;
+    with `only` = (scene, cut), that cut alone (the native app exports the open cut)."""
     parts = []
-    for sc in spec["scenes"]:
+    for si, sc in enumerate(spec["scenes"]):
         start = 0
-        for c in sc["cuts"]:
+        for ci, c in enumerate(sc["cuts"]):
             n = max(sum(e["length"] for e in cels) for cels in c["tracks"].values())
-            parts.append({"clips": sc.get("audio", []), "from": start, "frames": n})
+            if only is None or only == (si, ci):
+                parts.append({"clips": sc.get("audio", []), "from": start, "frames": n})
             start += n
     return parts
 
 
-def contributions(spec, pics, fps=24, rate=RATE):
+def contributions(spec, pics, fps=24, rate=RATE, only=None):
     """Each clip's sound placed where the mixdown puts it (gain 1), over the whole film:
     {(scene clip label): array (n, 2)}; and the total length in samples."""
     import numpy as np
-    parts = clip_parts(spec, fps)
+    parts = clip_parts(spec, fps, only)
     total = sum(p["frames"] for p in parts)
     n = max(1, round(total / fps * rate))
     out, t = {}, 0.0
@@ -1105,7 +1107,7 @@ def contributions(spec, pics, fps=24, rate=RATE):
     return out, n
 
 
-def audio_check(video, spec_path, pics):
+def audio_check(video, spec_path, pics, only=None):
     """The video's sound decoded, aligned (cross-correlation), and fitted as a sum of the
     clips' placed sounds (least squares): each clip's gain as heard (muted ones should be
     0, the others their gain), the lag, and what's left over."""
@@ -1114,10 +1116,12 @@ def audio_check(video, spec_path, pics):
     got = decode(video)
     if got is None:
         return {"sound": False}
-    basis, n = contributions(spec, pics, spec.get("fps", 24))
+    basis, n = contributions(spec, pics, spec.get("fps", 24), only=only)
     names = list(basis)
     want_gain = {}
-    for sc in spec["scenes"]:
+    for si, sc in enumerate(spec["scenes"]):
+        if only is not None and si != only[0]:
+            continue
         for c in sc.get("audio", []):
             want_gain[f"{c['file']}@{c.get('start', 0)}"] = 0.0 if c.get("muted") else c.get("gain", 1.0)
     expected = sum(basis[k] * want_gain[k] for k in names)
@@ -1171,7 +1175,8 @@ def main():
     if len(a) >= 3 and a[0] == "audio-check":
         # audio-check <video> <fixtures dir> <project name>
         pics = os.path.join(a[2], "pics")
-        print(json.dumps(audio_check(a[1], os.path.join(pics, f"{a[3]}.json"), pics), indent=1))
+        only = tuple(int(v) for v in a[a.index("--cut") + 1].split(",")) if "--cut" in a else None
+        print(json.dumps(audio_check(a[1], os.path.join(pics, f"{a[3]}.json"), pics, only), indent=1))
         return
     if len(a) >= 3 and a[0] == "run":
         binary, out = os.path.realpath(a[1]), os.path.realpath(a[2])
