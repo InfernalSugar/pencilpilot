@@ -1770,6 +1770,41 @@ impl Together {
         }
     }
 
+    /// Whether something waits to go into the canvas (it was busy). While it does, call
+    /// [`Together::retry`] now and then (the studio tries every 50 ms): waiting for this
+    /// app's next change could be forever, as nothing may change here.
+    pub fn waiting(&self) -> bool {
+        !self.structure.is_empty() || !self.pending.is_empty()
+    }
+
+    /// Put in what couldn't go in yet (layer and group changes, then tiles and masks):
+    /// those that can now do. Sends nothing.
+    pub fn retry(&mut self, c: &mut dyn CanvasPort) {
+        self.flush(c, false);
+    }
+
+    /// `count`: a change that keeps failing (e.g. the last layer can't go) is given up after
+    /// 50 of this app's changes (tries while waiting for a busy canvas don't count).
+    fn flush(&mut self, c: &mut dyn CanvasPort, count: bool) {
+        while let Some(op) = self.structure.front().map(|l| l.op.clone()) {
+            let done = self.run_op(c, &op);
+            let front = self.structure.front_mut().unwrap();
+            if !done {
+                if !count {
+                    break;
+                }
+                front.tries += 1;
+                if front.tries < 50 {
+                    break;
+                }
+            }
+            self.structure.pop_front();
+        }
+        for k in self.pending.iter().cloned().collect::<Vec<_>>() {
+            self.put_key(c, &k);
+        }
+    }
+
     /// The canvas changed here: send this app's changed tiles, settings, strokes and
     /// masks (and share layers made here). Call it a moment after changes (the studio
     /// waits 40 ms of quiet), and after the canvas stops being busy.
@@ -1777,19 +1812,7 @@ impl Together {
         if !self.synced {
             return;
         }
-        // (one that keeps failing, e.g. the last layer can't go, is given up after a while)
-        while let Some(op) = self.structure.front().map(|l| l.op.clone()) {
-            let done = self.run_op(c, &op);
-            let front = self.structure.front_mut().unwrap();
-            front.tries += 1;
-            if !done && front.tries < 50 {
-                break;
-            }
-            self.structure.pop_front();
-        }
-        for k in self.pending.iter().cloned().collect::<Vec<_>>() {
-            self.put_key(c, &k);
-        }
+        self.flush(c, true);
         // a layer made here outside the session's way (duplicate, paste, import)
         let known: HashSet<u32> = self.ids.values().copied().collect();
         let all = c.layers();

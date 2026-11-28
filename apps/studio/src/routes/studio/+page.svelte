@@ -2514,6 +2514,7 @@
 	function stopTogether(info: ShareInfo | null = sharing) {
 		clearTimeout(togetherTimer);
 		if (together && info) savedShare = together.save(info.invite, everyone(info.members));
+		together?.close();
 		dropLive();
 		if (together && canvas)
 			for (const id of together.ids.values()) canvas.setLayerQuiet(id, { locked: false });

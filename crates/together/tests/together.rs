@@ -1791,3 +1791,44 @@ fn clears_go_in_edits_every_app_takes_however_many() {
     let bd = showing(&mut s, B, sky);
     assert!(s.c(B).drawings[&bd].is_empty());
 }
+
+// ---- drawing together: a busy canvas ----
+
+#[test]
+fn takes_in_what_came_while_it_was_busy_when_retried_with_no_change_of_its_own() {
+    let mut s = hosted(&["Sky", "Hills"], |hc| {
+        hc.add_group(2);
+    });
+    // Bo's canvas is busy (someone's live stroke being drawn) as the project comes in
+    let mut bc = FakeCanvas::new(&[]);
+    bc.busy = true;
+    s.add(B, "Bo", bc);
+    s.with(B, |t, c| t.start_join(c, A));
+    s.settle();
+    s.c(A).paint(1, 7, 7, 70);
+    s.with(A, |t, c| t.local_changed(c));
+    s.settle();
+    assert!(s.t(B).waiting());
+    assert!(s.c(B).group_list.is_empty());
+    // the stroke ends: the app retries (no change of its own)
+    s.c(B).busy = false;
+    s.with(B, |t, c| t.retry(c));
+    assert!(!s.t(B).waiting());
+    let sky = s.c(B).by_name("Sky").id;
+    assert_eq!(s.c(B).pixel(sky, 7, 7), Some(70));
+    assert_eq!(s.c(B).group_list.len(), 1);
+    let g = s.c(B).group_list[0].id;
+    assert_eq!(s.c(B).by_name("Hills").group, g);
+    // retries while busy don't use up a change's tries
+    s.c(B).busy = true;
+    let hills = s.t(A).lid_of(2).unwrap();
+    s.with(A, |t, _| t.move_own(&hills, 0));
+    s.settle();
+    for _ in 0..200 {
+        s.with(B, |t, c| t.retry(c));
+    }
+    assert!(s.t(B).waiting());
+    s.c(B).busy = false;
+    s.with(B, |t, c| t.retry(c));
+    assert_eq!(s.c(B).names()[..2], ["Hills", "Sky"]);
+}

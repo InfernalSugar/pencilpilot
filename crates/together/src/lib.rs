@@ -46,6 +46,9 @@
 //!   [`Together::on_edit`] in the session's order.
 //! - Call [`Together::local_changed`] a moment after the canvas changes (the studio waits
 //!   40 ms of quiet), and again after a busy canvas frees up.
+//! - While [`Together::waiting`], call [`Together::retry`] every tick or so (the studio
+//!   tries every 50 ms). Tiles, groups and layer moves that came while the canvas was busy
+//!   (a stroke here, or someone's live stroke) go in then, even if nothing changes here.
 //! - Chat bodies (`{k: 'chat'}`) arrive as direct messages too. Check
 //!   [`chat::chat_text`] first, and hand the rest to [`Together::on_direct`].
 //!
