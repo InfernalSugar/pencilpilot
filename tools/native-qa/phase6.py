@@ -629,6 +629,33 @@ def decode_tile(s):
     return raw if len(raw) == TILE_BYTES else None
 
 
+def encode_tile(px):
+    c = zlib.compressobj(6, zlib.DEFLATED, -15)
+    return "z:" + base64.b64encode(c.compress(px) + c.flush()).decode()
+
+
+def stroke_tiles(seed, n=4, opaque=False):
+    """A few tiles of a scripted member's "stroke": a soft diagonal band, some of it at low
+    alpha (where premultiplied storage rounds), at tiles near (seed, seed)."""
+    import numpy as np
+    rng = np.random.default_rng(seed)
+    out = []
+    bx, by = 2 + seed % 20, 2 + (seed // 20) % 12
+    for i in range(n):
+        yy, xx = np.mgrid[0:64, 0:64]
+        d = np.abs(xx - yy - rng.integers(-20, 20))
+        a = np.clip(255 - d * rng.integers(6, 30), 0, 255).astype(np.uint8)
+        if opaque:
+            a = np.where(a > 0, 255, 0).astype(np.uint8)
+        rgb = rng.integers(0, 256, 3, dtype=np.uint8)
+        px = np.zeros((64, 64, 4), np.uint8)
+        px[..., :3] = rgb
+        px[..., 3] = a
+        px[a == 0] = 0
+        out.append([bx + i, by, px.tobytes()])
+    return out
+
+
 def wire_tiles(events):
     """Per (lid, did): {(x, y): bytes}, from a peer's log: the snapshot sent to it (snap.*)
     and every `tiles` edit after, in order."""
@@ -646,6 +673,55 @@ def wire_tiles(events):
             for x, y in b.get("clear", []):
                 m.pop((x, y), None)
     return state
+
+
+def wire_frames(events):
+    """From a peer's log: shared layer name → [tiles per frame], by the newest timeline (from
+    the snapshot or a `timeline` edit) and the tiles sent for each drawing."""
+    tiles = wire_tiles(events)
+    names, tl = {}, None
+    for e in events:
+        b = e.get("body") or {}
+        if b.get("k") == "snap.begin":
+            tl = b.get("tl")
+            for l in b.get("layers", []):
+                names[l["lid"]] = l["name"]
+        elif e["ev"] == "edit" and b.get("k") == "layer":
+            names[b["lid"]] = b.get("name")
+        elif e["ev"] == "edit" and b.get("k") == "rename":
+            names[b["lid"]] = b.get("name")
+        elif e["ev"] == "edit" and b.get("k") == "timeline":
+            tl = b.get("tl")
+    out = {}
+    for sc in (tl or {}).get("scenes", []):
+        for cut in sc.get("cuts", []):
+            for lid, track in cut.get("tracks", {}).items():
+                seq = []
+                for x in track:
+                    seq += [x.get("d") or None] * x.get("n", 1)
+                out.setdefault(names.get(lid, lid), []).extend(
+                    [nonempty(tiles.get((lid, d), {})) if d else None for d in seq])
+    return out
+
+
+def compare_with_wire(saved, events, names):
+    """A saved project's layers against what the wire carried (frame by frame)."""
+    pp, _ = project_pixels(saved)
+    wf = wire_frames(events)
+    res = {}
+    for n in names:
+        if n not in pp or n not in wf:
+            res[n] = {"missing": "saved" if n not in pp else "wire"}
+            continue
+        fs, fw = pp[n][-1], wf[n]
+        diffs = []
+        for i in range(min(len(fs), len(fw))):
+            c = compare_tiles(fs[i] or {}, fw[i] or {})
+            if not c["equal"]:
+                diffs.append({"frame": i, **c})
+        res[n] = {"equal": not diffs, "samePremul1": all(d["samePremul1"] for d in diffs),
+                  "frames": [len(fs), len(fw)], "differ": diffs[:4]}
+    return res
 
 
 def ppstudio_layers(path):
@@ -682,20 +758,105 @@ def nonempty(m):
 
 
 def compare_tiles(a, b):
-    """Two {(x, y): bytes} maps: equal, and where not (tiles only in one, differing bytes)."""
+    """Two {(x, y): bytes} maps: byte-equal, and where not: tiles only in one, tiles that
+    differ, the largest difference in a straight channel, in alpha, and premultiplied (the
+    current app keeps pixels premultiplied, so a tile put into it comes back with straight
+    colour off by a few where alpha is low; premultiplied, by at most 1)."""
+    import numpy as np
     a, b = nonempty(a), nonempty(b)
     only_a = sorted(set(a) - set(b))
     only_b = sorted(set(b) - set(a))
-    diff = []
-    maxd = 0
+    diff, maxd, maxa, maxp = 0, 0, 0, 0
     for k in set(a) & set(b):
         if a[k] != b[k]:
-            d = max(abs(x - y) for x, y in zip(a[k], b[k]))
-            maxd = max(maxd, d)
-            diff.append(k)
+            diff += 1
+            x = np.frombuffer(a[k], np.uint8).reshape(-1, 4).astype(np.int32)
+            y = np.frombuffer(b[k], np.uint8).reshape(-1, 4).astype(np.int32)
+            maxd = max(maxd, int(np.abs(x - y).max()))
+            maxa = max(maxa, int(np.abs(x[:, 3] - y[:, 3]).max()))
+            px = (x[:, :3] * x[:, 3:4] + 127) // 255
+            py = (y[:, :3] * y[:, 3:4] + 127) // 255
+            maxp = max(maxp, int(np.abs(px - py).max()))
+    # a tile in one only: compare with transparent
+    for k in only_a + only_b:
+        t = np.frombuffer((a.get(k) or b.get(k)), np.uint8).reshape(-1, 4).astype(np.int32)
+        maxa = max(maxa, int(t[:, 3].max()))
+        maxp = max(maxp, int(((t[:, :3] * t[:, 3:4] + 127) // 255).max()))
     return {"equal": not (only_a or only_b or diff), "tiles": [len(a), len(b)],
-            "onlyFirst": only_a[:8], "onlySecond": only_b[:8], "differ": len(diff),
-            "maxChannelDiff": maxd}
+            "onlyFirst": only_a[:8], "onlySecond": only_b[:8], "differ": diff,
+            "maxChannelDiff": maxd, "maxAlphaDiff": maxa, "maxPremulDiff": maxp,
+            "samePremul1": maxa == 0 and maxp <= 1}
+
+
+def frames_of(m):
+    """A manifest's timeline: layer id → [drawing id per frame] (every scene's cuts, in order)."""
+    out = {}
+    for sc in m["timeline"].get("scenes", []):
+        for cut in sc.get("cuts", []):
+            n = max([sum(e.get("length", 1) for e in t) for t in cut.get("tracks", {}).values()] or [0])
+            for lid, track in cut.get("tracks", {}).items():
+                seq = []
+                for e in track:
+                    seq += [e.get("drawing") or None] * e.get("length", 1)
+                seq += [None] * (n - len(seq))
+                out.setdefault(lid, []).extend(seq)
+    return out
+
+
+def project_pixels(path):
+    """A .ppstudio: layer name → [[tiles per frame] per layer of that name] ({(x, y): bytes},
+    transparent tiles left out; None: no drawing), and the manifest."""
+    z = zipfile.ZipFile(path)
+    m = json.loads(z.read("manifest.json"))
+    cache = {}
+
+    def tiles(did):
+        if did not in cache:
+            d = m["drawings"].get(did) or {"tiles": []}
+            t = {}
+            for e in d.get("tiles", []):
+                px = z.read(f"tiles/{e['hash']}")
+                if any(px):
+                    t[(e["x"], e["y"])] = px
+            cache[did] = t
+        return cache[did]
+    fr = frames_of(m)
+    out = {}
+    for l in m["layers"]:
+        seq = fr.get(str(l["id"]), [])
+        out.setdefault(l["name"], []).append([tiles(d) if d else None for d in seq])
+    return out, m
+
+
+def compare_projects(a, b, names=None):
+    """Two saved projects' layers (by name), frame by frame."""
+    pa, ma = project_pixels(a)
+    pb, mb = project_pixels(b)
+    names = names or sorted(set(pa) & set(pb))
+    res = {"layersA": [l["name"] for l in ma["layers"]], "layersB": [l["name"] for l in mb["layers"]],
+           "canvas": [ma["canvas"], mb["canvas"]], "layers": {}}
+    ok, ok1 = True, True
+    for n in names:
+        if n not in pa or n not in pb:
+            res["layers"][n] = {"missing": "A" if n not in pa else "B"}
+            ok = ok1 = False
+            continue
+        fa, fb = pa[n][-1], pb[n][-1]
+        r = {"frames": [len(fa), len(fb)], "differ": [], "sameName": [len(pa[n]), len(pb[n])]}
+        same1 = True
+        for i in range(min(len(fa), len(fb))):
+            c = compare_tiles(fa[i] or {}, fb[i] or {})
+            if not c["equal"]:
+                r["differ"].append({"frame": i, **c})
+                same1 = same1 and c["samePremul1"]
+        r["tiles"] = sum(len(t or {}) for t in fa)
+        r["equal"] = not r["differ"]
+        r["samePremul1"] = same1
+        ok, ok1 = ok and r["equal"], ok1 and same1
+        r["differ"] = r["differ"][:5]
+        res["layers"][n] = r
+    res["equal"], res["samePremul1"] = ok, ok1
+    return res
 
 
 # ------------------------------------------------------------------------------------------
@@ -787,8 +948,172 @@ def scenario_studio_wire(out):
     return res
 
 
+def live_latency(sent, evs, kinds=("begin", "points", "end")):
+    """From the sender's pen (per stroke, each point's time) to the receiver: when its live
+    stroke's first points arrived and were shown, and when the stroke's tiles arrived."""
+    lives = [e for e in evs if e.get("kind") == "presence" and e.get("live")]
+    tiles = [e for e in evs if e.get("kind") == "edit" and e.get("k") == "tiles"]
+    first_arrive, first_shown, tiles_after_end = [], [], []
+    for st in sent:
+        t0, t_end = st[0], st[-1]
+        b = next((e for e in lives if e["live"] == "begin" and e["t"] >= t0), None)
+        p = next((e for e in lives if e["live"] == "points" and e["t"] >= t0), None)
+        if b:
+            first_arrive.append((b["t"] - t0) / 1e6)
+        if p and p.get("shown"):
+            first_shown.append((p["shown"] - t0) / 1e6)
+        t = next((e for e in tiles if e["t"] >= t_end), None)
+        if t:
+            tiles_after_end.append((t["t"] - t_end) / 1e6)
+    return {"penToLiveArrivedMs": dist(first_arrive), "penToLiveShownMs": dist(first_shown),
+            "strokeEndToTilesArrivedMs": dist(tiles_after_end)}
+
+
+def scenario_studio_pair(out):
+    """Two current apps: A hosts, B joins; A draws; B shows the live stroke and then its
+    tiles; both saved projects byte-equal on the shared layer. (The current app against
+    itself: the reference for the native app.)"""
+    studio = env_bin("PP_STUDIO")
+    projects = env_bin("PP_PROJECTS")
+    res = {"load": load()}
+    a = Studio(studio, out, "pa", project=os.path.join(projects, "empty.ppstudio"), name="Ana")
+    b = None
+    try:
+        b = Studio(studio, out, "pb", project=os.path.join(projects, "tiny.ppstudio"), name="Bo")
+        a.open()
+        b.open()
+        res["soloSocketsA"] = len([x for x in sockets_of(a.pid) if x["proto"].startswith("udp")])
+        info = a.host()
+        probe = Peer(env_bin("PP_PEER"), out, "pair", invite=info["invite"], name="Probe")
+        time.sleep(0.5)
+        probe.direct(info["me"]["id"], {"k": "snap.req"})
+        jinfo, t_join = b.join(info["invite"])
+        res["members"] = len(jinfo["members"])
+        time.sleep(1.5)
+        b.take()
+        sent = a.pen([wave(i) for i in range(5)])
+        time.sleep(2.0)
+        evs = b.take()["ev"]
+        res["aToB"] = live_latency(sent, evs)
+        sent = b.pen([wave(i, y0=0.6) for i in range(3)])
+        time.sleep(2.0)
+        res["bOwnLayerEvents"] = len(a.take()["ev"])
+        pa, pb = a.save(), b.save()
+        res["compare"] = compare_projects(pa, pb, ["Layer 1"])
+        evs = probe.events()
+        res["aVsWire"] = compare_with_wire(pa, evs, ["Layer 1"])
+        res["bVsWire"] = compare_with_wire(pb, evs, ["Layer 1"])
+        probe.leave()
+    finally:
+        a.quit()
+        if b:
+            b.quit()
+    return res
+
+
+def peer_layer(p, n=1, name=None):
+    """A scripted member's own new layer: its id (the member's id starts it)."""
+    lid = f"{p.id[:12]}:{n}"
+    p.edit({"k": "layer", "lid": lid, "name": name or f"{p.ready['me']['name']} layer"})
+    return lid
+
+
+def peer_timeline(lid, did):
+    return {"k": "timeline", "tl": {"kinds": {}, "mouths": [], "palettes": [], "stages": {}, "statics": [],
+            "scenes": [{"name": "Scene 1", "cuts": [{"name": "Cut 1", "tracks": {lid: [{"d": did, "n": 1}]}}]}]}}
+
+
+def crowd(p, lid, did, strokes, rate, seed0):
+    """`strokes` tiles edits at `rate` a second on the member's own layer, cursors between."""
+    bodies = []
+    for i in range(strokes):
+        t = stroke_tiles(seed0 + i)
+        bodies.append({"k": "tiles", "lid": lid, "did": did,
+                       "set": [[x, y, encode_tile(px)] for x, y, px in t], "clear": []})
+    p.cmd(cmd="edits", bodies=bodies, gap_ms=int(1000 / rate))
+
+
+def scenario_studio_crowd(out, members=8, strokes=30, rate=2.0):
+    """The current app hosts 7 scripted members: each makes a layer and draws on it at once
+    (tiles edits, `rate` a second, like a person's strokes; cursors too). Every edit must
+    reach everyone in the same order, and the app's saved layers must hold every member's
+    last tiles."""
+    studio = env_bin("PP_STUDIO")
+    peer_bin = env_bin("PP_PEER")
+    res = {"load": load(), "members": members, "strokesEach": strokes, "rate": rate}
+    s = Studio(studio, out, "crowd", project=os.path.join(env_bin("PP_PROJECTS"), "empty.ppstudio"))
+    peers = []
+    try:
+        s.open()
+        info = s.host()
+        for i in range(members - 1):
+            peers.append(Peer(peer_bin, out, f"crowd{i}", invite=info["invite"], name=f"M{i}"))
+        time.sleep(1.0)
+        res["membersSeen"] = len(s.invoke("share_status")["members"])
+        lids = []
+        for i, p in enumerate(peers):
+            lid = peer_layer(p)
+            did = f"{p.id[:12]}:{1000 + i}"
+            p.edit(peer_timeline(lid, did))
+            lids.append((lid, did))
+        time.sleep(1.0)
+        t0 = mono_ns()
+        for i, (p, (lid, did)) in enumerate(zip(peers, lids)):
+            crowd(p, lid, did, strokes, rate, 100 * i)
+        # cursors from everyone while they draw
+        for k in range(int(strokes / rate * 10)):
+            for j, p in enumerate(peers):
+                p.presence({"x": 100 + k, "y": 50 * j})
+            time.sleep(0.1)
+        time.sleep(3.0)
+        page = s.take()
+        edits = [e for e in page["ev"] if e["kind"] == "edit"]
+        seqs = [e["seq"] for e in edits]
+        res["appEdits"] = len(edits)
+        res["appSeqGaps"] = sum(1 for a, b in zip(seqs, seqs[1:]) if b != a + 1)
+        res["appTilesEdits"] = sum(1 for e in edits if e.get("k") == "tiles")
+        expected = (members - 1) * strokes
+        # every scripted member got every other member's edits
+        got = []
+        lat = []
+        for p in peers:
+            ev = [e for e in p.events() if e["ev"] == "edit" and (e.get("body") or {}).get("k") == "tiles"]
+            got.append(len(ev))
+        sent_t = {}
+        for p in peers:
+            for e in p.events():
+                if e["ev"] == "sent":
+                    sent_t[(p.id, e["n"])] = e["t"]
+        res["tilesSentTotal"] = expected
+        res["tilesAtEachMember"] = got
+        res["dropped"] = sum(expected - g for g in got) + (expected - res["appTilesEdits"])
+        saved = s.save()
+        pp, _ = project_pixels(saved)
+        ok = {}
+        for i, p in enumerate(peers):
+            name = f"M{i} layer"
+            want = {}
+            for st in range(strokes):
+                for x, y, px in stroke_tiles(100 * i + st):
+                    want[(x, y)] = px
+            have = pp.get(name, [[None]])[-1]
+            c = compare_tiles(want, (have[0] if have else None) or {})
+            ok[name] = {k: c[k] for k in ("equal", "samePremul1", "tiles", "maxAlphaDiff", "maxPremulDiff")}
+        res["savedLayers"] = ok
+        res["allLayersSame"] = all(v["samePremul1"] for v in ok.values())
+        res["pssMiB"] = round(s.pss_kib() / 1024, 1)
+        res["seconds_drawing"] = round((mono_ns() - t0) / 1e9, 1)
+    finally:
+        for p in peers:
+            p.leave()
+        s.quit()
+    return res
+
+
 SCENARIOS = {
     "studio-wire": scenario_studio_wire,
+    "studio-pair": scenario_studio_pair,
+    "studio-crowd": scenario_studio_crowd,
 }
 
 
