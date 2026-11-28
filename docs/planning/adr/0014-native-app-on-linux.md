@@ -445,3 +445,22 @@ a `pp1-` code, and draws with others, the current app included, in the same sess
   so a computer is the same member in either app. **Checks never use a relay** (`--stats`,
   `--quit-after`: loopback only); `--host` / `--join <code>` / `--name` start a session
   without the interface, for checks only.
+- **Measured** (release, two native apps on loopback, each on a headless mutter and D-Bus of
+  its own, both drawing at once, 14 strokes each at 240 Hz input; 3 runs, the range;
+  load average 1–4):
+
+  | What | Proposed budget | 165 Hz | 60 Hz |
+  |---|---|---|---|
+  | Pen to the others' screen (live stroke shown), p99 | 50 ms | 6.2–6.5 ms | 13.2–13.4 ms |
+  | Stroke's end to its tiles shown there, worst | 100 ms | 9.0–9.4 ms | 13.1–13.3 ms |
+  | Pen to screen while the other draws, p99 (event time) | 10.06 / 20.67 ms | 8.3–8.6 ms | 18.4–18.5 ms |
+  | Missed frames while both draw | 0 | 0–1 | 0 |
+  | Joining 4K × 20 layers: connected to drawable | 3 s | 37–41 ms (launch to drawable 0.71 s) | |
+  | — the joiner's memory, peak PSS | 600 MiB | 325–326 MiB | |
+  | 8 members drawing at once (10 strokes each) | none dropped | 70 of 70 tile edits each; all 8 pictures the same | |
+
+  A first run under load average ~90 (other builds) had 8–11 missed frames and a pen p99 of
+  13–16.5 ms at 165 Hz; the same run quiet had none.
+- **Not yet in the native app** (the current app's): groups, masks, line (vector) layers,
+  adjustment layers and layer styles in a session; merging or deleting others' layers by
+  asking; sound files; rejoining a saved session after a break; the invite as a QR code.

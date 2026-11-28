@@ -148,6 +148,8 @@ struct Stroke {
     /// the painter's stroke key
     key: u32,
     brush: hokusai::Brush,
+    /// when its newest message came (one whose end was lost goes after a while)
+    at: std::time::Instant,
 }
 
 /// Others' live strokes: each member's preview layer and strokes going.
@@ -225,13 +227,21 @@ impl LiveIn {
                 }
                 self.begun.insert(id.clone(), std::time::Instant::now());
                 self.ended.remove(from);
-                self.strokes.insert(id, Stroke { key, brush: b });
+                self.strokes.insert(
+                    id,
+                    Stroke {
+                        key,
+                        brush: b,
+                        at: std::time::Instant::now(),
+                    },
+                );
                 Took::Nothing
             }
             "points" => {
-                let Some(st) = self.strokes.get(&id) else {
+                let Some(st) = self.strokes.get_mut(&id) else {
                     return Took::Nothing;
                 };
+                st.at = std::time::Instant::now();
                 let Some(pts) = ev.get("pts").and_then(Value::as_array) else {
                     return Took::Nothing;
                 };
@@ -302,6 +312,22 @@ impl LiveIn {
 
     /// Previews whose strokes ended a while ago go. Whether any did.
     pub fn prune(&mut self, p: &mut brush::Painter) -> bool {
+        // strokes whose end never came (datagrams may be lost) end now
+        let lost: Vec<(String, u64)> = self
+            .strokes
+            .iter()
+            .filter(|(_, st)| st.at.elapsed() >= STALE_PREVIEW)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in lost {
+            if let Some(st) = self.strokes.remove(&k) {
+                p.remote_end(st.key, &st.brush);
+            }
+            self.begun.remove(&k);
+            self.ended
+                .entry(k.0)
+                .or_insert_with(|| std::time::Instant::now() - STALE_PREVIEW);
+        }
         let old: Vec<String> = self
             .ended
             .iter()
@@ -321,7 +347,11 @@ impl LiveIn {
 
     /// When [`LiveIn::prune`] next has something to do.
     pub fn prune_at(&self) -> Option<std::time::Instant> {
-        self.ended.values().map(|t| *t + STALE_PREVIEW).min()
+        self.ended
+            .values()
+            .chain(self.strokes.values().map(|st| &st.at))
+            .map(|t| *t + STALE_PREVIEW)
+            .min()
     }
 
     /// Someone left: their strokes and preview layer go.
