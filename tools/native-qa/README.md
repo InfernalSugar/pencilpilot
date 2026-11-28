@@ -154,3 +154,21 @@ Measuring notes:
 - The current app sends a stroke's tiles 120 ms after the canvas settles (its batching), about
   145–165 ms after the stroke's last point, so "final tiles within 100 ms" can only hold where
   the native app sends.
+
+Scenarios (`phase6.py`; `PP_HZ` sets the headless display's rate; `name#tag` repeats one):
+
+| Scenario | What |
+|---|---|
+| `x-pair-native-hosts`, `x-pair-studio-hosts` | The two apps (the native app windowed) in one session, a scripted member watching the wire: pen to the other's screen (live stroke), stroke end to its tiles, both saved projects compared layer by layer and with the wire. |
+| `x-crowd` | Eight members (native host, current app, six scripted) drawing at once: native pen to screen and rate with and without them, others' edits to screen, no edit dropped, every layer in both saved copies, memory. |
+| `x-access` | Chat both ways; two ask for one layer, one is let in, the other's tiles count nowhere; taking access back mid-stroke; the native app asking for the current app's layer; a deny. |
+| `x-timeline-merge`, `x-first-strokes` | Timelines from several members (a layer's track from who may draw on it; a timeline right after its layer), the native app's first strokes on a blank frame. |
+| `x-join4k-*` | Joining the 4K, 20-layer project: native → native, current app → native, native → current app (after the host has shared its layers). |
+| `x-host-leaves-*`, `x-offline5`, `x-offline40`, `x-join-midstroke` | The host leaving (hand-over), a member stalled 5 s and 40 s, joining during a long stroke. |
+| `x-garbage-native`, `x-undo`, `x-groups`, `x-import4k`, `x-solo` | Edits no app may take (unknown kinds, AI-made content, broken), undo is your own, groups, a 4K picture arriving while drawing, a solo project's sockets. |
+| `studio-*` | The current app against itself (wire, pair, eight members, garbage, revoke): the reference. |
+
+`../../apps/native/tests/phase6_peer_qa.rs` is the native engine as a member without its window
+(`PP_NATIVE_PEER`: its test binary), for the scenarios that need many native members or access
+and chat actions; `../../crates/together/tests/phase6_oracle_qa.rs` reads the oracle's corpus
+through the port.
