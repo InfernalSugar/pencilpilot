@@ -10,6 +10,9 @@
 //!                                                when shown; the view; the state): for checks
 //!               [--save-doc d.png]               …and the document as a PNG on quitting
 //!               [--workspace draw]               …starting in that workspace
+//!               [--host] [--join pp1-…]          …hosting a session (the invite printed to
+//!               [--name Ana]                     stdout) or joining one, as Ana: checks
+//!                                                only (no relay: the same machine or network)
 
 mod pencheck;
 
@@ -55,11 +58,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // (and the system's sound output: a check plays to a silent one)
         shell::engine::sound::allow_sound();
     }
+    // drawing together without the interface: for checks only (they never use a relay)
+    let together = if a.iter().any(|x| x == "--host") {
+        Some(shell::engine::together::net::Start::Host)
+    } else {
+        val("--join").map(shell::engine::together::net::Start::Join)
+    };
+    if together.is_some() && !check {
+        return Err("--host and --join are for checks: with --quit-after or --stats".into());
+    }
     shell::run_window(shell::RunOptions {
         quit_after: val("--quit-after").and_then(|v| v.parse::<f64>().ok()),
         stats: val("--stats"),
         save_doc: val("--save-doc"),
         workspace,
         open: a.iter().find(|x| x.ends_with(".ppstudio")).cloned(),
+        together,
+        name: val("--name"),
     })
 }

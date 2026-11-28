@@ -256,6 +256,12 @@ impl Ui {
         self.open.is_some()
     }
 
+    /// Is (x, y) (logical) on something drawn above everything in the last pass (a card
+    /// over the canvas): the pointer there is the interface's.
+    pub fn over_overlay(&self, x: f32, y: f32) -> bool {
+        self.blocking.iter().any(|b| b.contains(x, y))
+    }
+
     /// A pass: build the interface (logical size `w` × `h`) with `build`. Returns the quads
     /// (device pixels) when they differ from what's on screen, None when nothing would change.
     ///
@@ -410,6 +416,30 @@ impl Frame<'_> {
     /// canvas) between those and what comes after.
     pub fn mark(&self) -> usize {
         self.quads.len()
+    }
+
+    /// Where the next quad goes in the list being drawn (the overlay's in an overlay): for
+    /// [`Frame::clip_from`].
+    pub fn here(&self) -> usize {
+        if self.in_overlay {
+            self.overlay.len()
+        } else {
+            self.quads.len()
+        }
+    }
+
+    /// Clips what was drawn since [`Frame::here`] gave `start` to `r` (logical).
+    pub fn clip_from(&mut self, start: usize, r: Rect) {
+        let sc = self.s();
+        let clip = [r.x * sc, r.y * sc, r.right() * sc, r.bottom() * sc];
+        let list = if self.in_overlay {
+            &mut self.overlay
+        } else {
+            &mut self.quads
+        };
+        for q in list.iter_mut().skip(start) {
+            *q = q.clip(clip);
+        }
     }
 
     /// The pointer, as this pass sees it.

@@ -123,6 +123,9 @@ pub struct Frames {
     ahead_due: bool,
     /// the picture made on the GPU ([`gpu`])
     pub gpu: gpu::GpuFrames,
+    /// layers that show others' strokes as they draw them (drawing together): no
+    /// drawings, no exposures, left as they are when frames change
+    pub previews: std::collections::HashSet<u32>,
 }
 
 /// Drawings decoded ahead (on another thread).
@@ -157,6 +160,13 @@ impl Frames {
         if self.onion_key.chunks(3).any(|e| e[0] == drawing) {
             self.onion_key.clear();
         }
+    }
+
+    /// A drawing changed from outside (someone else's tiles, drawing together): its
+    /// thumbnail and onion skin are made again, and its GPU copy (unless a layer shows it:
+    /// its changed tiles go up then).
+    pub fn remote_changed(&mut self, drawing: u32) {
+        self.mark(drawing);
     }
 
     /// The painter's id for the interface's layer `i`.
@@ -357,6 +367,9 @@ fn show(e: &mut Engine, s: &State) -> bool {
     let mut pairs = Vec::new();
     for (i, t) in s.sheet.tracks.iter().enumerate() {
         let id = e.frames.id(s, i);
+        if e.frames.previews.contains(&id) {
+            continue;
+        }
         let mut d = t.drawing_at(s.frame);
         // a drawing just started on a blank frame stays until the sheet takes it
         let shows = e.painter.layer_drawing(id);

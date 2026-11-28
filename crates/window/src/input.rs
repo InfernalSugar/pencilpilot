@@ -379,6 +379,8 @@ pub enum InputEvent {
         rate: i32,
         delay_ms: i32,
     },
+    /// text pasted from the system's clipboard ([`crate::Window::request_paste`])
+    Paste(String),
 }
 
 /// Pens by the compositor's tool object, so each tool keeps its own state.

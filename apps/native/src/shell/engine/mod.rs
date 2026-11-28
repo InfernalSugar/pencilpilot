@@ -15,6 +15,7 @@ pub mod export;
 pub mod files;
 pub mod frames;
 pub mod sound;
+pub mod together;
 pub mod tools;
 
 use brush::{Painter, set_brush_rgb};
@@ -132,6 +133,8 @@ pub struct Engine {
     pub exporter: export::Exporter,
     /// the scene's sound ([`sound`])
     pub sound: sound::Sounds,
+    /// drawing together ([`together`]): nothing runs until Host or Join
+    pub together: together::Together,
     lifts: u64,
 }
 
@@ -149,6 +152,7 @@ impl Engine {
             files: files::Files::default(),
             exporter: export::Exporter::default(),
             sound: sound::Sounds::default(),
+            together: together::Together::default(),
         }
     }
 
@@ -284,6 +288,9 @@ impl Engine {
             Action::Undo => self.painter.undo(),
             Action::Redo => self.painter.redo(),
             _ => {
+                if together::apply(self, s, a) {
+                    return true;
+                }
                 sound::apply(self, s, a);
                 files::apply(self, s, a)
                     || export::apply(self, s, a)
@@ -296,12 +303,14 @@ impl Engine {
     /// Once a loop, before drawing: playback and anything else that moves with time.
     /// Returns whether the picture changed.
     pub fn tick(&mut self, s: &mut State, now: std::time::Instant) -> bool {
+        // (first: layers and drawings from the session join before the frames part syncs)
+        let t = together::tick(self, s, now);
         let f = files::tick(self, s, now);
         let x = export::tick(self, s, now);
         let p = frames::tick(self, s, now);
         // (after playback's: it follows the clock playback has just set)
         let n = sound::tick(self, s, now);
-        p | f | x | n
+        p | f | x | n | t
     }
 
     /// When [`Engine::tick`] next has something to do (the shell sleeps until then).
@@ -311,6 +320,7 @@ impl Engine {
             files::next_tick_at(self, s),
             export::next_tick_at(self, s),
             sound::next_tick_at(self, s),
+            together::next_tick_at(self, s),
         ]
         .into_iter()
         .flatten()
@@ -387,6 +397,8 @@ impl Engine {
         self.painter.begin_stroke();
         self.painter
             .stroke_to(&b, x, y, pressure, tilt.0, tilt.1, 0.004);
+        together::stroke_begins(self, s);
+        self.together.live_out.point(x, y, pressure, 4.0);
         self.stroking = Some(b);
         self.last_ms = Some(ms);
         self.tap = Some(Tap {
@@ -412,6 +424,7 @@ impl Engine {
         }
         self.painter
             .stroke_to(b, x, y, pressure, tilt.0, tilt.1, dt);
+        self.together.live_out.point(x, y, pressure, dt * 1000.0);
     }
 
     pub fn up(&mut self) {
@@ -435,6 +448,9 @@ impl Engine {
                 }
             }
             self.painter.end_stroke(&b);
+            self.together.live_out.end(false);
+            self.together.live_out.on = false;
+            together::stroke_ended(self);
         }
         self.tap = None;
     }

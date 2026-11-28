@@ -119,6 +119,14 @@ impl DrawingCopy {
         TileBuffers(over.into_values().collect())
     }
 
+    /// Its tiles, as decoded tiles (to encode on another thread, say).
+    pub fn into_decoded(self) -> Vec<((i32, i32), DecodedTile)> {
+        self.0
+            .into_iter()
+            .map(|(k, t)| (k, DecodedTile(t)))
+            .collect()
+    }
+
     /// Its tiles' memory, for more copies.
     pub fn into_buffers(self) -> TileBuffers {
         TileBuffers(self.0.into_values().collect())
@@ -696,6 +704,9 @@ pub struct Painter {
     /// strokes from other people (shared canvases), drawn alongside the local
     /// one: key → (layer id, brush state). Never in the undo history.
     remote: HashMap<u32, (u32, BrushState)>,
+    /// drawings' tiles changed by recorded edits (strokes, fills, undo…) since last taken,
+    /// when asked to keep track ([`Painter::track_edits`]): what drawing together sends
+    edited: Option<HashMap<u32, HashSet<TileKey>>>,
     width: u32,
     height: u32,
     rgba: Vec<u8>,
@@ -776,6 +787,7 @@ impl Painter {
             next_group: 1,
             state: BrushState::default(),
             remote: HashMap::new(),
+            edited: None,
             width,
             height,
             rgba: vec![255; (width * height * 4) as usize],
@@ -2180,6 +2192,7 @@ impl Painter {
     fn push_step(&mut self, mut e: Edit) {
         self.edits += 1;
         self.tag_drawings(&mut e);
+        self.note_edited(&e);
         self.undo.push(e);
         if self.undo.len() > self.undo_limit {
             self.undo.remove(0);
@@ -4081,6 +4094,104 @@ impl Painter {
 
     // ---- shared canvases: other people's strokes ----
 
+    /// Keep track of which drawings' tiles recorded edits change (strokes, fills,
+    /// transforms, undo and redo), for [`Painter::take_edited`]; off forgets them.
+    pub fn track_edits(&mut self, on: bool) {
+        self.edited = on.then(HashMap::new);
+    }
+
+    /// The drawings whose colour tiles recorded edits changed since the last call (with
+    /// [`Painter::track_edits`] on), and those tiles. A layer showing no drawing counts
+    /// as drawing 0 (its own pixels).
+    pub fn take_edited(&mut self) -> Vec<(u32, Vec<(i32, i32)>)> {
+        let Some(m) = &mut self.edited else {
+            return Vec::new();
+        };
+        m.drain()
+            .map(|(d, k)| (d, k.into_iter().collect()))
+            .collect()
+    }
+
+    fn note_edited(&mut self, e: &Edit) {
+        if self.edited.is_none() {
+            return;
+        }
+        match e {
+            Edit::Tiles {
+                layer,
+                snap,
+                mask: false,
+                drawing,
+            } => {
+                let d = if *drawing != 0 {
+                    *drawing
+                } else {
+                    self.layers
+                        .iter()
+                        .find(|l| l.id == *layer)
+                        .map_or(0, |l| l.drawing)
+                };
+                if let Some(m) = &mut self.edited {
+                    m.entry(d).or_default().extend(snap.keys().copied());
+                }
+            }
+            Edit::Batch(list) => {
+                for e in list {
+                    self.note_edited(e);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Put tiles decoded ahead into a drawing (others' changes; not an undo step): `set`
+    /// replaces those tiles, `clear` empties those. The drawing may be showing (the layer's
+    /// changed tiles are marked for the picture) or kept. False when it's the drawing the
+    /// local stroke is painting (try again once it ends).
+    pub fn patch_drawing(
+        &mut self,
+        drawing: u32,
+        set: Vec<((i32, i32), DecodedTile)>,
+        clear: &[(i32, i32)],
+    ) -> bool {
+        if drawing == 0 {
+            return false;
+        }
+        if let Some(idx) = self.layers.iter().position(|l| l.drawing == drawing) {
+            if !self.idle() && self.layers[idx].id == self.active {
+                return false;
+            }
+            let l = &mut self.layers[idx];
+            for k in clear {
+                if l.surface.tiles.remove(k).is_some() {
+                    l.surface.dirty.insert(*k);
+                }
+            }
+            for (k, t) in set {
+                l.surface.tiles.insert(k, t.0);
+                l.surface.dirty.insert(k);
+            }
+            self.unstyle(idx);
+            return true;
+        }
+        let Some(tiles) = self.cels.get_mut(&drawing) else {
+            // (a drawing new here: its tiles; nothing to clear in one that has none)
+            if !set.is_empty() {
+                self.next_drawing = self.next_drawing.max(drawing + 1);
+                self.cels
+                    .insert(drawing, set.into_iter().map(|(k, t)| (k, t.0)).collect());
+            }
+            return true;
+        };
+        for k in clear {
+            tiles.remove(k);
+        }
+        for (k, t) in set {
+            tiles.insert(k, t.0);
+        }
+        true
+    }
+
     /// Add a layer without an undo step (e.g. a layer for another person). Returns its id.
     pub fn add_layer_silent(&mut self, name: &str) -> u32 {
         if self.layers.len() >= MAX_LAYERS {
@@ -4904,6 +5015,7 @@ impl Painter {
         };
         self.edits += 1;
         let inv = self.apply(e);
+        self.note_edited(&inv);
         self.redo.push(inv);
         true
     }
@@ -4922,6 +5034,7 @@ impl Painter {
         };
         self.edits += 1;
         let inv = self.apply(e);
+        self.note_edited(&inv);
         self.undo.push(inv);
         true
     }
