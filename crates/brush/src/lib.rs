@@ -4840,13 +4840,7 @@ impl Painter {
         self.next_drawing = self.next_drawing.max(drawing + 1);
         if let Some(idx) = self.layers.iter().position(|l| l.drawing == drawing) {
             let l = &mut self.layers[idx];
-            let keys: Vec<TileKey> = l
-                .surface
-                .tiles
-                .keys()
-                .chain(tiles.keys())
-                .copied()
-                .collect();
+            let keys = changed_tiles(&l.surface.tiles, &tiles);
             l.surface.tiles = tiles;
             l.surface.dirty.extend(keys);
         } else {
@@ -4869,13 +4863,7 @@ impl Painter {
         self.next_drawing = self.next_drawing.max(drawing + 1);
         if let Some(idx) = self.layers.iter().position(|l| l.drawing == drawing) {
             let l = &mut self.layers[idx];
-            let keys: Vec<TileKey> = l
-                .surface
-                .tiles
-                .keys()
-                .chain(tiles.keys())
-                .copied()
-                .collect();
+            let keys = changed_tiles(&l.surface.tiles, &tiles);
             l.surface.tiles = tiles;
             l.surface.dirty.extend(keys);
         } else {
@@ -6315,6 +6303,22 @@ pub(crate) fn pack_tiles(tiles: Option<&TileMap>) -> Vec<u8> {
     out
 }
 
+/// The tiles a drawing's new pixels change (gone, new, or different): only those are
+/// drawn again. (Someone's stroke arrives as their whole drawing: drawing all of it again
+/// held up the current app's page longer with each stroke, and the next stroke's live
+/// start with it.)
+fn changed_tiles(old: &TileMap, new: &TileMap) -> Vec<TileKey> {
+    old.keys()
+        .filter(|k| !new.contains_key(k))
+        .chain(
+            new.iter()
+                .filter(|(k, px)| old.get(k).is_none_or(|o| o != *px))
+                .map(|(k, _)| k),
+        )
+        .copied()
+        .collect()
+}
+
 /// A tile ready for the painter ([`Painter::put_drawing_decoded`]).
 #[derive(Clone)]
 pub struct DecodedTile(Box<TilePixels>);
@@ -7098,6 +7102,32 @@ mod tests {
                 assert!(a.get(k) == Some(tile), "{w}×{h} tile {k:?}");
             }
         }
+    }
+
+    #[test]
+    fn putting_a_drawing_again_draws_only_the_tiles_it_changes() {
+        let mut p = Painter::new(256, 640);
+        let layer = p.active_layer();
+        let b = pen();
+        line(&mut p, &b, 30.0);
+        let d = p.layer_drawing(layer);
+        let one = p.drawing_tiles_packed(d);
+        line(&mut p, &b, 500.0);
+        let two = p.drawing_tiles_packed(d);
+        let rows = ink_rows(&p, d);
+        p.flush();
+        // the same pixels again: nothing to draw
+        assert!(p.put_drawing_tiles(d, &two));
+        assert_eq!(p.flush(), None);
+        // the second line gone: only its tiles
+        assert!(p.put_drawing_tiles(d, &one));
+        let r = p.flush().expect("the line's tiles");
+        assert!(r.y >= 448, "{r:?}");
+        // and back (as someone's next stroke comes: their whole drawing, one line more)
+        assert!(p.put_drawing_tiles(d, &two));
+        let r = p.flush().expect("the line's tiles");
+        assert!(r.y >= 448, "the first line isn't drawn again: {r:?}");
+        assert_eq!(ink_rows(&p, d), rows);
     }
 
     #[test]

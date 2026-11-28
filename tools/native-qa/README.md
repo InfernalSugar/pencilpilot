@@ -151,6 +151,14 @@ Measuring notes:
   byte-equal (`equal`).
 - **Latency** is pen (the sender's input) to the receiver: the live stroke's arrival, its frame
   on screen, and the stroke's tiles arriving after its last point. All on CLOCK_MONOTONIC.
+  A stroke's live messages are found by its key (`k`), from the previous stroke's pen-up on:
+  the page's clock counts whole milliseconds, so a start that came at once can read a little
+  before the native app's pen time (matching by time missed it and took the start sent again
+  20 ms later, the "32 ms" starts of earlier runs).
+- `x-pair-native-hosts` writes `xn-native-to-studio.json` (pen times, every event the page saw,
+  when its main thread was held up) and `xn-probe.jsonl` (the scripted member's presence, as
+  a second receiver). With `PP_TRACE=1` the page also logs its long tasks (frames, timers,
+  callbacks from Rust, 3 ms or more) and the sync's own time per part.
 - The current app sends a stroke's tiles 120 ms after the canvas settles (its batching), about
   145–165 ms after the stroke's last point, so "final tiles within 100 ms" can only hold where
   the native app sends.

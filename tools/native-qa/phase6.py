@@ -400,6 +400,38 @@ const now = () => performance.timeOrigin + performance.now();
 const q = (window.__q6 = { out: [], ev: [], frames: [], keep: arguments[0] || false });
 const raf = window.requestAnimationFrame.bind(window);
 q.raf = raf;
+// the page's main thread held up (a 0 ms timer that came 6 ms or more late): when, how long
+q.busy = [];
+let last = now();
+const beat = () => { const t = now(); if (t - last >= 6) q.busy.push([last, t]); last = t; setTimeout(beat, 0); };
+setTimeout(beat, 0);
+// (PP_TRACE: which of the page's tasks run long, 3 ms or more: frames, timers, the app's
+// callbacks from Rust)
+q.long = [];
+q.wrapLong = () => {
+  const long = (what, f) => function (...a) {
+    const t = now();
+    try { return f.apply(this, a); } finally { const e = now(); if (e - t >= 3) q.long.push([t, e, what]); }
+  };
+  const r0 = window.requestAnimationFrame.bind(window);
+  window.requestAnimationFrame = (cb) => r0(long('raf:' + (cb.name || '?'), cb));
+  const s0 = window.setTimeout.bind(window);
+  window.setTimeout = (cb, ms, ...a) => typeof cb === 'function' ? s0(long('timeout:' + (cb.name || '?') + ':' + (ms | 0), cb), ms, ...a) : s0(cb, ms, ...a);
+  // (the canvas's own picture going on screen: how long, how big a rect)
+  const P = CanvasRenderingContext2D.prototype, put0 = P.putImageData;
+  P.putImageData = function (img, x, y, dx, dy, dw, dh) {
+    const t = now();
+    try { return put0.apply(this, arguments); } finally {
+      const e = now(); if (e - t >= 1) q.long.push([t, e, `putImageData ${dw ?? img.width}x${dh ?? img.height}`]); }
+  };
+  const cbs = I.callbacks;
+  if (cbs) {
+    for (const [id, f] of cbs) cbs.set(id, long('cb:' + id, f));
+    const set0 = cbs.set.bind(cbs);
+    cbs.set = (id, f) => set0(id, long('cb:' + id, f));
+  }
+  return true;
+};
 const orig = I.invoke.bind(I);
 I.invoke = (cmd, args, opts) => {
   if (typeof cmd === 'string' && cmd.startsWith('share_')) {
@@ -415,10 +447,12 @@ const cb = I.transformCallback((e) => {
   const p = e.payload || {};
   const b = p.body || {};
   const r = { t: now(), kind: p.kind, seq: p.seq, from: p.from, k: b.k,
-              live: b.live ? b.live.type : undefined,
+              live: b.live ? b.live.type : undefined, lk: b.live ? b.live.k : undefined,
               n: b.live && b.live.pts ? b.live.pts.length / 4 : undefined,
               body: q.keep || p.kind === 'direct' && b.k === 'chat' ? b : undefined,
               reason: p.reason };
+  // (the sync's own time spent so far, by part, when it's traced: PP_TRACE)
+  if (globalThis.ppTogetherTrace) r.times = { ...(globalThis.ppTogetherTimes || {}) };
   q.ev.push(r);
   // drawn on the next frame, on screen at the one after (as the baseline counts it)
   raf(() => { r.drawn = now(); raf(() => { r.shown = now(); }); });
@@ -617,6 +651,9 @@ class Studio:
             self.js("document.querySelector('button.primary').click(); return true;")
         took = self.until(STUDIO_READY, secs)
         self.js(HOOKS, False)
+        if os.environ.get("PP_TRACE"):
+            # (the sync times its parts: tiles inflated, packed, put on the canvas)
+            self.js("globalThis.ppTogetherTrace = true; return window.__q6.wrapLong();")
         return took
 
     def share_dialog(self):
@@ -736,13 +773,15 @@ return true;""", text)
 
     def take(self):
         """What the page logged since last asked (times on CLOCK_MONOTONIC, ns)."""
-        r = self.js("const q = window.__q6; const o = {out: q.out, ev: q.ev}; q.out = []; "
+        r = self.js("const q = window.__q6; const o = {out: q.out, ev: q.ev, busy: q.busy, long: q.long || []}; q.out = []; q.busy = []; q.long = []; "
                     "q.ev = q.ev.filter((e) => !e.shown); return o;")
         for k in ("out", "ev"):
             for e in r[k]:
                 for f in ("t", "drawn", "shown"):
                     if e.get(f):
                         e[f] = self.to_mono_ns(e[f])
+        r["busy"] = [[self.to_mono_ns(a), self.to_mono_ns(b)] for a, b in r.get("busy") or []]
+        r["long"] = [[self.to_mono_ns(a), self.to_mono_ns(b), w] for a, b, w in r.get("long") or []]
         return r
 
     def layers(self):
@@ -1292,11 +1331,20 @@ def live_latency(sent, evs, kinds=("begin", "points", "end")):
     stroke's first points arrived and were shown, and when the stroke's tiles arrived."""
     lives = [e for e in evs if e.get("kind") == "presence" and e.get("live")]
     tiles = [e for e in evs if e.get("kind") == "edit" and e.get("k") == "tiles"]
-    first_arrive, first_shown, tiles_after_end = [], [], []
+    first_arrive, first_shown, tiles_after_end, visible = [], [], [], []
+    prev_end = None
     for st in sent:
         t0, t_end = st[0], st[-1]
-        b = next((e for e in lives if e["live"] == "begin" and e["t"] >= t0), None)
-        p = next((e for e in lives if e["live"] == "points" and e["t"] >= t0), None)
+        # a stroke's messages: the first after the last stroke's pen-up, then by its key
+        # (the page's clock counts whole ms and the sender's pen time is taken after the
+        # press went: a start that came at once can read up to ~1.5 ms before it; matching
+        # by time from the pen missed it and took the start said again 20 ms on)
+        since = prev_end if prev_end is not None else t0 - 5e6
+        prev_end = t_end
+        b = next((e for e in lives if e["live"] == "begin" and e["t"] >= since), None)
+        same = (lambda e: e.get("lk") == b.get("lk")) if b and b.get("lk") is not None else (lambda e: True)
+        mine = [e for e in lives if e["t"] >= since and same(e)]
+        p = next((e for e in mine if e["live"] == "points"), None)
         if b:
             first_arrive.append((b["t"] - t0) / 1e6)
         if p and p.get("shown"):
@@ -1304,14 +1352,10 @@ def live_latency(sent, evs, kinds=("begin", "points", "end")):
         t = next((e for e in tiles if e["t"] >= t_end), None)
         if t:
             tiles_after_end.append((t["t"] - t_end) / 1e6)
-    # visible: its first points on screen, and not before its start arrived
-    visible = []
-    for st_ in sent:
-        t0 = st_[0]
-        b = next((e for e in lives if e["live"] == "begin" and e["t"] >= t0), None)
-        p = next((e for e in lives if e["live"] == "points" and e["t"] >= t0 and e.get("shown")), None)
-        if b and p:
-            visible.append((max(p["shown"], b.get("shown") or b["t"]) - t0) / 1e6)
+        # visible: its first points on screen, and not before its start arrived
+        ps = next((e for e in mine if e["live"] == "points" and e.get("shown")), None)
+        if b and ps:
+            visible.append((max(ps["shown"], b.get("shown") or b["t"]) - t0) / 1e6)
     return {"penToLiveArrivedMs": dist(first_arrive), "penToLiveShownMs": dist(first_shown),
             "penToLiveVisibleMs": dist(visible), "perStrokeBeginArrivedMs": [round(x, 1) for x in first_arrive],
             "strokeEndToTilesArrivedMs": dist(tiles_after_end)}
@@ -1606,7 +1650,13 @@ def scenario_x_pair(out, native_hosts=True, strokes=8):
         if native_hosts:
             sent_n = [n.inp.stroke(native_wave(i)) for i in range(strokes)]
             time.sleep(2.0)
-            res["nativeToStudio"] = live_latency(sent_n, s.take()["ev"])
+            taken = s.take()
+            sev = taken["ev"]
+            res["nativeToStudio"] = live_latency(sent_n, sev)
+            # (the raw trace: each stroke's pen times, every event the page saw, when its
+            # main thread was held up)
+            with open(os.path.join(out, f"{tag}-native-to-studio.json"), "w") as f:
+                json.dump({"sent": sent_n, "studio": sev, "busy": taken["busy"], "long": taken["long"]}, f)
             sent_s = s.pen([wave(i, y0=0.6) for i in range(3)])
         else:
             sent_s = s.pen([wave(i) for i in range(strokes)])
@@ -1639,6 +1689,10 @@ def scenario_x_pair(out, native_hosts=True, strokes=8):
         res["sharedLayerNames"] = shared
         res["compare"] = compare_projects(res["studioSaved"], nproj, shared)
         evs = probe.events()
+        with open(os.path.join(out, f"{tag}-probe.jsonl"), "w") as f:
+            for e in evs:
+                if e.get("ev") == "presence":
+                    f.write(json.dumps(e) + "\n")
         res["studioVsWire"] = compare_with_wire(res["studioSaved"], evs, shared)
         res["nativeVsWire"] = compare_with_wire(nproj, evs, shared)
     finally:
