@@ -344,7 +344,9 @@ impl Pump {
     fn flush(&mut self, t: &mut Together, s: &Session, port: &RemotePort) -> bool {
         let size = |v: &Value| v.to_string().len() as u64;
         let mut ok = true;
-        for o in t.take_out() {
+        let outs = t.take_out();
+        wire_log(&outs);
+        for o in outs {
             match o {
                 TogetherOut::Edit(mut body) => {
                     if self.stamp
@@ -397,6 +399,39 @@ impl Pump {
             ids: t.ids.iter().map(|(k, v)| (k.clone(), *v)).collect(),
             synced: t.synced(),
         }));
+    }
+}
+
+/// Checks: what this app sends, one line each (`PENCILPILOT_WIRE_LOG`: where), without the
+/// pixels: the kind, layer, drawing, how many tiles, and the timeline's tracks.
+fn wire_log(outs: &[TogetherOut]) {
+    use std::io::Write;
+    let Some(path) = std::env::var_os("PENCILPILOT_WIRE_LOG") else {
+        return;
+    };
+    let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    else {
+        return;
+    };
+    for o in outs {
+        let (to, b) = match o {
+            TogetherOut::Edit(b) => (None, b),
+            TogetherOut::Direct { to, body } => (Some(&to[..12.min(to.len())]), body),
+        };
+        let n = |k: &str| b.get(k).and_then(Value::as_array).map_or(0, Vec::len);
+        let line = json!({
+            "to": to, "k": b.get("k"), "lid": b.get("lid"), "did": b.get("did"),
+            "set": n("set"), "clear": n("clear"),
+            "tl": b.get("tl").map(|t| t["scenes"].as_array().map(|sc| sc.iter().map(|s|
+                s["cuts"].as_array().map(|c| c.iter().map(|c| c["tracks"].clone()).collect::<Vec<_>>())
+            ).collect::<Vec<_>>())),
+            "layers": b.get("layers").map(|l| l.as_array().map(|a| a.iter().map(|x| (x["lid"].clone(), x["name"].clone())).collect::<Vec<_>>())),
+            "ns": now_ns(),
+        });
+        let _ = writeln!(f, "{line}");
     }
 }
 

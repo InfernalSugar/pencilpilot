@@ -590,6 +590,7 @@ mod tests {
                     owner: "Mina".into(),
                     asked: false,
                     other: None,
+                    group: None,
                 }),
                 Some(Access {
                     lid: "aaaaaaaaaaaa:3".into(),
@@ -598,6 +599,7 @@ mod tests {
                     owner: "Sam".into(),
                     asked: false,
                     other: None,
+                    group: None,
                 }),
                 None,
                 None,

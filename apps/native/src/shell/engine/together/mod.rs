@@ -108,6 +108,8 @@ pub struct Access {
     pub asked: bool,
     /// a kind of layer this version doesn't draw (made in the current app): what it is
     pub other: Option<&'static str>,
+    /// the group it's in (shown; groups are changed in the current app)
+    pub group: Option<String>,
 }
 
 /// A shared layer as the dialog lists it.
@@ -1038,6 +1040,15 @@ fn refresh_ui(e: &Engine, s: &mut State) {
                 } else {
                     None
                 },
+                group: e
+                    .painter
+                    .layers()
+                    .iter()
+                    .find(|x| x.id == tr.layer)
+                    .map(|x| x.group())
+                    .filter(|g| *g != 0)
+                    .and_then(|g| e.painter.groups().iter().find(|x| x.id == g))
+                    .map(|g| g.name.clone()),
             })
         })
         .collect();

@@ -172,9 +172,26 @@ pub fn project(e: &Engine, s: &State, doc: &mut Doc) -> Result<(Project, SaveTim
             l.blend = pl.props.blend.as_str().into();
             l.alpha_lock = pl.props.alpha_lock;
             l.clip = pl.props.clip;
+            // (drawing together: the session's groups, as the painter keeps them)
+            if !e.together.view.ids.is_empty() {
+                l.group = pl.group();
+            }
             l
         })
         .collect();
+    if !e.together.view.ids.is_empty() {
+        m.groups = e
+            .painter
+            .groups()
+            .iter()
+            .map(|g| ppstudio::Group {
+                id: g.id,
+                name: g.name.clone(),
+                visible: g.visible,
+                opacity: g.opacity,
+            })
+            .collect();
+    }
     let here: HashSet<u32> = m.layers.iter().map(|l| l.id).collect();
     m.active_layer = s
         .sheet
@@ -306,10 +323,11 @@ pub fn project(e: &Engine, s: &State, doc: &mut Doc) -> Result<(Project, SaveTim
     );
     use super::super::frames::store::Kept;
     let store = &e.frames.store;
-    // a shared project (drawing together) keeps paint past the canvas's edge, as the current
-    // app does (its copies and this one's stay the same); otherwise the canvas cuts it
+    // tiles past the canvas aren't written (as the current app's writer leaves them out); a
+    // shared project's tiles at its edge are written as they are, as that writer writes them
+    // (a solo project's are cut at the edge)
     let shared = !e.together.view.ids.is_empty();
-    let on = |x: i32, y: i32| x >= 0 && y >= 0 && (shared || (x < cols && y < rows));
+    let on = |x: i32, y: i32| x >= 0 && y >= 0 && x < cols && y < rows;
     let mut kept_refs: HashMap<u32, Vec<TileRef>> = HashMap::new();
     // (drawing, tile, where: None the painter, Some(i) the store's i-th tile)
     let mut jobs: Vec<(u32, (i32, i32), Option<usize>)> = Vec::new();
@@ -341,25 +359,19 @@ pub fn project(e: &Engine, s: &State, doc: &mut Doc) -> Result<(Project, SaveTim
                 tiles
                     .iter()
                     .enumerate()
-                    // (the file's tiles are at whole, positive places)
-                    .filter(|(_, (k, _))| k.0 >= 0 && k.1 >= 0)
+                    .filter(|(_, (k, _))| on(k.0, k.1))
                     .map(|(i, (k, _))| (*d, *k, Some(i))),
             ),
-            None => {
-                let exact = store.exact.get(d);
-                jobs.extend(
-                    e.painter
-                        .drawing_tile_keys(*d)
-                        .into_iter()
-                        .filter(|&(x, y)| {
-                            on(x, y)
-                                || (x >= 0
-                                    && y >= 0
-                                    && exact.is_some_and(|m| m.contains_key(&(x, y))))
-                        })
-                        .map(|k| (*d, k, None)),
-                )
-            }
+            None => jobs.extend(
+                e.painter
+                    .drawing_tile_keys(*d)
+                    .into_iter()
+                    .filter(|&(x, y)| {
+                        on(x, y)
+                            || (x >= 0 && y >= 0 && exact.is_some_and(|m| m.contains_key(&(x, y))))
+                    })
+                    .map(|k| (*d, k, None)),
+            ),
         }
     }
     let source = doc.source.as_ref();

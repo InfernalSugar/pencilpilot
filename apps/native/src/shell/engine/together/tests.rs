@@ -407,4 +407,8 @@ fn a_project_from_a_file_is_shared_whole() {
         guest.e.frames.store.drawings.len()
     );
     same(&mut host, &mut guest, "the same picture");
+    let ink = |p: &[u8]| p.chunks(4).filter(|x| x[0] < 200).count();
+    let (h, g) = (ink(&host.picture()), ink(&guest.picture()));
+    eprintln!("ink: host {h}, guest {g}");
+    assert!(g > 100, "the guest has the host's drawing ({g} px)");
 }
