@@ -284,7 +284,11 @@ class PrivatePW:
         self.dir = os.path.join(os.path.realpath(out), f"pw-{os.getpid()}-{int(time.monotonic() * 1000)}")
         os.makedirs(self.dir, mode=0o700, exist_ok=True)
         conf = os.path.join(self.dir, "qa-null.conf")
-        open(conf, "w").write(PW_CONF)
+        # (PP_QA_PW_QUANTUM: the graph's period, samples; 256 by default)
+        q = os.environ.get("PP_QA_PW_QUANTUM", "256")
+        open(conf, "w").write(PW_CONF.replace("default.clock.quantum = 256", f"default.clock.quantum = {q}")
+                              .replace("default.clock.min-quantum = 64", f"default.clock.min-quantum = {q}")
+                              .replace("default.clock.max-quantum = 1024", f"default.clock.max-quantum = {q}"))
         self.alsa = os.path.join(self.dir, "asound.conf")
         # ALSA's own config (no user or system override exists here), then its default and
         # "null" devices are this sink (the app takes only "null" in a check)
@@ -367,6 +371,32 @@ def sinkclock_bin(out):
                                text=True, check=True).stdout.split()
         subprocess.run(["cc", "-O2", "-o", exe, src, *flags, "-lm"], check=True)
     return exe
+
+
+def calibrate(out, secs=4.0):
+    """What the recorder adds: the reference stream's bursts (clickplay.c) recorded, less when
+    PipeWire says they're heard (ms, median)."""
+    src = os.path.join(HERE, "clickplay.c")
+    exe = os.path.join(out, "clickplay")
+    if not os.path.exists(exe) or os.path.getmtime(exe) < os.path.getmtime(src):
+        flags = subprocess.run(["pkg-config", "--cflags", "--libs", "libpipewire-0.3"], capture_output=True,
+                               text=True, check=True).stdout.split()
+        subprocess.run(["cc", "-O2", "-o", exe, src, *flags, "-lm"], check=True)
+    pw = PrivatePW(out)
+    try:
+        path = os.path.join(pw.dir, "cal.bin")
+        rec = subprocess.Popen([sinkclock_bin(out), path, str(secs + 1)], env=pw.env)
+        pw.link_into("qa-sink:monitor", "qa-capture")
+        pl = subprocess.Popen([exe, str(secs)], env=pw.env, stdout=subprocess.PIPE, text=True)
+        pw.link_into("qa-play", "qa-sink", 3)
+        pred = [int(ln.split()[0]) for ln in pl.communicate()[0].splitlines() if ln.strip()]
+        rec.wait()
+        t, x = read_sinkclock(path)
+        ons = [o for o, _ in onsets(t, x)]
+        d = [(min(ons, key=lambda o: abs(o - q)) - q) / 1e6 for q in pred] if ons else []
+        return round(statistics.median(d), 2) if d else None
+    finally:
+        pw.stop()
 
 
 def read_sinkclock(path):
@@ -854,9 +884,28 @@ def sound_run(binary, out, tag, hz, project, secs, actions=None):
         # (no PENCILPILOT_NO_SOUND here: the sound goes to the private sink)
         e = pw.app_env()
         app = cw.App(binary, m, out, tag, secs + 12, "animate", args=[project], env=e)
-        links_app = pw.link_into(None, "qa-sink", wait=6.0)
+        # the app's sound streams are linked to the sink as soon as they appear (a thread
+        # polling every 10 ms; there's no session manager): when each was seen and linked
+        import threading
+        link_log, stop = [], threading.Event()
+
+        def linker():
+            done = set()
+            while not stop.is_set():
+                seen = cw.mono_ns()
+                for o in pw.ports("-o"):
+                    if o in done or o.startswith(("qa-sink:", "qa-capture:")):
+                        continue
+                    side = "FL" if o.endswith("FL") else "FR" if o.endswith("FR") else None
+                    for sd in ([side] if side else ["FL", "FR"]):
+                        pw.run("pw-link", o, f"qa-sink:playback_{sd}")
+                    done.add(o)
+                    link_log.append({"port": o, "seenNs": seen, "linkedNs": cw.mono_ns()})
+                time.sleep(0.01)
+
+        th = threading.Thread(target=linker, daemon=True)
+        th.start()
         wait_opened(app)
-        # (a stream made only once Play is pressed is linked as it comes)
         inp = cw.Input()
         inp.to(560, 330)
         time.sleep(0.2)
@@ -864,20 +913,16 @@ def sound_run(binary, out, tag, hz, project, secs, actions=None):
         if actions is None:
             keys.append(cw.mono_ns())
             inp.key("Return")
-            late = []
-            t_end = time.monotonic() + secs
-            while time.monotonic() < t_end:
-                if not links_app:
-                    links_app = pw.link_into(None, "qa-sink", wait=0.05)
-                    if links_app:
-                        late.append(cw.mono_ns())
-                time.sleep(0.05)
+            time.sleep(secs)
             inp.key("Return")
         else:
             keys = actions(inp, pw)
         t_stop = cw.mono_ns()
         inp.stop()
         st = app.wait()
+        stop.set()
+        th.join(2)
+        links_app = link_log
         rec.terminate()
         rec.wait(5)
         t, x = read_sinkclock(rec_path)
@@ -938,8 +983,9 @@ def sync_analyse(r, hz, fps=24, every_frames=12):
 
 def scenario_sync(binary, out):
     """Sound in step with playback: sound-60s (640 x 360) for 10 s, PP_QA_RUNS times, at 165
-    and 60 Hz; budgets: offset within one display frame, Play to sound within 50 ms."""
-    res = {}
+    and 60 Hz; budgets: offset within one display frame, Play to sound within 50 ms. The
+    offsets are given as recorded and less what the recorder adds (`calibrate`)."""
+    res = {"recorderAddsMs": calibrate(out), "quantum": int(os.environ.get("PP_QA_PW_QUANTUM", "256"))}
     for name in ("sound-60s", "layers20-4k-60s-sound"):
         for hz in (165, 60):
             runs = []
@@ -987,7 +1033,10 @@ def scenario_sound_start(binary, out):
             end = idx[gaps[0]] if len(gaps) else idx[-1]
             heard = (t[end] - t[idx[0]]) / 1e6
             f0 = shown_at(r["stats"], 1, k)
+            lk = [x for x in r["links"]["app"]]
             runs.append({"playToSoundMs": round((t[idx[0]] - k) / 1e6, 1),
+                         "streamSeenMs": lk and round((lk[0]["seenNs"] - k) / 1e6, 1),
+                         "streamLinkedMs": lk and round((lk[0]["linkedNs"] - k) / 1e6, 1),
                          "frame1ShownMs": f0 and round((f0 - k) / 1e6, 1),
                          "toneHeardMs": round(heard, 1), "startLeftOutMs": round(3000 - heard, 1),
                          "alone": r["alone"]})
