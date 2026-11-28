@@ -756,12 +756,16 @@ return true;""", text)
         before = os.stat(self.project).st_mtime_ns
         self.js("document.body.dispatchEvent(new KeyboardEvent('keydown', {key: 's', code: 'KeyS', ctrlKey: true, bubbles: true})); return true;")
         t = time.monotonic()
-        while time.monotonic() - t < 60:
+        while time.monotonic() - t < 15:
             if os.stat(self.project).st_mtime_ns != before:
                 time.sleep(0.5)
                 return self.project
             time.sleep(0.05)
-        raise TimeoutError("not saved")
+        # nothing to save (no change since it was opened): the file is the project
+        unsaved = self.js("return document.title.includes('•') || document.title.includes('*');")
+        if unsaved:
+            raise TimeoutError("not saved")
+        return self.project
 
     def pss_kib(self):
         tot = 0
@@ -2524,6 +2528,144 @@ def scenario_x_first_strokes(out, gap=0.5):
     return res
 
 
+def multi_scene_project(projects, out):
+    """tiny.ppstudio with two scenes and three cuts (held drawings, a blank stretch): for
+    timeline round trips."""
+    src = os.path.join(projects, "tiny.ppstudio")
+    dst = os.path.join(out, "multi.ppstudio")
+    zi = zipfile.ZipFile(src)
+    m = json.loads(zi.read("manifest.json"))
+    tr = lambda *es: {"1": [{"drawing": d or None, "length": n} for d, n in es]}
+    m["timeline"]["scenes"] = [
+        {"name": "Scene A", "cuts": [{"name": "A1", "tracks": tr(("D1", 2), ("D2", 2))},
+                                     {"name": "A2", "tracks": tr(("D2", 3))}]},
+        {"name": "Scene B", "cuts": [{"name": "B1", "tracks": tr(("D1", 1), ("", 2), ("D2", 1))}]},
+    ]
+    # `frames`: the scenes flattened (as crates/ppstudio's Timeline::flatten)
+    frames = []
+    for sc in m["timeline"]["scenes"]:
+        for c in sc["cuts"]:
+            n = max(sum(e["length"] for e in t) for t in c["tracks"].values())
+            for f in range(n):
+                cels = {}
+                for lid, t in c["tracks"].items():
+                    at = 0
+                    for e in t:
+                        if f < at + e["length"]:
+                            if e["drawing"]:
+                                cels[lid] = e["drawing"]
+                            break
+                        at += e["length"]
+                if frames and frames[-1]["cels"] == cels:
+                    frames[-1]["hold"] += 1
+                else:
+                    frames.append({"cels": cels, "hold": 1})
+    m["timeline"]["frames"] = frames
+    with zipfile.ZipFile(dst, "w") as zo:
+        for n in zi.namelist():
+            zo.writestr(n, json.dumps(m) if n == "manifest.json" else zi.read(n))
+    return dst
+
+
+def timeline_shape(path):
+    """Scenes → cuts → (length, per layer name: [drawing present per frame])."""
+    m = json.loads(zipfile.ZipFile(path).read("manifest.json"))
+    names = {str(l["id"]): l["name"] for l in m["layers"]}
+    out = []
+    for sc in m["timeline"].get("scenes", []):
+        cuts = []
+        for c in sc.get("cuts", []):
+            tracks = {}
+            for lid, t in c.get("tracks", {}).items():
+                seq = []
+                for e in t:
+                    seq += [1 if e.get("drawing") else 0] * e.get("length", 1)
+                tracks[names.get(lid, lid)] = seq
+            cuts.append({"name": c.get("name"), "tracks": tracks})
+        out.append({"name": sc.get("name"), "cuts": cuts})
+    return out
+
+
+def scenario_x_timeline_roundtrip(out, native_hosts=False):
+    """A project with two scenes and three cuts, hosted by one app, joined by the other;
+    the joiner draws on its own layer; both saved copies: the same scenes, cuts, lengths and
+    which frames hold drawings on the shared layers, and the same pixels frame by frame."""
+    projects = env_bin("PP_PROJECTS")
+    res = {"load": load(), "nativeHosts": native_hosts}
+    tag = "trn" if native_hosts else "trs"
+    multi = multi_scene_project(projects, out)
+    s = a = None
+    try:
+        s = Studio(env_bin("PP_STUDIO"), out, tag, project=multi if not native_hosts else
+                   os.path.join(projects, "empty.ppstudio"), name="Stu")
+        s.open()
+        a = NativePeer(np_bin(), out, tag)
+        if native_hosts:
+            res["opened"] = a.do(cmd="open", path=multi)["ok"]
+            invite = a.do(cmd="host", name="Nat")["state"]["info"]["invite"]
+            time.sleep(1.0)
+            s.join(invite)
+        else:
+            invite = s.host()["invite"]
+            time.sleep(3.0)
+            a.do(cmd="open", path=os.path.join(projects, "empty.ppstudio"))
+            a.do(cmd="join", code=invite, name="Nat")
+        time.sleep(2.0)
+        if native_hosts:
+            s.pen([wave(0, y0=0.6)])
+        else:
+            a.do(cmd="stroke", y=700)
+        time.sleep(3.0)
+        pn = os.path.join(a.home, "after.ppstudio")
+        a.do(cmd="save", path=pn)
+        ps = s.save()
+        tn, ts = timeline_shape(pn), timeline_shape(ps)
+        res["native"], res["studio"] = tn, ts
+        shared = sorted(set(project_pixels(pn)[0]) & set(project_pixels(ps)[0]) - {"Layer 1"})
+        shared = [x for x in shared if not x.endswith("(drawing now)")]
+        res["sharedLayers"] = shared
+        strip = lambda t: [{"name": sc["name"], "cuts": [{"name": c["name"], "tracks": {k: v for k, v in c["tracks"].items() if k in shared}}
+                                                          for c in sc["cuts"]]} for sc in t]
+        res["sameTimeline"] = strip(tn) == strip(ts)
+        res["compare"] = compare_projects(ps, pn, shared)
+        res["pass"] = bool(shared) and res["sameTimeline"] and res["compare"]["samePremul1"]
+    finally:
+        if a:
+            a.quit()
+        if s:
+            s.quit()
+    return res
+
+
+def scenario_x_join_studio_file(out):
+    """The native app joins a current app hosting a project opened from a file with drawings
+    (tiny.ppstudio: 4 frames, 2 drawings): the native app's copy must hold the host's layer
+    and every frame's drawing, as the file has them."""
+    projects = env_bin("PP_PROJECTS")
+    res = {"load": load()}
+    s = Studio(env_bin("PP_STUDIO"), out, "jsf", project=os.path.join(projects, "tiny.ppstudio"), name="Stu")
+    a = None
+    try:
+        s.open()
+        invite = s.host()["invite"]
+        time.sleep(3.0)
+        a = NativePeer(np_bin(), out, "jsf")
+        a.do(cmd="open", path=os.path.join(projects, "empty.ppstudio"))
+        j = a.do(cmd="join", code=invite, name="Nat")
+        res["joinMs"] = round((j["readyNs"] - j["startNs"]) / 1e6, 1)
+        time.sleep(2.0)
+        pn = os.path.join(a.home, "after.ppstudio")
+        a.do(cmd="save", path=pn)
+        res["nativeLayers"] = [l["name"] for l in json.loads(zipfile.ZipFile(pn).read("manifest.json"))["layers"]]
+        res["vsFile"] = compare_projects(os.path.join(projects, "tiny.ppstudio"), pn, ["Ink"])
+        res["pass"] = res["vsFile"]["samePremul1"]
+    finally:
+        if a:
+            a.quit()
+        s.quit()
+    return res
+
+
 SCENARIOS = {
     "studio-wire": scenario_studio_wire,
     "studio-pair": scenario_studio_pair,
@@ -2549,6 +2691,9 @@ SCENARIOS = {
     "x-import4k": scenario_x_import4k,
     "x-groups": scenario_x_groups,
     "x-first-strokes": scenario_x_first_strokes,
+    "x-timeline-roundtrip-studio-hosts": lambda out: scenario_x_timeline_roundtrip(out, False),
+    "x-timeline-roundtrip-native-hosts": lambda out: scenario_x_timeline_roundtrip(out, True),
+    "x-join-studio-file": scenario_x_join_studio_file,
 }
 
 
