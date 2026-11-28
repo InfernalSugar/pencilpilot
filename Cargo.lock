@@ -3563,6 +3563,7 @@ dependencies = [
 name = "pencilpilot-native"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "cosmic-text",
  "data-encoding",
  "gif",

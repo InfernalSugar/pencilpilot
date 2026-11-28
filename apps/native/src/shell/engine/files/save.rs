@@ -155,6 +155,8 @@ pub fn project(e: &Engine, s: &State, doc: &mut Doc) -> Result<(Project, SaveTim
         .painter
         .layers()
         .iter()
+        // (others' strokes as they draw them, drawing together, aren't the project's)
+        .filter(|pl| !e.frames.previews.contains(&pl.id))
         .map(|pl| {
             let id = fid(pl.id);
             let mut l = base
@@ -330,21 +332,31 @@ pub fn project(e: &Engine, s: &State, doc: &mut Doc) -> Result<(Project, SaveTim
                     .filter(|(_, (k, _))| on(k.0, k.1))
                     .map(|(i, (k, _))| (*d, *k, Some(i))),
             ),
-            // (from others, drawing together: their RGBA tiles)
+            // (from others, drawing together: their RGBA tiles, kept as they came, past the
+            // canvas's edge too, as the current app keeps them)
             Some(Kept::Wire(tiles)) => jobs.extend(
                 tiles
                     .iter()
                     .enumerate()
-                    .filter(|(_, (k, _))| on(k.0, k.1))
+                    // (the file's tiles are at whole, positive places)
+                    .filter(|(_, (k, _))| k.0 >= 0 && k.1 >= 0)
                     .map(|(i, (k, _))| (*d, *k, Some(i))),
             ),
-            None => jobs.extend(
-                e.painter
-                    .drawing_tile_keys(*d)
-                    .into_iter()
-                    .filter(|&(x, y)| on(x, y))
-                    .map(|k| (*d, k, None)),
-            ),
+            None => {
+                let exact = store.exact.get(d);
+                jobs.extend(
+                    e.painter
+                        .drawing_tile_keys(*d)
+                        .into_iter()
+                        .filter(|&(x, y)| {
+                            on(x, y)
+                                || (x >= 0
+                                    && y >= 0
+                                    && exact.is_some_and(|m| m.contains_key(&(x, y))))
+                        })
+                        .map(|k| (*d, k, None)),
+                )
+            }
         }
     }
     let source = doc.source.as_ref();
@@ -362,9 +374,16 @@ pub fn project(e: &Engine, s: &State, doc: &mut Doc) -> Result<(Project, SaveTim
         jobs.par_iter()
             .filter_map(|&(d, (x, y), at)| {
                 let mut px = vec![0u8; TILE * TILE * 4];
+                // (a tile as it came from someone, drawing together: its bytes exactly)
+                let mut as_came = false;
                 match at {
                     None => {
-                        if !painter.drawing_tile_rgba(d, (x, y), &mut px) {
+                        if let Some(t) = store.exact.get(&d).and_then(|m| m.get(&(x, y)))
+                            && let Some(b) = super::super::frames::store::file_rgba(t)
+                        {
+                            px = b;
+                            as_came = true;
+                        } else if !painter.drawing_tile_rgba(d, (x, y), &mut px) {
                             return None;
                         }
                     }
@@ -379,15 +398,19 @@ pub fn project(e: &Engine, s: &State, doc: &mut Doc) -> Result<(Project, SaveTim
                         }
                         Some(Kept::Wire(t)) => {
                             px = super::super::frames::store::file_rgba(&t.get(i)?.1)?;
+                            as_came = true;
                         }
                         _ => return None,
                     },
                 }
                 // (paint past the canvas's edge isn't part of the picture: as the file cuts
                 // tiles from a whole canvas)
-                let (x0, y0) = (x as usize * TILE, y as usize * TILE);
-                let (wn, hn) = ((w as usize - x0).min(TILE), (h as usize - y0).min(TILE));
-                if wn < TILE || hn < TILE {
+                let (x0, y0) = (x.max(0) as usize * TILE, y.max(0) as usize * TILE);
+                let (wn, hn) = (
+                    (w as usize).saturating_sub(x0).min(TILE),
+                    (h as usize).saturating_sub(y0).min(TILE),
+                );
+                if !as_came && (wn < TILE || hn < TILE) {
                     for row in 0..TILE {
                         let from = if row < hn { wn } else { 0 };
                         px[(row * TILE + from) * 4..(row + 1) * TILE * 4].fill(0);

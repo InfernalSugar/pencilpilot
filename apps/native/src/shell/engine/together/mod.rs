@@ -1,25 +1,25 @@
 //! Drawing together (ADR-0013): a live session with others, the native app's side of it,
-//! compatible with the current app's (`together.ts`, `share.rs`): the same edits, the same
-//! join, the same live strokes, cursors and chat.
+//! compatible with the current app's (`together.ts`, `share.rs`).
 //!
-//! - [`net`]: the session on its own thread (nothing here waits on the network); tiles
-//!   decoded and compressed there.
-//! - [`model`]: shared layers and who may draw on each.
-//! - [`live`]: strokes as they're drawn, both ways.
-//! - this file: hosting, joining, leaving; the session's edits put into the painter
-//!   between frames (layers, tiles, the timeline, access), this app's changes sent (tiles
-//!   of its strokes, layers, the timeline), members, cursors, chat, and what `--stats`
-//!   records.
+//! - [`net`]: the session on its own thread, with `crates/together`'s `Together` there (the
+//!   shared project edit for edit as the current app keeps it: layers, groups, access, the
+//!   timeline, masks, line strokes, sound, the join, coming back after a break).
+//! - [`port`] / [`serve`]: the canvas as `Together` sees it, asked from that thread and
+//!   answered here between frames (only quick work here).
+//! - [`live`]: strokes as they're drawn, both ways (fast and lossy, beside the session).
+//! - this file: hosting, joining, leaving, rejoining; this app's changes told to the
+//!   session's thread; members, cursors, chat; what `--stats` records.
 //!
 //! **Solo projects never connect:** nothing here runs until Host or Join.
 
 pub mod live;
-pub mod model;
 pub mod net;
+pub mod port;
+pub mod serve;
 #[cfg(test)]
 mod tests;
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -48,6 +48,8 @@ pub mod ops {
     pub const REVOKE: &str = "Together: revoke ";
     /// the layers panel's lock on someone else's layer: ask for the active one
     pub const ASK_ACTIVE: &str = "Together: ask for this layer";
+    /// back to the session after a break
+    pub const REJOIN: &str = "Together: rejoin";
 }
 
 /// Chat lines kept (the newest), and the longest message.
@@ -56,13 +58,13 @@ pub const MAX_CHAT_CHARS: usize = 500;
 /// Cursors go at most this often; a cursor without news this long goes.
 const CURSOR_GAP: Duration = Duration::from_millis(50);
 const CURSOR_STALE: Duration = Duration::from_secs(4);
-/// The timeline is compared with what was sent this often (not mid-stroke).
-const TIMELINE_EVERY: Duration = Duration::from_millis(150);
-/// Work a tick may do with the session's edits and the tiles going out (the rest waits
-/// for the next tick: frames stay on time).
+/// The canvas's answers to the session's thread a tick may give (the rest wait a tick).
 const TICK_BUDGET: Duration = Duration::from_millis(3);
-/// Tiles copied out of the painter for sending, a tick at most.
-const TILES_A_TICK: usize = 192;
+/// A live stroke's points go at most this often (as the current app's, a frame's worth).
+const LIVE_EVERY: Duration = Duration::from_millis(16);
+/// A live stroke's start is said again this often while it goes (one that was lost, or
+/// came before someone was ready, still shows).
+const LIVE_BEGIN_AGAIN: Duration = Duration::from_millis(500);
 
 /// A member's colour: picked from their id, the same in every app (share.ts's).
 pub fn member_colour(id: &str) -> [f32; 4] {
@@ -158,6 +160,8 @@ pub struct TogetherUi {
     pub copy_out: Option<String>,
     /// this person's pointer over the canvas (document pixels), from the shell
     pub pointer: Option<(f32, f32)>,
+    /// a session was left or lost: it can be rejoined
+    pub can_rejoin: bool,
 }
 
 impl TogetherUi {
@@ -228,41 +232,6 @@ pub struct Stats {
     pub snapshot_last_ns: Option<u64>,
 }
 
-/// A layer's mask as it travels: whether it has one, and its tiles on the wire.
-type Mask = (bool, std::collections::BTreeMap<(i32, i32), String>);
-
-/// A tile as it came over the wire: where, and its bytes.
-type WireTile = ((i32, i32), std::sync::Arc<super::frames::store::FileTile>);
-
-/// A drawing's tiles to send.
-#[derive(Debug)]
-enum Job {
-    Drawing {
-        /// to one member (a snapshot), else to everyone (an edit)
-        to: Option<String>,
-        lid: String,
-        did: String,
-        d: u32,
-        /// which tiles (None: all it has)
-        keys: Option<Vec<(i32, i32)>>,
-        /// when the change was made (its stroke's end), ns
-        t_ns: u64,
-    },
-    /// a message to one member, in turn (a snapshot's masks and line strokes, after its
-    /// tiles)
-    Message(String, Value),
-    /// the snapshot's end (after its tiles)
-    End(String),
-}
-
-/// Remote tiles waiting to go in (the painter was busy with that drawing).
-struct Waiting {
-    from: String,
-    tiles: net::Tiles,
-    received_ns: u64,
-    sent_ns: Option<u64>,
-}
-
 /// The engine's share of drawing together.
 #[derive(Default)]
 pub struct Together {
@@ -274,60 +243,31 @@ pub struct Together {
     pub stats_on: bool,
     /// host or join as soon as the engine is ready (`--host`, `--join`)
     pub auto: Option<net::Start>,
-    /// where to write the invite once hosting (`--host`): stdout
+    /// print the invite to stdout once hosting (`--host`)
     pub print_invite: bool,
     /// this computer's key, when not the one kept on disk (tests)
     pub identity: Option<pencilpilot_share::Identity>,
-    me: String,
-    shared: model::Shared,
-    /// shared layer → the painter's layer
-    ids: HashMap<String, u32>,
-    /// shared drawing ↔ the painter's
-    dids: HashMap<String, u32>,
-    did_of: HashMap<u32, String>,
-    synced: bool,
-    /// edits before the project arrived (joining)
-    buffer: Vec<(u64, String, Value, Option<net::Tiles>, u64)>,
-    snap_seq: u64,
-    snap_tl: Option<Value>,
-    snap_frame: Option<u32>,
-    /// the project's drawings as they came (joining): kept compressed once it's in
-    snap_wire: HashMap<String, Vec<WireTile>>,
-    last_seq: u64,
-    n: u64,
-    /// layers made here, made active once the session numbers them
-    mine: HashSet<String>,
-    /// the painter's layers that aren't shared (from before joining)
-    local: HashSet<u32>,
+    pub(crate) me: String,
+    /// the shared state as the session's thread last told it
+    pub(crate) view: net::SharedView,
+    /// the canvas the session's thread sees ([`serve`])
+    pub(crate) win: serve::Window,
     pub live_in: live::LiveIn,
     pub live_out: live::LiveOut,
-    waiting: VecDeque<Waiting>,
-    outbox: VecDeque<Job>,
+    live_sent_at: Option<Instant>,
+    begin_at: Option<Instant>,
     cursors: HashMap<String, (f32, f32, Instant)>,
     cursor_sent: Option<((f32, f32), Instant)>,
-    /// the session's timeline as it was last received or sent (all of it), and this app's
-    /// tracks as they were then: only what changes here goes into it
-    session_tl: Option<Value>,
-    /// what this app doesn't draw itself, kept as it came so nothing of it is lost (and a
-    /// joiner gets it from this app too): each layer's mask (on, and its tiles on the
-    /// wire), line strokes' edits in order per drawing, sound files' pieces
-    masks: HashMap<String, Mask>,
-    lines: HashMap<(String, String), Vec<Value>>,
-    sounds: Vec<Value>,
-    /// each shared drawing's layer (every drawing the session has, any scene or cut)
-    did_lid: HashMap<String, String>,
-    tl_base: serde_json::Map<String, Value>,
-    /// this app's track changes sent and not back yet (numbered), and how many sends
-    tl_mine: serde_json::Map<String, Value>,
-    tl_inflight: usize,
-    tl_check: Option<Instant>,
-    looks_sent: HashMap<String, (bool, f32)>,
-    /// layer removals and moves that couldn't happen yet (the painter busy)
-    structure: Vec<String>,
+    /// the layers' settings as last told (a change here is told again)
+    props_sig: u64,
+    /// questions from the session's thread waiting for a tick with room
+    asks: std::collections::VecDeque<port::Ask>,
+    /// what to come back with after a break (the session as it was left)
+    pub saved: Option<Box<net::Saved>>,
     /// the interface's lists need making again
     ui_dirty: bool,
     /// when this app's last stroke ended (for the tiles it sends), ns
-    stroke_end_ns: u64,
+    stroke_end_ns: Option<u64>,
     pub stats: Stats,
 }
 
@@ -340,54 +280,40 @@ impl Together {
         self.net.is_some()
     }
 
-    /// A new id for a layer made here (the maker's first 12 id characters and a number).
-    fn new_lid(&mut self) -> String {
-        if self.n == 0 {
-            // (a random start, as the current app's: ids from before a break don't clash)
-            self.n = (now_ns() % 100_000_000).max(1);
-        }
-        self.n += 1;
-        format!("{}:{}", &self.me[..12.min(self.me.len())], self.n)
+    pub fn synced(&self) -> bool {
+        self.view.synced
     }
 
-    /// A drawing's shared id (given one the first time it's shared).
-    fn did_of(&mut self, d: u32) -> String {
-        if let Some(x) = self.did_of.get(&d) {
-            return x.clone();
-        }
-        let did = format!("{}:{d}", &self.me[..12.min(self.me.len())]);
-        self.did_of.insert(d, did.clone());
-        self.dids.insert(did.clone(), d);
-        did
-    }
-
-    fn lid_of(&self, layer: u32) -> Option<&String> {
-        self.ids.iter().find(|(_, v)| **v == layer).map(|(k, _)| k)
-    }
-
-    fn send(&self, c: net::Cmd) {
+    pub(crate) fn send(&self, c: net::Cmd) {
         if let Some(n) = &self.net {
             n.send(c);
         }
     }
 
-    fn edit(&self, v: Value) {
-        self.send(net::Cmd::Edit(v));
+    pub fn lid_of(&self, layer: u32) -> Option<&String> {
+        self.view
+            .ids
+            .iter()
+            .find(|(_, v)| *v == layer)
+            .map(|(k, _)| k)
+    }
+
+    /// Whether this app may draw on a painter layer (shared ones: as the session says; a
+    /// line or adjustment layer made in the current app: never here).
+    pub fn may_draw(&self, layer: u32) -> bool {
+        let Some(lid) = self.lid_of(layer) else {
+            return true;
+        };
+        let sh = &self.view.shared;
+        sh.can_draw(lid, &self.me)
+            && !sh
+                .layers
+                .get(lid)
+                .is_some_and(|l| l.lines || l.adjust.is_some())
     }
 }
 
-/// A shared drawing's id here (a new one the first time).
-fn local_of(e: &mut Engine, did: &str) -> u32 {
-    if let Some(&d) = e.together.dids.get(did) {
-        return d;
-    }
-    let d = e.painter.new_drawing();
-    e.together.dids.insert(did.to_string(), d);
-    e.together.did_of.insert(d, did.to_string());
-    d
-}
-
-/// Starts hosting or joining (from the dialog or `--host` / `--join`).
+/// Starts hosting, joining or coming back (from the dialog or `--host` / `--join`).
 fn start(e: &mut Engine, s: &mut State, how: net::Start) {
     if e.together.live() {
         return;
@@ -410,23 +336,21 @@ fn start(e: &mut Engine, s: &mut State, how: net::Start) {
         name,
         relays,
         e.together.waker.clone(),
+        e.together.stats_on,
     ));
 }
 
 /// What the interface asked for. Returns whether it was this part's (and the picture may
 /// have changed).
 pub fn apply(e: &mut Engine, s: &mut State, a: &Action) -> bool {
-    let live = e.together.live() && e.together.synced;
+    let live = e.together.live() && e.together.synced();
     let name = match a {
         Action::Other(n) => n.as_str(),
         // a new layer while drawing together is a shared one, made when the session numbers
         // it (on top, for everyone)
         Action::NewLayer if live => {
-            let lid = e.together.new_lid();
-            e.together.mine.insert(lid.clone());
             let name = format!("{}’s layer", s.together.member_name(&e.together.me));
-            e.together
-                .edit(json!({"k": "layer", "lid": lid, "name": name}));
+            e.together.send(net::Cmd::AddOwnLayer(name));
             return true;
         }
         _ => return false,
@@ -437,16 +361,11 @@ pub fn apply(e: &mut Engine, s: &mut State, a: &Action) -> bool {
         let lid = e.together.lid_of(active).cloned();
         let mine = lid
             .as_ref()
-            .is_some_and(|l| e.together.shared.owns(l, &e.together.me));
+            .is_some_and(|l| e.together.view.shared.owns(l, &e.together.me));
         match name {
-            fops::DELETE_LAYER => {
-                match (&lid, mine) {
-                    (Some(l), true) => e.together.edit(json!({"k": "remove", "lid": l})),
-                    (Some(_), false) => s
-                        .together
-                        .say("Only the person who made a shared layer can delete it."),
-                    _ => return false,
-                }
+            fops::DELETE_LAYER if lid.is_some() => {
+                // (someone else's: their leave is asked for first)
+                e.together.send(net::Cmd::DeleteLayer(active));
                 return true;
             }
             fops::LAYER_UP | fops::LAYER_DOWN => {
@@ -456,7 +375,7 @@ pub fn apply(e: &mut Engine, s: &mut State, a: &Action) -> bool {
                         .say("Only the person who made a shared layer can move it.");
                     return true;
                 }
-                let order = e.together.shared.order();
+                let order = &e.together.view.shared.order;
                 let at = order.iter().position(|x| *x == l).unwrap_or(0);
                 let to = if name == fops::LAYER_UP {
                     (at + 1).min(order.len().saturating_sub(1))
@@ -464,7 +383,7 @@ pub fn apply(e: &mut Engine, s: &mut State, a: &Action) -> bool {
                     at.saturating_sub(1)
                 };
                 if to != at {
-                    e.together.edit(json!({"k": "move", "lid": l, "to": to}));
+                    e.together.send(net::Cmd::MoveOwn(l, to as u32));
                 }
                 return true;
             }
@@ -487,6 +406,11 @@ pub fn apply(e: &mut Engine, s: &mut State, a: &Action) -> bool {
                 s.together.error = "Type your name first: it's what the others see.".into();
             } else {
                 start(e, s, net::Start::Host);
+            }
+        }
+        ops::REJOIN => {
+            if let Some(saved) = e.together.saved.clone() {
+                start(e, s, net::Start::Rejoin(saved));
             }
         }
         ops::JOIN => {
@@ -532,14 +456,7 @@ pub fn apply(e: &mut Engine, s: &mut State, a: &Action) -> bool {
             if text.is_empty() {
                 return true;
             }
-            for m in &info.members {
-                if m.id != info.me.id {
-                    e.together.send(net::Cmd::Direct(
-                        m.id.clone(),
-                        json!({"k": "chat", "text": text}),
-                    ));
-                }
-            }
+            e.together.send(net::Cmd::Chat(text.clone()));
             let me = info.me.clone();
             s.together.line(ChatLine {
                 from: me.id,
@@ -570,13 +487,13 @@ pub fn apply(e: &mut Engine, s: &mut State, a: &Action) -> bool {
             let Some((lid, to)) = rest.split_once(' ') else {
                 return true;
             };
-            let v = match p {
-                ops::LET => json!({"k": "grant", "lid": lid, "to": to, "handover": false}),
-                ops::HAND => json!({"k": "grant", "lid": lid, "to": to, "handover": true}),
-                ops::DENY => json!({"k": "deny", "lid": lid, "to": to}),
-                _ => json!({"k": "revoke", "lid": lid, "to": to}),
-            };
-            e.together.edit(v);
+            let (lid, to) = (lid.to_string(), to.to_string());
+            e.together.send(match p {
+                ops::LET => net::Cmd::Grant(lid, to, false),
+                ops::HAND => net::Cmd::Grant(lid, to, true),
+                ops::DENY => net::Cmd::Deny(lid, to),
+                _ => net::Cmd::Revoke(lid, to),
+            });
         }
         _ => return false,
     }
@@ -585,22 +502,24 @@ pub fn apply(e: &mut Engine, s: &mut State, a: &Action) -> bool {
 
 fn ask(e: &mut Engine, s: &mut State, lid: &str) {
     let t = &e.together;
-    if t.shared.can_draw(lid, &t.me) {
+    if t.view.shared.can_draw(lid, &t.me) {
         return;
     }
-    if t.shared
-        .asks()
+    if t.view
+        .shared
+        .asks
         .iter()
         .any(|a| a.lid == lid && a.from == t.me)
     {
         s.together.say("You've asked: it's theirs to say yes.");
         return;
     }
-    t.edit(json!({"k": "ask", "lid": lid, "why": "draw", "own": false}));
+    t.send(net::Cmd::Ask(lid.to_string()));
     let owner = t
+        .view
         .shared
-        .get(lid)
-        .map(|l| l.owner.clone())
+        .owner_of(lid)
+        .map(str::to_string)
         .unwrap_or_default();
     s.together.say(&format!(
         "Asked {}: you can draw once they say yes.",
@@ -609,14 +528,21 @@ fn ask(e: &mut Engine, s: &mut State, lid: &str) {
 }
 
 /// Leaves the session (`why`: it ended on its own, and why). The shared layers stay
-/// (everyone keeps a full copy), unlocked.
+/// (everyone keeps a full copy), unlocked; the session is kept to come back to.
 pub fn leave(e: &mut Engine, s: &mut State, why: Option<String>) {
     let t = &mut e.together;
+    let mut saved = None;
     if let Some(n) = t.net.take() {
-        n.leave(Duration::from_millis(500));
+        saved = n.leave(Duration::from_millis(800));
     }
+    // (questions left unanswered: the thread has gone)
+    t.asks.clear();
+    let previews: Vec<u32> = t.live_in.layers.values().copied().collect();
     t.live_in.clear(&mut e.painter);
-    for &id in t.ids.values() {
+    for id in previews {
+        e.frames.previews.remove(&id);
+    }
+    for &(_, id) in &t.view.ids {
         if let Some(l) = e.painter.layers().iter().find(|l| l.id == id) {
             let mut p = l.props.clone();
             if p.locked {
@@ -627,16 +553,18 @@ pub fn leave(e: &mut Engine, s: &mut State, why: Option<String>) {
     }
     e.painter.track_edits(false);
     let stats = std::mem::take(&mut t.stats);
-    let (offline, stats_on, waker, identity) =
-        (t.offline, t.stats_on, t.waker.clone(), t.identity.clone());
-    *t = Together {
-        offline,
-        stats_on,
-        waker,
-        identity,
+    let keep = Together {
+        offline: t.offline,
+        stats_on: t.stats_on,
+        waker: t.waker.clone(),
+        identity: t.identity.clone(),
+        saved: saved.or_else(|| t.saved.take()),
+        // (the session's timeline as it was: coming back goes on from it)
+        win: std::mem::take(&mut t.win),
         stats,
         ..Default::default()
     };
+    *t = keep;
     let ui = &mut s.together;
     ui.info = None;
     ui.busy = false;
@@ -647,14 +575,15 @@ pub fn leave(e: &mut Engine, s: &mut State, why: Option<String>) {
     ui.cursors.clear();
     ui.access.clear();
     ui.rows.clear();
+    ui.can_rejoin = e.together.saved.is_some();
     if let Some(w) = why {
-        ui.error = w;
+        ui.error = format!("{w} You can rejoin: whoever's still there, or you'll host it again.");
         ui.open = true;
     }
 }
 
-/// Once a loop, before drawing: the session's news put in, this app's changes sent.
-/// Returns whether the picture changed.
+/// Once a loop, before drawing: the session thread's questions answered, its news put
+/// in, this app's changes told. Returns whether the picture changed.
 pub fn tick(e: &mut Engine, s: &mut State, now: Instant) -> bool {
     // (`--host` / `--join`: once the project given at the start is open)
     if s.project.startup.is_none()
@@ -667,8 +596,19 @@ pub fn tick(e: &mut Engine, s: &mut State, now: Instant) -> bool {
     }
     let until = Instant::now() + TICK_BUDGET;
     let mut changed = false;
-    // what the session sent
-    while Instant::now() < until {
+    // what the session's thread sent (its questions answered within the tick's room)
+    loop {
+        if let Some(a) = e.together.asks.pop_front() {
+            if Instant::now() >= until {
+                e.together.asks.push_front(a);
+                break;
+            }
+            let port::Ask(r, reply) = a;
+            let resp = serve::serve(e, s, r);
+            let _ = reply.send(resp);
+            changed = true;
+            continue;
+        }
         let Some(msg) = e.together.net.as_ref().and_then(net::Net::try_recv) else {
             break;
         };
@@ -677,17 +617,33 @@ pub fn tick(e: &mut Engine, s: &mut State, now: Instant) -> bool {
             return true;
         }
     }
-    if e.together.synced {
-        changed |= retry(e, s);
-        local_changes(e, s, now);
+    if e.together.synced() {
+        local_changes(e, s);
     }
-    // this app's live stroke and cursor
-    for m in e.together.live_out.take() {
-        e.together.stats.live_sent += 1;
-        e.together.send(net::Cmd::Presence(m));
+    // this app's live stroke (a frame's worth of points a datagram) and cursor
+    let due = e
+        .together
+        .live_sent_at
+        .is_none_or(|t| t.elapsed() >= LIVE_EVERY)
+        || !e.together.live_out.on;
+    if due {
+        if e.together.live_out.on
+            && e.together
+                .begin_at
+                .is_some_and(|t| t.elapsed() >= LIVE_BEGIN_AGAIN)
+        {
+            e.together.live_out.begin_again();
+            e.together.begin_at = Some(Instant::now());
+        }
+        let msgs = e.together.live_out.take();
+        if !msgs.is_empty() {
+            e.together.live_sent_at = Some(Instant::now());
+        }
+        for m in msgs {
+            e.together.stats.live_sent += 1;
+            e.together.send(net::Cmd::Presence(m));
+        }
     }
-    send_out(e, s, until);
-    changed |= e.together.live_in.prune(&mut e.painter);
     if let Some(p) = s.together.pointer
         && e.together
             .cursor_sent
@@ -704,6 +660,7 @@ pub fn tick(e: &mut Engine, s: &mut State, now: Instant) -> bool {
     if e.together.cursors.len() != before {
         e.together.ui_dirty = true;
     }
+    changed |= e.together.live_in.prune(&mut e.painter);
     if let Some((_, until)) = &s.together.note
         && Instant::now() >= *until
     {
@@ -718,6 +675,7 @@ pub fn tick(e: &mut Engine, s: &mut State, now: Instant) -> bool {
         refresh_ui(e, s);
         changed = true;
     }
+    let _ = now;
     changed
 }
 
@@ -732,8 +690,11 @@ pub fn next_tick_at(e: &Engine, s: &State) -> Option<Instant> {
     }
     let now = Instant::now();
     let mut at: Vec<Instant> = Vec::new();
-    if !t.outbox.is_empty() || !t.waiting.is_empty() || !t.live_out.out.is_empty() {
+    if !t.asks.is_empty() {
         at.push(now);
+    }
+    if !t.live_out.out.is_empty() || t.live_out.has_points() {
+        at.push(t.live_sent_at.map_or(now, |x| x + LIVE_EVERY));
     }
     if let Some(p) = s.together.pointer
         && let Some((q, sent)) = t.cursor_sent
@@ -744,47 +705,39 @@ pub fn next_tick_at(e: &Engine, s: &State) -> Option<Instant> {
     if let Some(c) = t.cursors.values().map(|c| c.2).min() {
         at.push(c + CURSOR_STALE);
     }
-    if let Some(c) = t.tl_check {
-        at.push(c);
-    }
     if let Some(c) = t.live_in.prune_at() {
         at.push(c);
     }
     if let Some((_, u)) = &s.together.note {
         at.push(*u);
     }
-    if !t.structure.is_empty() {
-        at.push(now + Duration::from_millis(20));
-    }
     at.into_iter().min()
 }
 
-/// One message from the session. Whether the picture changed.
+/// One message from the session's thread. Whether the picture changed.
 fn take(e: &mut Engine, s: &mut State, msg: net::In) -> bool {
     use net::In;
     match msg {
+        In::Ask(a) => {
+            e.together.asks.push_back(a);
+            false
+        }
         In::Started(info) => {
             e.together.me = info.me.id.clone();
             e.together.stats.joined_ns = Some(now_ns());
             e.painter.track_edits(true);
             let _ = e.painter.take_edited();
+            e.together.win.sheet_sig = serve::sheet_sig(e, s);
             s.together.busy = false;
             s.together.error.clear();
-            let host = info.host;
-            let host_id = info.members.first().map(|m| m.id.clone());
-            if e.together.print_invite && host {
+            s.together.can_rejoin = false;
+            if e.together.print_invite && info.host {
                 use std::io::Write;
                 let mut o = std::io::stdout();
                 let _ = writeln!(o, "{}", info.invite);
                 let _ = o.flush();
             }
             s.together.info = Some(info);
-            if host {
-                start_host(e, s);
-            } else if let Some(h) = host_id {
-                e.together
-                    .send(net::Cmd::Direct(h, json!({"k": "snap.req"})));
-            }
             e.together.ui_dirty = true;
             true
         }
@@ -794,99 +747,40 @@ fn take(e: &mut Engine, s: &mut State, msg: net::In) -> bool {
             s.together.error = err;
             true
         }
-        In::Edit {
-            seq,
-            from,
-            body,
-            tiles,
-            at_ns,
-        } => {
-            if !e.together.synced {
-                e.together.buffer.push((seq, from, body, tiles, at_ns));
-                return false;
-            }
-            on_edit(e, s, seq, &from, body, tiles, at_ns)
+        In::Shared(v) => {
+            e.together.view = v;
+            s.together.synced = e.together.view.synced;
+            e.together.ui_dirty = true;
+            refresh_locks(e);
+            true
         }
-        In::Direct {
-            from,
-            body,
-            wire,
-            at_ns,
-        } => {
-            if body.get("k").and_then(Value::as_str) == Some("chat") {
-                if let Some(text) = chat_text(&body) {
-                    let name = s.together.member_name(&from);
-                    s.together.line(ChatLine {
-                        from,
-                        name,
-                        mine: false,
-                        system: false,
-                        text,
-                    });
-                }
-                return true;
+        In::Synced(frame) => {
+            e.together.stats.synced_ns = Some(now_ns());
+            if let Some(f) = frame {
+                s.frame = f.min(s.frames.saturating_sub(1));
             }
-            on_direct(e, s, &from, body, wire, at_ns)
+            s.together.synced = true;
+            e.together.win.sheet_sig = serve::sheet_sig(e, s);
+            e.together.ui_dirty = true;
+            true
         }
-        In::Presence { from, body, at_ns } => {
-            if let Some(ev) = body.get("live") {
-                if !e.together.synced {
-                    return false;
-                }
-                let name = format!("{} (drawing now)", s.together.member_name(&from));
-                let t = &mut e.together;
-                let mut made = None;
-                let took = t.live_in.take(&mut e.painter, &from, ev, |p| {
-                    let id = p.add_layer_silent(&name);
-                    if id != 0 {
-                        let mut props = p
-                            .layers()
-                            .iter()
-                            .find(|l| l.id == id)
-                            .unwrap()
-                            .props
-                            .clone();
-                        props.locked = true;
-                        p.set_layer_props(id, props, false);
-                    }
-                    made = Some(id);
-                    id
-                });
-                if let Some(id) = made.filter(|id| *id != 0) {
-                    t.local.insert(id);
-                    e.frames.previews.insert(id);
-                    t.ui_dirty = true;
-                }
-                if took == live::Took::Painted {
-                    t.live_in.last_at.insert(from.clone(), at_ns);
-                    if t.stats_on && ev.get("type").and_then(Value::as_str) == Some("points") {
-                        let n = ev.get("pts").and_then(Value::as_array).map_or(0, Vec::len) / 4;
-                        t.stats.edits.push(EditStat {
-                            kind: "live",
-                            from,
-                            tiles: n,
-                            received_ns: at_ns,
-                            applied_ns: now_ns(),
-                            sent_ns: ev.get("t").and_then(Value::as_u64),
-                        });
-                    }
-                    return true;
-                }
-                return false;
-            }
-            let x = body.get("x").and_then(Value::as_f64);
-            let y = body.get("y").and_then(Value::as_f64);
-            if let (Some(x), Some(y)) = (x, y)
-                && x.is_finite()
-                && y.is_finite()
-            {
-                e.together
-                    .cursors
-                    .insert(from, (x as f32, y as f32, Instant::now()));
-                e.together.ui_dirty = true;
-            }
-            false
+        In::Note(text) => {
+            s.together.say(&text);
+            true
         }
+        In::TilesCame(from) => e.together.live_in.tiles_came(&mut e.painter, &from),
+        In::Chat { from, text } => {
+            let name = s.together.member_name(&from);
+            s.together.line(ChatLine {
+                from,
+                name,
+                mine: false,
+                system: false,
+                text,
+            });
+            true
+        }
+        In::Presence { from, body, at_ns } => presence(e, s, from, body, at_ns),
         In::Joined(m) => {
             if let Some(info) = &mut s.together.info
                 && !info.members.iter().any(|x| x.id == m.id)
@@ -922,7 +816,6 @@ fn take(e: &mut Engine, s: &mut State, msg: net::In) -> bool {
             });
             e.together.cursors.remove(&id);
             if let Some(l) = e.together.live_in.layers.get(&id).copied() {
-                e.together.local.remove(&l);
                 e.frames.previews.remove(&l);
             }
             e.together.live_in.forget(&mut e.painter, &id);
@@ -933,7 +826,6 @@ fn take(e: &mut Engine, s: &mut State, msg: net::In) -> bool {
             you,
             members,
             invite,
-            ..
         } => {
             if let Some(info) = &mut s.together.info {
                 info.members = members;
@@ -943,11 +835,70 @@ fn take(e: &mut Engine, s: &mut State, msg: net::In) -> bool {
             note_members(e, s);
             true
         }
-        In::Closed(why) => {
-            leave(e, s, Some(why));
+        In::Closed { why, saved } => {
+            if saved.is_some() {
+                e.together.saved = saved;
+            }
+            let why = why.map(|w| format!("The session was lost ({w})."));
+            leave(
+                e,
+                s,
+                Some(why.unwrap_or_else(|| "The session has ended.".into())),
+            );
             true
         }
     }
+}
+
+/// Someone's cursor or live stroke.
+fn presence(e: &mut Engine, s: &mut State, from: String, body: Value, at_ns: u64) -> bool {
+    if let Some(ev) = body.get("live") {
+        if !e.together.synced() {
+            return false;
+        }
+        let name = format!("{} (drawing now)", s.together.member_name(&from));
+        let t = &mut e.together;
+        let mut made = None;
+        let took = t.live_in.take(&mut e.painter, &from, ev, |p| {
+            let id = p.add_layer_silent(&name);
+            if id != 0
+                && let Some(l) = p.layers().iter().find(|l| l.id == id)
+            {
+                let mut props = l.props.clone();
+                props.locked = true;
+                p.set_layer_props(id, props, false);
+            }
+            made = Some(id);
+            id
+        });
+        if let Some(id) = made.filter(|id| *id != 0) {
+            e.frames.previews.insert(id);
+            t.ui_dirty = true;
+        }
+        if took == live::Took::Painted {
+            t.live_in.last_at.insert(from.clone(), at_ns);
+            if t.stats_on && ev.get("type").and_then(Value::as_str) == Some("points") {
+                let n = ev.get("pts").and_then(Value::as_array).map_or(0, Vec::len) / 4;
+                t.stats.edits.push(EditStat {
+                    kind: "live",
+                    from,
+                    tiles: n,
+                    received_ns: at_ns,
+                    applied_ns: now_ns(),
+                    sent_ns: ev.get("t").and_then(Value::as_u64),
+                });
+            }
+            return true;
+        }
+        return false;
+    }
+    if let Some((x, y)) = pencilpilot_together::chat::cursor(&body) {
+        e.together
+            .cursors
+            .insert(from, (x as f32, y as f32, Instant::now()));
+        e.together.ui_dirty = true;
+    }
+    false
 }
 
 fn note_members(e: &mut Engine, s: &State) {
@@ -956,1136 +907,77 @@ fn note_members(e: &mut Engine, s: &State) {
     e.together.ui_dirty = true;
 }
 
-/// An incoming chat body's text, or None when it isn't one (never markup: shown as text).
-fn chat_text(body: &Value) -> Option<String> {
-    let t = body.get("text")?.as_str()?;
-    let t: String = t
-        .chars()
-        .filter(|c| !c.is_control() || *c == '\t' || *c == '\n' || *c == '\r')
-        .collect();
-    let t = t.trim();
-    (!t.is_empty()).then(|| t.chars().take(MAX_CHAT_CHARS).collect())
-}
-
-// ---- hosting ----
-
-/// Hosting: what's on the canvas is shared (every layer, every drawing, the timeline).
-fn start_host(e: &mut Engine, s: &mut State) {
-    super::frames::catch_up(e, s);
-    let layers: Vec<(u32, String)> = e
-        .painter
-        .layers()
-        .iter()
-        .filter(|l| !e.frames.previews.contains(&l.id))
-        .map(|l| (l.id, l.props.name.clone()))
-        .collect();
-    for (id, name) in &layers {
-        let lid = e.together.new_lid();
-        e.together.ids.insert(lid.clone(), *id);
-        e.together
-            .edit(json!({"k": "layer", "lid": lid, "name": name}));
-    }
-    for (id, _) in &layers {
-        let lid = e.together.lid_of(*id).cloned().unwrap_or_default();
-        for d in drawings_of(e, s, *id) {
-            let did = e.together.did_of(d);
-            e.together.did_lid.insert(did.clone(), lid.clone());
-            e.together.outbox.push_back(Job::Drawing {
-                to: None,
-                lid: lid.clone(),
-                did,
-                d,
-                keys: None,
-                t_ns: 0,
-            });
-        }
-    }
-    if let Some(tl) = timeline_out(e, s) {
-        e.together.edit(json!({"k": "timeline", "tl": tl}));
-    }
-    e.together.synced = true;
-    s.together.synced = true;
-    e.together.stats.synced_ns = Some(now_ns());
-    e.together.ui_dirty = true;
-}
-
-/// Every drawing a layer has: on the timeline, and the one it shows.
-fn drawings_of(e: &Engine, s: &State, layer: u32) -> Vec<u32> {
-    let mut v: Vec<u32> = s
-        .sheet
-        .tracks
-        .iter()
-        .filter(|t| t.layer == layer)
-        .flat_map(|t| t.drawings())
-        .collect();
-    let shows = e.painter.layer_drawing(layer);
-    if shows != 0 && !v.contains(&shows) {
-        v.push(shows);
-    }
-    v.sort_unstable();
-    v.dedup();
-    v
-}
-
-/// Each shared layer's track in the cut this app shows, as the timeline carries it: its
-/// cels, whether it's static, its drawings' kinds (lid → that).
-fn native_tracks(e: &mut Engine, s: &State) -> serde_json::Map<String, Value> {
-    let mut out = serde_json::Map::new();
-    for t in &s.sheet.tracks {
-        let Some(lid) = e.together.lid_of(t.layer).cloned() else {
-            continue;
-        };
-        let mut kinds = serde_json::Map::new();
-        let cels: Vec<Value> = t
-            .cels
-            .iter()
-            .map(|c| {
-                let d = if c.drawing != 0 {
-                    e.together.did_of(c.drawing)
-                } else {
-                    String::new()
-                };
-                if c.drawing != 0 {
-                    kinds.insert(
-                        d.clone(),
-                        mark_name(c.mark).map_or(Value::Null, |k| json!(k)),
-                    );
-                }
-                json!({"d": d, "n": c.hold.max(1)})
-            })
-            .collect();
-        // a static layer's one drawing shows all cut long here (its length follows the
-        // cut): the session's own length for it stays
-        let mut cels = cels;
-        if t.kind == 'S'
-            && let Some(was) = e
-                .together
-                .session_tl
-                .as_ref()
-                .and_then(|tl| tl["scenes"][0]["cuts"][0]["tracks"][lid.as_str()].as_array())
-            && was.len() == 1
-            && cels.len() == 1
-            && was[0]["d"] == cels[0]["d"]
+/// Layers this app can't draw on faithfully (a line or adjustment layer from the current
+/// app) stay locked, whatever access says.
+fn refresh_locks(e: &mut Engine) {
+    let ids: Vec<u32> = e.together.view.ids.iter().map(|(_, v)| *v).collect();
+    for id in ids {
+        if !e.together.may_draw(id)
+            && let Some(l) = e.painter.layers().iter().find(|l| l.id == id)
+            && !l.props.locked
         {
-            cels = was.clone();
-        }
-        out.insert(
-            lid,
-            json!({"cels": cels, "static": t.kind == 'S', "kinds": kinds}),
-        );
-    }
-    out
-}
-
-/// A timeline with nothing in it but one scene and one cut (hosting: the session has
-/// none yet).
-fn skeleton(s: &State) -> Value {
-    json!({
-        "scenes": [{"name": s.project.scene, "cuts": [{"name": s.cut_name, "tracks": {}}]}],
-        "statics": [],
-        "mouths": [],
-        "kinds": {},
-    })
-}
-
-/// These tracks of this app's (lid → its track as [`native_tracks`] makes them) put into
-/// a session timeline; `base`: what they were before (for their drawings' kinds).
-fn patch_tracks(
-    tl: &mut Value,
-    s: &State,
-    changed: &serde_json::Map<String, Value>,
-    base: &serde_json::Map<String, Value>,
-) {
-    if !tl.is_object() {
-        *tl = skeleton(s);
-    }
-    // (the cut this app shows: the first scene's first; made when it's missing)
-    if !tl["scenes"].is_array() || tl["scenes"].as_array().is_some_and(Vec::is_empty) {
-        tl["scenes"] = skeleton(s)["scenes"].clone();
-    }
-    let scene = &mut tl["scenes"][0];
-    if !scene["cuts"].is_array() || scene["cuts"].as_array().is_some_and(Vec::is_empty) {
-        scene["cuts"] = json!([{"name": s.cut_name, "tracks": {}}]);
-    }
-    if !scene["cuts"][0]["tracks"].is_object() {
-        scene["cuts"][0]["tracks"] = json!({});
-    }
-    for (lid, v) in changed {
-        tl["scenes"][0]["cuts"][0]["tracks"][lid.as_str()] = v["cels"].clone();
-        // static or not
-        if !tl["statics"].is_array() {
-            tl["statics"] = json!([]);
-        }
-        let statics = tl["statics"].as_array_mut().unwrap();
-        let has = statics.iter().any(|x| x.as_str() == Some(lid.as_str()));
-        let want = v["static"].as_bool().unwrap_or(false);
-        if want && !has {
-            statics.push(json!(lid));
-        } else if !want && has {
-            statics.retain(|x| x.as_str() != Some(lid.as_str()));
-        }
-        // its drawings' kinds (only theirs)
-        if !tl["kinds"].is_object() {
-            tl["kinds"] = json!({});
-        }
-        let kinds = tl["kinds"].as_object_mut().unwrap();
-        if let Some(Value::Object(was)) = base.get(lid).map(|b| &b["kinds"]) {
-            for d in was.keys() {
-                if v["kinds"].get(d).is_none() {
-                    kinds.remove(d);
-                }
-            }
-        }
-        if let Some(k) = v["kinds"].as_object() {
-            for (d, kind) in k {
-                if kind.is_null() {
-                    kinds.remove(d);
-                } else {
-                    kinds.insert(d.clone(), kind.clone());
-                }
-            }
-        }
-    }
-}
-
-/// What changed here in the timeline, put into the session's own (everything this app
-/// doesn't show or know of, other scenes and cuts, markers, sound clips, notes, kept as it
-/// came): the timeline to send, or None when nothing changed.
-fn timeline_out(e: &mut Engine, s: &State) -> Option<Value> {
-    let now = native_tracks(e, s);
-    let mut changed = serde_json::Map::new();
-    for (lid, v) in &now {
-        match e.together.tl_base.get(lid) {
-            Some(b) if b == v => {}
-            // (a layer new here with nothing on it: nothing to say about its track)
-            None if v["cels"].as_array().is_none_or(Vec::is_empty) => {}
-            _ => {
-                changed.insert(lid.clone(), v.clone());
-            }
-        }
-    }
-    if changed.is_empty() {
-        e.together.tl_base = now;
-        return None;
-    }
-    let mut tl = e.together.session_tl.clone().unwrap_or_else(|| skeleton(s));
-    let base = e.together.tl_base.clone();
-    patch_tracks(&mut tl, s, &changed, &base);
-    // (in flight until it comes back numbered: a timeline from someone else meanwhile gets
-    // these put into it again)
-    e.together.tl_mine.extend(changed);
-    e.together.tl_inflight += 1;
-    e.together.tl_base = now;
-    e.together.session_tl = Some(tl.clone());
-    Some(tl)
-}
-
-fn mark_name(m: super::frames::Mark) -> Option<&'static str> {
-    use super::frames::Mark;
-    match m {
-        Mark::None => None,
-        Mark::Key => Some("key"),
-        Mark::Breakdown => Some("breakdown"),
-        Mark::InBetween => Some("inbetween"),
-    }
-}
-
-fn mark_of(k: &str) -> super::frames::Mark {
-    use super::frames::Mark;
-    match k {
-        "key" => Mark::Key,
-        "breakdown" => Mark::Breakdown,
-        "inbetween" => Mark::InBetween,
-        _ => Mark::None,
-    }
-}
-
-/// The session's timeline put in: the shared layers' tracks (the first cut: this app
-/// works on one); this app's own layers keep theirs.
-fn put_timeline(e: &mut Engine, s: &mut State, tl: &Value) {
-    let Some(cut) = tl
-        .get("scenes")
-        .and_then(|v| v.get(0))
-        .and_then(|v| v.get("cuts"))
-        .and_then(|v| v.get(0))
-    else {
-        return;
-    };
-    let kinds = tl.get("kinds").cloned().unwrap_or(Value::Null);
-    let statics: HashSet<String> = tl
-        .get("statics")
-        .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(|x| x.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
-    let Some(tracks) = cut.get("tracks").and_then(Value::as_object) else {
-        return;
-    };
-    let mut new: Vec<(u32, char, Vec<super::frames::Cel>)> = Vec::new();
-    for (lid, cels) in tracks {
-        let Some(&layer) = e.together.ids.get(lid) else {
-            continue;
-        };
-        let Some(cels) = cels.as_array() else {
-            continue;
-        };
-        let mut v = Vec::new();
-        for c in cels.iter().take(5000) {
-            let did = c.get("d").and_then(Value::as_str).unwrap_or("");
-            let d = if model::is_lid(did) {
-                local_of(e, did)
-            } else {
-                0
-            };
-            let n = c
-                .get("n")
-                .and_then(Value::as_u64)
-                .unwrap_or(1)
-                .clamp(1, 999) as u32;
-            let mark = kinds
-                .get(did)
-                .and_then(Value::as_str)
-                .map_or(super::frames::Mark::None, mark_of);
-            v.push(super::frames::Cel::new(d, n, mark));
-        }
-        let kind = if statics.contains(lid) { 'S' } else { 'C' };
-        new.push((layer, kind, v));
-    }
-    super::frames::catch_up(e, s);
-    for (layer, kind, cels) in new {
-        if let Some(i) = s.sheet.tracks.iter().position(|t| t.layer == layer) {
-            s.sheet.tracks[i].cels = cels;
-            s.sheet.tracks[i].kind = kind;
-            if let Some(l) = s.layers.get_mut(i) {
-                l.kind = kind;
-            }
-        }
-    }
-    super::frames::derive(s);
-    super::frames::sheet_changed(e, s);
-    // (as it came: what this app changes later goes into it)
-    e.together.session_tl = Some(tl.clone());
-    e.together.tl_base = native_tracks(e, s);
-}
-
-// ---- joining ----
-
-fn on_direct(
-    e: &mut Engine,
-    s: &mut State,
-    from: &str,
-    body: Value,
-    wire: Option<net::WireTiles>,
-    at_ns: u64,
-) -> bool {
-    let k = body.get("k").and_then(Value::as_str).unwrap_or("");
-    match k {
-        "snap.req" if e.together.synced => {
-            send_snapshot(e, s, from);
-            false
-        }
-        "snap.begin" if !e.together.synced => {
-            e.together.shared.load(&body);
-            e.together.snap_seq = body.get("seq").and_then(Value::as_u64).unwrap_or(0);
-            e.together.snap_tl = body.get("tl").cloned().filter(Value::is_object);
-            e.together.snap_frame = body.get("frame").and_then(Value::as_u64).map(|f| f as u32);
-            // a native host says the project's size; the current app's doesn't (its
-            // canvas: this app's own size then)
-            let size = match (
-                body.get("w").and_then(Value::as_u64),
-                body.get("h").and_then(Value::as_u64),
-            ) {
-                (Some(w), Some(h)) if (1..=16384).contains(&w) && (1..=16384).contains(&h) => {
-                    Some((w as u32, h as u32))
-                }
-                _ => None,
-            };
-            open_shared(e, s, size);
-            true
-        }
-        "snap.tiles" if !e.together.synced => {
-            // a mask: kept as it came, shown once the project is in
-            if let Some(w) = &wire
-                && w.did == "mask"
-                && e.together.shared.get(&w.lid).is_some()
-            {
-                let set: Vec<Value> = w
-                    .tiles
-                    .iter()
-                    .map(|((x, y), t)| {
-                        let p = if t.deflated { "z:" } else { "r:" };
-                        json!([
-                            x,
-                            y,
-                            format!("{p}{}", data_encoding::BASE64.encode(&t.bytes))
-                        ])
-                    })
-                    .collect();
-                keep_mask(e, &w.lid, &json!({"on": true, "set": set, "clear": []}));
-                return false;
-            }
-            // (kept as they came, compressed, until the drawing is shown)
-            if let Some(w) = wire
-                && e.together.shared.get(&w.lid).is_some()
-                && model::is_lid(&w.did)
-            {
-                let t = &mut e.together;
-                t.stats.snapshot_tiles += w.tiles.len() as u64;
-                t.stats.snapshot_last_ns = Some(at_ns);
-                t.did_lid.insert(w.did.clone(), w.lid.clone());
-                t.snap_wire.entry(w.did).or_default().extend(w.tiles);
-            }
-            let _ = from;
-            false
-        }
-        // line strokes and sound files: kept as they came (and passed on to joiners)
-        "snap.lines" if !e.together.synced => {
-            if let (Some(lid), Some(did)) = (
-                body.get("lid").and_then(Value::as_str),
-                body.get("did").and_then(Value::as_str),
-            ) && e.together.shared.get(lid).is_some()
-                && model::is_lid(did)
-            {
-                let mut b = body.clone();
-                b["k"] = json!("lines");
-                // (checked as an edit would be)
-                if pencilpilot_together::parse_edit(&b).is_some() {
-                    let key = (lid.to_string(), did.to_string());
-                    e.together.lines.entry(key).or_default().push(b);
-                }
-            }
-            false
-        }
-        "snap.sound" if !e.together.synced => {
-            let mut b = body.clone();
-            b["k"] = json!("sound");
-            if pencilpilot_together::parse_edit(&b).is_some() {
-                keep_sound(e, b);
-            }
-            false
-        }
-        "snap.end" if !e.together.synced => {
-            finish_join(e, s);
-            true
-        }
-        _ => false,
-    }
-}
-
-/// Joining: the shared project opens in place of the one here (its size, an empty
-/// layer), and the shared layers are made.
-fn open_shared(e: &mut Engine, s: &mut State, size: Option<(u32, u32)>) {
-    let (w, h) = size.unwrap_or((e.painter.width(), e.painter.height()));
-    super::files::new_sized(e, s, w, h);
-    e.painter.track_edits(true);
-    // (the empty layer stays aside until the shared ones are in)
-    for l in e.painter.layers() {
-        e.together.local.insert(l.id);
-    }
-    for lid in e.together.shared.order() {
-        make_layer(e, &lid);
-    }
-    for lid in e.together.shared.order() {
-        place(e, &lid);
-    }
-    e.painter.clear_history();
-}
-
-fn finish_join(e: &mut Engine, s: &mut State) {
-    let t = &mut e.together;
-    // the empty layer it opened with goes (the shared ones are the project)
-    let boot: Vec<u32> = e
-        .painter
-        .layers()
-        .iter()
-        .filter(|l| t.local.contains(&l.id) && !e.frames.previews.contains(&l.id))
-        .map(|l| l.id)
-        .collect();
-    if e.painter.layers().len() > boot.len() {
-        for id in boot {
-            if e.painter.remove_layer_silent(id) {
-                t.local.remove(&id);
-            }
-        }
-    }
-    for lid in t.shared.order() {
-        refresh_lock(e, &lid);
-    }
-    // the project's drawings, kept as they came (compressed): those shown are decoded as
-    // they're shown
-    for (did, tiles) in std::mem::take(&mut e.together.snap_wire) {
-        let d = local_of(e, &did);
-        e.frames.store.drawings.insert(
-            d,
-            std::sync::Arc::new(super::frames::store::Kept::Wire(tiles)),
-        );
-        e.frames.remote_changed(d);
-    }
-    let masked: Vec<String> = e.together.masks.keys().cloned().collect();
-    for lid in masked {
-        put_mask(e, &lid);
-    }
-    super::frames::tick(e, s, Instant::now());
-    if let Some(tl) = e.together.snap_tl.take() {
-        put_timeline(e, s, &tl);
-    }
-    if let Some(f) = e.together.snap_frame.take() {
-        s.frame = f.min(s.frames.saturating_sub(1));
-    }
-    e.painter.clear_history();
-    e.together.synced = true;
-    s.together.synced = true;
-    e.together.stats.synced_ns = Some(now_ns());
-    let snap = e.together.snap_seq;
-    let later: Vec<_> = std::mem::take(&mut e.together.buffer)
-        .into_iter()
-        .filter(|b| b.0 > snap)
-        .collect();
-    for (seq, from, body, tiles, at) in later {
-        on_edit(e, s, seq, &from, body, tiles, at);
-    }
-    // a layer of one's own to draw on, on top, for everyone
-    let lid = e.together.new_lid();
-    e.together.mine.insert(lid.clone());
-    let name = format!("{}’s layer", s.together.member_name(&e.together.me));
-    e.together
-        .edit(json!({"k": "layer", "lid": lid, "name": name}));
-    e.together.ui_dirty = true;
-}
-
-/// A joiner asked for the project: the layers and who may draw on them, the timeline (the
-/// session's, all of it), the sound files, every shared drawing's tiles (any scene or cut),
-/// masks and line strokes, then the end: all a current app's host sends.
-fn send_snapshot(e: &mut Engine, s: &mut State, to: &str) {
-    // (what changed here goes in first)
-    if let Some(tl) = timeline_out(e, s) {
-        e.together.edit(json!({"k": "timeline", "tl": tl}));
-    }
-    let mut snap = e.together.shared.snapshot();
-    let tl = e.together.session_tl.clone().unwrap_or_else(|| skeleton(s));
-    snap["k"] = json!("snap.begin");
-    snap["seq"] = json!(e.together.last_seq);
-    snap["tl"] = tl;
-    // (a native host's extras: the project's size, and the frame it's on, where the joiner
-    // starts)
-    snap["w"] = json!(e.painter.width());
-    snap["h"] = json!(e.painter.height());
-    snap["frame"] = json!(s.frame);
-    e.together.send(net::Cmd::Direct(to.to_string(), snap));
-    for p in &e.together.sounds {
-        let mut p = p.clone();
-        p["k"] = json!("snap.sound");
-        e.together.send(net::Cmd::Direct(to.to_string(), p));
-    }
-    // every drawing: those on this app's cut, and every other the session has; the ones
-    // showing first (the joiner can draw sooner)
-    let mut jobs: Vec<(String, String, u32, bool)> = Vec::new();
-    let ids: Vec<(String, u32)> = e
-        .together
-        .ids
-        .iter()
-        .map(|(a, b)| (a.clone(), *b))
-        .collect();
-    for (lid, layer) in ids {
-        let shows = e.painter.layer_drawing(layer);
-        for d in drawings_of(e, s, layer) {
-            let did = e.together.did_of(d);
-            e.together.did_lid.insert(did.clone(), lid.clone());
-            jobs.push((lid.clone(), did, d, d == shows));
-        }
-    }
-    let known: Vec<(String, String)> = e
-        .together
-        .did_lid
-        .iter()
-        .map(|(d, l)| (d.clone(), l.clone()))
-        .collect();
-    for (did, lid) in known {
-        if jobs.iter().any(|j| j.1 == did) || e.together.shared.get(&lid).is_none() {
-            continue;
-        }
-        if let Some(&d) = e.together.dids.get(&did)
-            && (e.painter.has_drawing(d) || e.frames.store.drawings.contains_key(&d))
-        {
-            jobs.push((lid, did, d, false));
-        }
-    }
-    jobs.sort_by_key(|j| !j.3);
-    for (lid, did, d, _) in jobs {
-        e.together.outbox.push_back(Job::Drawing {
-            to: Some(to.to_string()),
-            lid,
-            did,
-            d,
-            keys: None,
-            t_ns: 0,
-        });
-    }
-    // masks, as the current app sends them (tiles of the drawing "mask")
-    let masks: Vec<(String, Vec<Value>)> = e
-        .together
-        .masks
-        .iter()
-        .filter(|(lid, (on, _))| *on && e.together.shared.get(lid).is_some())
-        .map(|(lid, (_, t))| {
-            (
-                lid.clone(),
-                t.iter().map(|((x, y), px)| json!([x, y, px])).collect(),
-            )
-        })
-        .collect();
-    for (lid, set) in masks {
-        for c in set.chunks(net::TILES_PER_EDIT) {
-            e.together.outbox.push_back(Job::Message(
-                to.to_string(),
-                json!({"k": "snap.tiles", "lid": lid, "did": "mask", "set": c}),
-            ));
-        }
-    }
-    // line strokes: their edits again, in order
-    let lines: Vec<Value> = e
-        .together
-        .lines
-        .iter()
-        .filter(|((lid, _), _)| e.together.shared.get(lid).is_some())
-        .flat_map(|(_, v)| v.iter().cloned())
-        .collect();
-    for mut l in lines {
-        l["k"] = json!("snap.lines");
-        e.together.outbox.push_back(Job::Message(to.to_string(), l));
-    }
-    e.together.outbox.push_back(Job::End(to.to_string()));
-}
-
-// ---- the session's edits ----
-
-fn on_edit(
-    e: &mut Engine,
-    s: &mut State,
-    seq: u64,
-    from: &str,
-    body: Value,
-    tiles: Option<net::Tiles>,
-    at_ns: u64,
-) -> bool {
-    e.together.last_seq = e.together.last_seq.max(seq);
-    let Some(change) = e.together.shared.apply(from, &body) else {
-        return false;
-    };
-    let me = e.together.me.clone();
-    e.together.ui_dirty = true;
-    use model::Change;
-    match change {
-        Change::Made(lid) => {
-            if !e.together.ids.contains_key(&lid) {
-                make_layer(e, &lid);
-                place(e, &lid);
-            } else {
-                refresh_lock(e, &lid);
-            }
-            if e.together.mine.remove(&lid)
-                && let Some(&id) = e.together.ids.get(&lid)
-            {
-                super::frames::catch_up(e, s);
-                e.painter.set_active_layer(id);
-                super::frames::tick(e, s, Instant::now());
-                if let Some(i) = s.sheet.tracks.iter().position(|t| t.layer == id) {
-                    s.active_layer = i;
-                }
-            }
-            true
-        }
-        Change::Renamed(lid) => {
-            if let (Some(&id), Some(l)) = (e.together.ids.get(&lid), e.together.shared.get(&lid)) {
-                let name = l.name.clone();
-                set_props(e, id, |p| p.name = name);
-            }
-            true
-        }
-        Change::Look(lid) => {
-            if from != me
-                && let (Some(&id), Some(look)) = (
-                    e.together.ids.get(&lid),
-                    e.together.shared.get(&lid).and_then(|l| l.look.clone()),
-                )
-            {
-                let visible = look.visible;
-                let opacity = look.opacity.clamp(0.0, 1.0) as f32;
-                let blend = brush::Blend::parse(&look.blend);
-                let (alpha_lock, clip) = (look.alpha_lock, look.clip);
-                e.together
-                    .looks_sent
-                    .insert(lid.clone(), (visible, opacity));
-                set_props(e, id, |p| {
-                    p.visible = visible;
-                    p.opacity = opacity;
-                    p.alpha_lock = alpha_lock;
-                    p.clip = clip;
-                    if let Some(b) = blend {
-                        p.blend = b;
-                    }
-                });
-            }
-            true
-        }
-        Change::Mask(lid) => {
-            keep_mask(e, &lid, &body);
-            if from != me {
-                put_mask(e, &lid);
-            }
-            true
-        }
-        Change::Lines(lid, did) => {
-            e.together.lines.entry((lid, did)).or_default().push(body);
-            false
-        }
-        Change::Sound => {
-            keep_sound(e, body);
-            false
-        }
-        Change::Removed(lid) => {
-            e.together.masks.remove(&lid);
-            e.together.lines.retain(|(l, _), _| *l != lid);
-            e.together.did_lid.retain(|_, l| *l != lid);
-            if let Some(id) = e.together.ids.remove(&lid) {
-                if !e.painter.remove_layer_silent(id) {
-                    e.together.structure.push(format!("remove {id}"));
-                } else {
-                    e.painter.clear_history();
-                }
-            }
-            true
-        }
-        Change::Moved(lid) => {
-            place(e, &lid);
-            true
-        }
-        Change::Tiles(_) => {
-            if from == me {
-                // (this app's own changes are on its canvas already)
-                return false;
-            }
-            let sent = body.get("t").and_then(Value::as_u64);
-            match tiles {
-                Some(t) => put_tiles(e, s, from, t, at_ns, sent, "tiles"),
-                None => false,
-            }
-        }
-        Change::Timeline => {
-            // everyone's, this app's own too, in the session's order: all end the same
-            // (several sent at once: the last numbered wins everywhere)
-            let Some(tl) = body.get("tl") else {
-                return false;
-            };
-            if from == me {
-                let t = &mut e.together;
-                t.tl_inflight = t.tl_inflight.saturating_sub(1);
-                if t.tl_inflight == 0 {
-                    t.tl_mine.clear();
-                }
-                // (a newer one of this app's is on its way, made on top of what came
-                // meanwhile: this one is passed over here)
-                if t.session_tl.as_ref() == Some(tl) || t.tl_inflight > 0 {
-                    return false;
-                }
-                put_timeline(e, s, tl);
-                return true;
-            }
-            put_timeline(e, s, tl);
-            // this app's changes not numbered yet go into it again, and go again: whole
-            // timelines replace each other, and theirs came before this app's
-            if e.together.tl_inflight > 0 {
-                let mine = e.together.tl_mine.clone();
-                let mut merged = tl.clone();
-                let base = e.together.tl_base.clone();
-                patch_tracks(&mut merged, s, &mine, &base);
-                put_timeline(e, s, &merged);
-                e.together.tl_inflight += 1;
-                e.together.edit(json!({"k": "timeline", "tl": merged}));
-            }
-            true
-        }
-        Change::Access(lid) => {
-            refresh_lock(e, &lid);
-            true
-        }
-        Change::Asked(lid) => {
-            if e.together.shared.owns(&lid, &me) {
-                let name = s.together.member_name(from);
-                let layer = e
-                    .together
-                    .shared
-                    .get(&lid)
-                    .map(|l| l.name.clone())
-                    .unwrap_or_default();
-                s.together.say(&format!(
-                    "{name} asks to draw on “{layer}”: see Draw together."
-                ));
-            }
-            false
-        }
-        Change::Denied { to, .. } => {
-            if to == me {
-                s.together.say("They said no: nothing was changed.");
-            }
-            false
-        }
-        Change::Other => false,
-    }
-}
-
-/// Changes a layer's settings (not an undo step).
-fn set_props(e: &mut Engine, id: u32, f: impl FnOnce(&mut brush::LayerProps)) {
-    if let Some(l) = e.painter.layers().iter().find(|l| l.id == id) {
-        let mut p = l.props.clone();
-        f(&mut p);
-        if p != l.props {
+            let mut p = l.props.clone();
+            p.locked = true;
             e.painter.set_layer_props(id, p, false);
         }
     }
 }
 
-/// A shared layer made here (on top; [`place`] puts it where the session has it).
-fn make_layer(e: &mut Engine, lid: &str) {
-    if e.together.ids.contains_key(lid) {
-        return;
-    }
-    let Some(l) = e.together.shared.get(lid).cloned() else {
-        return;
-    };
-    let id = e.painter.add_layer_silent(&l.name);
-    if id == 0 {
-        return;
-    }
-    e.together.ids.insert(lid.to_string(), id);
-    if let Some(look) = &l.look {
-        let (visible, opacity) = (look.visible, look.opacity.clamp(0.0, 1.0) as f32);
-        let blend = brush::Blend::parse(&look.blend);
-        set_props(e, id, |p| {
-            p.visible = visible;
-            p.opacity = opacity;
-            if let Some(b) = blend {
-                p.blend = b;
-            }
-        });
-    }
-    refresh_lock(e, lid);
-}
-
-/// A shared layer put where the session's order has it, below the live previews.
-fn place(e: &mut Engine, lid: &str) {
-    let Some(&id) = e.together.ids.get(lid) else {
-        return;
-    };
-    let order = e.together.shared.order();
-    let Some(i) = order.iter().position(|x| x == lid) else {
-        return;
-    };
-    let pos = |e: &Engine, id: u32| e.painter.layers().iter().position(|l| l.id == id);
-    let Some(from) = pos(e, id) else { return };
-    // the nearest shared layer below that's here
-    let below = order[..i]
-        .iter()
-        .rev()
-        .find_map(|x| e.together.ids.get(x).copied())
-        .and_then(|b| pos(e, b));
-    let to = match below {
-        Some(b) if from > b => b + 1,
-        Some(b) => b,
-        // the lowest shared layer: right above this app's own (none after joining)
-        None => e
-            .painter
-            .layers()
-            .iter()
-            .filter(|l| e.together.local.contains(&l.id) && !e.frames.previews.contains(&l.id))
-            .count()
-            .min(from),
-    };
-    if to != from {
-        if e.painter.move_layer_silent(id, to) {
-            e.painter.clear_history();
-        } else {
-            e.together.structure.push(format!("place {lid}"));
+/// A sign of the layers' settings (a change here goes to the others).
+fn props_sig(e: &Engine) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for l in e.painter.layers() {
+        if e.frames.previews.contains(&l.id) {
+            continue;
         }
+        (
+            l.id,
+            l.props.visible,
+            (l.props.opacity * 1000.0) as i32,
+            l.props.blend.as_str(),
+            &l.props.name,
+            l.group(),
+        )
+            .hash(&mut h);
     }
+    h.finish()
 }
 
-/// A shared layer shows locked when this app may not draw on it.
-fn refresh_lock(e: &mut Engine, lid: &str) {
-    let t = &e.together;
-    let Some(&id) = t.ids.get(lid) else { return };
-    // (a line layer or an adjustment layer can't be drawn on faithfully here: their tiles
-    // would undo their strokes or settings for the others; they stay locked)
-    let other_kind = t
-        .shared
-        .get(lid)
-        .is_some_and(|l| l.lines || l.adjust.is_some());
-    let locked = !t.shared.can_draw(lid, &t.me) || other_kind;
-    set_props(e, id, |p| p.locked = locked);
-}
-
-/// A mask edit kept: whether the layer has a mask, and its tiles as they travel.
-fn keep_mask(e: &mut Engine, lid: &str, body: &Value) {
-    let on = body.get("on") != Some(&Value::Bool(false));
-    let m = e.together.masks.entry(lid.to_string()).or_default();
-    m.0 = on;
-    if !on {
-        m.1.clear();
-        return;
-    }
-    let int = |v: Option<&Value>| v.and_then(Value::as_i64).map(|n| n as i32);
-    for c in body
-        .get("clear")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        if let (Some(x), Some(y)) = (int(c.get(0)), int(c.get(1))) {
-            m.1.remove(&(x, y));
-        }
-    }
-    for t in body
-        .get("set")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        if let (Some(x), Some(y), Some(px)) = (
-            int(t.get(0)),
-            int(t.get(1)),
-            t.get(2).and_then(Value::as_str),
-        ) {
-            m.1.insert((x, y), px.to_string());
-        }
-    }
-}
-
-/// A piece of a sound file kept (once each).
-fn keep_sound(e: &mut Engine, mut body: Value) {
-    body["k"] = json!("sound");
-    let key = |v: &Value| (v.get("file").cloned(), v.get("i").cloned());
-    if !e.together.sounds.iter().any(|x| key(x) == key(&body)) {
-        e.together.sounds.push(body);
-    }
-}
-
-/// A layer's mask as kept, shown (later if the painter's busy).
-fn put_mask(e: &mut Engine, lid: &str) {
-    let Some(&id) = e.together.ids.get(lid) else {
-        return;
-    };
-    let packed = match e.together.masks.get(lid) {
-        Some((true, tiles)) => {
-            let mut out = Vec::new();
-            let mut n = 0u32;
-            out.extend_from_slice(&0u32.to_le_bytes());
-            for ((x, y), s) in tiles {
-                if let Some(px) = net::decode_tile(s) {
-                    out.extend_from_slice(&x.to_le_bytes());
-                    out.extend_from_slice(&y.to_le_bytes());
-                    out.extend_from_slice(&px);
-                    n += 1;
-                }
-            }
-            out[..4].copy_from_slice(&n.to_le_bytes());
-            out
-        }
-        _ => Vec::new(),
-    };
-    if e.painter.put_mask_tiles(id, &packed) {
-        e.frames.gpu.forget_mask(id);
-    } else {
-        e.together.structure.push(format!("mask {lid}"));
-    }
-}
-
-/// Someone's tiles put into the drawing they're for (decoded already: this only swaps
-/// them in). The GPU's copy follows: a drawing showing gets the changed tiles, one not
-/// showing is sent up again when it shows.
-fn put_tiles(
-    e: &mut Engine,
-    s: &State,
-    from: &str,
-    t: net::Tiles,
-    received_ns: u64,
-    sent_ns: Option<u64>,
-    kind: &'static str,
-) -> bool {
-    let d = local_of(e, &t.did);
-    e.together.did_lid.insert(t.did.clone(), t.lid.clone());
-    // drawing on that drawing now (granted to two): theirs goes in once the stroke ends
-    if e.is_stroking() && e.painter.layer_drawing(e.painter.active_layer()) == d {
-        e.together.stats.deferred += 1;
-        e.together.waiting.push_back(Waiting {
-            from: from.to_string(),
-            tiles: t,
-            received_ns,
-            sent_ns,
-        });
-        return false;
-    }
-    // (a drawing put away compressed comes back first: the change is to all of it)
-    if !e.painter.has_drawing(d) && e.frames.store.drawings.contains_key(&d) {
-        super::frames::load_drawings(e, &[d]);
-    }
-    let n = t.set.len() + t.clear.len();
-    let ok = e.painter.patch_drawing(d, t.set, &t.clear);
-    if !ok {
-        return false;
-    }
-    e.frames.store.drawings.remove(&d);
-    e.frames.remote_changed(d);
-    if e.together.live_in.tiles_came(&mut e.painter, from) {
-        // (their preview layer emptied)
-    }
-    if e.together.stats_on {
-        e.together.stats.edits.push(EditStat {
-            kind,
-            from: from.to_string(),
-            tiles: n,
-            received_ns,
-            applied_ns: now_ns(),
-            sent_ns,
-        });
-    }
-    let _ = s;
-    true
-}
-
-/// Remote tiles that waited, and layer moves the painter couldn't make then.
-fn retry(e: &mut Engine, s: &mut State) -> bool {
-    let mut changed = false;
-    if !e.is_stroking() {
-        while let Some(w) = e.together.waiting.pop_front() {
-            changed |= put_tiles(e, s, &w.from, w.tiles, w.received_ns, w.sent_ns, "tiles");
-        }
-        for op in std::mem::take(&mut e.together.structure) {
-            if let Some(id) = op
-                .strip_prefix("remove ")
-                .and_then(|x| x.parse::<u32>().ok())
-            {
-                if e.painter.remove_layer_silent(id) {
-                    e.painter.clear_history();
-                    changed = true;
-                }
-            } else if let Some(lid) = op.strip_prefix("mask ") {
-                put_mask(e, lid);
-                changed = true;
-            } else if let Some(lid) = op.strip_prefix("place ") {
-                place(e, lid);
-                changed = true;
-            }
-        }
-    }
-    changed
-}
-
-// ---- this app's changes ----
-
-/// What changed here goes to the others: the tiles strokes changed (once a stroke ends),
-/// the layers' look, the timeline.
-fn local_changes(e: &mut Engine, s: &mut State, now: Instant) {
-    // a stroke in progress: its tiles go when it ends
+/// What changed here goes to the session's thread: the timeline first (as the current app
+/// sends it), then the drawings strokes changed; the layers' settings.
+fn local_changes(e: &mut Engine, s: &mut State) {
+    // a stroke in progress: its changes go when it ends
     if e.is_stroking() {
         return;
     }
-    let me = e.together.me.clone();
     let edited = e.painter.take_edited();
-    let t_ns = std::mem::take(&mut e.together.stroke_end_ns);
-    for (d, keys) in edited {
-        if d == 0 || keys.is_empty() {
-            continue;
-        }
-        // the layer the drawing is on: showing, or on its track
-        let layer = e
-            .painter
-            .layers()
-            .iter()
-            .find(|l| e.painter.layer_drawing(l.id) == d)
-            .map(|l| l.id)
-            .or_else(|| {
-                s.sheet
-                    .tracks
-                    .iter()
-                    .find(|t| t.cels.iter().any(|c| c.drawing == d))
-                    .map(|t| t.layer)
-            });
-        let Some(lid) = layer.and_then(|l| e.together.lid_of(l).cloned()) else {
-            continue;
-        };
-        let own_new =
-            e.together.shared.get(&lid).is_none() && lid.starts_with(&me[..12.min(me.len())]);
-        if !e.together.shared.can_draw(&lid, &me) && !own_new {
-            continue;
-        }
-        let did = e.together.did_of(d);
-        e.together.did_lid.insert(did.clone(), lid.clone());
-        e.together.outbox.push_back(Job::Drawing {
-            to: None,
-            lid,
-            did,
-            d,
-            keys: Some(keys),
-            t_ns,
-        });
-    }
-    // the eye and opacity of layers this app may change
-    let looks: Vec<(String, bool, f32, &'static str)> = e
-        .together
-        .ids
-        .iter()
-        .filter(|(lid, _)| e.together.shared.can_draw(lid, &me))
-        .filter_map(|(lid, id)| {
-            let l = e.painter.layers().iter().find(|l| l.id == *id)?;
-            Some((
-                lid.clone(),
-                l.props.visible,
-                l.props.opacity,
-                l.props.blend.as_str(),
-            ))
-        })
-        .collect();
-    for (lid, visible, opacity, blend) in looks {
-        let was = e.together.looks_sent.get(&lid).copied();
-        let base = e.together.shared.get(&lid).and_then(|l| l.look.clone());
-        let was = was.or_else(|| base.map(|b| (b.visible, b.opacity as f32)));
-        let was = was.unwrap_or((true, 1.0));
-        if was.0 != visible || (was.1 - opacity).abs() > 1e-3 {
-            e.together
-                .looks_sent
-                .insert(lid.clone(), (visible, opacity));
-            // (everything else as the session has it: alpha lock, clipping, style)
-            let mut look = e
-                .together
-                .shared
-                .get(&lid)
-                .and_then(|l| l.look.as_ref())
-                .map(|l| l.to_json())
-                .unwrap_or_else(|| {
-                    json!({"visible": true, "opacity": 1, "blend": blend,
-                        "alphaLock": false, "clip": false})
-                });
-            look["visible"] = json!(visible);
-            look["opacity"] = json!(opacity);
-            e.together
-                .edit(json!({"k": "look", "lid": lid, "look": look}));
+    // (tiles changed here aren't as they came any more)
+    for (d, keys) in &edited {
+        if let Some(m) = e.frames.store.exact.get_mut(d) {
+            for k in keys {
+                m.remove(k);
+            }
         }
     }
-    // the layers' locks show access (unlocking someone else's layer here changes nothing)
-    let lids: Vec<String> = e.together.ids.keys().cloned().collect();
-    for lid in &lids {
-        refresh_lock(e, lid);
+    let sig = serve::sheet_sig(e, s);
+    let timeline = sig != e.together.win.sheet_sig;
+    let props = props_sig(e);
+    let looks = props != e.together.props_sig;
+    if !timeline && !looks && edited.is_empty() {
+        return;
     }
-    // the timeline, now and then
-    if e.together.tl_check.is_none_or(|t| now >= t) {
-        e.together.tl_check = Some(now + TIMELINE_EVERY);
-        if let Some(tl) = timeline_out(e, s) {
-            e.together.edit(json!({"k": "timeline", "tl": tl}));
-        }
-    }
+    e.together.win.sheet_sig = sig;
+    e.together.props_sig = props;
+    let touched: Vec<u32> = edited.iter().map(|(d, _)| *d).filter(|d| *d != 0).collect();
+    let tiles: usize = edited.iter().map(|(_, k)| k.len()).sum();
+    e.together.stats.tiles_sent += tiles as u64;
+    let t_ns = e.together.stroke_end_ns.take();
+    e.together.send(net::Cmd::Changed {
+        timeline,
+        touched,
+        t_ns,
+    });
 }
 
 /// This app's stroke starts: it goes to the others as it's drawn when it's on a shared
@@ -2100,97 +992,23 @@ pub fn stroke_begins(e: &mut Engine, s: &State) {
         .iter()
         .find(|l| l.id == active)
         .is_some_and(|l| l.props.visible && !l.props.locked);
-    let on = t.live()
-        && t.synced
-        && paints
-        && t.lid_of(active)
-            .is_some_and(|l| t.shared.can_draw(l, &t.me));
+    let on = t.live() && t.synced() && paints && t.lid_of(active).is_some() && t.may_draw(active);
     t.live_out.on = on;
     t.live_out.stamp = t.stats_on;
     if on {
         t.live_out.begin(live::style(s));
+        t.begin_at = Some(Instant::now());
+        // (the start goes at once)
+        t.live_sent_at = None;
     }
 }
 
 /// This app's stroke ended (for the time its tiles say they were made).
 pub fn stroke_ended(e: &mut Engine) {
     if e.together.live() {
-        e.together.stroke_end_ns = now_ns();
-    }
-}
-
-/// Tiles waiting to go: copied out of the painter a few at a time (the network thread
-/// compresses them), within the tick's budget.
-fn send_out(e: &mut Engine, _s: &State, until: Instant) {
-    let mut copied = 0usize;
-    while let Some(job) = e.together.outbox.pop_front() {
-        if Instant::now() >= until || copied >= TILES_A_TICK {
-            e.together.outbox.push_front(job);
-            break;
-        }
-        match job {
-            Job::End(to) => {
-                e.together
-                    .send(net::Cmd::Direct(to, json!({"k": "snap.end"})));
-            }
-            Job::Message(to, body) => {
-                e.together.send(net::Cmd::Direct(to, body));
-            }
-            Job::Drawing {
-                to,
-                lid,
-                did,
-                d,
-                keys,
-                t_ns,
-            } => {
-                // a drawing kept compressed (put away, or unchanged since the file was read:
-                // then the painter's copy is the same): sent from the network thread, as it
-                // is kept where it can be
-                if keys.is_none() && e.frames.store.drawings.contains_key(&d)
-                    || !e.painter.has_drawing(d)
-                {
-                    if let Some(job) = e.frames.store.job(d) {
-                        e.together.send(net::Cmd::Kept { to, lid, did, job });
-                    }
-                    continue;
-                }
-                let mut keys = keys.unwrap_or_else(|| e.painter.drawing_tile_keys(d));
-                let rest = if keys.len() > TILES_A_TICK {
-                    keys.split_off(TILES_A_TICK)
-                } else {
-                    Vec::new()
-                };
-                let mut spare = brush::TileBuffers::default();
-                let copy = e.painter.drawing_copy_tiles(d, &keys, &mut spare);
-                let set = copy.into_decoded();
-                copied += keys.len();
-                let have: HashSet<(i32, i32)> = set.iter().map(|(k, _)| *k).collect();
-                // (asked for all it has: none to clear)
-                let clear: Vec<(i32, i32)> =
-                    keys.into_iter().filter(|k| !have.contains(k)).collect();
-                e.together.stats.tiles_sent += set.len() as u64;
-                let stamp = (e.together.stats_on && t_ns != 0).then_some(t_ns);
-                e.together.send(net::Cmd::Tiles {
-                    to: to.clone(),
-                    lid: lid.clone(),
-                    did: did.clone(),
-                    set,
-                    clear,
-                    t_ns: stamp,
-                });
-                if !rest.is_empty() {
-                    e.together.outbox.push_front(Job::Drawing {
-                        to,
-                        lid,
-                        did,
-                        d,
-                        keys: Some(rest),
-                        t_ns,
-                    });
-                }
-            }
-        }
+        e.together.stroke_end_ns = Some(now_ns());
+        e.together.live_sent_at = None;
+        e.together.begin_at = None;
     }
 }
 
@@ -2198,6 +1016,7 @@ fn send_out(e: &mut Engine, _s: &State, until: Instant) {
 
 fn refresh_ui(e: &Engine, s: &mut State) {
     let t = &e.together;
+    let sh = &t.view.shared;
     let ui_names = |id: &str| s.together.member_name(id);
     let access: Vec<Option<Access>> = s
         .sheet
@@ -2205,17 +1024,13 @@ fn refresh_ui(e: &Engine, s: &mut State) {
         .iter()
         .map(|tr| {
             let lid = t.lid_of(tr.layer)?;
-            let l = t.shared.get(lid)?;
+            let l = sh.layers.get(lid)?;
             Some(Access {
                 lid: lid.clone(),
                 mine: l.owner == t.me,
                 can_draw: l.writers.contains(&t.me),
                 owner: ui_names(&l.owner),
-                asked: t
-                    .shared
-                    .asks()
-                    .iter()
-                    .any(|a| a.lid == *lid && a.from == t.me),
+                asked: sh.asks.iter().any(|a| a.lid == *lid && a.from == t.me),
                 other: if l.adjust.is_some() {
                     Some("Adjustment layer, made in another version: not shown here")
                 } else if l.lines {
@@ -2226,32 +1041,26 @@ fn refresh_ui(e: &Engine, s: &mut State) {
             })
         })
         .collect();
-    let rows: Vec<Row> = t
-        .shared
-        .order()
+    let rows: Vec<Row> = sh
+        .order
         .iter()
         .rev()
-        .filter_map(|lid| t.shared.get(lid))
+        .filter_map(|lid| sh.layers.get(lid))
         .map(|l| Row {
             lid: l.lid.clone(),
             name: l.name.clone(),
             owner: ui_names(&l.owner),
             mine: l.owner == t.me,
             can_draw: l.writers.contains(&t.me),
-            asked: t
-                .shared
-                .asks()
-                .iter()
-                .any(|a| a.lid == l.lid && a.from == t.me),
+            asked: sh.asks.iter().any(|a| a.lid == l.lid && a.from == t.me),
             writers: l
                 .writers
                 .iter()
                 .filter(|w| **w != l.owner)
                 .map(|w| (w.clone(), ui_names(w)))
                 .collect(),
-            asks: t
-                .shared
-                .asks()
+            asks: sh
+                .asks
                 .iter()
                 .filter(|a| a.lid == l.lid && l.owner == t.me)
                 .map(|a| {
@@ -2286,7 +1095,7 @@ fn refresh_ui(e: &Engine, s: &mut State) {
     s.together.access = access;
     s.together.rows = rows;
     s.together.cursors = cursors;
-    s.together.synced = t.synced;
+    s.together.synced = t.view.synced;
 }
 
 /// `--stats`: the session's record, as JSON (null when there was none).
@@ -2320,8 +1129,9 @@ pub fn stats_json(e: &Engine, s: &State, shown_after: &dyn Fn(u64) -> Option<u64
         )
     });
     let members = s.together.info.as_ref().map_or(0, |i| i.members.len());
+    let tl = t.win.full_tl.as_ref().map_or(0, |tl| tl.scenes.len());
     format!(
-        "{{\"host\": {}, \"members\": {members}, \"membersPeak\": {}, \"startedNs\": {}, \"joinedNs\": {}, \"syncedNs\": {}, \"bytesSent\": {sent}, \"bytesReceived\": {received}, \"liveSent\": {}, \"tilesSent\": {}, \"deferred\": {}, \"snapshotTiles\": {}, \"snapshotLastNs\": {}, \"sharedLayers\": {}, \"edits\": [{}]}}",
+        "{{\"host\": {}, \"members\": {members}, \"membersPeak\": {}, \"startedNs\": {}, \"joinedNs\": {}, \"syncedNs\": {}, \"bytesSent\": {sent}, \"bytesReceived\": {received}, \"liveSent\": {}, \"tilesSent\": {}, \"deferred\": {}, \"sharedLayers\": {}, \"scenes\": {}, \"edits\": [{}]}}",
         s.together.info.as_ref().is_some_and(|i| i.host),
         t.stats.members_peak,
         opt(t.stats.started_ns),
@@ -2330,9 +1140,8 @@ pub fn stats_json(e: &Engine, s: &State, shown_after: &dyn Fn(u64) -> Option<u64
         t.stats.live_sent,
         t.stats.tiles_sent,
         t.stats.deferred,
-        t.stats.snapshot_tiles,
-        opt(t.stats.snapshot_last_ns),
-        t.shared.len(),
+        t.view.shared.layers.len(),
+        tl,
         edits.join(", ")
     )
 }
