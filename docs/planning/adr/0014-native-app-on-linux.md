@@ -471,18 +471,27 @@ for a mixed session:** the native app never destroys or alters what it doesn't s
   | Stroke's end to its tiles shown there, worst | 100 ms | 15–21 ms | 30 ms |
   | Pen to screen while the other draws, p99 | 10.06 / 20.67 ms | 8.3–9.5 ms | 18.5–18.6 ms |
   | Missed frames while both draw | 0 | 0–3 | 0–1 |
-  | Joining 4K × 20 layers: connected → drawable | 3 s | 1.8–3.7 s (launch → drawable 2.5–4.5 s) | |
-  | — memory, peak PSS (joiner / host) | 600 MiB | **699–710 / 645–669 MiB: over** | |
+  | Joining 4K × 20 layers: connected → drawable | 3 s | 1.03–1.11 s (a current-app host: 0.67 s) | |
+  | — memory, peak PSS (joiner / host) | 600 MiB | 439–467 / 447–456 MiB (joining a current-app host: 383–536) | |
+  | Another member's 4K picture coming in while drawing: PSS; pen p99 | 600 MiB | 588–619 MiB; 8.1–8.4 ms (4 missed) | 33.5 ms (2 missed) |
   | 8 members drawing at once | none lost | every edit; all 8 pictures the same | |
-  | — pen to screen meanwhile, p99 | 10.06 ms | **10.2–21.3 ms: over** (0–10 missed) | |
+  | — pen to screen meanwhile, p99 | 10.06 ms | 8.5–12.9 ms (4–7 missed); the same app with no one drawing 8.4–12.8 | |
 
   With the current app (QA's harness, run here): first strokes, timeline merges, the whole
   timeline both ways (but the current app's copy of a file a native host shares, below),
   offline 5 s and 40 s, big erases pass.
-- **Open:** memory and join time on big projects: `Together` keeps every drawing of the session
-  as RGBA (232 MiB for 4K × 20 layers) beside the app's own copies, and decodes them one by one
-  on joining (most of the 1.8 s); a compressed cache in `crates/together` would bring both
-  apps' copies down. The current app joining a native host that opened a file with several
+- **Since:** the crate's cache is compressed and tiles come in as they came over the wire
+  (`put_deflated`: kept compressed, shared with the crate's copy, decoded on the session's own
+  few threads, at a lower priority than the window's); the window answers the session's
+  questions back to back while it joins (waiting up to a tick's room for the next, not a loop
+  of the window each); a stroke's start goes out at pen-down straight from the window's thread
+  (not behind the session thread's work); the window no longer spins when work is due within
+  the frames' lead while not playing (it was waking at once again and again, idle);
+  taking over as host in a hand-over waits 5 s for the others to come over before calling the
+  session lost.
+- **Open:** pen to screen at 60 Hz misses a refresh at some stroke starts (the frame is drawn
+  for the refresh after next: the frame callback came late; no work on the window's thread
+  over 0.5 ms around them), which is what puts the 60 Hz import's p99 at 33 ms. The current app joining a native host that opened a file with several
   scenes saves no pixels for that file's layers, though they're on the wire (native joiners
   get them). The pen while 8 draw at 165 Hz.
 - **Phase 7 parity (not yet):** rejoining a session from the project file (the current app keeps

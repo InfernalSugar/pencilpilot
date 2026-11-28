@@ -20,6 +20,30 @@ use crate::shell::engine::frames::store::{FileTile, Job};
 /// A tile as kept exactly (straight RGBA8, raw deflate).
 pub type Exact = Arc<FileTile>;
 
+/// The session's own threads for tiles (decoding, encoding, hashing): few, and behind the
+/// window's in the queue for the processor (the pen's work, the painter's on rayon's
+/// shared threads, never waits for a remote picture's tiles).
+pub fn pool() -> &'static rayon::ThreadPool {
+    static POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        let n = std::thread::available_parallelism().map_or(2, |n| n.get());
+        rayon::ThreadPoolBuilder::new()
+            .num_threads((n / 2).clamp(1, 4))
+            .thread_name(|i| format!("together-tiles-{i}"))
+            .start_handler(|_| behind())
+            .build()
+            .expect("the session's tile threads")
+    })
+}
+
+/// This thread goes behind the window's for the processor (a little: nice 5).
+pub fn behind() {
+    // SAFETY: setpriority on the calling thread (who 0 is this thread on Linux)
+    unsafe {
+        libc::setpriority(libc::PRIO_PROCESS, 0, 5);
+    }
+}
+
 /// A tile as it came over the wire (raw deflate), and where.
 type Wire = ((i32, i32), Arc<[u8]>);
 /// A tile from the wire decoded for the painter, and as it came (None: nothing in it).
@@ -98,7 +122,8 @@ pub enum Resp {
 }
 
 /// A question and where its answer goes.
-pub struct Ask(pub Req, pub mpsc::Sender<Resp>);
+/// (and when it was asked, ns: for `--stats`)
+pub struct Ask(pub Req, pub mpsc::Sender<Resp>, pub u64);
 
 /// The port: asks the window, keeps what's needed to send only what changed.
 pub struct RemotePort {
@@ -111,6 +136,11 @@ pub struct RemotePort {
     sounds: HashMap<String, (Arc<Vec<u8>>, String)>,
     /// the remote edit being put in (for `--stats`)
     pub stamp: Option<Stamp>,
+    /// bytes of tiles decoded here since memory was last given back, and when the last came
+    pub untrimmed: usize,
+    pub put_at: Option<std::time::Instant>,
+    /// calls and their waits counted here (for `--stats`)
+    pub bytes: Option<Arc<super::net::Bytes>>,
     /// the window's thread has gone (leaving): every answer is "no"
     gone: std::cell::Cell<bool>,
 }
@@ -128,6 +158,9 @@ impl RemotePort {
             zhashes: HashMap::new(),
             sounds: HashMap::new(),
             stamp: None,
+            bytes: None,
+            untrimmed: 0,
+            put_at: None,
             gone: std::cell::Cell::new(false),
         }
     }
@@ -137,12 +170,19 @@ impl RemotePort {
             return None;
         }
         let (tx, rx) = mpsc::channel();
-        if !(self.ask)(Ask(r, tx)) {
+        if !(self.ask)(Ask(r, tx, pencilpilot_window::clock::now_ns())) {
             self.gone.set(true);
             return None;
         }
         // (waiting is fine here: this is the session's thread, never the window's)
+        let t = std::time::Instant::now();
         let got = tokio::task::block_in_place(|| rx.recv().ok());
+        if let Some(b) = &self.bytes {
+            use std::sync::atomic::Ordering::Relaxed;
+            b.asks.fetch_add(1, Relaxed);
+            b.ask_wait_ns
+                .fetch_add(t.elapsed().as_nanos() as u64, Relaxed);
+        }
         if got.is_none() {
             self.gone.set(true);
         }
@@ -172,7 +212,7 @@ fn rgba(t: &brush::DecodedTile) -> Option<Vec<u8>> {
 pub fn exact(px: &[u8]) -> Exact {
     Arc::new(FileTile {
         deflated: true,
-        bytes: miniz_oxide::deflate::compress_to_vec(px, 1).into_boxed_slice(),
+        bytes: miniz_oxide::deflate::compress_to_vec(px, 1).into(),
     })
 }
 
@@ -218,23 +258,26 @@ impl CanvasPort for RemotePort {
             Pixels::Kept(job) => {
                 // kept as the file or the wire has them: those bytes, nothing rounded
                 if let Some(w) = job.rgba_tiles() {
-                    let mut m: Vec<((i32, i32), Vec<u8>)> = w
-                        .par_iter()
-                        .filter_map(|(k, t)| {
-                            Some((*k, crate::shell::engine::frames::store::file_rgba(t)?))
-                        })
-                        .collect();
+                    let mut m: Vec<((i32, i32), Vec<u8>)> = pool().install(|| {
+                        w.par_iter()
+                            .filter_map(|(k, t)| {
+                                Some((*k, crate::shell::engine::frames::store::file_rgba(t)?))
+                            })
+                            .collect()
+                    });
                     m.sort_by_key(|(k, _)| (k.1, k.0));
                     return self.packed_from(drawing, m, &exact);
                 }
-                job.decode()
+                pool().install(|| job.decode())
             }
             Pixels::None => Vec::new(),
         };
-        let mut m: Vec<((i32, i32), Vec<u8>)> = tiles
-            .par_iter()
-            .filter_map(|(k, t)| Some((*k, rgba(t)?)))
-            .collect();
+        let mut m: Vec<((i32, i32), Vec<u8>)> = pool().install(|| {
+            tiles
+                .par_iter()
+                .filter_map(|(k, t)| Some((*k, rgba(t)?)))
+                .collect()
+        });
         m.sort_by_key(|(k, _)| (k.1, k.0));
         self.packed_from(drawing, m, &exact)
     }
@@ -244,17 +287,18 @@ impl CanvasPort for RemotePort {
         let was = self.hashes.get(&drawing).cloned().unwrap_or_default();
         let list: Vec<(&(i32, i32), &Vec<u8>)> = m.iter().collect();
         let now: HashMap<(i32, i32), u64> =
-            list.par_iter().map(|(k, px)| (**k, hash(px))).collect();
+            pool().install(|| list.par_iter().map(|(k, px)| (**k, hash(px))).collect());
         let changed: Vec<(&(i32, i32), &Vec<u8>)> =
             m.iter().filter(|(k, _)| was.get(k) != now.get(k)).collect();
-        let set: Vec<((i32, i32), brush::DecodedTile, Exact)> = changed
-            .par_iter()
-            .filter_map(|(k, px)| Some((**k, brush::decode_tile(px)?, exact(px))))
-            .collect();
-        let mut clear: Vec<(i32, i32)> = was
-            .keys()
+        let set: Vec<((i32, i32), brush::DecodedTile, Exact)> = pool().install(|| {
+            changed
+                .par_iter()
+                .filter_map(|(k, px)| Some((**k, brush::decode_tile(px)?, exact(px))))
+                .collect()
+        });
+        let mut clear: Vec<(i32, i32)> = self
+            .known(drawing)
             .filter(|k| !now.contains_key(k))
-            .copied()
             .collect();
         // (a tile with nothing in it is cleared)
         for (k, _) in &changed {
@@ -262,6 +306,8 @@ impl CanvasPort for RemotePort {
                 clear.push(**k);
             }
         }
+        self.untrimmed += set.len() * (64 * 64 * 8 + 64 * 64 * 4);
+        self.put_at = Some(std::time::Instant::now());
         if set.is_empty() && clear.is_empty() {
             return true;
         }
@@ -283,36 +329,38 @@ impl CanvasPort for RemotePort {
         // (as they came over the wire: kept as they are, inflated and decoded here only
         // where they changed; known by a hash of their bytes as they came)
         let was = self.zhashes.get(&drawing).cloned().unwrap_or_default();
-        let now: HashMap<(i32, i32), u64> = tiles.par_iter().map(|(k, b)| (*k, hash(b))).collect();
+        let now: HashMap<(i32, i32), u64> =
+            pool().install(|| tiles.par_iter().map(|(k, b)| (*k, hash(b))).collect());
         let changed: Vec<&Wire> = tiles
             .iter()
             .filter(|(k, _)| was.get(k) != now.get(k))
             .collect();
-        let decoded: Vec<Decoded> = changed
-            .par_iter()
-            .map(|(k, b)| {
-                let px = miniz_oxide::inflate::decompress_to_vec_with_limit(
-                    b,
-                    pencilpilot_together::TILE_BYTES,
-                )
-                .ok()
-                .filter(|p| p.len() == pencilpilot_together::TILE_BYTES);
-                let t = px.and_then(|p| brush::decode_tile(&p)).map(|t| {
-                    (
-                        t,
-                        Arc::new(FileTile {
-                            deflated: true,
-                            bytes: b.to_vec().into_boxed_slice(),
-                        }),
+        let decoded: Vec<Decoded> = pool().install(|| {
+            changed
+                .par_iter()
+                .map(|(k, b)| {
+                    let px = miniz_oxide::inflate::decompress_to_vec_with_limit(
+                        b,
+                        pencilpilot_together::TILE_BYTES,
                     )
-                });
-                (*k, t)
-            })
-            .collect();
-        let mut clear: Vec<(i32, i32)> = was
-            .keys()
+                    .ok()
+                    .filter(|p| p.len() == pencilpilot_together::TILE_BYTES);
+                    let t = px.and_then(|p| brush::decode_tile(&p)).map(|t| {
+                        (
+                            t,
+                            Arc::new(FileTile {
+                                deflated: true,
+                                bytes: Arc::clone(b),
+                            }),
+                        )
+                    });
+                    (*k, t)
+                })
+                .collect()
+        });
+        let mut clear: Vec<(i32, i32)> = self
+            .known(drawing)
             .filter(|k| !now.contains_key(k))
-            .copied()
             .collect();
         let mut set = Vec::with_capacity(decoded.len());
         for (k, t) in decoded {
@@ -321,6 +369,8 @@ impl CanvasPort for RemotePort {
                 None => clear.push(k),
             }
         }
+        self.untrimmed += set.len() * (64 * 64 * 8 + 64 * 64 * 4);
+        self.put_at = Some(std::time::Instant::now());
         if !set.is_empty() || !clear.is_empty() {
             let stamp = self.stamp.clone();
             if !self.bool(Req::Put {
@@ -415,6 +465,20 @@ impl RemotePort {
     }
 
     /// Packed from RGBA tiles, those kept exactly in their place; the hashes noted.
+    /// The tiles last known in a drawing, put in either way.
+    fn known(&self, drawing: u32) -> impl Iterator<Item = (i32, i32)> + '_ {
+        let a = self.hashes.get(&drawing).into_iter().flat_map(|m| m.keys());
+        let b = self
+            .zhashes
+            .get(&drawing)
+            .into_iter()
+            .flat_map(|m| m.keys());
+        let mut all: Vec<(i32, i32)> = a.chain(b).copied().collect();
+        all.sort_unstable();
+        all.dedup();
+        all.into_iter()
+    }
+
     fn packed_from(
         &mut self,
         drawing: u32,

@@ -60,6 +60,11 @@ const CURSOR_GAP: Duration = Duration::from_millis(50);
 const CURSOR_STALE: Duration = Duration::from_secs(4);
 /// The canvas's answers to the session's thread a tick may give (the rest wait a tick).
 const TICK_BUDGET: Duration = Duration::from_millis(3);
+/// Taking over as host with others in the session, how long until they've come over
+/// (a hand-over takes moments; past this, this app is the one that lost touch).
+const ALONE_GRACE: Duration = Duration::from_secs(5);
+/// How long a tick waits for the session thread's next question after answering one.
+const ASK_FOLLOWS: Duration = Duration::from_millis(1);
 /// A live stroke's points go at most this often (as the current app's, a frame's worth).
 const LIVE_EVERY: Duration = Duration::from_millis(16);
 /// A live stroke's start is said again this often while it goes (one that was lost, or
@@ -229,6 +234,10 @@ pub struct Stats {
     pub members_peak: usize,
     /// remote tile edits that waited (the painter busy) before going in
     pub deferred: u64,
+    /// the window's time answering the session's thread, and how long questions waited
+    /// for it, ns
+    pub serve_ns: u64,
+    pub ask_queue_ns: u64,
     /// joining: the project's tiles, and when the last came
     pub snapshot_tiles: u64,
     pub snapshot_last_ns: Option<u64>,
@@ -270,6 +279,9 @@ pub struct Together {
     pub saved: Option<Box<net::Saved>>,
     /// came back once after losing touch (not again on its own)
     reconnected: bool,
+    /// took over as host with others still in the session: since when, waiting for them
+    /// to come over (a hand-over: they do within moments; if not, this app lost them)
+    alone_since: Option<Instant>,
     /// the interface's lists need making again
     ui_dirty: bool,
     /// when this app's last stroke ended (for the tiles it sends), ns
@@ -288,6 +300,12 @@ impl Together {
 
     pub fn synced(&self) -> bool {
         self.view.synced
+    }
+
+    /// The session's thread is likely to ask the canvas soon (joining, or questions
+    /// waiting): slow work on the window's thread waits.
+    pub fn busy(&self) -> bool {
+        self.live() && (!self.view.synced || !self.asks.is_empty())
     }
 
     pub(crate) fn send(&self, c: net::Cmd) {
@@ -603,6 +621,7 @@ pub fn tick(e: &mut Engine, s: &mut State, now: Instant) -> bool {
     }
     let until = Instant::now() + TICK_BUDGET;
     let mut changed = false;
+    let mut served = false;
     // what the session's thread sent (its questions answered within the tick's room)
     loop {
         if let Some(a) = e.together.asks.pop_front() {
@@ -610,17 +629,66 @@ pub fn tick(e: &mut Engine, s: &mut State, now: Instant) -> bool {
                 e.together.asks.push_front(a);
                 break;
             }
-            let port::Ask(r, reply) = a;
+            let port::Ask(r, reply, asked) = a;
+            e.together.stats.ask_queue_ns += now_ns().saturating_sub(asked);
+            // (a question that only reads draws no frame: joining asks hundreds)
+            let shows = !matches!(
+                r,
+                port::Req::Layers
+                    | port::Req::Groups
+                    | port::Req::Timeline
+                    | port::Req::Doc
+                    | port::Req::DrawingsOfLayer(_)
+                    | port::Req::LayerOfDrawing(_)
+                    | port::Req::Packed(_)
+                    | port::Req::MaskPacked(_)
+                    | port::Req::NewDrawing
+                    | port::Req::DrawingOf(_)
+                    | port::Req::PutSound(..)
+            );
+            let t0 = Instant::now();
             let resp = serve::serve(e, s, r);
+            e.together.stats.serve_ns += t0.elapsed().as_nanos() as u64;
             let _ = reply.send(resp);
-            changed = true;
+            // (joining: the project shows once it's all in, not a frame per question)
+            changed |= shows && e.together.view.synced;
+            served = true;
             continue;
         }
-        let Some(msg) = e.together.net.as_ref().and_then(net::Net::try_recv) else {
+        // (a question answered: the next one usually follows within a fraction of a
+        // millisecond; waiting for it here, briefly, saves it a whole loop of the window —
+        // joining asks hundreds, one after another. Never while the pen draws.)
+        // (joining, nothing else to do: the whole tick's room)
+        let room = until.saturating_duration_since(Instant::now());
+        let wait = if e.together.view.synced {
+            room.min(ASK_FOLLOWS)
+        } else {
+            room
+        };
+        let msg = if served && !e.is_stroking() && !wait.is_zero() {
+            e.together.net.as_ref().and_then(|n| n.recv_timeout(wait))
+        } else {
+            e.together.net.as_ref().and_then(net::Net::try_recv)
+        };
+        let Some(msg) = msg else {
             break;
         };
         changed |= take(e, s, msg);
         if !e.together.live() {
+            return true;
+        }
+    }
+    if e.together
+        .alone_since
+        .is_some_and(|t| t.elapsed() >= ALONE_GRACE)
+    {
+        e.together.alone_since = None;
+        if s.together
+            .info
+            .as_ref()
+            .is_some_and(|i| i.members.len() <= 1)
+        {
+            reconnect(e, s, "Lost touch with the others: finding them again…");
             return true;
         }
     }
@@ -637,9 +705,10 @@ pub fn tick(e: &mut Engine, s: &mut State, now: Instant) -> bool {
         // (soon after the start, then now and then: a stroke's first datagram can be lost
         // on a link that has been quiet)
         let gap = match e.together.begins {
-            0 => Duration::from_millis(40),
-            1 => Duration::from_millis(100),
-            2 => Duration::from_millis(200),
+            0 => Duration::from_millis(20),
+            1 => Duration::from_millis(40),
+            2 => Duration::from_millis(100),
+            3 => Duration::from_millis(200),
             _ => LIVE_BEGIN_AGAIN,
         };
         if e.together.live_out.on && e.together.begin_at.is_some_and(|t| t.elapsed() >= gap) {
@@ -723,6 +792,9 @@ pub fn next_tick_at(e: &Engine, s: &State) -> Option<Instant> {
     if let Some((_, u)) = &s.together.note {
         at.push(*u);
     }
+    if let Some(a) = t.alone_since {
+        at.push(a + ALONE_GRACE);
+    }
     at.into_iter().min()
 }
 
@@ -804,6 +876,8 @@ fn take(e: &mut Engine, s: &mut State, msg: net::In) -> bool {
                     m.name.clone()
                 };
                 info.members.push(m);
+                // (someone came over: a hand-over, not a lost session)
+                e.together.alone_since = None;
                 s.together.line(ChatLine {
                     from: String::new(),
                     name: String::new(),
@@ -844,6 +918,10 @@ fn take(e: &mut Engine, s: &mut State, msg: net::In) -> bool {
             // may have dropped it, not the session)
             let was_host = s.together.info.as_ref().is_some_and(|i| i.host);
             let alone = you && !was_host && members.len() == 1;
+            // (the others this app knew, the old host gone: on a hand-over they come to it)
+            let others = s.together.info.as_ref().map_or(0, |i| {
+                i.members.iter().filter(|m| m.id != e.together.me).count()
+            });
             if let Some(info) = &mut s.together.info {
                 info.members = members;
                 info.host = you;
@@ -852,7 +930,9 @@ fn take(e: &mut Engine, s: &mut State, msg: net::In) -> bool {
             note_members(e, s);
             // took over alone: the others may still be there (this app lost touch with
             // them, not they with each other): back to them if they are
-            if alone {
+            if alone && others > 0 {
+                e.together.alone_since = Some(Instant::now());
+            } else if alone {
                 reconnect(e, s, "Lost touch with the others: finding them again…");
             }
             true
@@ -1042,6 +1122,23 @@ pub fn stroke_begins(e: &mut Engine, s: &State) {
     }
 }
 
+/// The stroke's start (and its first point) go to the others now, at pen-down: not with
+/// the window's next loop.
+pub fn send_live_now(e: &mut Engine) {
+    let t = &mut e.together;
+    if !t.live_out.on {
+        return;
+    }
+    let msgs = t.live_out.take();
+    if !msgs.is_empty() {
+        t.live_sent_at = Some(Instant::now());
+    }
+    for m in msgs {
+        t.stats.live_sent += 1;
+        t.send(net::Cmd::Presence(m));
+    }
+}
+
 /// This app's stroke ended (for the time its tiles say they were made).
 pub fn stroke_ended(e: &mut Engine) {
     if e.together.live() {
@@ -1179,7 +1276,7 @@ pub fn stats_json(e: &Engine, s: &State, shown_after: &dyn Fn(u64) -> Option<u64
     let members = s.together.info.as_ref().map_or(0, |i| i.members.len());
     let tl = t.win.full_tl.as_ref().map_or(0, |tl| tl.scenes.len());
     format!(
-        "{{\"host\": {}, \"members\": {members}, \"membersPeak\": {}, \"startedNs\": {}, \"joinedNs\": {}, \"syncedNs\": {}, \"bytesSent\": {sent}, \"bytesReceived\": {received}, \"liveSent\": {}, \"tilesSent\": {}, \"deferred\": {}, \"cacheMiB\": {:.1}, \"sharedLayers\": {}, \"scenes\": {}, \"edits\": [{}]}}",
+        "{{\"host\": {}, \"members\": {members}, \"membersPeak\": {}, \"startedNs\": {}, \"joinedNs\": {}, \"syncedNs\": {}, \"bytesSent\": {sent}, \"bytesReceived\": {received}, \"liveSent\": {}, \"tilesSent\": {}, \"deferred\": {}, \"cacheMiB\": {:.1}, \"asks\": {}, \"askWaitMs\": {:.1}, \"serveMs\": {:.1}, \"askQueueMs\": {:.1}, \"sharedLayers\": {}, \"scenes\": {}, \"edits\": [{}]}}",
         s.together.info.as_ref().is_some_and(|i| i.host),
         t.stats.members_peak,
         opt(t.stats.started_ns),
@@ -1189,6 +1286,18 @@ pub fn stats_json(e: &Engine, s: &State, shown_after: &dyn Fn(u64) -> Option<u64
         t.stats.tiles_sent,
         t.stats.deferred,
         t.view.cache_bytes as f64 / (1 << 20) as f64,
+        t.net.as_ref().map_or(0, |n| n
+            .bytes
+            .asks
+            .load(std::sync::atomic::Ordering::Relaxed)),
+        t.net.as_ref().map_or(0.0, |n| n
+            .bytes
+            .ask_wait_ns
+            .load(std::sync::atomic::Ordering::Relaxed)
+            as f64
+            / 1e6),
+        t.stats.serve_ns as f64 / 1e6,
+        t.stats.ask_queue_ns as f64 / 1e6,
         t.view.shared.layers.len(),
         tl,
         edits.join(", ")

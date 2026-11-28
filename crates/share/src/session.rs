@@ -264,6 +264,33 @@ impl Session {
 
     /// Send passing state (a cursor). It may be lost; send the newest often instead.
     pub fn presence(&self, body: Value) {
+        self.presencer().send(body);
+    }
+
+    /// Something that sends passing state from any thread, without waiting for the
+    /// session's own (for a stroke's start, sent the moment the pen goes down).
+    pub fn presencer(&self) -> Presencer {
+        Presencer {
+            core: self.core.clone(),
+        }
+    }
+}
+
+/// Sends passing state from any thread: see [`Session::presencer`].
+#[derive(Clone)]
+pub struct Presencer {
+    core: Arc<Core>,
+}
+
+impl std::fmt::Debug for Presencer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Presencer")
+    }
+}
+
+impl Presencer {
+    /// As [`Session::presence`].
+    pub fn send(&self, body: Value) {
         let p = Presence {
             from: self.core.me.id.clone(),
             body,
@@ -277,7 +304,9 @@ impl Session {
             send_datagram(&l.conn, &p);
         }
     }
+}
 
+impl Session {
     /// The next event, or `None` once the session is over and every event was read.
     pub async fn next_event(&mut self) -> Option<Event> {
         self.events.recv().await
