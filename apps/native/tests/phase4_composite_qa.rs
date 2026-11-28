@@ -757,3 +757,198 @@ fn many_layers_picture_is_right() {
     }
     unsafe { std::env::set_var("PENCILPILOT_DIALOG_ANSWER", "") };
 }
+
+// ------------------------------------------------------------------------------------------
+// what the painter does right after the GPU showed frames alone (scrubbing)
+
+/// 20 layers at 4K opened, the GPU making the picture; frames 0 → 5 one after another as
+/// fast as the window would (no rest); within a few ms of the last: the Eyedropper picks
+/// what's on screen, Fill fills the drawing showing on the active layer (not the one before),
+/// and after scrubbing on to frame 7 the first stroke lands in frame 7's drawing. How long each
+/// first press takes (the painter catching up). Then an adjustment layer: the picture falls
+/// back to the CPU and is right.
+#[test]
+#[ignore]
+fn painting_right_after_scrubbing_at_4k() {
+    let Some(fix) = std::env::var_os("PP_QA_FIXTURES").map(PathBuf::from) else {
+        eprintln!("skipped: PP_QA_FIXTURES not set");
+        return;
+    };
+    let g = match pencilpilot_gpu::Gpu::new() {
+        Ok(g) => g,
+        Err(err) => {
+            eprintln!("skipped: no GPU ({err})");
+            return;
+        }
+    };
+    use pencilpilot_native::shell::engine::frames::gpu::Pic;
+    use pencilpilot_native::shell::engine::{Phase, Sample};
+    use pencilpilot_native::state::Tool;
+    init();
+    let mut s = State::demo();
+    s.onion = false;
+    let mut e = Engine::new(s.view.doc_w, s.view.doc_h);
+    settle(&mut e, &mut s);
+    unsafe {
+        std::env::set_var(
+            "PENCILPILOT_DIALOG_ANSWER",
+            fix.join("layers20-4k.ppstudio"),
+        )
+    };
+    assert!(e.apply(&mut s, &Action::File(files::OPEN.into())));
+    settle(&mut e, &mut s);
+    unsafe { std::env::set_var("PENCILPILOT_DIALOG_ANSWER", "") };
+    let (w, h) = (e.painter.width(), e.painter.height());
+    assert_eq!((w, h), (3840, 2160));
+    let mut comp =
+        pencilpilot_gpu::Compositor::new(&g, w, h, brush::srgb_table(), 1024 << 20).unwrap();
+    let show = |e: &mut Engine, s: &mut State, comp: &mut pencilpilot_gpu::Compositor| -> bool {
+        e.tick(s, Instant::now());
+        matches!(e.picture_gpu(s, &g, comp), Pic::Gpu(_))
+    };
+    // the top animated layer is the active one ("Anim 4": the interface's layers are top first)
+    s.active_layer = s.layers.iter().position(|l| l.name == "Anim 4").unwrap();
+    assert!(e.apply(&mut s, &Action::GoToFrame(0)));
+    // (resting on frame 0: everything up, the painter showing it)
+    for _ in 0..30 {
+        show(&mut e, &mut s, &mut comp);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let f0 = comp.read_back(&g).unwrap();
+    let mut gpu_all = true;
+    for f in 1..=5 {
+        assert!(e.apply(&mut s, &Action::GoToFrame(f)));
+        gpu_all &= show(&mut e, &mut s, &mut comp);
+    }
+    let f5 = comp.read_back(&g).unwrap();
+    // a pixel that changed between frames 0 and 5 (the animation)
+    let px = |v: &[u8], i: usize| [v[i * 4], v[i * 4 + 1], v[i * 4 + 2]];
+    let p = (0..(w * h) as usize)
+        .step_by(97)
+        .find(|&i| {
+            let (a, b) = (px(&f0, i), px(&f5, i));
+            (0..3).any(|c| a[c].abs_diff(b[c]) > 60)
+        })
+        .expect("frames 0 and 5 differ");
+    let (x, y) = ((p as u32 % w) as f32 + 0.5, (p as u32 / w) as f32 + 0.5);
+    let smp = |x: f32, y: f32, ms: u32| Sample {
+        x,
+        y,
+        pressure: 0.8,
+        tilt: (0.0, 0.0),
+        ms,
+    };
+    // the Eyedropper, at once
+    s.tool = Tool::Eyedropper;
+    let t = Instant::now();
+    e.pointer(&mut s, Phase::Down, smp(x, y, 0));
+    let pick_ms = t.elapsed().as_secs_f64() * 1e3;
+    e.pointer(&mut s, Phase::Up, smp(x, y, 1));
+    let picked = s.colour.map(|c| (c * 255.0).round() as u8);
+    let on_screen = px(&f5, p);
+    let pick_diff = (0..3)
+        .map(|c| picked[c].abs_diff(on_screen[c]))
+        .max()
+        .unwrap();
+    // Fill on the active layer, where its frame-5 drawing is empty, at once after another
+    // scrub 0 → 5
+    for f in [0, 1, 2, 3, 4, 5] {
+        assert!(e.apply(&mut s, &Action::GoToFrame(f)));
+        show(&mut e, &mut s, &mut comp);
+    }
+    let track = s.sheet.tracks[s.active_layer].clone();
+    let (d5, d0) = (track.drawing_at(5), track.drawing_at(0));
+    assert_ne!(d5, d0, "the active layer shows another drawing on frame 5");
+    let before5 = e.painter.drawing_rgba(d5);
+    let before0 = e.painter.drawing_rgba(d0);
+    let hole = (0..(w * h) as usize)
+        .step_by(1013)
+        .find(|&i| before5[i * 4 + 3] == 0 && i % w as usize > 100 && i / (w as usize) > 100)
+        .unwrap();
+    s.tool = Tool::Fill;
+    let (fx, fy) = (
+        (hole as u32 % w) as f32 + 0.5,
+        (hole as u32 / w) as f32 + 0.5,
+    );
+    let t = Instant::now();
+    e.pointer(&mut s, Phase::Down, smp(fx, fy, 0));
+    e.pointer(&mut s, Phase::Up, smp(fx, fy, 1));
+    let fill_ms = t.elapsed().as_secs_f64() * 1e3;
+    for _ in 0..5 {
+        show(&mut e, &mut s, &mut comp);
+    }
+    let after5 = e.painter.drawing_rgba(d5);
+    let after0 = e.painter.drawing_rgba(d0);
+    let filled5 = after5[hole * 4 + 3] > 0;
+    let changed0 = after0 != before0;
+    // scrub on to 7, then a stroke at once
+    for f in [6, 7] {
+        assert!(e.apply(&mut s, &Action::GoToFrame(f)));
+        show(&mut e, &mut s, &mut comp);
+    }
+    let d7 = s.sheet.tracks[s.active_layer].drawing_at(7);
+    let (b7, b5) = (e.painter.drawing_rgba(d7), e.painter.drawing_rgba(d5));
+    s.tool = Tool::Brush;
+    s.brush = 2;
+    s.brush_size = 30.0;
+    let t = Instant::now();
+    for i in 0..=40u32 {
+        let ph = match i {
+            0 => Phase::Down,
+            40 => Phase::Up,
+            _ => Phase::Move,
+        };
+        e.pointer(&mut s, ph, smp(400.0 + i as f32 * 40.0, 300.0, i * 4));
+    }
+    let stroke_ms = t.elapsed().as_secs_f64() * 1e3;
+    for _ in 0..5 {
+        show(&mut e, &mut s, &mut comp);
+    }
+    let in7 = e.painter.drawing_rgba(d7) != b7;
+    let in5 = e.painter.drawing_rgba(d5) != b5;
+    // what's on screen after the stroke: the GPU's picture against the CPU's
+    let gp = comp.read_back(&g).unwrap();
+    let cpu = shown(&mut e, &s);
+    let after_stroke_diff = gp
+        .iter()
+        .zip(&cpu)
+        .enumerate()
+        .filter(|(i, _)| i % 4 != 3)
+        .map(|(_, (a, b))| a.abs_diff(*b))
+        .max()
+        .unwrap();
+    // an adjustment on the paper layer: the CPU makes the picture
+    let paper = e.painter.layers()[0].id;
+    let mut props = e.painter.layers()[0].props.clone();
+    props.adjust = Some(Box::new(brush::adjust::ColourAdjust {
+        hue: 90.0,
+        saturation: 0.5,
+        ..Default::default()
+    }));
+    let took_adjust = e.painter.set_layer_props(paper, props, false);
+    let has_adjust = e.painter.layers()[0].props.adjust.is_some();
+    e.tick(&mut s, Instant::now());
+    let adj_on_gpu = matches!(e.picture_gpu(&s, &g, &mut comp), Pic::Gpu(_));
+    let json = format!(
+        "{{\"scrubOnGpu\": {gpu_all}, \"eyedropper\": {{\"ms\": {pick_ms:.1}, \"picked\": {picked:?}, \"onScreen\": {on_screen:?}, \"maxDiff\": {pick_diff}}}, \"fill\": {{\"ms\": {fill_ms:.1}, \"filledFrame5Drawing\": {filled5}, \"changedFrame0Drawing\": {changed0}}}, \"stroke\": {{\"ms\": {stroke_ms:.1}, \"inFrame7Drawing\": {in7}, \"inFrame5Drawing\": {in5}, \"gpuVsCpuAfter\": {after_stroke_diff}}}, \"adjustment\": {{\"taken\": {took_adjust}, \"held\": {has_adjust}, \"pictureOnGpu\": {adj_on_gpu}}}}}"
+    );
+    std::fs::write(out_dir().join("after_scrubbing.json"), &json).unwrap();
+    eprintln!("after scrubbing: {json}");
+    assert!(gpu_all, "scrubbing wasn't on the GPU");
+    assert!(
+        pick_diff <= 1,
+        "the Eyedropper picked {picked:?}, the screen shows {on_screen:?}"
+    );
+    assert!(
+        filled5 && !changed0,
+        "Fill went to the wrong drawing: {json}"
+    );
+    assert!(in7 && !in5, "the stroke went to the wrong drawing: {json}");
+    assert!(
+        after_stroke_diff <= 1,
+        "after the stroke the GPU shows other pixels: {json}"
+    );
+    if has_adjust {
+        assert!(!adj_on_gpu, "an adjustment layer composited on the GPU");
+    }
+}

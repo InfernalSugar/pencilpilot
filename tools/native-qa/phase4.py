@@ -1050,13 +1050,18 @@ def scenario_sound_edges(binary, out):
 
 def decode(path, rate=RATE):
     """Any sound (or a video's sound) as float32 (n, 2) at `rate`; None if it has none or
-    doesn't decode. A mono file is on both sides, as Web Audio plays it."""
+    doesn't decode. A mono file is the same on both sides, at its own level, as Web Audio
+    plays it (FFmpeg's own mono to stereo is 3 dB down: not used)."""
     import numpy as np
-    p = subprocess.run(["ffmpeg", "-loglevel", "error", "-nostdin", "-i", path, "-vn", "-f", "f32le", "-ac", "2",
-                        "-ar", str(rate), "-"], capture_output=True)
+    pr = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=channels",
+                         "-of", "csv=p=0", path], capture_output=True, text=True)
+    mono = pr.stdout.strip() == "1"
+    p = subprocess.run(["ffmpeg", "-loglevel", "error", "-nostdin", "-i", path, "-vn", "-f", "f32le", "-ac",
+                        "1" if mono else "2", "-ar", str(rate), "-"], capture_output=True)
     if p.returncode != 0 or not p.stdout:
         return None
-    return np.frombuffer(p.stdout, "<f4").reshape(-1, 2)
+    x = np.frombuffer(p.stdout, "<f4")
+    return np.stack([x, x], 1) if mono else x.reshape(-1, 2)
 
 
 def clip_parts(spec, fps, only=None):

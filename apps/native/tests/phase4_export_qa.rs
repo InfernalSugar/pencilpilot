@@ -22,7 +22,9 @@ use pencilpilot_native::state::{Action, State};
 fn out_dir() -> PathBuf {
     let d = std::env::var_os("PP_QA_OUT")
         .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::temp_dir().join(format!("pp-p4-export-{}", std::process::id())));
+        .unwrap_or_else(|| {
+            std::env::temp_dir().join(format!("pp-p4-export-{}", std::process::id()))
+        });
     let _ = std::fs::create_dir_all(&d);
     d
 }
@@ -94,11 +96,20 @@ fn opened(path: &Path) -> (Engine, State) {
     loop {
         tick(&mut e, &mut s);
         let opened = s.project.path.as_deref() == Some(path);
-        let decoded = s.sound.clips.iter().all(|c| c.frames > 0 || c.failed.is_some());
+        let decoded = s
+            .sound
+            .clips
+            .iter()
+            .all(|c| c.frames > 0 || c.failed.is_some());
         if opened && decoded {
             break;
         }
-        assert!(t.elapsed() < Duration::from_secs(30), "{} didn't open: {:?}", path.display(), s.project.note);
+        assert!(
+            t.elapsed() < Duration::from_secs(30),
+            "{} didn't open: {:?}",
+            path.display(),
+            s.project.note
+        );
     }
     answer(None);
     (e, s)
@@ -118,7 +129,10 @@ fn export(
     let t = Instant::now();
     while s.export.videos.is_none() {
         tick(e, s);
-        assert!(t.elapsed() < Duration::from_secs(10), "FFmpeg never looked for");
+        assert!(
+            t.elapsed() < Duration::from_secs(10),
+            "FFmpeg never looked for"
+        );
     }
     s.export.format = format;
     s.export.size = size;
@@ -141,7 +155,10 @@ fn export(
             Status::Idle if cancelled || t.elapsed() > Duration::from_secs(5) => break,
             _ => {}
         }
-        assert!(t.elapsed() < Duration::from_secs(300), "the export never ended");
+        assert!(
+            t.elapsed() < Duration::from_secs(300),
+            "the export never ended"
+        );
     }
     answer(None);
     // (Cancel: let FFmpeg go)
@@ -183,7 +200,15 @@ fn sound_into_videos() {
     let mut rows = Vec::new();
     for (sc, cut, formats) in [
         (0u64, 0u64, vec![(Format::Mp4, 0usize, "mp4")]),
-        (0, 1, vec![(Format::Mp4, 0, "mp4"), (Format::Webm, 0, "webm"), (Format::Mp4, 1, "half.mp4")]),
+        (
+            0,
+            1,
+            vec![
+                (Format::Mp4, 0, "mp4"),
+                (Format::Webm, 0, "webm"),
+                (Format::Mp4, 1, "half.mp4"),
+            ],
+        ),
         (1, 0, vec![(Format::Mp4, 0, "mp4")]),
     ] {
         let p = d.join(format!("sound-s{sc}c{cut}.ppstudio"));
@@ -193,7 +218,17 @@ fn sound_into_videos() {
             .sound
             .clips
             .iter()
-            .map(|c| format!("{{\"file\": {:?}, \"start\": {}, \"frames\": {}, \"failed\": {:?}}}", c.file, c.start, c.frames, c.failed))
+            .map(|c| {
+                format!(
+                    "{{\"file\": {:?}, \"start\": {}, \"frames\": {}, \"failed\": {}}}",
+                    c.file,
+                    c.start,
+                    c.frames,
+                    c.failed
+                        .as_ref()
+                        .map_or("null".to_string(), |f| format!("{f:?}"))
+                )
+            })
             .collect();
         for (f, size, ext) in formats {
             let out = d.join(format!("sound-s{sc}c{cut}.{ext}"));
@@ -208,7 +243,10 @@ fn sound_into_videos() {
                 s.frames,
                 clips.join(", ")
             ));
-            assert!(matches!(st, Status::Done(_)), "{ext} of scene {sc} cut {cut}: {st:?}");
+            assert!(
+                matches!(st, Status::Done(_)),
+                "{ext} of scene {sc} cut {cut}: {st:?}"
+            );
         }
     }
     // no sound at all: a video with no sound
@@ -216,7 +254,12 @@ fn sound_into_videos() {
     let out = d.join("sound-none.mp4");
     let _ = std::fs::remove_file(&out);
     let (st, ms) = export(&mut e, &mut s, Format::Mp4, 0, &out, None);
-    rows.push(format!("{{\"file\": {:?}, \"status\": {:?}, \"ms\": {ms:.0}, \"exists\": {}}}", out.display().to_string(), format!("{st:?}"), out.exists()));
+    rows.push(format!(
+        "{{\"file\": {:?}, \"status\": {:?}, \"ms\": {ms:.0}, \"exists\": {}}}",
+        out.display().to_string(),
+        format!("{st:?}"),
+        out.exists()
+    ));
     // Cancel after 10 frames of the minute with sound: nothing left, FFmpeg gone
     let (mut e, mut s) = opened(&fix.join("sound-60s.ppstudio"));
     let out = d.join("sound-60s-cancelled.mp4");
@@ -273,7 +316,8 @@ fn frame_as_psd() {
             let mut m = vec![0u8; w * h];
             for y in 0..h {
                 for x in 0..w {
-                    let hole = (x as i32 - 250).abs() < 20 && (y as i32 - (h as i32 - 24)).abs() < 12;
+                    let hole =
+                        (x as i32 - 250).abs() < 20 && (y as i32 - (h as i32 - 24)).abs() < 12;
                     m[y * w + x] = if hole { 0 } else { (x * 255 / (w - 1)) as u8 };
                 }
             }
