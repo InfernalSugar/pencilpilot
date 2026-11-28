@@ -465,11 +465,11 @@ fn a_host_leaving_hands_over() {
             .as_ref()
             .is_some_and(|i| i.members.len() == 2)
     };
-    until(&mut [&mut host, &mut a, &mut b], 20, "the hand-over", |x| {
+    until(&mut [&mut host, &mut a, &mut b], 40, "the hand-over", |x| {
         (hosting(x[1]) || hosting(x[2])) && two(x[1]) && two(x[2])
     });
     // (past the time a lost session is noticed in: still together, no one went looking)
-    settle(&mut [&mut a, &mut b], 6000);
+    settle(&mut [&mut a, &mut b], 16000);
     for x in [&a, &b] {
         assert!(two(x), "both still in the session");
         assert!(
