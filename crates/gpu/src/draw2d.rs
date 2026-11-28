@@ -5,7 +5,7 @@ use std::ffi::c_void;
 
 use ash::vk;
 
-use super::{COLOR_RANGE, Canvas, Ctx, DmabufImage, Error, Gpu, Result};
+use super::{COLOR_RANGE, Canvas, Compositor, Ctx, DmabufImage, Error, Gpu, Result};
 
 /// The atlas is this many pixels a side (RGBA8, premultiplied).
 pub const ATLAS_SIZE: u32 = 2048;
@@ -539,6 +539,22 @@ impl Renderer2d {
         canvas: Option<&mut Canvas>,
         second: Option<&mut Canvas>,
     ) -> Result<()> {
+        self.draw_composited(gpu, frame, clear, quads, canvas, second, None)
+    }
+
+    /// [`Renderer2d::draw_canvases`], with the layers composited on the GPU first: what
+    /// `layers` composites goes into `canvas` (after the canvas's own uploads, if any).
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_composited(
+        &mut self,
+        gpu: &Gpu,
+        frame: &DmabufImage,
+        clear: [f32; 4],
+        quads: &[Quad],
+        canvas: Option<&mut Canvas>,
+        second: Option<&mut Canvas>,
+        mut layers: Option<&mut Compositor>,
+    ) -> Result<()> {
         if quads.len() > self.capacity {
             let cap = quads.len().next_power_of_two();
             unsafe {
@@ -627,6 +643,7 @@ impl Renderer2d {
             };
             *bound = serial;
         }
+        let has_canvas = canvas.is_some();
         let pictures: Vec<_> = canvas
             .into_iter()
             .chain(second)
@@ -653,9 +670,13 @@ impl Renderer2d {
                     .collect();
                 let was_ready = c.ready;
                 c.ready = true;
-                (c.image, c.staging, regions, was_ready)
+                (c.image, vec![(c.staging, regions)], was_ready)
             })
             .collect();
+        let mut pictures = pictures;
+        if !has_canvas {
+            layers = None;
+        }
         let fam = gpu.family;
         let (atlas, staging, pipeline, layout, set, instances) = (
             self.atlas,
@@ -817,9 +838,17 @@ impl Renderer2d {
                 }
                 d.cmd_end_rendering(cmd);
             };
+            // the layers composited on the GPU go into the canvas, after its own changes
+            if let Some(comp) = layers {
+                comp.record(d, cmd);
+                let regions = comp.regions();
+                if !regions.is_empty() {
+                    pictures[0].1.push((comp.out.buffer, regions));
+                }
+            }
             // the pictures' changes go up, then they're read by the shader
-            for (cimg, cstaging, cregions, was_ready) in &pictures {
-                if cregions.is_empty() && *was_ready {
+            for (cimg, copies, was_ready) in &pictures {
+                if copies.iter().all(|c| c.1.is_empty()) && *was_ready {
                     continue;
                 }
                 let from = if *was_ready {
@@ -844,13 +873,36 @@ impl Renderer2d {
                         vk::QUEUE_FAMILY_IGNORED,
                     ),
                 );
-                if !cregions.is_empty() {
+                for (i, (src, regions)) in copies.iter().enumerate() {
+                    if regions.is_empty() {
+                        continue;
+                    }
+                    if i > 0 {
+                        // (what comes after lands over what came before)
+                        Gpu::barrier(
+                            d,
+                            cmd,
+                            *cimg,
+                            (
+                                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                                vk::AccessFlags::TRANSFER_WRITE,
+                                vk::PipelineStageFlags::TRANSFER,
+                                vk::QUEUE_FAMILY_IGNORED,
+                            ),
+                            (
+                                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                                vk::AccessFlags::TRANSFER_WRITE,
+                                vk::PipelineStageFlags::TRANSFER,
+                                vk::QUEUE_FAMILY_IGNORED,
+                            ),
+                        );
+                    }
                     d.cmd_copy_buffer_to_image(
                         cmd,
-                        *cstaging,
+                        *src,
                         *cimg,
                         vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                        cregions,
+                        regions,
                     );
                 }
                 Gpu::barrier(

@@ -632,6 +632,9 @@ fn write_in_background(
     settle(e, s);
     let mut doc = std::mem::take(&mut e.files.doc);
     let made = save::project(e, s, &mut doc);
+    // (the painter's own picture catches up with what the GPU composited)
+    super::frames::catch_up(e, s);
+    e.painter.flush();
     let thumb = save::thumbnail(e);
     let source = doc.source.take();
     e.files.doc = doc;

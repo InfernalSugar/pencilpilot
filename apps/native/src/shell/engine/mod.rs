@@ -230,6 +230,10 @@ impl Engine {
     /// A pointer on the canvas (pen or mouse, pressed). The Brush and the Eraser paint;
     /// the other tools are [`tools`]'.
     pub fn pointer(&mut self, s: &mut State, phase: Phase, p: Sample) {
+        if phase == Phase::Down {
+            // (the painter shows the frame's drawings: the GPU may have shown them alone)
+            frames::catch_up(self, s);
+        }
         if Engine::paints(s) || self.is_stroking() {
             // pixels still being moved are put down first (the painter takes no stroke while
             // they float), as picking the brush would have
@@ -261,6 +265,20 @@ impl Engine {
     /// Carries out what the interface asked for. Returns whether the picture may have
     /// changed (the shell then shows it).
     pub fn apply(&mut self, s: &mut State, a: &Action) -> bool {
+        // going from frame to frame needs nothing of the painter; anything else is done on
+        // the drawings it shows (the GPU may have shown the frame alone)
+        if !matches!(
+            a,
+            Action::GoToFrame(_)
+                | Action::NextFrame
+                | Action::PreviousFrame
+                | Action::NextDrawing
+                | Action::PreviousDrawing
+                | Action::Play
+                | Action::Stop
+        ) {
+            frames::catch_up(self, s);
+        }
         match a {
             Action::Undo => self.painter.undo(),
             Action::Redo => self.painter.redo(),
@@ -304,6 +322,29 @@ impl Engine {
         frames::picture(self, s)
     }
 
+    /// The canvas's picture made on the GPU into `comp` where it can be, otherwise the
+    /// painter's as [`Engine::picture`] gives it ([`frames::gpu`]).
+    pub fn picture_gpu(
+        &mut self,
+        s: &State,
+        gpu: &pencilpilot_gpu::Gpu,
+        comp: &mut pencilpilot_gpu::Compositor,
+    ) -> frames::gpu::Pic<'_> {
+        frames::gpu::picture(self, s, gpu, comp)
+    }
+
+    /// The drawings of the frames around this one go up to the GPU ahead of being shown,
+    /// for `budget` at most ([`frames::gpu::ahead`]). Whether there's more to do.
+    pub fn gpu_ahead(
+        &mut self,
+        s: &State,
+        gpu: &pencilpilot_gpu::Gpu,
+        comp: &mut pencilpilot_gpu::Compositor,
+        budget: std::time::Duration,
+    ) -> bool {
+        frames::gpu::ahead(self, s, gpu, comp, budget)
+    }
+
     /// The brush to paint with now: the picked one, in the picked colour and size, erasing
     /// with the Eraser tool.
     fn brush(s: &State) -> Option<hokusai::Brush> {
@@ -340,6 +381,7 @@ impl Engine {
 
     /// A stroke's sample (canvas pixels; pressure 0–1; tilt −1–1; the input's time in ms).
     pub fn down(&mut self, s: &State, x: f32, y: f32, pressure: f32, tilt: (f32, f32), ms: u32) {
+        frames::catch_up(self, s);
         let Some(b) = Engine::brush(s) else { return };
         self.painter.begin_stroke();
         self.painter
