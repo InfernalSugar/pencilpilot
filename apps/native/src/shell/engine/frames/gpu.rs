@@ -554,7 +554,7 @@ pub fn ahead(
         e.frames.gpu.warm.done = Some(s.frame);
         return false;
     }
-    if !comp.room(tiles) {
+    if !comp.room(tiles) || comp.reserve(gpu, tiles).is_err() {
         e.frames.gpu.warm.full = Some(s.frame);
         return false;
     }
