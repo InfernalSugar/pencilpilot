@@ -2666,6 +2666,50 @@ def scenario_x_join_studio_file(out):
     return res
 
 
+def scenario_x_big_erase(out):
+    """The current app (host) draws strokes, then clears its whole layer (Select all,
+    Delete: tiles cleared, as a big erase travels); the native app (joined) must end with the
+    same layer: nothing left where the current app has nothing."""
+    projects = env_bin("PP_PROJECTS")
+    res = {"load": load()}
+    s = Studio(env_bin("PP_STUDIO"), out, "erase", project=os.path.join(projects, "empty.ppstudio"), name="Stu")
+    a = pr = None
+    key = lambda k, code, **m: s.js("document.body.dispatchEvent(new KeyboardEvent('keydown', Object.assign({key: arguments[0], code: arguments[1], bubbles: true}, arguments[2]))); return true;", k, code, m)
+    try:
+        s.open()
+        invite = s.host()["invite"]
+        a = NativePeer(np_bin(), out, "erase")
+        a.do(cmd="open", path=os.path.join(projects, "tiny.ppstudio"))
+        a.do(cmd="join", code=invite, name="Nat")
+        pr = Peer(env_bin("PP_PEER"), out, "erase", invite=invite, name="Probe")
+        time.sleep(1.5)
+        s.pen([wave(i, y0=0.2) for i in range(6)])
+        time.sleep(2.0)
+        p1 = os.path.join(a.home, "drawn.ppstudio")
+        a.do(cmd="save", path=p1)
+        res["tilesBefore"] = len(tiles_of(p1, "Layer 1"))
+        key("a", "KeyA", ctrlKey=True)
+        time.sleep(0.3)
+        key("Delete", "Delete")
+        time.sleep(3.0)
+        p2 = os.path.join(a.home, "erased.ppstudio")
+        a.do(cmd="save", path=p2)
+        ps = s.save()
+        res["studioTilesAfter"] = len(tiles_of(ps, "Layer 1"))
+        res["nativeTilesAfter"] = len(tiles_of(p2, "Layer 1"))
+        res["clearsOnWire"] = sum(len((e.get("body") or {}).get("clear", [])) for e in pr.events()
+                                  if (e.get("body") or {}).get("k") == "tiles")
+        res["compare"] = compare_projects(ps, p2, ["Layer 1"])
+        res["pass"] = res["tilesBefore"] > 0 and res["compare"]["samePremul1"]
+    finally:
+        if pr:
+            pr.leave()
+        if a:
+            a.quit()
+        s.quit()
+    return res
+
+
 SCENARIOS = {
     "studio-wire": scenario_studio_wire,
     "studio-pair": scenario_studio_pair,
@@ -2694,6 +2738,7 @@ SCENARIOS = {
     "x-timeline-roundtrip-studio-hosts": lambda out: scenario_x_timeline_roundtrip(out, False),
     "x-timeline-roundtrip-native-hosts": lambda out: scenario_x_timeline_roundtrip(out, True),
     "x-join-studio-file": scenario_x_join_studio_file,
+    "x-big-erase": scenario_x_big_erase,
 }
 
 
