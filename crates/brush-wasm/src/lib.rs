@@ -103,6 +103,28 @@ pub fn inflate_tiles(blob: &[u8], lens: &[u32]) -> Vec<u8> {
     out
 }
 
+/// Tiles for drawing together, deflated (raw deflate at the default level), `n` 64×64
+/// RGBA8 tiles one after another in `px`: each one's length (u32, little-endian), then the
+/// bytes of each one after another.
+#[wasm_bindgen]
+pub fn deflate_tiles(px: &[u8]) -> Vec<u8> {
+    let n = px.len() / TILE_BYTES;
+    let parts: Vec<Vec<u8>> = px
+        .as_chunks::<TILE_BYTES>()
+        .0
+        .iter()
+        .map(|t| miniz_oxide::deflate::compress_to_vec(t, 6))
+        .collect();
+    let mut out = Vec::with_capacity(n * 4 + parts.iter().map(Vec::len).sum::<usize>());
+    for p in &parts {
+        out.extend_from_slice(&(p.len() as u32).to_le_bytes());
+    }
+    for p in &parts {
+        out.extend_from_slice(p);
+    }
+    out
+}
+
 #[wasm_bindgen]
 pub fn vectorise(alpha: &[u8], w: u32, h: u32, threshold: u8) -> Vec<f32> {
     let strokes = brush::vectorise::vectorise(alpha, w as usize, h as usize, threshold);
@@ -1634,5 +1656,19 @@ mod inflate_tests {
         assert_eq!(&out[..TILE_BYTES], &tile[..]);
         assert_eq!(&out[3 * TILE_BYTES..4 * TILE_BYTES], &tile[..]);
         assert_eq!(&out[4 * TILE_BYTES..], &[1, 0, 0, 1]);
+    }
+
+    #[test]
+    fn deflates_tiles_that_inflate_back() {
+        let a: Vec<u8> = (0..TILE_BYTES).map(|i| (i % 251) as u8).collect();
+        let b = vec![7u8; TILE_BYTES];
+        let out = deflate_tiles(&[&a[..], &b[..]].concat());
+        let la = u32::from_le_bytes(out[..4].try_into().unwrap()) as usize;
+        let lb = u32::from_le_bytes(out[4..8].try_into().unwrap()) as usize;
+        let blob = &out[8..];
+        assert_eq!(blob.len(), la + lb);
+        let back = inflate_tiles(blob, &[la as u32, lb as u32]);
+        assert_eq!(&back[..TILE_BYTES], &a[..]);
+        assert_eq!(&back[TILE_BYTES..2 * TILE_BYTES], &b[..]);
     }
 }

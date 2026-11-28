@@ -6370,8 +6370,15 @@ pub fn decode_tile(rgba: &[u8]) -> Option<DecodedTile> {
     if rgba.len() != ts * ts * 4 {
         return None;
     }
-    // (the sRGB curve of each 8-bit value, looked up: the same numbers premul_fix15 makes,
-    // without three powf a pixel)
+    let (t, any) = premul_tile(rgba);
+    any.then_some(DecodedTile(t))
+}
+
+/// Straight-alpha sRGB RGBA8 (a whole tile) as the painter keeps it, and whether anything
+/// is in it. (The sRGB curve of each 8-bit value, looked up: the same numbers
+/// [`premul_fix15`] makes, without three `powf` a pixel.)
+fn premul_tile(rgba: &[u8]) -> (Box<TilePixels>, bool) {
+    let ts = TILE_SIZE;
     static LINEAR: std::sync::OnceLock<[f32; 256]> = std::sync::OnceLock::new();
     let lin = LINEAR.get_or_init(|| {
         std::array::from_fn(|v| hokusai::color::srgb_to_linear((v as f32 / 255.0).clamp(0.0, 1.0)))
@@ -6388,7 +6395,7 @@ pub fn decode_tile(rgba: &[u8]) -> Option<DecodedTile> {
         let f = |v: u8| (lin[v as usize] * a * one).round() as u16;
         t[k / ts][k % ts] = [f(px[0]), f(px[1]), f(px[2]), (a * one).round() as u16];
     }
-    any.then_some(DecodedTile(t))
+    (t, any)
 }
 
 /// A decoded tile back as straight-alpha sRGB RGBA8 (16 384 bytes into `out`), as the
@@ -6429,15 +6436,8 @@ pub(crate) fn unpack_tiles(packed: &[u8]) -> Option<TileMap> {
         let tx = i32::from_le_bytes(packed[at..at + 4].try_into().unwrap());
         let ty = i32::from_le_bytes(packed[at + 4..at + 8].try_into().unwrap());
         let src = &packed[at + 8..at + 8 + tile_bytes];
-        let mut t = empty_tile();
-        for (k, px) in src.as_chunks::<4>().0.iter().enumerate() {
-            if px[3] == 0 {
-                continue;
-            }
-            let c = [px[0], px[1], px[2]].map(|v| v as f32 / 255.0);
-            t[k / ts][k % ts] = premul_fix15(c, px[3] as f32 / 255.0);
-        }
-        tiles.insert((tx, ty), t);
+        // (the same numbers premul_fix15 makes: see decode_tile_matches_premul_fix15)
+        tiles.insert((tx, ty), premul_tile(src).0);
     }
     Some(tiles)
 }
@@ -6463,6 +6463,37 @@ mod decode_tile_tests {
                 let c = [p[0], p[1], p[2]].map(|v| v as f32 / 255.0);
                 let want = premul_fix15(c, p[3] as f32 / 255.0);
                 assert_eq!(t.0[k / TILE_SIZE][k % TILE_SIZE], want, "{p:?}");
+            }
+        }
+    }
+
+    /// Packed tiles (drawing together's, a frame store's) go in as premul_fix15 makes them,
+    /// every value and alpha, empty tiles kept.
+    #[test]
+    fn unpack_tiles_matches_premul_fix15() {
+        let mut packed = Vec::new();
+        packed.extend_from_slice(&256u32.to_le_bytes());
+        for a in 0..=255u32 {
+            packed.extend_from_slice(&(a as i32).to_le_bytes());
+            packed.extend_from_slice(&(-(a as i32)).to_le_bytes());
+            for k in 0..TILE_SIZE * TILE_SIZE {
+                let v = ((k as u32 * 7 + a) % 256) as u8;
+                packed.extend_from_slice(&[v, 255 - v, v / 2, a as u8]);
+            }
+        }
+        let tiles = unpack_tiles(&packed).unwrap();
+        assert_eq!(tiles.len(), 256);
+        for a in 0..=255u32 {
+            let t = &tiles[&(a as i32, -(a as i32))];
+            for k in 0..TILE_SIZE * TILE_SIZE {
+                let v = ((k as u32 * 7 + a) % 256) as u8;
+                let c = [v, 255 - v, v / 2].map(|x| x as f32 / 255.0);
+                let want = if a == 0 {
+                    [0; 4]
+                } else {
+                    premul_fix15(c, a as f32 / 255.0)
+                };
+                assert_eq!(t[k / TILE_SIZE][k % TILE_SIZE], want, "{v} {a}");
             }
         }
     }
