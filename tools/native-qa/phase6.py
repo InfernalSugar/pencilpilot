@@ -1627,8 +1627,12 @@ def scenario_x_pair(out, native_hosts=True, strokes=8):
         nproj = os.path.join(out, f"native-{tag}", "empty.ppstudio")
         if not native_hosts:
             # joined: the project is the host's, saved where Save as's dialog was answered
-            nproj = os.path.join(out, f"native-{tag}", "saved.ppstudio")
-            res["nativeSavedJoined"] = os.path.exists(nproj)
+            # (Save as's answer for a joined project without a file; once joining keeps
+            # the joiner's own project, Ctrl+S saves to it: the newer of the two)
+            cands = [os.path.join(out, f"native-{tag}", x) for x in ("saved.ppstudio", "tiny.ppstudio")]
+            cands = [c for c in cands if os.path.exists(c)]
+            nproj = max(cands, key=os.path.getmtime)
+            res["nativeSavedJoined"] = os.path.basename(nproj)
         sp, _ = project_pixels(res["studioSaved"])
         np_, _ = project_pixels(nproj)
         shared = sorted(set(sp) & set(np_) - {"Ink"})
