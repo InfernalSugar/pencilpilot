@@ -2710,6 +2710,40 @@ def scenario_x_big_erase(out):
     return res
 
 
+def scenario_studio_join4k(out):
+    """The reference for x-join4k-native-joins: a current app joining a current app hosting
+    the 4K, 20-layer project (after it has shared its layers): Join to the snapshot's end and
+    to the layers shown."""
+    projects = env_bin("PP_PROJECTS")
+    res = {"load": load()}
+    a = b = None
+    try:
+        a = Studio(env_bin("PP_STUDIO"), out, "sj4a", project=os.path.join(projects, "layers20-4k.ppstudio"), name="Ana")
+        b = Studio(env_bin("PP_STUDIO"), out, "sj4b", project=os.path.join(projects, "empty.ppstudio"), name="Bo")
+        a.open(300)
+        b.open()
+        invite = a.host()["invite"]
+        time.sleep(12)
+        b.take()
+        _, t0 = b.join(invite)
+        t = time.monotonic()
+        end = None
+        while time.monotonic() - t < 60:
+            ev = b.js("return window.__q6.ev.filter((e) => e.kind === 'direct' && e.k === 'snap.end').map((e) => e.t);")
+            if ev:
+                end = b.to_mono_ns(ev[0])
+                break
+            time.sleep(0.05)
+        res["joinClickToSnapshotEndMs"] = end and round((end - t0) / 1e6, 1)
+        b.until("return document.querySelectorAll('ul.list button.name').length >= 20", 60)
+        res["joinClickToLayersShownMs"] = round((mono_ns() - t0) / 1e6, 1)
+    finally:
+        for x in (a, b):
+            if x:
+                x.quit()
+    return res
+
+
 SCENARIOS = {
     "studio-wire": scenario_studio_wire,
     "studio-pair": scenario_studio_pair,
@@ -2719,6 +2753,7 @@ SCENARIOS = {
     "x-pair-studio-hosts": lambda out: scenario_x_pair(out, False),
     "x-access": scenario_x_access,
     "studio-revoke": scenario_studio_revoke,
+    "studio-join4k": scenario_studio_join4k,
     "x-crowd": scenario_x_crowd,
     "x-timeline-merge": scenario_x_timeline_merge,
     "x-join4k-native-joins": lambda out: scenario_x_join4k(out, True),
