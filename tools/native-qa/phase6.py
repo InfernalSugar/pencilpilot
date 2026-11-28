@@ -1372,11 +1372,113 @@ def scenario_studio_garbage(out):
     return res
 
 
+def native_wave(i, n=120, y0=230):
+    """A stroke across the native window's canvas (window points)."""
+    return [(300 + 500 * j / (n - 1), y0 + 30 * i + 25 * math.sin(j / (n - 1) * 9 + i)) for j in range(n)]
+
+
+def native_edits(st, kind=None):
+    t = (st or {}).get("together") or {}
+    return [e for e in t.get("edits", []) if kind is None or e["kind"] == kind]
+
+
+def native_live_latency(sent, st):
+    """Studio pen (per stroke, each point's time) → the native app: the live stroke's first
+    frame on screen, and the stroke's tiles on screen after its last point."""
+    ev = native_edits(st)
+    out = {"penToLiveShownMs": [], "penToLiveReceivedMs": [], "strokeEndToTilesShownMs": [],
+           "strokeEndToTilesReceivedMs": []}
+    for stroke in sent:
+        t0, t_end = stroke[0], stroke[-1]
+        live = next((e for e in ev if e["kind"].startswith("live") and e["receivedNs"] >= t0), None)
+        if live:
+            out["penToLiveReceivedMs"].append((live["receivedNs"] - t0) / 1e6)
+            if live["shownNs"]:
+                out["penToLiveShownMs"].append((live["shownNs"] - t0) / 1e6)
+        tl = next((e for e in ev if e["kind"] == "tiles" and e["receivedNs"] >= t_end), None)
+        if tl:
+            out["strokeEndToTilesReceivedMs"].append((tl["receivedNs"] - t_end) / 1e6)
+            if tl["shownNs"]:
+                out["strokeEndToTilesShownMs"].append((tl["shownNs"] - t_end) / 1e6)
+    return {k: dist(v) for k, v in out.items()}
+
+
+def scenario_x_pair(out, native_hosts=True, strokes=5):
+    """The native app and the current app in one session. The host draws `strokes` strokes,
+    the joiner some on its own layer; the other shows them live, then the tiles; both save,
+    and every shared layer must hold the same pixels in both files."""
+    native_bin = env_bin("PP_NATIVE")
+    studio = env_bin("PP_STUDIO")
+    projects = env_bin("PP_PROJECTS")
+    res = {"load": load(), "nativeHosts": native_hosts, "hz": int(os.environ.get("PP_HZ", "60"))}
+    s = n = probe = None
+    try:
+        s = Studio(studio, out, "x", project=os.path.join(projects, "empty.ppstudio" if not native_hosts else "tiny.ppstudio"),
+                   name="Studio")
+        s.open()
+        if native_hosts:
+            n = Native(native_bin, out, "x", 40, project=os.path.join(projects, "empty.ppstudio"), host=True,
+                       name="Nat", args=["--workspace", "animate"])
+            invite = n.invite
+        else:
+            info = s.host()
+            invite = info["invite"]
+            n = Native(native_bin, out, "x", 40, project=os.path.join(projects, "tiny.ppstudio"), join=invite,
+                       name="Nat", args=["--workspace", "animate"])
+        probe = Peer(env_bin("PP_PEER"), out, "x", invite=invite, name="Probe")
+        if native_hosts:
+            jinfo, _ = s.join(invite)
+            res["studioMembers"] = len(jinfo["members"])
+        time.sleep(2.5)
+        s.take()
+        # the host draws, then the joiner
+        if native_hosts:
+            sent_n = [n.inp.stroke(native_wave(i)) for i in range(strokes)]
+            time.sleep(2.0)
+            res["nativeToStudio"] = live_latency(sent_n, s.take()["ev"])
+            sent_s = s.pen([wave(i, y0=0.6) for i in range(3)])
+        else:
+            sent_s = s.pen([wave(i) for i in range(strokes)])
+            time.sleep(2.0)
+            sent_n = [n.inp.stroke(native_wave(i, y0=500)) for i in range(3)]
+            res["studioToNativeEvents"] = len(s.take()["ev"])
+        time.sleep(2.5)
+        res["studioSaved"] = s.save()
+        n.inp.combo("Control_L", "s")
+        time.sleep(3.0)
+        st = n.wait()
+        n = None
+        res["nativeStats"] = {k: v for k, v in ((st or {}).get("together") or {}).items() if k != "edits"}
+        res["studioToNative"] = native_live_latency(sent_s, st)
+        res["nativeEditKinds"] = {}
+        for e in native_edits(st):
+            res["nativeEditKinds"][e["kind"]] = res["nativeEditKinds"].get(e["kind"], 0) + 1
+        nproj = os.path.join(out, "native-x", "tiny.ppstudio" if not native_hosts else "empty.ppstudio")
+        sp, _ = project_pixels(res["studioSaved"])
+        np_, _ = project_pixels(nproj)
+        shared = sorted(set(sp) & set(np_) - {"Ink"})
+        res["sharedLayerNames"] = shared
+        res["compare"] = compare_projects(res["studioSaved"], nproj, shared)
+        evs = probe.events()
+        res["studioVsWire"] = compare_with_wire(res["studioSaved"], evs, shared)
+        res["nativeVsWire"] = compare_with_wire(nproj, evs, shared)
+    finally:
+        if probe:
+            probe.leave()
+        if n:
+            n.kill()
+        if s:
+            s.quit()
+    return res
+
+
 SCENARIOS = {
     "studio-wire": scenario_studio_wire,
     "studio-pair": scenario_studio_pair,
     "studio-crowd": scenario_studio_crowd,
     "studio-garbage": scenario_studio_garbage,
+    "x-pair-native-hosts": lambda out: scenario_x_pair(out, True),
+    "x-pair-studio-hosts": lambda out: scenario_x_pair(out, False),
 }
 
 
