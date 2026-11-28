@@ -1831,13 +1831,16 @@ def native_drawing(n, secs=4.0):
     import canvas_window as cw
     t0 = mono_ns()
     k = 0
+    sent = SENT.setdefault(t0, [])
     while (mono_ns() - t0) < secs * 1e9:
         y = 200 + (k % 20) * 15
         n.inp.to(*cw.line((200, y), (900, y + 40), 200)[0])
         time.sleep(0.02)
+        sent.append(("press", mono_ns()))
         n.inp.button(BTN_LEFT, True)
         for p in cw.line((200, y), (900, y + 40), 200)[1:]:
             time.sleep(0.002)
+            sent.append(("move", mono_ns()))
             n.inp.to(*p)
         time.sleep(0.002)
         n.inp.button(BTN_LEFT, False)
@@ -1845,11 +1848,33 @@ def native_drawing(n, secs=4.0):
     return t0, mono_ns(), k
 
 
+# what native_drawing sent and when (CLOCK_MONOTONIC), by its start: the driver's own clock,
+# independent of what the app counts as a frame's input
+SENT = {}
+
+
+def sent_to_shown(st, t0, hz):
+    """From the driver's own send times: each press and pen move to the first frame drawn
+    after it that had input, on screen. Independent of the app's own accounting of which
+    input a frame shows (it can only read late, never early: the event may have gone in a
+    later frame still)."""
+    fr = sorted((f for f in st["frames"] if f["events"] and f["shownNs"]), key=lambda f: f["drawnNs"])
+    drawn = [f["drawnNs"] for f in fr]
+    import bisect
+    out = {"press": [], "move": []}
+    for kind, t in SENT.get(t0, []):
+        i = bisect.bisect_right(drawn, t)
+        if i < len(fr):
+            out[kind].append((fr[i]["shownNs"] - t) / 1e6)
+    return {k: dist(v) for k, v in out.items()}
+
+
 def pen_numbers(st, t0, t1, hz):
     import canvas_window as cw
     fr = cw.frame_numbers(st, t0, t1 + 50_000_000)
     inputs = sorted((f for f in fr if f["events"] and f["shownNs"]), key=lambda f: f["shownNs"])
-    return {"rate": cw.rate(fr, hz), "latency": cw.latency(inputs), "budgetMs": round(1000 / hz + 4, 2)}
+    return {"rate": cw.rate(fr, hz), "latency": cw.latency(inputs), "budgetMs": round(1000 / hz + 4, 2),
+            "driverSentToShownMs": sent_to_shown(st, t0, hz)}
 
 
 def incoming_numbers(st, t0, t1, hz):
@@ -2830,6 +2855,43 @@ def scenario_studio_groups(out):
     return res
 
 
+def scenario_x_pen_during_join(out):
+    """The native app hosts the 4K, 20-layer project and draws (canvas_window.py's latency
+    run) while a native member joins (the project goes out to it): the host's pen to
+    screen and rate during the join, against the same drawing before it."""
+    projects = env_bin("PP_PROJECTS")
+    hz = int(os.environ.get("PP_HZ", "60"))
+    res = {"load": load(), "hz": hz}
+    n = j = None
+    try:
+        n = Native(env_bin("PP_NATIVE"), out, "pjoin", 40, project=os.path.join(projects, "layers20-4k.ppstudio"),
+                   host=True, name="Nat", args=["--workspace", "draw"])
+        time.sleep(2.0)
+        a0, a1, _ = native_drawing(n, 4.0)
+        j = NativePeer(np_bin(), out, "pjoin")
+        j.do(cmd="open", path=os.path.join(projects, "empty.ppstudio"))
+        box = {}
+        th = __import__("threading").Thread(target=lambda: box.update(j.do(cmd="join", code=n.invite, name="Jo")))
+        b0 = mono_ns()
+        th.start()
+        bd, b1, _ = native_drawing(n, 4.0)
+        th.join()
+        res["joinMs"] = box.get("readyNs") and round((box["readyNs"] - box["startNs"]) / 1e6, 1)
+        res["joinerSynced"] = (box.get("state") or {}).get("synced")
+        res["joinStartedAfterDrawingMs"] = box.get("startNs") and round((box["startNs"] - b0) / 1e6, 1)
+        res["hostPssMiB"] = round((n.pss_kib() or 0) / 1024, 1)
+        st = n.wait()
+        n = None
+        res["penBefore"] = pen_numbers(st, a0, a1, hz)
+        res["penDuringJoin"] = pen_numbers(st, bd, b1, hz)
+    finally:
+        if j:
+            j.quit()
+        if n:
+            n.kill()
+    return res
+
+
 SCENARIOS = {
     "studio-wire": scenario_studio_wire,
     "studio-pair": scenario_studio_pair,
@@ -2856,6 +2918,7 @@ SCENARIOS = {
     "x-offline5": lambda out: scenario_x_offline(out, 5),
     "x-offline40": lambda out: scenario_x_offline(out, 40),
     "x-import4k": scenario_x_import4k,
+    "x-pen-during-join": scenario_x_pen_during_join,
     "x-groups": scenario_x_groups,
     "x-first-strokes": scenario_x_first_strokes,
     "x-timeline-roundtrip-studio-hosts": lambda out: scenario_x_timeline_roundtrip(out, False),
