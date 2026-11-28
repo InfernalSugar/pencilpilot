@@ -36,6 +36,30 @@
 //! the timeline changed          timeline_changed(canvas)
 //! ```
 
+//! ## Using it
+//!
+//! - Everything runs inside the call: no `async`. [`CanvasPort::packed`] returns the
+//!   drawing's tiles there and then (a GPU readback has to finish first).
+//! - After every call, send [`Together::take_out`] in order, then show
+//!   [`Together::take_notices`].
+//! - Edits come back numbered, the app's own too. Pass each one to
+//!   [`Together::on_edit`] in the session's order.
+//! - Call [`Together::local_changed`] a moment after the canvas changes (the studio waits
+//!   120 ms of quiet), and again after a busy canvas frees up.
+//! - Chat bodies (`{k: 'chat'}`) arrive as direct messages too. Check
+//!   [`chat::chat_text`] first, and hand the rest to [`Together::on_direct`].
+//!
+//! ## Where it differs from together.ts (on purpose, invisible on the wire)
+//!
+//! - **Strokes are compared by value, not as objects.** An identical copy of a stroke
+//!   doesn't travel, where the studio would send it again.
+//! - **Local drawing numbers can differ.** A joiner numbers the drawings it meets in key
+//!   order (the session hands over JSON with sorted keys). Shared ids are the same.
+//! - **Odd input is skipped, not thrown on.** A snapshot layer without `writers`, or
+//!   tiles at places that aren't numbers, is left out; together.ts throws mid-join.
+//! - **Half characters go.** A name cut through a surrogate pair loses the half,
+//!   where the studio keeps a lone surrogate.
+
 pub mod chat;
 pub mod edit;
 pub mod js;
