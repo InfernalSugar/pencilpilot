@@ -928,6 +928,29 @@ export async function decodeTile(s: string): Promise<Uint8Array | null> {
 	}
 }
 
+/**
+ * A timing mark for checks (`performance.mark('together:<what>')`), only when the page
+ * asks for them (`globalThis.ppTogetherTrace = true`): what a host's snapshot and a
+ * joiner's intake take, in the real window.
+ */
+function trace(what: string) {
+	if ((globalThis as { ppTogetherTrace?: boolean }).ppTogetherTrace)
+		performance.mark(`together:${what}`);
+}
+
+/** Time spent on `what` (ms, summed in `globalThis.ppTogetherTimes`), when tracing. */
+function timed<T>(what: string, f: () => T): T {
+	const g = globalThis as { ppTogetherTrace?: boolean; ppTogetherTimes?: Record<string, number> };
+	if (!g.ppTogetherTrace) return f();
+	const t = performance.now();
+	try {
+		return f();
+	} finally {
+		const times = (g.ppTogetherTimes ??= {});
+		times[what] = (times[what] ?? 0) + performance.now() - t;
+	}
+}
+
 /** each tile's wire form, once made (the same pixels always make the same bytes) */
 const encoded = new WeakMap<Uint8Array, Promise<string>>();
 
@@ -942,8 +965,28 @@ export function encodeTileOnce(px: Uint8Array): Promise<string> {
 	return p;
 }
 
-/** Tiles for the wire, all at once (the browser compresses them side by side). */
-export const encodeTiles = (pxs: Uint8Array[]) => Promise.all(pxs.map(encodeTileOnce));
+/** compressing many tiles at once, where the app has a faster way (the paint engine) */
+let deflater: ((tiles: Uint8Array[]) => Uint8Array[]) | null = null;
+
+/** Compress tiles with `f` from now on (each tile → its raw deflate); without it, the
+ * browser's CompressionStream does, a tile at a time. (Any deflate is read the same: the
+ * bytes may differ from another app's, the pixels never do.) */
+export function useDeflater(f: ((tiles: Uint8Array[]) => Uint8Array[]) | null) {
+	deflater = f;
+}
+
+/** Tiles for the wire, all at once (each made once, and kept). */
+export function encodeTiles(pxs: Uint8Array[]): Promise<string[]> {
+	const f = deflater;
+	if (f) {
+		const need = [...new Set(pxs.filter((px) => !encoded.has(px)))];
+		if (need.length) {
+			const zs = timed('deflate', () => f(need));
+			need.forEach((px, i) => encoded.set(px, Promise.resolve('z:' + toBase64(zs[i]))));
+		}
+	}
+	return Promise.all(pxs.map(encodeTileOnce));
+}
 
 /** inflating many "z:" tiles at once, where the app has a faster way (the paint engine) */
 let inflater: ((zs: Uint8Array[]) => (Uint8Array | null)[]) | null = null;
@@ -968,13 +1011,15 @@ async function decodeAll(wire: string[]): Promise<(Uint8Array | null)[]> {
 			return;
 		}
 		try {
-			zs.push(fromBase64(s.slice(2)));
+			zs.push(timed('base64', () => fromBase64(s.slice(2))));
 			at.push(i);
 		} catch {
 			// (not base64: not a tile)
 		}
 	});
-	f(zs).forEach((px, j) => (out[at[j]] = px && px.length === TILE_BYTES ? px : null));
+	timed('inflate', () => f(zs)).forEach(
+		(px, j) => (out[at[j]] = px && px.length === TILE_BYTES ? px : null)
+	);
 	await Promise.all(rest);
 	return out;
 }
@@ -1349,8 +1394,10 @@ export class Together {
 	/** Compress every shared tile ahead of a joiner, a batch at a time (each is kept). */
 	async #prepare() {
 		const all = [...this.cache.values()].flatMap((t) => [...t.values()]);
+		trace('prepare.start');
 		for (let i = 0; i < all.length && !this.#closed; i += PREPARE_BATCH)
 			await encodeTiles(all.slice(i, i + PREPARE_BATCH));
+		trace('prepare.end');
 	}
 
 	/** A drawing's tiles (none, when they can't be had: a frame store that failed). */
@@ -2049,11 +2096,13 @@ export class Together {
 		const m = body as Snap;
 		if (!m || typeof m !== 'object') return;
 		if (m.k === 'snap.req') {
+			trace('snapshot.asked');
 			// (asked before this app has the project, e.g. while it's still sharing it:
 			// answered once it has)
 			if (!this.#askers.includes(from)) this.#askers.push(from);
 			await this.#answer();
 		} else if (m.k === 'snap.begin' && !this.#synced) {
+			trace('join.begin');
 			this.shared.load(m);
 			// (no number: everything after the snapshot is put in, again if need be)
 			this.#snapSeq = Number.isFinite(m.seq) ? m.seq : 0;
@@ -2099,7 +2148,9 @@ export class Together {
 			const p = parseEdit({ ...(m as object), k: 'sound' });
 			if (p?.k === 'sound') await this.#takeSound(p.file, p.name, p.i, p.n, p.data);
 		} else if (m.k === 'snap.end' && !this.#synced) {
+			trace('join.end');
 			while (this.#decoding.size) await Promise.all(this.#decoding);
+			trace('join.decoded');
 			if (this.#synced) return;
 			// back from a break: layers deleted meanwhile go
 			for (const [lid, id] of [...this.ids])
@@ -2122,14 +2173,18 @@ export class Together {
 				} else this.#makeGroup(gid);
 			}
 			for (const [lid] of this.ids) if (!this.shared.layers.get(lid)?.group) this.#place(lid);
+			trace('join.placed');
 			for (const k of this.cache.keys()) if (!this.#ownOnRejoin(k)) this.#put(k);
+			trace('join.put');
 			if (this.#snapTl) this.canvas.setTimeline(this.#fromShared(this.#snapTl));
+			trace('join.timeline');
 			this.#synced = true;
 			const later = this.#buffer.filter((b) => b.seq > this.#snapSeq);
 			this.#buffer = [];
 			// (all queued at once, so edits arriving meanwhile go after them)
 			for (const b of later) void this.onEdit(b.seq, b.from, b.body);
 			await this.#edits;
+			trace('join.caughtUp');
 			if (this.#rejoining) {
 				// this app's own drawings, as drawn here (compared with the session's): sent
 				for (const [lid, id] of this.ids)
@@ -2293,6 +2348,7 @@ export class Together {
 	}
 
 	async #sendSnapshot(to: string) {
+		trace('snapshot.start');
 		const s = this.shared.snapshot();
 		this.net.direct(to, {
 			k: 'snap.begin',
@@ -2329,6 +2385,7 @@ export class Together {
 				this.net.direct(to, { ...e, k: 'snap.lines' });
 		}
 		this.net.direct(to, { k: 'snap.end' });
+		trace('snapshot.end');
 	}
 
 	/**
@@ -2509,7 +2566,15 @@ export class Together {
 		const t = this.cache.get(k);
 		if (!t) return;
 		const d = this.localOf(did);
-		if (this.canvas.put(d, pack(t))) this.#pending.delete(k);
+		if (
+			timed('put', () =>
+				this.canvas.put(
+					d,
+					timed('pack', () => pack(t))
+				)
+			)
+		)
+			this.#pending.delete(k);
 		else {
 			this.#pending.add(k);
 			this.#retrySoon();
