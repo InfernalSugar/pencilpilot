@@ -78,6 +78,31 @@ impl PaintBrush {
 /// Line art as strokes (see `brush::vectorise`): `alpha` is one byte a pixel, `w` × `h`,
 /// ink above `threshold`. Flat, for JS: the number of strokes, then for each its number
 /// of points and their x, y, width (canvas px).
+/// Bytes in a tile: 64×64 RGBA8.
+const TILE_BYTES: usize = 64 * 64 * 4;
+
+/// Tiles from drawing together, inflated (each one raw deflate, `lens` long one after
+/// another in `blob`): every tile's 64×64 RGBA8 one after another, then a byte per tile, 1
+/// where it was a tile (inflated to exactly one), 0 where it wasn't (its pixels zero).
+#[wasm_bindgen]
+pub fn inflate_tiles(blob: &[u8], lens: &[u32]) -> Vec<u8> {
+    let mut out = vec![0u8; lens.len() * (TILE_BYTES + 1)];
+    let (px, ok) = out.split_at_mut(lens.len() * TILE_BYTES);
+    let mut at = 0usize;
+    for (i, &n) in lens.iter().enumerate() {
+        let n = n as usize;
+        let Some(z) = blob.get(at..at + n) else { break };
+        at += n;
+        if let Ok(t) = miniz_oxide::inflate::decompress_to_vec_with_limit(z, TILE_BYTES + 1)
+            && t.len() == TILE_BYTES
+        {
+            px[i * TILE_BYTES..(i + 1) * TILE_BYTES].copy_from_slice(&t);
+            ok[i] = 1;
+        }
+    }
+    out
+}
+
 #[wasm_bindgen]
 pub fn vectorise(alpha: &[u8], w: u32, h: u32, threshold: u8) -> Vec<f32> {
     let strokes = brush::vectorise::vectorise(alpha, w as usize, h as usize, threshold);
@@ -1592,4 +1617,22 @@ pub(crate) fn colour_table(b: &[u8]) -> Option<[[u8; 3]; 256]> {
         }
         t
     })
+}
+
+#[cfg(test)]
+mod inflate_tests {
+    use super::*;
+
+    #[test]
+    fn inflates_tiles_and_marks_ones_that_arent() {
+        let tile: Vec<u8> = (0..TILE_BYTES).map(|i| (i % 251) as u8).collect();
+        let z = miniz_oxide::deflate::compress_to_vec(&tile, 6);
+        let short = miniz_oxide::deflate::compress_to_vec(&tile[..100], 6);
+        let blob = [&z[..], &short[..], b"junk", &z[..]].concat();
+        let lens = [z.len() as u32, short.len() as u32, 4, z.len() as u32];
+        let out = inflate_tiles(&blob, &lens);
+        assert_eq!(&out[..TILE_BYTES], &tile[..]);
+        assert_eq!(&out[3 * TILE_BYTES..4 * TILE_BYTES], &tile[..]);
+        assert_eq!(&out[4 * TILE_BYTES..], &[1, 0, 0, 1]);
+    }
 }

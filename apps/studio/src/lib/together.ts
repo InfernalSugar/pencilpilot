@@ -204,6 +204,10 @@ export function cut(s: string, n: number): string {
 const LID = /^[0-9a-f]{12}:[0-9]{1,12}$/;
 /** how soon what couldn't go into a busy canvas is tried again */
 const RETRY_MS = 50;
+/** tiles compressed side by side ahead of a joiner */
+const PREPARE_BATCH = 512;
+/** the longest a joiner waits for this app's own edits to come back before it's answered */
+const ANSWER_WAIT_MS = 3000;
 const MEMBER = /^[0-9a-f]{64}$/;
 const int = (v: unknown) => Number.isInteger(v) && Math.abs(v as number) < 1e6;
 
@@ -924,6 +928,77 @@ export async function decodeTile(s: string): Promise<Uint8Array | null> {
 	}
 }
 
+/** each tile's wire form, once made (the same pixels always make the same bytes) */
+const encoded = new WeakMap<Uint8Array, Promise<string>>();
+
+/** `encodeTile`, made once per tile (a tile shared, then sent again to a joiner, isn't
+ * compressed twice). */
+export function encodeTileOnce(px: Uint8Array): Promise<string> {
+	let p = encoded.get(px);
+	if (!p) {
+		p = encodeTile(px);
+		encoded.set(px, p);
+	}
+	return p;
+}
+
+/** Tiles for the wire, all at once (the browser compresses them side by side). */
+export const encodeTiles = (pxs: Uint8Array[]) => Promise.all(pxs.map(encodeTileOnce));
+
+/** inflating many "z:" tiles at once, where the app has a faster way (the paint engine) */
+let inflater: ((zs: Uint8Array[]) => (Uint8Array | null)[]) | null = null;
+
+/** Inflate "z:" tiles with `f` from now on (each tile's raw deflate → its pixels, or null
+ * when it isn't one); without it, the browser's DecompressionStream does, a tile at a time. */
+export function useInflater(f: ((zs: Uint8Array[]) => (Uint8Array | null)[]) | null) {
+	inflater = f;
+}
+
+/** Tiles from the wire, decoded (null: not a tile), many at once. */
+async function decodeAll(wire: string[]): Promise<(Uint8Array | null)[]> {
+	const f = inflater;
+	if (!f) return Promise.all(wire.map(decodeTile));
+	const out: (Uint8Array | null)[] = wire.map(() => null);
+	const zs: Uint8Array[] = [];
+	const at: number[] = [];
+	const rest: Promise<void>[] = [];
+	wire.forEach((s, i) => {
+		if (!s.startsWith('z:')) {
+			rest.push(decodeTile(s).then((px) => void (out[i] = px)));
+			return;
+		}
+		try {
+			zs.push(fromBase64(s.slice(2)));
+			at.push(i);
+		} catch {
+			// (not base64: not a tile)
+		}
+	});
+	f(zs).forEach((px, j) => (out[at[j]] = px && px.length === TILE_BYTES ? px : null));
+	await Promise.all(rest);
+	return out;
+}
+
+/** Tiles from the wire put into `t`, decoded side by side ("x,y" → pixels; ones that
+ * aren't tiles are left out). */
+async function decodeInto(t: TileMap, set: [number, number, string][]) {
+	const px = await decodeAll(set.map(([, , s]) => s));
+	set.forEach(([x, y], i) => {
+		const p = px[i];
+		if (p) t.set(`${x},${y}`, p);
+	});
+}
+
+/** `next` keeping `prev`'s tiles where they're the same (so a tile's wire form, once
+ * made, is made again only when it changes). */
+function keepSame(prev: TileMap, next: TileMap): TileMap {
+	for (const [k, px] of next) {
+		const old = prev.get(k);
+		if (old && old !== px && same(old, px)) next.set(k, old);
+	}
+	return next;
+}
+
 // ---- the app's side ----
 
 /** What the sync needs from the app (silent: none of it is an undo step). */
@@ -1191,7 +1266,7 @@ export class Together {
 					const data = toBase64(snd.bytes.subarray(i * SOUND_CHUNK, (i + 1) * SOUND_CHUNK));
 					const piece = { k: 'sound', file: a.file, name: snd.name, i, n, data };
 					if (to) this.net.direct(to, { ...piece, k: 'snap.sound' });
-					else this.net.edit(piece);
+					else this.#send(piece);
 				}
 			}
 	}
@@ -1218,6 +1293,46 @@ export class Together {
 		}
 	}
 
+	/** edits sent from here that the session hasn't handed back yet */
+	#unseen = 0;
+
+	/** An edit to the session (it comes back numbered, like everyone's). */
+	#send(body: unknown) {
+		this.#unseen++;
+		this.net.edit(body);
+	}
+
+	/**
+	 * Answer who asked for the project, once this app has it and has its own edits back
+	 * (a snapshot taken before would leave out the layers on their way, and the tiles
+	 * that go only with it).
+	 */
+	async #answer() {
+		if (!this.#synced || !this.#askers.length) return;
+		if (this.#unseen > 0) {
+			// (an edit of this app's that never comes back, its sending failed: answered anyway)
+			this.#answerTimer ??= setTimeout(() => {
+				this.#answerTimer = undefined;
+				this.#unseen = 0;
+				void this.#answer();
+			}, ANSWER_WAIT_MS);
+			return;
+		}
+		clearTimeout(this.#answerTimer);
+		this.#answerTimer = undefined;
+		for (const to of this.#askers.splice(0)) await this.#sendSnapshot(to);
+	}
+
+	#answerTimer: ReturnType<typeof setTimeout> | undefined;
+
+	/** coming back after a break: a drawing of this app's own keeps what was drawn here */
+	#ownOnRejoin(k: string) {
+		return this.#rejoining && this.shared.layers.get(k.split('|')[0])?.owner === this.me;
+	}
+
+	/** a snapshot's tiles being decoded */
+	#decoding = new Set<Promise<void>>();
+
 	/** hosting: edits are taken in at once (a joiner keeps them until it has the project) */
 	#hosting = false;
 
@@ -1226,7 +1341,16 @@ export class Together {
 
 	async #nowSynced() {
 		this.#synced = true;
-		for (const to of this.#askers.splice(0)) await this.#sendSnapshot(to);
+		// the project's tiles compressed meanwhile, for the first to join (each once)
+		void this.#prepare();
+		await this.#answer();
+	}
+
+	/** Compress every shared tile ahead of a joiner, a batch at a time (each is kept). */
+	async #prepare() {
+		const all = [...this.cache.values()].flatMap((t) => [...t.values()]);
+		for (let i = 0; i < all.length && !this.#closed; i += PREPARE_BATCH)
+			await encodeTiles(all.slice(i, i + PREPARE_BATCH));
 	}
 
 	/** A drawing's tiles (none, when they can't be had: a frame store that failed). */
@@ -1246,7 +1370,7 @@ export class Together {
 			this.ids.set(lid, l.id);
 			if (l.adjust) adjusts.add(l.id);
 			const lines = !l.adjust && !!this.canvas.isLineLayer?.(l.id);
-			this.net.edit({
+			this.#send({
 				k: 'layer',
 				lid,
 				name: l.name,
@@ -1260,17 +1384,14 @@ export class Together {
 					const tiles = await this.#tilesOf(d);
 					if (!tiles) continue;
 					const did = this.didOf(d);
+					// (kept, not sent: no one is in the session yet, and whoever joins gets them
+					// with the project)
 					this.cache.set(key(lid, did), tiles);
-					const set: [number, number, Uint8Array][] = [...tiles].map(([k, px]) => {
-						const [x, y] = k.split(',').map(Number);
-						return [x, y, px];
-					});
-					if (set.length) await this.#sendTiles(lid, did, set, []);
 					this.#sendLines(lid, id, d, true);
 				}
 		const tl = this.#sharedTimeline();
 		this.#shareSounds(tl);
-		this.net.edit({ k: 'timeline', tl });
+		this.#send({ k: 'timeline', tl });
 	}
 
 	/** This app's groups, shared (hosting): each with its layers, then its settings. */
@@ -1284,10 +1405,10 @@ export class Together {
 			if (!lids.length) continue;
 			const gid = this.#newLid();
 			this.gids.set(gid, g.id);
-			this.net.edit({ k: 'group', lid: lids[0], gid, name: g.name, lids });
+			this.#send({ k: 'group', lid: lids[0], gid, name: g.name, lids });
 			const s = { name: g.name, visible: g.visible, opacity: g.opacity };
 			this.#groupSent.set(gid, s);
-			this.net.edit({ k: 'gset', lid: gid, ...s });
+			this.#send({ k: 'gset', lid: gid, ...s });
 		}
 	}
 
@@ -1376,7 +1497,7 @@ export class Together {
 	addOwnLayer(name = '', lines = false) {
 		const lid = this.#newLid();
 		this.#mine.add(lid);
-		this.net.edit({
+		this.#send({
 			k: 'layer',
 			lid,
 			name: name || `${this.myName}’s ${lines ? 'lines' : 'layer'}`,
@@ -1401,16 +1522,16 @@ export class Together {
 		if (now === was && !base?.length) return;
 		this.#linesSynced.set(key(lid, did), now);
 		const edits = now === was ? [] : lineEdits(lid, did, was, now);
-		for (const e of withBase(edits, lid, did, base)) this.net.edit(e);
+		for (const e of withBase(edits, lid, did, base)) this.#send(e);
 	}
 
 	/** Delete a shared layer of this app's own, for everyone. */
 	removeOwn(lid: string) {
-		if (this.shared.layers.get(lid)?.owner === this.me) this.net.edit({ k: 'remove', lid });
+		if (this.shared.layers.get(lid)?.owner === this.me) this.#send({ k: 'remove', lid });
 	}
 	/** Move a shared layer of this app's own to `to` in the shared order (0 = bottom). */
 	moveOwn(lid: string, to: number) {
-		if (this.shared.layers.get(lid)?.owner === this.me) this.net.edit({ k: 'move', lid, to });
+		if (this.shared.layers.get(lid)?.owner === this.me) this.#send({ k: 'move', lid, to });
 	}
 
 	/**
@@ -1429,12 +1550,12 @@ export class Together {
 		if (!lid || !at) return lid;
 		// the session takes the new layer before the move: it's this app's by then
 		const i = this.shared.order.filter((x) => x !== lid).indexOf(at);
-		if (i >= 0) this.net.edit({ k: 'move', lid, to: i + 1 });
+		if (i >= 0) this.#send({ k: 'move', lid, to: i + 1 });
 		return lid;
 	}
 
 	ask(lid: string) {
-		this.net.edit({ k: 'ask', lid, why: 'draw', own: false });
+		this.#send({ k: 'ask', lid, why: 'draw', own: false });
 	}
 
 	/** The group an engine group is, if any. */
@@ -1463,7 +1584,7 @@ export class Together {
 			return [];
 		}
 		for (const n of missing)
-			this.net.edit({ k: 'ask', lid: n.lid, why, own: n.own, ...(n.with ? { with: n.with } : {}) });
+			this.#send({ k: 'ask', lid: n.lid, why, own: n.own, ...(n.with ? { with: n.with } : {}) });
 		this.#waiting.push({ needs, run });
 		return [
 			...new Set(
@@ -1513,7 +1634,7 @@ export class Together {
 					return;
 				}
 				this.#forget(a);
-				this.#afterSend.push(() => this.net.edit({ k: 'remove', lid: a }));
+				this.#afterSend.push(() => this.#send({ k: 'remove', lid: a }));
 				await this.localChanged();
 			}
 		);
@@ -1533,7 +1654,7 @@ export class Together {
 	deleteLayer(id: number): string[] | null {
 		const lid = this.lidOf(id);
 		if (!lid) return null;
-		return this.request('delete', [{ lid, own: true }], () => this.net.edit({ k: 'remove', lid }));
+		return this.request('delete', [{ lid, own: true }], () => this.#send({ k: 'remove', lid }));
 	}
 
 	/** Put a shared layer in a new group: needs leave to draw on it (and on the group it's
@@ -1547,7 +1668,7 @@ export class Together {
 			[{ lid, own: false }, ...(now ? [{ lid: now, own: false }] : [])],
 			() => {
 				const gid = this.#newLid();
-				this.net.edit({ k: 'group', lid, gid, name: 'Group', lids: [lid] });
+				this.#send({ k: 'group', lid, gid, name: 'Group', lids: [lid] });
 			}
 		);
 	}
@@ -1562,7 +1683,7 @@ export class Together {
 		const needs = [{ lid, own: false }];
 		if (gid) needs.push({ lid: gid, own: false });
 		if (now && now !== gid) needs.push({ lid: now, own: false });
-		return this.request('group', needs, () => this.net.edit({ k: 'place', lid, to, gid }));
+		return this.request('group', needs, () => this.#send({ k: 'place', lid, to, gid }));
 	}
 
 	/** Change a shared group's settings (`run` changes them here, once allowed). */
@@ -1580,7 +1701,7 @@ export class Together {
 		const gid = this.gidOf(group);
 		if (!gid) return null;
 		return this.request('group', [{ lid: gid, own: true }], () =>
-			this.net.edit({ k: 'ungroup', lid: gid })
+			this.#send({ k: 'ungroup', lid: gid })
 		);
 	}
 
@@ -1593,7 +1714,7 @@ export class Together {
 			'delete',
 			m.map((lid) => ({ lid, own: true })),
 			() => {
-				for (const lid of this.shared.members(gid)) this.net.edit({ k: 'remove', lid });
+				for (const lid of this.shared.members(gid)) this.#send({ k: 'remove', lid });
 			}
 		);
 	}
@@ -1629,14 +1750,14 @@ export class Together {
 				this.#groupSent.delete(gid);
 				const bottom = m[0];
 				this.#afterSend.push(() => {
-					this.net.edit({ k: 'rename', lid: bottom, name: g.name });
-					this.net.edit({
+					this.#send({ k: 'rename', lid: bottom, name: g.name });
+					this.#send({
 						k: 'place',
 						lid: bottom,
 						to: this.shared.order.indexOf(bottom),
 						gid: ''
 					});
-					for (const lid of m.slice(1)) this.net.edit({ k: 'remove', lid });
+					for (const lid of m.slice(1)) this.#send({ k: 'remove', lid });
 				});
 				await this.localChanged();
 			}
@@ -1664,17 +1785,17 @@ export class Together {
 				p--;
 				while (h && p > 0 && groupOf(rest[p - 1]) === h) p--;
 			}
-			this.net.edit({ k: 'block', lid: gid, to: p });
+			this.#send({ k: 'block', lid: gid, to: p });
 		});
 	}
 	grant(lid: string, to: string, handover = false) {
-		this.net.edit({ k: 'grant', lid, to, handover });
+		this.#send({ k: 'grant', lid, to, handover });
 	}
 	deny(lid: string, to: string) {
-		this.net.edit({ k: 'deny', lid, to });
+		this.#send({ k: 'deny', lid, to });
 	}
 	revoke(lid: string, to: string) {
-		this.net.edit({ k: 'revoke', lid, to });
+		this.#send({ k: 'revoke', lid, to });
 	}
 
 	/** The timeline changed here (a step of this app's): everyone gets it. */
@@ -1682,7 +1803,7 @@ export class Together {
 		if (!this.#synced) return;
 		const tl = this.#sharedTimeline();
 		this.#shareSounds(tl);
-		this.net.edit({ k: 'timeline', tl });
+		this.#send({ k: 'timeline', tl });
 	}
 
 	/** These drawings may have changed here (e.g. an undo on another frame). */
@@ -1713,6 +1834,16 @@ export class Together {
 	}
 
 	async #onEdit(seq: number, from: string, body: unknown) {
+		if (from === this.me && this.#unseen > 0) this.#unseen--;
+		try {
+			await this.#take(seq, from, body);
+		} finally {
+			// (outside the edits' line: a snapshot takes a moment, others' edits go on)
+			if (this.#askers.length) void this.#answer();
+		}
+	}
+
+	async #take(seq: number, from: string, body: unknown) {
 		if (!this.#synced && !this.#hosting) {
 			this.#buffer.push({ seq, from, body });
 			return;
@@ -1753,10 +1884,7 @@ export class Together {
 						const t = this.cache.get(key(e.lid, 'mask')) ?? new Map();
 						this.cache.set(key(e.lid, 'mask'), t);
 						for (const [x, y] of e.clear) t.delete(`${x},${y}`);
-						for (const [x, y, s] of e.set) {
-							const px = await decodeTile(s);
-							if (px) t.set(`${x},${y}`, px);
-						}
+						await decodeInto(t, e.set);
 					}
 					this.#put(key(e.lid, 'mask'));
 				}
@@ -1923,13 +2051,18 @@ export class Together {
 		if (m.k === 'snap.req') {
 			// (asked before this app has the project, e.g. while it's still sharing it:
 			// answered once it has)
-			if (this.#synced) await this.#sendSnapshot(from);
-			else if (!this.#askers.includes(from)) this.#askers.push(from);
+			if (!this.#askers.includes(from)) this.#askers.push(from);
+			await this.#answer();
 		} else if (m.k === 'snap.begin' && !this.#synced) {
 			this.shared.load(m);
 			// (no number: everything after the snapshot is put in, again if need be)
 			this.#snapSeq = Number.isFinite(m.seq) ? m.seq : 0;
 			this.#snapTl = m.tl && typeof m.tl === 'object' ? m.tl : null;
+			// the layers at once, their pixels as they come (a big project shows as it arrives)
+			for (const lid of this.shared.order) {
+				this.#makeLayer(lid);
+				this.#refreshLock(lid);
+			}
 		} else if (m.k === 'snap.tiles') {
 			if (
 				!this.shared.layers.has(m.lid) ||
@@ -1946,11 +2079,16 @@ export class Together {
 			if (m.did === 'mask') this.#maskOn.set(m.lid, true);
 			const t = this.cache.get(k) ?? new Map();
 			this.cache.set(k, t);
-			for (const p of m.set) {
-				if (!Array.isArray(p) || !int(p[0]) || !int(p[1]) || typeof p[2] !== 'string') continue;
-				const px = await decodeTile(p[2]);
-				if (px) t.set(`${p[0]},${p[1]}`, px);
-			}
+			const done = decodeInto(
+				t,
+				m.set.filter(
+					(p): p is [number, number, string] =>
+						Array.isArray(p) && int(p[0]) && int(p[1]) && typeof p[2] === 'string'
+				)
+			);
+			// (messages are handed in as they come: the end waits for the tiles still decoding)
+			this.#decoding.add(done);
+			await done.finally(() => this.#decoding.delete(done));
 			if (late) this.#put(k);
 		} else if (m.k === 'snap.lines' && !this.#synced) {
 			const l = this.shared.layers.get(m.lid);
@@ -1961,6 +2099,8 @@ export class Together {
 			const p = parseEdit({ ...(m as object), k: 'sound' });
 			if (p?.k === 'sound') await this.#takeSound(p.file, p.name, p.i, p.n, p.data);
 		} else if (m.k === 'snap.end' && !this.#synced) {
+			while (this.#decoding.size) await Promise.all(this.#decoding);
+			if (this.#synced) return;
 			// back from a break: layers deleted meanwhile go
 			for (const [lid, id] of [...this.ids])
 				if (!this.shared.layers.has(lid)) {
@@ -1982,9 +2122,7 @@ export class Together {
 				} else this.#makeGroup(gid);
 			}
 			for (const [lid] of this.ids) if (!this.shared.layers.get(lid)?.group) this.#place(lid);
-			const own = (k: string) =>
-				this.#rejoining && this.shared.layers.get(k.split('|')[0])?.owner === this.me;
-			for (const k of this.cache.keys()) if (!own(k)) this.#put(k);
+			for (const k of this.cache.keys()) if (!this.#ownOnRejoin(k)) this.#put(k);
 			if (this.#snapTl) this.canvas.setTimeline(this.#fromShared(this.#snapTl));
 			this.#synced = true;
 			const later = this.#buffer.filter((b) => b.seq > this.#snapSeq);
@@ -2001,7 +2139,7 @@ export class Together {
 				await this.localChanged();
 			} else this.addOwnLayer();
 			this.onchange();
-			for (const to of this.#askers.splice(0)) await this.#sendSnapshot(to);
+			await this.#answer();
 		}
 	}
 
@@ -2032,7 +2170,7 @@ export class Together {
 						this.ids.set(lid, l.id);
 						// (a line layer stays one: duplicated, pasted or imported)
 						const lines = !l.adjust && !!this.canvas.isLineLayer?.(l.id);
-						this.net.edit({
+						this.#send({
 							k: 'layer',
 							lid,
 							name: l.name,
@@ -2049,7 +2187,7 @@ export class Together {
 						l.adjust !== (this.#adjustSent.get(lid) ?? this.shared.layers.get(lid)?.adjust)
 					) {
 						this.#adjustSent.set(lid, l.adjust);
-						this.net.edit({ k: 'adjust', lid, spec: l.adjust });
+						this.#send({ k: 'adjust', lid, spec: l.adjust });
 					}
 					const packed = this.canvas.maskPacked(l.id);
 					const on = packed.length > 0;
@@ -2058,7 +2196,7 @@ export class Together {
 					const d = diffTiles(prev, next);
 					if (on === (this.#maskOn.get(lid) ?? false) && !d.set.length && !d.clear.length) continue;
 					this.#maskOn.set(lid, on);
-					if (on) this.cache.set(key(lid, 'mask'), next);
+					if (on) this.cache.set(key(lid, 'mask'), keepSame(prev, next));
 					else this.cache.delete(key(lid, 'mask'));
 					await this.#sendMask(lid, on, d.set, d.clear);
 				}
@@ -2070,7 +2208,7 @@ export class Together {
 					if (sameLook(look, this.#lookSent.get(lid) ?? this.shared.layers.get(lid)?.look))
 						continue;
 					this.#lookSent.set(lid, look);
-					this.net.edit({ k: 'look', lid, look });
+					this.#send({ k: 'look', lid, look });
 				}
 				// group settings changed here, on groups this app may change
 				for (const g of this.canvas.groups()) {
@@ -2086,7 +2224,7 @@ export class Together {
 					)
 						continue;
 					this.#groupSent.set(gid, s);
-					this.net.edit({ k: 'gset', lid: gid, ...s });
+					this.#send({ k: 'gset', lid: gid, ...s });
 				}
 				// what may have changed: each drawable layer's drawing showing, and drawings
 				// touched elsewhere (an undo on another frame)
@@ -2111,7 +2249,7 @@ export class Together {
 					const prev = this.cache.get(key(lid, did)) ?? new Map();
 					const diff = diffTiles(prev, next);
 					if (!diff.set.length && !diff.clear.length) continue;
-					this.cache.set(key(lid, did), next);
+					this.cache.set(key(lid, did), keepSame(prev, next));
 					await this.#sendTiles(lid, did, diff.set, diff.clear);
 				}
 				// line layers: their strokes, and a layer turned into pixels
@@ -2120,7 +2258,7 @@ export class Together {
 					if (!lid || !d || !this.shared.canDraw(lid, this.me)) continue;
 					this.#sendLines(lid, id, d);
 					if (this.shared.layers.get(lid)?.lines && this.canvas.isLineLayer?.(id) === false)
-						this.net.edit({ k: 'pixels', lid });
+						this.#send({ k: 'pixels', lid });
 				}
 				// (a merged layer's removal: after the merged pixels)
 				for (const f of this.#afterSend.splice(0)) f();
@@ -2136,11 +2274,10 @@ export class Together {
 		set: [number, number, Uint8Array][],
 		clear: [number, number][]
 	) {
-		for (const [part, gone] of tileParts(set, clear)) {
-			const enc: [number, number, string][] = [];
-			for (const [x, y, px] of part) enc.push([x, y, await encodeTile(px)]);
-			this.net.edit({ k: 'tiles', lid, did, set: enc, clear: gone });
-		}
+		const wire = await encodeTiles(set.map(([, , px]) => px));
+		const enc = set.map(([x, y], i): [number, number, string] => [x, y, wire[i]]);
+		for (const [part, gone] of tileParts(enc, clear))
+			this.#send({ k: 'tiles', lid, did, set: part, clear: gone });
 	}
 
 	async #sendMask(
@@ -2149,11 +2286,10 @@ export class Together {
 		set: [number, number, Uint8Array][],
 		clear: [number, number][]
 	) {
-		for (const [part, gone] of tileParts(set, clear)) {
-			const enc: [number, number, string][] = [];
-			for (const [x, y, px] of part) enc.push([x, y, await encodeTile(px)]);
-			this.net.edit({ k: 'mask', lid, on, set: enc, clear: gone });
-		}
+		const wire = await encodeTiles(set.map(([, , px]) => px));
+		const enc = set.map(([x, y], i): [number, number, string] => [x, y, wire[i]]);
+		for (const [part, gone] of tileParts(enc, clear))
+			this.#send({ k: 'mask', lid, on, set: part, clear: gone });
 	}
 
 	async #sendSnapshot(to: string) {
@@ -2165,16 +2301,19 @@ export class Together {
 			tl: this.#sharedTimeline()
 		});
 		this.#shareSounds(this.#sharedTimeline(), to);
-		for (const [k, t] of this.cache) {
+		// every drawing's tiles as they are now, compressed side by side (most were when they
+		// were shared, and are kept so), sent in order
+		const drawings = [...this.cache]
+			.filter(([k]) => this.shared.layers.has(k.split('|')[0]))
+			.map(([k, t]) => [k, [...t]] as const);
+		for (const [k, tiles] of drawings) {
 			const [lid, did] = k.split('|');
-			if (!this.shared.layers.has(lid)) continue;
-			const tiles = [...t];
+			const wire = await encodeTiles(tiles.map(([, px]) => px));
 			for (let i = 0; i < Math.max(tiles.length, 1); i += TILES_PER_EDIT) {
-				const set: [number, number, string][] = [];
-				for (const [tk, px] of tiles.slice(i, i + TILES_PER_EDIT)) {
+				const set = tiles.slice(i, i + TILES_PER_EDIT).map(([tk], j): [number, number, string] => {
 					const [x, y] = tk.split(',').map(Number);
-					set.push([x, y, await encodeTile(px)]);
-				}
+					return [x, y, wire[i + j]];
+				});
 				this.net.direct(to, { k: 'snap.tiles', lid, did, set });
 			}
 		}
@@ -2230,19 +2369,17 @@ export class Together {
 		const id = this.ids.get(lid);
 		if (id && this.shared.canDraw(lid, this.me)) {
 			const next = unpack(await this.canvas.packed(d));
-			const diff = diffTiles(this.cache.get(key(lid, did)) ?? new Map(), next);
+			const prev = this.cache.get(key(lid, did)) ?? new Map();
+			const diff = diffTiles(prev, next);
 			if (diff.set.length || diff.clear.length) {
-				this.cache.set(key(lid, did), next);
+				this.cache.set(key(lid, did), keepSame(prev, next));
 				await this.#sendTiles(lid, did, diff.set, diff.clear);
 			}
 		}
 		const t = this.cache.get(key(lid, did)) ?? new Map();
 		this.cache.set(key(lid, did), t);
 		for (const [x, y] of clear) t.delete(`${x},${y}`);
-		for (const [x, y, s] of set) {
-			const px = await decodeTile(s);
-			if (px) t.set(`${x},${y}`, px);
-		}
+		await decodeInto(t, set);
 		this.#put(key(lid, did));
 	}
 
@@ -2343,6 +2480,7 @@ export class Together {
 	/** The session is over for this app: nothing more goes into the canvas. */
 	close() {
 		this.#closed = true;
+		clearTimeout(this.#answerTimer);
 		clearTimeout(this.#retryTimer);
 		this.#retryTimer = undefined;
 	}
