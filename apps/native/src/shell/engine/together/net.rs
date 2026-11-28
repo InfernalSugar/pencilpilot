@@ -55,6 +55,8 @@ pub struct SharedView {
     /// shared layer → the painter's layer
     pub ids: Vec<(String, u32)>,
     pub synced: bool,
+    /// bytes `Together` keeps of the project's pixels (its copy of every drawing)
+    pub cache_bytes: usize,
 }
 
 /// What reaches the window.
@@ -344,7 +346,9 @@ impl Pump {
     fn flush(&mut self, t: &mut Together, s: &Session, port: &RemotePort) -> bool {
         let size = |v: &Value| v.to_string().len() as u64;
         let mut ok = true;
-        for o in t.take_out() {
+        let outs = t.take_out();
+        wire_log(&outs);
+        for o in outs {
             match o {
                 TogetherOut::Edit(mut body) => {
                     if self.stamp
@@ -396,7 +400,45 @@ impl Pump {
             shared: t.shared.clone(),
             ids: t.ids.iter().map(|(k, v)| (k.clone(), *v)).collect(),
             synced: t.synced(),
+            cache_bytes: t
+                .cache
+                .values()
+                .map(|m| m.values().map(Vec::len).sum::<usize>())
+                .sum(),
         }));
+    }
+}
+
+/// Checks: what this app sends, one line each (`PENCILPILOT_WIRE_LOG`: where), without the
+/// pixels: the kind, layer, drawing, how many tiles, and the timeline's tracks.
+fn wire_log(outs: &[TogetherOut]) {
+    use std::io::Write;
+    let Some(path) = std::env::var_os("PENCILPILOT_WIRE_LOG") else {
+        return;
+    };
+    let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    else {
+        return;
+    };
+    for o in outs {
+        let (to, b) = match o {
+            TogetherOut::Edit(b) => (None, b),
+            TogetherOut::Direct { to, body } => (Some(&to[..12.min(to.len())]), body),
+        };
+        let n = |k: &str| b.get(k).and_then(Value::as_array).map_or(0, Vec::len);
+        let line = json!({
+            "to": to, "k": b.get("k"), "lid": b.get("lid"), "did": b.get("did"),
+            "set": n("set"), "clear": n("clear"),
+            "tl": b.get("tl").map(|t| t["scenes"].as_array().map(|sc| sc.iter().map(|s|
+                s["cuts"].as_array().map(|c| c.iter().map(|c| c["tracks"].clone()).collect::<Vec<_>>())
+            ).collect::<Vec<_>>())),
+            "layers": b.get("layers").map(|l| l.as_array().map(|a| a.iter().map(|x| (x["lid"].clone(), x["name"].clone())).collect::<Vec<_>>())),
+            "ns": now_ns(),
+        });
+        let _ = writeln!(f, "{line}");
     }
 }
 
@@ -470,7 +512,8 @@ async fn run(
                 _ => t.resume_host(&mut port),
             }
         } else if joining {
-            port.new_doc(None);
+            // (the project here stays, put aside: hidden and locked, as the current app
+            // keeps its own when joining)
             if let Some(h) = &host {
                 t.start_join(&mut port, h);
             }
@@ -487,8 +530,19 @@ async fn run(
     let size = |v: &Value| v.to_string().len() as u64;
     let mut snap_frame: Option<u32> = None;
     let mut why: Option<String> = None;
+    // what couldn't go into a busy canvas is tried again (a stroke ended, …)
+    let mut again = tokio::time::interval(Duration::from_millis(30));
+    again.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
+            _ = again.tick() => {
+                if t.waiting() {
+                    tokio::task::block_in_place(|| {
+                        t.retry(&mut port);
+                        pump.flush(&mut t, &s, &port);
+                    });
+                }
+            }
             cmd = rx.recv() => {
                 let Some(cmd) = cmd else { break };
                 if matches!(cmd, Cmd::Leave) {
@@ -612,6 +666,12 @@ async fn run(
                 }
                 if !was_synced && t.synced() {
                     was_synced = true;
+                    // (joining went through every drawing once: what it used for that goes
+                    // back to the system)
+                    // SAFETY: glibc's own call, no arguments that matter
+                    unsafe {
+                        libc::malloc_trim(0);
+                    }
                     out.send(In::Synced(snap_frame.take()));
                 }
             }

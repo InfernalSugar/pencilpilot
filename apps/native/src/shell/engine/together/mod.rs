@@ -108,6 +108,8 @@ pub struct Access {
     pub asked: bool,
     /// a kind of layer this version doesn't draw (made in the current app): what it is
     pub other: Option<&'static str>,
+    /// the group it's in (shown; groups are changed in the current app)
+    pub group: Option<String>,
 }
 
 /// A shared layer as the dialog lists it.
@@ -256,6 +258,8 @@ pub struct Together {
     pub live_out: live::LiveOut,
     live_sent_at: Option<Instant>,
     begin_at: Option<Instant>,
+    /// a stroke's start said again so many times
+    begins: u32,
     cursors: HashMap<String, (f32, f32, Instant)>,
     cursor_sent: Option<((f32, f32), Instant)>,
     /// the layers' settings as last told (a change here is told again)
@@ -264,6 +268,8 @@ pub struct Together {
     asks: std::collections::VecDeque<port::Ask>,
     /// what to come back with after a break (the session as it was left)
     pub saved: Option<Box<net::Saved>>,
+    /// came back once after losing touch (not again on its own)
+    reconnected: bool,
     /// the interface's lists need making again
     ui_dirty: bool,
     /// when this app's last stroke ended (for the tiles it sends), ns
@@ -561,6 +567,7 @@ pub fn leave(e: &mut Engine, s: &mut State, why: Option<String>) {
         saved: saved.or_else(|| t.saved.take()),
         // (the session's timeline as it was: coming back goes on from it)
         win: std::mem::take(&mut t.win),
+        reconnected: t.reconnected,
         stats,
         ..Default::default()
     };
@@ -627,13 +634,18 @@ pub fn tick(e: &mut Engine, s: &mut State, now: Instant) -> bool {
         .is_none_or(|t| t.elapsed() >= LIVE_EVERY)
         || !e.together.live_out.on;
     if due {
-        if e.together.live_out.on
-            && e.together
-                .begin_at
-                .is_some_and(|t| t.elapsed() >= LIVE_BEGIN_AGAIN)
-        {
+        // (soon after the start, then now and then: a stroke's first datagram can be lost
+        // on a link that has been quiet)
+        let gap = match e.together.begins {
+            0 => Duration::from_millis(40),
+            1 => Duration::from_millis(100),
+            2 => Duration::from_millis(200),
+            _ => LIVE_BEGIN_AGAIN,
+        };
+        if e.together.live_out.on && e.together.begin_at.is_some_and(|t| t.elapsed() >= gap) {
             e.together.live_out.begin_again();
             e.together.begin_at = Some(Instant::now());
+            e.together.begins += 1;
         }
         let msgs = e.together.live_out.take();
         if !msgs.is_empty() {
@@ -756,6 +768,7 @@ fn take(e: &mut Engine, s: &mut State, msg: net::In) -> bool {
         }
         In::Synced(frame) => {
             e.together.stats.synced_ns = Some(now_ns());
+            e.together.reconnected = false;
             if let Some(f) = frame {
                 s.frame = f.min(s.frames.saturating_sub(1));
             }
@@ -827,17 +840,31 @@ fn take(e: &mut Engine, s: &mut State, msg: net::In) -> bool {
             members,
             invite,
         } => {
+            // (this app took over as host, and no one else is here: the host (and the others)
+            // may have dropped it, not the session)
+            let was_host = s.together.info.as_ref().is_some_and(|i| i.host);
+            let alone = you && !was_host && members.len() == 1;
             if let Some(info) = &mut s.together.info {
                 info.members = members;
                 info.host = you;
                 info.invite = invite;
             }
             note_members(e, s);
+            // took over alone: the others may still be there (this app lost touch with
+            // them, not they with each other): back to them if they are
+            if alone {
+                reconnect(e, s, "Lost touch with the others: finding them again…");
+            }
             true
         }
         In::Closed { why, saved } => {
             if saved.is_some() {
                 e.together.saved = saved;
+            }
+            // lost (not left): back once, to whoever is still there
+            if why.is_some() && !e.together.reconnected && e.together.saved.is_some() {
+                reconnect(e, s, "The session was lost: finding the others again…");
+                return true;
             }
             let why = why.map(|w| format!("The session was lost ({w})."));
             leave(
@@ -847,6 +874,17 @@ fn take(e: &mut Engine, s: &mut State, msg: net::In) -> bool {
             );
             true
         }
+    }
+}
+
+/// Lost touch: leave, and come back to whoever of the session is online (or host it again
+/// if no one is), once; the person is told.
+fn reconnect(e: &mut Engine, s: &mut State, say: &str) {
+    leave(e, s, None);
+    if let Some(saved) = e.together.saved.clone() {
+        e.together.reconnected = true;
+        s.together.say(say);
+        start(e, s, net::Start::Rejoin(saved));
     }
 }
 
@@ -998,6 +1036,7 @@ pub fn stroke_begins(e: &mut Engine, s: &State) {
     if on {
         t.live_out.begin(live::style(s));
         t.begin_at = Some(Instant::now());
+        t.begins = 0;
         // (the start goes at once)
         t.live_sent_at = None;
     }
@@ -1038,6 +1077,15 @@ fn refresh_ui(e: &Engine, s: &mut State) {
                 } else {
                     None
                 },
+                group: e
+                    .painter
+                    .layers()
+                    .iter()
+                    .find(|x| x.id == tr.layer)
+                    .map(|x| x.group())
+                    .filter(|g| *g != 0)
+                    .and_then(|g| e.painter.groups().iter().find(|x| x.id == g))
+                    .map(|g| g.name.clone()),
             })
         })
         .collect();
@@ -1131,7 +1179,7 @@ pub fn stats_json(e: &Engine, s: &State, shown_after: &dyn Fn(u64) -> Option<u64
     let members = s.together.info.as_ref().map_or(0, |i| i.members.len());
     let tl = t.win.full_tl.as_ref().map_or(0, |tl| tl.scenes.len());
     format!(
-        "{{\"host\": {}, \"members\": {members}, \"membersPeak\": {}, \"startedNs\": {}, \"joinedNs\": {}, \"syncedNs\": {}, \"bytesSent\": {sent}, \"bytesReceived\": {received}, \"liveSent\": {}, \"tilesSent\": {}, \"deferred\": {}, \"sharedLayers\": {}, \"scenes\": {}, \"edits\": [{}]}}",
+        "{{\"host\": {}, \"members\": {members}, \"membersPeak\": {}, \"startedNs\": {}, \"joinedNs\": {}, \"syncedNs\": {}, \"bytesSent\": {sent}, \"bytesReceived\": {received}, \"liveSent\": {}, \"tilesSent\": {}, \"deferred\": {}, \"cacheMiB\": {:.1}, \"sharedLayers\": {}, \"scenes\": {}, \"edits\": [{}]}}",
         s.together.info.as_ref().is_some_and(|i| i.host),
         t.stats.members_peak,
         opt(t.stats.started_ns),
@@ -1140,6 +1188,7 @@ pub fn stats_json(e: &Engine, s: &State, shown_after: &dyn Fn(u64) -> Option<u64
         t.stats.live_sent,
         t.stats.tiles_sent,
         t.stats.deferred,
+        t.view.cache_bytes as f64 / (1 << 20) as f64,
         t.view.shared.layers.len(),
         tl,
         edits.join(", ")

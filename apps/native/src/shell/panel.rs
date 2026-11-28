@@ -857,6 +857,15 @@ fn layers(f: &mut Frame, body: Rect, s: &mut State) {
                 let shared = s.together.access.get(i).cloned().flatten();
                 let what = match &shared {
                     Some(a) if a.other.is_some() => a.other.unwrap_or_default().to_string(),
+                    Some(a) if a.group.is_some() => format!(
+                        "{} · in {}",
+                        if a.mine {
+                            "Yours".to_string()
+                        } else {
+                            format!("{}’s", a.owner)
+                        },
+                        a.group.clone().unwrap_or_default()
+                    ),
                     Some(a) if a.mine => format!("Yours · {what}"),
                     Some(a) => format!("{}’s · {what}", a.owner),
                     None => what.to_string(),

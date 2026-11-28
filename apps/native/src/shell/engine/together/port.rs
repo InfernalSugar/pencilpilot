@@ -65,6 +65,8 @@ pub enum Req {
     NewDoc(Option<(u32, u32)>),
     /// the project's size and the frame showing (a native host's snapshot says them)
     Doc,
+    /// a sound file the session sent (kept to save with the project)
+    PutSound(String, Arc<Vec<u8>>),
 }
 
 /// A drawing's tiles as the window has them.
@@ -307,8 +309,9 @@ impl CanvasPort for RemotePort {
         self.sounds.get(file).cloned()
     }
     fn put_sound(&mut self, file: &str, bytes: Vec<u8>, name: &str) {
-        self.sounds
-            .insert(file.into(), (Arc::new(bytes), name.into()));
+        let b = Arc::new(bytes);
+        self.call(Req::PutSound(file.into(), b.clone()));
+        self.sounds.insert(file.into(), (b, name.into()));
     }
     fn timeline(&self) -> Timeline {
         match self.call(Req::Timeline) {

@@ -38,9 +38,15 @@ pub struct Window {
     pub sheet_sig: u64,
     /// the scene and cut this app shows (the sheet), in the session's timeline
     pub shown: (usize, usize),
+    /// sound files the session has sent (to save with the project)
+    sounds: HashMap<String, Arc<Vec<u8>>>,
 }
 
 impl Window {
+    pub fn sounds(&self) -> impl Iterator<Item = (&String, &Arc<Vec<u8>>)> {
+        self.sounds.iter()
+    }
+
     pub fn is_adjust(&self, id: u32) -> bool {
         self.adjusts.contains_key(&id)
     }
@@ -96,8 +102,18 @@ fn ensure_full(e: &mut Engine, s: &State) {
     }
 }
 
+/// The session's whole timeline as this app has it now (for saving), when in or after one.
+pub fn session_timeline(e: &Engine, s: &State) -> Option<Timeline> {
+    e.together.win.full_tl.as_ref()?;
+    Some(timeline_built(e, s))
+}
+
 fn timeline_of(e: &mut Engine, s: &State) -> Timeline {
     ensure_full(e, s);
+    timeline_built(e, s)
+}
+
+fn timeline_built(e: &Engine, s: &State) -> Timeline {
     let mut tl = e.together.win.full_tl.clone().unwrap_or_default();
     let (si, ci) = e.together.win.shown;
     while tl.scenes.len() <= si {
@@ -671,6 +687,10 @@ pub fn serve(e: &mut Engine, s: &mut State, r: Req) -> Resp {
             Resp::Unit
         }
         Req::Doc => Resp::Doc(e.painter.width(), e.painter.height(), s.frame),
+        Req::PutSound(file, bytes) => {
+            e.together.win.sounds.insert(file, bytes);
+            Resp::Unit
+        }
     }
 }
 

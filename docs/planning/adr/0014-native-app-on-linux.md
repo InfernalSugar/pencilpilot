@@ -416,66 +416,51 @@ Each step is its own PR, with tests that need no window on the screen.
 ## Phase 6: drawing together (2026-11-28)
 
 The native app takes part in the current app's live sessions (ADR-0013): it hosts, joins with
-a `pp1-` code, and draws with others, the current app included, in the same session.
+a `pp1-` code, and draws with others, the current app included, in the same session. **The rule
+for a mixed session:** the native app never destroys or alters what it doesn't support.
 
-- **Where:** `apps/native/src/shell/engine/together` (the session's own thread around
-  `crates/share`, the edits put in and sent), `shell/together_ui.rs` (the dialog, chat,
-  cursors), the layers panel (whose each shared layer is; the lock asks to draw on someone
-  else's). The rules and the edits' checks are `crates/together`'s (the current app's
-  `together.ts`, ported by the core part of this phase).
-- **Nothing on the window's thread waits on the network:** the session runs on a thread of
-  its own (a small tokio runtime) that wakes the window when something comes (a pipe the
-  window's wait watches with the compositor's socket: no polling). Tiles are decoded and
-  compressed there; the window only swaps decoded tiles into drawings between frames, within
-  3 ms a tick.
-- **Tiles go straight to the GPU's copy:** a drawing showing gets the changed tiles marked
-  (the compositor re-uploads only those, checked by hash); one not showing is forgotten and
-  goes up when shown.
-- **Live strokes:** this app's stroke goes as it's drawn (the points gathered each frame, in
-  datagrams of 24 points, as the current app's: a datagram has to fit in one packet), others' are drawn with their
-  brush on a layer of their own until their tiles arrive.
-- **What a stroke sends:** the painter keeps which drawings' tiles recorded edits changed
-  (`Painter::track_edits`), so a stroke's end sends only its tiles, copied out a few hundred
-  a tick and compressed on the session's thread (the current app compares whole drawings).
-- **Joining:** the project's size and frame come with the snapshot (extra fields the current
-  app ignores; from the current app the joiner keeps its own size); drawings kept as the
-  file has them go as they are (no decoding or compressing again), and the joiner keeps them
-  compressed as they came until they're shown.
-- **Identity:** the current app's key file (`$XDG_DATA_HOME/app.pencilpilot.studio/share/key`),
-  so a computer is the same member in either app. **Checks never use a relay** (`--stats`,
-  `--quit-after`: loopback only); `--host` / `--join <code>` / `--name` start a session
-  without the interface, for checks only.
-- **With the current app, nothing it doesn't support is lost or changed:** the session's
-  timeline is kept whole as it came (every scene, cut, marker, sound clip, note, camera,
-  mouth chart, palette); only the tracks this app changed (in the cut it shows, the first)
-  go back into it, and a static layer's length stays the session's. Masks, line strokes and
-  sound files from another version are kept as they came and passed on to joiners (this app
-  as host sends everything the current app's host does); masks are shown, line layers'
-  pixels too; line and adjustment layers stay locked here (their tiles from here would undo
-  their strokes or settings for the others). A layer's look goes out with its alpha lock,
-  clipping and style as the session has them. Groups, adjustment settings and styles are
-  kept in the shared state, not drawn here. Cleared tiles go as the current app sends them
-  while its own check takes the edit; past 4 × 48 tiles in an edit (a big erase) the
-  current app's own edit is refused by every app, so here they go in more edits.
-- **Measured** (release, two native apps on loopback, each on a headless mutter and D-Bus of
-  its own, both drawing at once, 14 strokes each at 240 Hz input; 3 runs, the range;
-  load average 1–3):
-
-  | What | Proposed budget | 165 Hz | 60 Hz |
-  |---|---|---|---|
-  | Pen to the others' screen (live stroke shown), p99 | 50 ms | 6.2–6.6 ms | 13.4–14.4 ms |
-  | Stroke's end to its tiles shown there, worst | 100 ms | 9.0–14.7 ms | 13.1–14.1 ms |
-  | Pen to screen while the other draws, p99 (event time) | 10.06 / 20.67 ms | 8.3–8.7 ms; one run 10.0–10.4 | 18.4–18.7 ms |
-  | Missed frames while both draw | 0 | 0–2; one run 7 | 0–1 |
-  | Joining 4K × 20 layers: connected to drawable | 3 s | 38–41 ms (launch to drawable 0.71 s) | |
-  | — the joiner's memory, peak PSS | 600 MiB | 321–328 MiB | |
-  | 8 members drawing at once (10 strokes each) | none dropped | 70 of 70 tile edits each; all 8 pictures the same | |
-  | — pen to screen meanwhile, p99, each member | 10.06 ms | 9.5–12.9 ms (most over); 0–2 missed | |
-
-  The 8-member run is 8 apps and 8 mutters on one machine. A control with the same 8 apps
-  drawing without a session gave a steady 26.8–27.1 ms p99, which isn't understood yet, so
-  it doesn't tell how much of the 8-member figure is the session's.
-- **Not yet in the native app** (kept and passed on, not made or edited here): groups,
-  line (vector) strokes, adjustment layers, layer styles, sound clips, other scenes and cuts;
-  merging or deleting others' layers by asking; rejoining a saved session after a break;
-  the invite as a QR code.
+- **The session's state is `crates/together`'s `Together`** (the current app's `together.ts`,
+  ported, edit for edit): layers, groups, who may draw on each, asks, the whole timeline (every
+  scene and cut, notes, markers, sound clips, mouth charts, stages, palettes), masks, line
+  strokes, sound files, the joiner's snapshot, coming back after a break. It runs on the
+  session's own thread (`engine/together/net.rs`, a small tokio runtime around
+  `crates/share`'s `Session`), never on the window's.
+- **The canvas is asked, not shared** (`engine/together/port.rs`, `serve.rs`): `Together`'s
+  `CanvasPort` calls go to the window's thread, which answers them between frames (3 ms a
+  tick at most) and never waits on the session's. The heavy work stays on the session's
+  thread: a drawing's tiles encoded from the painter's copy, tiles put in decoded and
+  compared there (a hash each: only those that changed reach the painter). A pipe the window's
+  wait watches wakes it (`crates/window`'s `Waker`): no polling.
+- **What the native app doesn't show stays as it came:**
+  - the timeline is the session's, whole; only the tracks of the cut the native app shows (the
+    sheet) are read back from it, and a static layer's length stays the session's;
+  - a layer's look comes back as the session set it, but for what changes here (eye,
+    opacity, blend where the native app has it): a blend mode or style it hasn't isn't
+    rewritten;
+  - line and adjustment layers made in the current app show their pixels (line layers) and stay
+    locked here; masks show; groups are kept (the painter's groups; shown in the layers panel,
+    changed in the current app);
+  - others' tiles are kept exactly as they came (straight RGBA, compressed) and used for saving
+    and passing on; a drawing not in the painter is kept compressed as it came.
+- **Saving a shared project:** the session's whole timeline and every drawing in it (other cuts'
+  too), its groups and the sound files it sent; tiles past the canvas are left out and tiles at
+  its edge are written as they are, as the current app's writer does; live-preview layers
+  aren't saved.
+- **Hosting a project from its file** shares its whole timeline: drawings of cuts the native
+  app doesn't show go as the file has them (no decoding).
+- **Joining** puts the project open aside (hidden, locked), as the current app does; a native
+  host's snapshot adds the project's size and frame (fields the current app ignores), and a
+  joiner whose project is another size opens one of that size.
+- **Live strokes:** this app's stroke goes as it's drawn, a frame's worth of points (24 a
+  datagram) at most every 16 ms; its start is said again soon after (40, 100, 200 ms) and then
+  every 0.5 s, so a start lost on a quiet link still shows. Others' are drawn with their brush on
+  a layer of their own until their tiles come (or 2 s after the stroke's end, a lost end).
+- **Losing touch:** a session lost (closed under it) or split (this app took over alone while
+  others were there) is told, and the native app goes back once to whoever of it is online, or
+  hosts it again. Leaving keeps the session to rejoin within the app's run.
+- **Identity:** the current app's key file (`$XDG_DATA_HOME/app.pencilpilot.studio/share/key`).
+  **Checks never use a relay**; `--host` / `--join <code>` / `--name` start a session without the
+  interface, for checks only; `PENCILPILOT_WIRE_LOG` writes what this app sends (no pixels).
+- **Phase 7 parity (not yet):** rejoining a session from the project file (the current app keeps
+  it in `extra.share`); drawing on line layers and editing groups natively; layer styles drawn;
+  adjustment layers shown; the invite as a QR code.
