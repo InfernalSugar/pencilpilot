@@ -28,6 +28,7 @@
 
 #![cfg(target_os = "linux")]
 
+pub mod clipboard;
 pub mod clock;
 pub mod input;
 mod keyboard;
@@ -55,6 +56,7 @@ use wayland_protocols::xdg::decoration::zv1::client::{
 };
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 
+pub use clipboard::Waker;
 pub use input::*;
 pub use wayland_client::protocol::wl_output::WlOutput;
 
@@ -158,6 +160,8 @@ struct State {
     keyboard: Option<wl_keyboard::WlKeyboard>,
     keymap: Option<Keyboard>,
     pens: HashMap<ObjectId, PenGatherer>,
+    /// the system's clipboard
+    clip: clipboard::Clip,
 }
 
 struct Slot {
@@ -189,6 +193,10 @@ pub struct Window {
     frames: u64,
     /// the size the slots are (device pixels)
     slot_size: (u32, u32),
+    /// the clipboard's manager (copying makes a source with it)
+    data: Option<wayland_client::protocol::wl_data_device_manager::WlDataDeviceManager>,
+    /// what wakes the window's wait from other threads
+    wake: clipboard::Wake,
 }
 
 impl Window {
@@ -221,6 +229,9 @@ impl Window {
         if let (Some(seat), Some(t)) = (&seat, &tablets) {
             t.get_tablet_seat(seat, &qh, ());
         }
+        // the clipboard (copying an invite, pasting one)
+        let data: Option<wayland_client::protocol::wl_data_device_manager::WlDataDeviceManager> =
+            globals.bind(&qh, 1..=3, ()).ok();
         // every monitor, to know their refresh rates
         let mut outputs = Vec::new();
         let mut st = State {
@@ -237,6 +248,9 @@ impl Window {
                 st.outputs.insert(g.name, Output::default());
                 outputs.push(o);
             }
+        }
+        if let (Some(seat), Some(m)) = (&seat, &data) {
+            st.clip.device = Some(m.get_data_device(seat, &qh, ()));
         }
         let surface = compositor.create_surface(&qh, ());
         let xdg = wm.get_xdg_surface(&surface, &qh, ());
@@ -281,12 +295,15 @@ impl Window {
             next_id: 1,
             frames: 0,
             slot_size: (0, 0),
+            data,
+            wake: clipboard::Wake::new().map_err(wl)?,
         })
     }
 
-    /// Wait for the compositor (a frame due, a resize, a close…), then handle what came.
+    /// Wait for the compositor (a frame due, a resize, a close…) or a [`Waker`], then handle
+    /// what came.
     pub fn wait(&mut self) -> Result<()> {
-        self.queue.blocking_dispatch(&mut self.st).map_err(wl)?;
+        self.wait_until(u64::MAX)?;
         if self.st.refused {
             return Err(Error::Wayland(
                 "the compositor refused a frame's dmabuf".into(),
@@ -295,11 +312,14 @@ impl Window {
         Ok(())
     }
 
-    /// Wait for the compositor until `deadline_ns` (CLOCK_MONOTONIC) at the latest. True if
-    /// something came.
+    /// Wait for the compositor until `deadline_ns` (CLOCK_MONOTONIC) at the latest, or until
+    /// a [`Waker`] wakes it. True if something came.
     pub fn wait_until(&mut self, deadline_ns: u64) -> Result<bool> {
         self.conn.flush().map_err(wl)?;
         if self.queue.dispatch_pending(&mut self.st).map_err(wl)? > 0 {
+            return Ok(true);
+        }
+        if self.wake.drain() {
             return Ok(true);
         }
         let Some(guard) = self.queue.prepare_read() else {
@@ -308,12 +328,36 @@ impl Window {
         // (a deadline already past still reads what has arrived: a caller with work due
         // all the time mustn't starve the compositor's events, frame callbacks included)
         let wait = deadline_ns.saturating_sub(clock::now_ns());
-        if clock::wait_readable(&guard.connection_fd(), wait) {
+        let (socket, woken) = clock::wait_readable2(&guard.connection_fd(), &self.wake.fd(), wait);
+        if socket {
             guard.read().map_err(wl)?;
         } else {
             drop(guard);
         }
-        Ok(self.queue.dispatch_pending(&mut self.st).map_err(wl)? > 0)
+        let woken = woken && self.wake.drain();
+        Ok(self.queue.dispatch_pending(&mut self.st).map_err(wl)? > 0 || woken)
+    }
+
+    /// Something that ends the window's wait from another thread (work arrived for it).
+    pub fn waker(&self) -> Waker {
+        self.wake.waker()
+    }
+
+    /// Puts `text` on the system's clipboard (for pasting in any app). False when the
+    /// compositor offers no clipboard.
+    pub fn set_clipboard(&mut self, text: &str) -> bool {
+        let ok = clipboard::set(&mut self.st, self.data.as_ref(), &self.qh, text);
+        let _ = self.conn.flush();
+        ok
+    }
+
+    /// Asks for the clipboard's text: it comes as [`InputEvent::Paste`] (false: nothing to
+    /// paste).
+    pub fn request_paste(&mut self) -> bool {
+        let w = self.wake.waker();
+        let ok = clipboard::request(&mut self.st, w);
+        let _ = self.conn.flush();
+        ok
     }
 
     /// Handle what's arrived without waiting.
@@ -427,6 +471,9 @@ impl Window {
 
     /// Input since the last call, in order.
     pub fn take_input(&mut self) -> Vec<InputEvent> {
+        if let Ok(mut a) = self.st.clip.arrived.lock() {
+            self.st.input.extend(a.drain(..).map(InputEvent::Paste));
+        }
         std::mem::take(&mut self.st.input)
     }
 
@@ -863,8 +910,12 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
             E::Enter {
                 surface_x,
                 surface_y,
+                serial,
                 ..
-            } => PointerPiece::Enter(surface_x, surface_y),
+            } => {
+                s.clip.serial = serial;
+                PointerPiece::Enter(surface_x, surface_y)
+            }
             E::Leave { .. } => PointerPiece::Leave,
             E::Motion {
                 time,
@@ -875,12 +926,15 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
                 time,
                 button,
                 state,
-                ..
-            } => PointerPiece::Button(
-                time,
-                button,
-                state == WEnum::Value(wl_pointer::ButtonState::Pressed),
-            ),
+                serial,
+            } => {
+                s.clip.serial = serial;
+                PointerPiece::Button(
+                    time,
+                    button,
+                    state == WEnum::Value(wl_pointer::ButtonState::Pressed),
+                )
+            }
             E::Axis { time, axis, value } => PointerPiece::Axis(
                 time,
                 axis == WEnum::Value(wl_pointer::Axis::VerticalScroll),
@@ -924,7 +978,10 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for State {
                     s.keymap = Keyboard::from_text(&text);
                 }
             }
-            E::Enter { .. } => s.input.push(InputEvent::Focus(true)),
+            E::Enter { serial, .. } => {
+                s.clip.serial = serial;
+                s.input.push(InputEvent::Focus(true))
+            }
             E::Leave { .. } => s.input.push(InputEvent::Focus(false)),
             E::Modifiers {
                 mods_depressed,
@@ -938,8 +995,12 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for State {
                 }
             }
             E::Key {
-                time, key, state, ..
+                time,
+                key,
+                state,
+                serial,
             } => {
+                s.clip.serial = serial;
                 let pressed = state == WEnum::Value(wl_keyboard::KeyState::Pressed);
                 let (keysym, name, text, mods) = match &s.keymap {
                     Some(k) => {
@@ -1053,7 +1114,10 @@ impl Dispatch<zwp_tablet_tool_v2::ZwpTabletToolV2, ()> for State {
             } => PenPiece::Serial(((hardware_serial_hi as u64) << 32) | hardware_serial_lo as u64),
             E::ProximityIn { .. } => PenPiece::ProximityIn,
             E::ProximityOut => PenPiece::ProximityOut,
-            E::Down { .. } => PenPiece::Down,
+            E::Down { serial } => {
+                s.clip.serial = serial;
+                PenPiece::Down
+            }
             E::Up => PenPiece::Up,
             E::Motion { x, y } => PenPiece::Motion(x, y),
             E::Pressure { pressure } => PenPiece::Pressure(pressure),
