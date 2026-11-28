@@ -2456,12 +2456,21 @@ def scenario_x_groups(out):
         s.open()
         s.js("document.querySelector('button[aria-label=\"New layer\"]').click(); return true;")
         time.sleep(0.5)
-        invite = s.host()["invite"]
+        info = s.host()
+        invite = info["invite"]
+        # the probe is in before the group is made: it sees the group's edits
+        probe = Peer(env_bin("PP_PEER"), out, "grp", invite=invite, name="Probe")
+        time.sleep(1.0)
         s.pen([wave(0, y0=0.3)])
         res["grouped"] = s.js("const b = document.querySelector('button[title=\"Put this layer in a new group\"]'); b?.click(); return !!b;")
         time.sleep(1.5)
         res["studioLayers"] = s.layer_names()
-        probe = Peer(env_bin("PP_PEER"), out, "grp", invite=invite, name="Probe")
+        # and what a joiner is sent
+        probe.direct(info["me"]["id"], {"k": "snap.req"})
+        time.sleep(1.0)
+        snap = [e["body"] for e in probe.events() if (e.get("body") or {}).get("k") == "snap.begin"]
+        res["snapshotGroups"] = snap and snap[-1].get("groups")
+        res["snapshotLayers"] = snap and [{"name": x.get("name"), "group": x.get("group")} for x in snap[-1].get("layers", [])]
         a = NativePeer(np_bin(), out, "grp")
         a.do(cmd="open", path=os.path.join(projects, "tiny.ppstudio"))
         a.do(cmd="join", code=invite, name="Nat")
@@ -2476,7 +2485,8 @@ def scenario_x_groups(out):
         res["studioGroups"] = ms.get("groups")
         res["nativeLayerGroups"] = [(l["name"], l.get("group")) for l in mn["layers"]]
         res["studioLayerGroups"] = [(l["name"], l.get("group")) for l in ms["layers"]]
-        res["pass"] = bool(mn.get("groups")) == bool(ms.get("groups"))
+        res["pass"] = bool(ms.get("groups")) and bool(mn.get("groups")) and \
+            [g for _, g in res["nativeLayerGroups"]].count(0) == [g for _, g in res["studioLayerGroups"]].count(0)
     finally:
         if probe:
             probe.leave()
