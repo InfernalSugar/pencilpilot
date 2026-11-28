@@ -62,8 +62,9 @@ const CURSOR_STALE: Duration = Duration::from_secs(4);
 const TICK_BUDGET: Duration = Duration::from_millis(3);
 const TICK_BUDGET_DRAWING: Duration = Duration::from_millis(1);
 /// Taking over as host with others in the session, how long until they've come over
-/// (a hand-over takes moments; past this, this app is the one that lost touch).
-const ALONE_GRACE: Duration = Duration::from_secs(5);
+/// (usually moments, but over a relay or on a slow machine it can take seconds; past this,
+/// this app is the one that lost touch).
+const ALONE_GRACE: Duration = Duration::from_secs(15);
 /// How long a tick waits for the session thread's next question after answering one.
 const ASK_FOLLOWS: Duration = Duration::from_millis(1);
 /// A live stroke's points go at most this often (as the current app's, a frame's worth).

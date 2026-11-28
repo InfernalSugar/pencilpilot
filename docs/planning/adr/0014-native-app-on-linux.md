@@ -487,7 +487,7 @@ for a mixed session:** the native app never destroys or alters what it doesn't s
   of the window each); a stroke's start goes out at pen-down straight from the window's thread
   (not behind the session thread's work); the window no longer spins when work is due within
   the frames' lead while not playing (it was waking at once again and again, idle);
-  taking over as host in a hand-over waits 5 s for the others to come over before calling the
+  taking over as host in a hand-over waits 15 s for the others (5 s was too short on a slow CI machine; over a relay it can take seconds) to come over before calling the
   session lost.
 - **Stroke starts** (what decided the 60 Hz pen numbers): the frame for a press was counted
   from the pointer's hover before it (a move with nothing to show, which drew no frame; now
