@@ -1465,6 +1465,8 @@ def garbage_into(app_kind, a, p, host_id, own_lid=None):
     lid = f"{p.id[:12]}:500"
     p.edit({"k": "layer", "lid": lid, "name": "After garbage"})
     did = f"{p.id[:12]}:501"
+    # (a moment between the layer and its timeline: the race of the two is a test of its own)
+    time.sleep(1.0)
     p.edit(peer_timeline(lid, did))
     t = stroke_tiles(5)
     p.edit({"k": "tiles", "lid": lid, "did": did, "set": [[x, y, encode_tile(px)] for x, y, px in t], "clear": []})
@@ -2468,6 +2470,48 @@ def scenario_x_groups(out):
     return res
 
 
+def scenario_x_first_strokes(out, gap=0.5):
+    """The native app (hosting, a blank first frame) draws two strokes `gap` apart while the
+    current app (joined) draws one on its own layer: both strokes must be on the native
+    app's layer, in both apps' saved copies. The wire is kept (who sent which timeline)."""
+    projects = env_bin("PP_PROJECTS")
+    res = {"load": load(), "gapS": gap}
+    a = NativePeer(np_bin(), out, "first")
+    s = pr = None
+    try:
+        a.do(cmd="open", path=os.path.join(projects, "empty.ppstudio"))
+        invite = a.do(cmd="host", name="Nat")["state"]["info"]["invite"]
+        s = Studio(env_bin("PP_STUDIO"), out, "first", project=os.path.join(projects, "tiny.ppstudio"), name="Stu")
+        s.open()
+        s.join(invite)
+        pr = Peer(env_bin("PP_PEER"), out, "first", invite=invite, name="Probe")
+        time.sleep(2.0)
+        a.do(cmd="stroke", y=300)
+        time.sleep(gap)
+        a.do(cmd="stroke", y=420)
+        s.pen([wave(0, y0=0.6)])
+        time.sleep(3.0)
+        pn = os.path.join(a.home, "after.ppstudio")
+        a.do(cmd="save", path=pn)
+        ps = s.save()
+        rows = lambda f: sorted(set(k[1] for k in tiles_of(f, "Layer 1")))
+        res["nativeLayer1Rows"] = {"native": rows(pn), "studio": rows(ps)}
+        res["wire"] = []
+        for e in pr.events():
+            b = e.get("body") or {}
+            if e["ev"] == "edit" and b.get("k") in ("timeline", "tiles"):
+                res["wire"].append([e["seq"], b["k"], e["from"][:6],
+                                    b.get("did") or {k[:6]: v for k, v in b["tl"]["scenes"][0]["cuts"][0]["tracks"].items()}])
+        res["pass"] = res["nativeLayer1Rows"]["native"] == [4, 6] and res["nativeLayer1Rows"]["studio"] == [4, 6]
+    finally:
+        if pr:
+            pr.leave()
+        a.quit()
+        if s:
+            s.quit()
+    return res
+
+
 SCENARIOS = {
     "studio-wire": scenario_studio_wire,
     "studio-pair": scenario_studio_pair,
@@ -2492,6 +2536,7 @@ SCENARIOS = {
     "x-offline40": lambda out: scenario_x_offline(out, 40),
     "x-import4k": scenario_x_import4k,
     "x-groups": scenario_x_groups,
+    "x-first-strokes": scenario_x_first_strokes,
 }
 
 
