@@ -666,6 +666,12 @@ async fn run(
                 }
                 if !was_synced && t.synced() {
                     was_synced = true;
+                    // (joining went through every drawing once: what it used for that goes
+                    // back to the system)
+                    // SAFETY: glibc's own call, no arguments that matter
+                    unsafe {
+                        libc::malloc_trim(0);
+                    }
                     out.send(In::Synced(snap_frame.take()));
                 }
             }
