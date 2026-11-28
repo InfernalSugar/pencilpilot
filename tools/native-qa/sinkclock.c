@@ -36,25 +36,30 @@ static double mono_s(void)
 static void on_process(void *userdata)
 {
 	struct data *d = userdata;
-	struct pw_buffer *b = pw_stream_dequeue_buffer(d->stream);
-	if (b == NULL)
-		return;
-	struct spa_buffer *buf = b->buffer;
-	float *samples = buf->datas[0].data;
-	if (samples != NULL) {
-		uint32_t n = buf->datas[0].chunk->size / (2 * sizeof(float));
-		struct pw_time t;
-		pw_stream_get_time_n(d->stream, &t, sizeof(t));
-		int64_t now = t.now;
-		uint64_t ticks = t.ticks;
-		uint32_t rate = t.rate.denom ? t.rate.denom : 48000;
-		fwrite(&now, sizeof(now), 1, d->out);
-		fwrite(&ticks, sizeof(ticks), 1, d->out);
-		fwrite(&rate, sizeof(rate), 1, d->out);
-		fwrite(&n, sizeof(n), 1, d->out);
-		fwrite((char *)samples + buf->datas[0].chunk->offset, sizeof(float), n * 2, d->out);
+	struct pw_time t;
+	pw_stream_get_time_n(d->stream, &t, sizeof(t));
+	uint32_t rate = t.rate.denom ? t.rate.denom : 48000;
+	struct pw_buffer *b;
+	/* every buffer queued (not only one a cycle: a recorder that fell behind would stay
+	 * behind, and its times would be late by what's queued); each buffer's time from its
+	 * own ticks (when the graph made it), against this cycle's ticks and time */
+	while ((b = pw_stream_dequeue_buffer(d->stream)) != NULL) {
+		struct spa_buffer *buf = b->buffer;
+		float *samples = buf->datas[0].data;
+		if (samples != NULL) {
+			uint32_t n = buf->datas[0].chunk->size / (2 * sizeof(float));
+			int64_t now = t.now;
+			uint64_t ticks = b->time ? b->time : t.ticks;
+			if (b->time && t.ticks >= b->time)
+				now = t.now - (int64_t)((t.ticks - b->time) * 1000000000ull / rate);
+			fwrite(&now, sizeof(now), 1, d->out);
+			fwrite(&ticks, sizeof(ticks), 1, d->out);
+			fwrite(&rate, sizeof(rate), 1, d->out);
+			fwrite(&n, sizeof(n), 1, d->out);
+			fwrite((char *)samples + buf->datas[0].chunk->offset, sizeof(float), n * 2, d->out);
+		}
+		pw_stream_queue_buffer(d->stream, b);
 	}
-	pw_stream_queue_buffer(d->stream, b);
 	if (mono_s() > d->until)
 		pw_main_loop_quit(d->loop);
 }

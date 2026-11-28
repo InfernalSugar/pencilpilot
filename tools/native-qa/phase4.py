@@ -185,7 +185,8 @@ def sound_projects(pics):
     """sound: two scenes; scene 1 has cuts A (48 frames) and B (72) with clicks (from 0), the
     tone (from frame -12, gain 0.5), noise (from 30, gain 0.8), chirp (from 60, muted) and the
     broken file; scene 2's cut C (48) has the chirp from frame 10. sound-none: the same
-    frames, no sounds. sound-60s: one 1440-frame cut, clicks from 0."""
+    frames, no sounds. sound-60s: one 1440-frame cut, clicks from 0. sound-start: the 3 s tone
+    from frame 0 of a 120-frame cut (how much of a sound's start Play leaves out)."""
     def cut(name, frames, first):
         return {"name": name, "tracks": {"Lines": [{"image": numbered(pics, first + i), "length": 1}
                                                    for i in range(frames)]}}
@@ -201,8 +202,9 @@ def sound_projects(pics):
     long = {"name": "Scene 1", "cuts": [{"name": "Long", "tracks": {"Lines": [
         {"image": numbered(pics, i % 240), "length": 1} for i in range(1440)]}}],
             "audio": [{"file": "clicks.wav", "start": 0}]}
+    start = {"name": "Scene 1", "cuts": [cut("S", 120, 0)], "audio": [{"file": "tone.wav", "start": 0}]}
     return {"sound": {**base, "scenes": [s1, s2]}, "sound-none": {**base, "scenes": none},
-            "sound-60s": {**base, "scenes": [long]}}
+            "sound-60s": {**base, "scenes": [long]}, "sound-start": {**base, "scenes": [start]}}
 
 
 # ------------------------------------------------------------------------------------------
@@ -284,12 +286,12 @@ class PrivatePW:
         conf = os.path.join(self.dir, "qa-null.conf")
         open(conf, "w").write(PW_CONF)
         self.alsa = os.path.join(self.dir, "asound.conf")
+        # ALSA's own config (no user or system override exists here), then its default and
+        # "null" devices are this sink (the app takes only "null" in a check)
         open(self.alsa, "w").write(
-            'pcm_type.pipewire { lib "/usr/lib/alsa-lib/libasound_module_pcm_pipewire.so" }\n'
-            'ctl_type.pipewire { lib "/usr/lib/alsa-lib/libasound_module_ctl_pipewire.so" }\n'
+            '</usr/share/alsa/alsa.conf>\n'
             'pcm.!default { type pipewire playback_node "qa-sink" }\n'
-            'ctl.!default { type pipewire }\n'
-            'pcm.pipewire { type pipewire playback_node "qa-sink" }\n')
+            'pcm.!null { type pipewire playback_node "qa-sink" hint { show on description "QA sink" } }\n')
         # the clients' config: the system's client.conf, their streams' ports made without a
         # session manager (the user's own config isn't read)
         self.client = os.path.join(self.dir, "client")
@@ -316,7 +318,8 @@ class PrivatePW:
     def app_env(self):
         return {"PIPEWIRE_RUNTIME_DIR": self.dir, "PIPEWIRE_REMOTE": "pipewire-0",
                 "PIPEWIRE_CONFIG_DIR": self.client, "ALSA_CONFIG_PATH": self.alsa,
-                "PULSE_SERVER": "unix:/nonexistent/pp-qa-no-pulse", **json.loads(os.environ.get("PP_QA_SOUND_ENV", "{}"))}
+                "PULSE_SERVER": "unix:/nonexistent/pp-qa-no-pulse", "PENCILPILOT_SOUND_DEVICE": "alsa:null",
+                **json.loads(os.environ.get("PP_QA_SOUND_ENV", "{}"))}
 
     def run(self, *cmd, timeout=10):
         return subprocess.run(list(cmd), env=self.env, capture_output=True, text=True, timeout=timeout)
@@ -900,16 +903,24 @@ def sync_analyse(r, hz, fps=24, every_frames=12):
     if not ons:
         return {"sound": False, "links": r["links"], "exit": r["exit"]}
     per = every_frames / fps * 1e9
-    offs, ts = [], []
+    # which click each onset is: from where the picture puts click 1 (its frame's shown time),
+    # so a click not heard (the first, at Play) doesn't shift the others
+    anchor = shown_at(st, every_frames, t_key)
+    if anchor is None:
+        return {"sound": True, "clicks": len(ons), "matched": 0, "exit": r["exit"]}
+    anchor -= per
+    offs, ts, ks = [], [], []
     for o, _ in ons:
-        k = round((o - ons[0][0]) / per)
+        k = round((o - anchor) / per)
         shown = shown_at(st, k * every_frames, t_key)
-        if shown is None:
+        if k < 0 or shown is None:
             continue
         offs.append((o - shown) / 1e6)
         ts.append((o - ons[0][0]) / 1e9)
+        ks.append(k)
     disp = 1000 / hz
-    res = {"sound": True, "clicks": len(ons), "matched": len(offs),
+    res = {"sound": True, "clicks": len(ons), "matched": len(offs), "firstClickHeard": 0 in ks,
+           "missingClicks": (max(ks) + 1 - len(set(ks))) if ks else None,
            "playToFirstSoundMs": round((ons[0][0] - t_key) / 1e6, 1),
            "playToFirstFrameChangeMs": None, "displayFrameMs": round(disp, 2), "exit": r["exit"]}
     if offs:
@@ -950,6 +961,38 @@ def scenario_sound_drift(binary, out):
     for name in ("sound-60s", "layers20-4k-60s-sound"):
         r = sound_run(binary, out, f"p4sdrift-{name}-{hz}", hz, os.path.join(FIX, f"{name}.ppstudio"), 62.0)
         res[f"{name}-{hz}"] = sync_analyse(r, hz)
+    return res
+
+
+def scenario_sound_start(binary, out):
+    """Play from frame 0 with a 3 s tone starting on frame 0: Play to the first sound heard,
+    and how much of the tone's start isn't heard (3 s less how long it's heard for), PP_QA_RUNS
+    times at 165 and 60 Hz."""
+    import numpy as np
+    res = {}
+    for hz in (165, 60):
+        runs = []
+        for i in range(RUNS):
+            r = sound_run(binary, out, f"p4sstart-{hz}-{i}", hz, os.path.join(FIX, "sound-start.ppstudio"), 4.0)
+            t, x = r["t"], r["x"]
+            a = np.abs(x).max(axis=1) if len(x) else np.zeros(0)
+            k = r["keys"][0]
+            loud = np.nonzero((t >= k) & (a > 0.05))[0]
+            if not len(loud):
+                runs.append({"sound": False, "links": len(r["links"]["app"])})
+                continue
+            # the tone's first run (gaps under 20 ms are the sine's own zero crossings)
+            idx = loud
+            gaps = np.nonzero(np.diff(t[idx]) > 20e6)[0]
+            end = idx[gaps[0]] if len(gaps) else idx[-1]
+            heard = (t[end] - t[idx[0]]) / 1e6
+            f0 = shown_at(r["stats"], 1, k)
+            runs.append({"playToSoundMs": round((t[idx[0]] - k) / 1e6, 1),
+                         "frame1ShownMs": f0 and round((f0 - k) / 1e6, 1),
+                         "toneHeardMs": round(heard, 1), "startLeftOutMs": round(3000 - heard, 1),
+                         "alone": r["alone"]})
+        res[str(hz)] = {"summary": {kk: nested(runs, [kk]) for kk in ("playToSoundMs", "startLeftOutMs")},
+                        "runs": runs}
     return res
 
 
@@ -1117,7 +1160,8 @@ def audio_check(video, spec_path, pics):
 
 SCENARIOS = {"play": scenario_play, "drift": scenario_drift, "play500": scenario_play500,
              "scrub": scenario_scrub, "switch": scenario_switch, "latency": scenario_latency,
-             "sync": scenario_sync, "sound-drift": scenario_sound_drift, "sound-edges": scenario_sound_edges}
+             "sync": scenario_sync, "sound-drift": scenario_sound_drift, "sound-edges": scenario_sound_edges,
+             "sound-start": scenario_sound_start}
 
 
 def main():
