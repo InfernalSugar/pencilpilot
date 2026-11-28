@@ -2314,11 +2314,13 @@ def scenario_x_undo(out):
                          "afterStudioUndo": {"nat": rows(tiles_of(s3, "Ink")), "stu": rows(tiles_of(s3, "Stu’s layer"))}}
         res["sameAfterEach"] = [compare_projects(x, y, ["Ink", "Stu’s layer"])["samePremul1"]
                                 for x, y in ((p1, s1), (p2, s2), (p3, s3))]
-        n, st = res["native"], res["studio"]
-        res["pass"] = (all(res["sameAfterEach"]) and n["afterNativeUndo"]["stu"] == n["before"]["stu"]
-                       and n["afterNativeUndo"]["nat"] != n["before"]["nat"]
-                       and n["afterStudioUndo"]["nat"] == n["afterNativeUndo"]["nat"]
-                       and n["afterStudioUndo"]["stu"] != n["afterNativeUndo"]["stu"])
+        # what each undo changed in the native app's copy (bytes, not just rows)
+        ch = lambda x, y, name: not compare_tiles(tiles_of(x, name), tiles_of(y, name))["equal"]
+        res["changed"] = {"nativeUndo": {"Ink": ch(p1, p2, "Ink"), "stu": ch(p1, p2, "Stu’s layer")},
+                          "studioUndo": {"Ink": ch(p2, p3, "Ink"), "stu": ch(p2, p3, "Stu’s layer")}}
+        c = res["changed"]
+        res["pass"] = (all(res["sameAfterEach"]) and c["nativeUndo"]["Ink"] and not c["nativeUndo"]["stu"]
+                       and c["studioUndo"]["stu"] and not c["studioUndo"]["Ink"])
     finally:
         a.quit()
         if s:
