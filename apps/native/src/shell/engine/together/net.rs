@@ -505,7 +505,8 @@ async fn run(
                 _ => t.resume_host(&mut port),
             }
         } else if joining {
-            port.new_doc(None);
+            // (the project here stays, put aside: hidden and locked, as the current app
+            // keeps its own when joining)
             if let Some(h) = &host {
                 t.start_join(&mut port, h);
             }
@@ -522,8 +523,19 @@ async fn run(
     let size = |v: &Value| v.to_string().len() as u64;
     let mut snap_frame: Option<u32> = None;
     let mut why: Option<String> = None;
+    // what couldn't go into a busy canvas is tried again (a stroke ended, …)
+    let mut again = tokio::time::interval(Duration::from_millis(30));
+    again.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
+            _ = again.tick() => {
+                if t.waiting() {
+                    tokio::task::block_in_place(|| {
+                        t.retry(&mut port);
+                        pump.flush(&mut t, &s, &port);
+                    });
+                }
+            }
             cmd = rx.recv() => {
                 let Some(cmd) = cmd else { break };
                 if matches!(cmd, Cmd::Leave) {

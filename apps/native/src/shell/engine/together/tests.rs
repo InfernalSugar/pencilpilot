@@ -372,6 +372,35 @@ fn what_this_app_doesnt_show_goes_round_unchanged() {
     assert_eq!(t.scenes[0].audio.len(), 1);
     assert_eq!(t.scenes[0].cuts[0].transition.as_deref(), Some("dissolve"));
     assert_eq!(t.palettes.len(), 1);
+
+    // the guest's saved file has the session's whole timeline, its drawings with it
+    let dir = std::env::temp_dir().join(format!("pp-together-save-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("guest.ppstudio");
+    let ok = crate::shell::engine::files::save_to(&mut guest.e, &mut guest.s, &path);
+    assert!(ok, "saved: {}", guest.s.project.note);
+    let bytes = std::fs::read(&path).unwrap();
+    let o = ppstudio::Opened::read(std::io::Cursor::new(bytes)).unwrap();
+    let m = &o.manifest;
+    assert_eq!(m.timeline.scenes.len(), 3, "every scene saved");
+    assert_eq!(m.timeline.scenes[0].cuts.len(), 2, "every cut saved");
+    assert_eq!(m.timeline.scenes[0].markers.len(), 1);
+    assert_eq!(
+        m.timeline.scenes[0].cuts[0].transition.as_deref(),
+        Some("dissolve")
+    );
+    for sc in &m.timeline.scenes {
+        for c in &sc.cuts {
+            for ex in c.tracks.values() {
+                for x in ex {
+                    if let Some(n) = &x.drawing {
+                        assert!(m.drawings.contains_key(n), "drawing {n} saved");
+                    }
+                }
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// A project from a file with scenes and cuts, hosted here: a joiner gets its drawings'
