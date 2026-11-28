@@ -1280,7 +1280,16 @@ def live_latency(sent, evs, kinds=("begin", "points", "end")):
         t = next((e for e in tiles if e["t"] >= t_end), None)
         if t:
             tiles_after_end.append((t["t"] - t_end) / 1e6)
+    # visible: its first points on screen, and not before its start arrived
+    visible = []
+    for st_ in sent:
+        t0 = st_[0]
+        b = next((e for e in lives if e["live"] == "begin" and e["t"] >= t0), None)
+        p = next((e for e in lives if e["live"] == "points" and e["t"] >= t0 and e.get("shown")), None)
+        if b and p:
+            visible.append((max(p["shown"], b.get("shown") or b["t"]) - t0) / 1e6)
     return {"penToLiveArrivedMs": dist(first_arrive), "penToLiveShownMs": dist(first_shown),
+            "penToLiveVisibleMs": dist(visible), "perStrokeBeginArrivedMs": [round(x, 1) for x in first_arrive],
             "strokeEndToTilesArrivedMs": dist(tiles_after_end)}
 
 
