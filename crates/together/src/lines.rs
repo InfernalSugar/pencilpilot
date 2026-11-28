@@ -662,10 +662,67 @@ pub fn read_line_edit(b: &Map<String, Value>) -> Option<LineParts> {
     Some((del, out, base))
 }
 
+/// `withMoves`: a diff that also carries strokes moved in the order without changing
+/// (brought to the front, sent back): the fewest of them, taken out and put again at their
+/// place, so the strokes left keep their order. (A diff alone sends only changed strokes:
+/// the order would differ from app to app.)
+pub fn with_moves<'a>(
+    before: &[LineStroke],
+    after: &'a [LineStroke],
+    d: (Vec<String>, Vec<(u32, &'a LineStroke)>),
+) -> (Vec<String>, Vec<(u32, &'a LineStroke)>) {
+    use std::collections::{HashMap, HashSet};
+    let at: HashMap<&str, usize> = before
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.id.as_str(), i))
+        .collect();
+    let changed: HashSet<u32> = d.1.iter().map(|p| p.0).collect();
+    // the strokes that stay: their places before, in the order they're in now
+    let stay: Vec<(usize, usize)> = after
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !changed.contains(&(*i as u32)))
+        .map(|(i, s)| (i, at[s.id.as_str()]))
+        .collect();
+    // the longest run of them still in order keeps its place; the others move
+    let mut tails: Vec<usize> = Vec::new();
+    let mut prev = vec![usize::MAX; stay.len()];
+    for j in 0..stay.len() {
+        let lo = tails.partition_point(|&t| stay[t].1 < stay[j].1);
+        prev[j] = if lo > 0 { tails[lo - 1] } else { usize::MAX };
+        if lo == tails.len() {
+            tails.push(j);
+        } else {
+            tails[lo] = j;
+        }
+    }
+    let mut keep = HashSet::new();
+    let mut j = tails.last().copied().unwrap_or(usize::MAX);
+    while j != usize::MAX {
+        keep.insert(j);
+        j = prev[j];
+    }
+    if keep.len() == stay.len() {
+        return d;
+    }
+    let moved: Vec<usize> = stay
+        .iter()
+        .enumerate()
+        .filter(|(j, _)| !keep.contains(j))
+        .map(|(_, (i, _))| *i)
+        .collect();
+    let (mut del, mut put) = d;
+    del.extend(moved.iter().map(|i| after[*i].id.clone()));
+    put.extend(moved.iter().map(|i| (*i as u32, &after[*i])));
+    put.sort_by_key(|p| p.0);
+    (del, put)
+}
+
 /// `lineEdits`: the `lines` edits that turn `before` into `after` (several when there's
 /// a lot to send); none when nothing changed.
 pub fn line_edits(lid: &str, did: &str, before: &[LineStroke], after: &[LineStroke]) -> Vec<Edit> {
-    let (del, put) = diff_lines(before, after);
+    let (del, put) = with_moves(before, after, diff_lines(before, after));
     if del.is_empty() && put.is_empty() {
         return Vec::new();
     }

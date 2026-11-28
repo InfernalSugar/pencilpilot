@@ -133,8 +133,8 @@ fn sends_the_same_line_edits() {
     // (the studio's list kept its own unread copy of a stroke the edit left alone: read)
     let applied = decode_lines(&from_base64(p["applied"].as_str().unwrap()).unwrap()).unwrap();
     assert_eq!(apply_line_edit(before, &del, &put), applied);
-    // ours: the same, less the stroke the studio sent because it was a copy (it compares
-    // strokes as objects; here they're compared as they are)
+    // ours: the strokes changed or moved (the studio also sent one it had copied: it
+    // compares strokes as objects; here they're compared as they are), giving the same list
     let ours = line_edits(lid, did, before, &after);
     let Edit::Lines {
         del: d2, put: p2, ..
@@ -142,13 +142,11 @@ fn sends_the_same_line_edits() {
     else {
         panic!()
     };
-    assert_eq!(d2, &["ell", "er"]);
-    assert_eq!(p2.iter().map(|x| x.0).collect::<Vec<_>>(), vec![3, 4, 5]);
+    assert_eq!(apply_line_edit(before, d2, p2), after);
+    assert!(d2.contains(&"ell".to_string()) && d2.contains(&"er".to_string()));
     for (i, enc) in p2 {
-        let studio = put.iter().find(|x| x.0 == *i).unwrap();
-        // (the studio's stroke as it had it, unread; read and written again they're the same)
-        let s = decode_lines(&from_base64(&studio.1).unwrap()).unwrap();
-        assert_eq!(*enc, to_base64(&encode_lines(&s)));
+        let s = decode_lines(&from_base64(enc).unwrap()).unwrap();
+        assert_eq!(s[0], after[*i as usize]);
     }
     let _ = diff_lines(before, &after);
 
