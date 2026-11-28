@@ -1783,3 +1783,41 @@ describe('drawing together: mixed sessions (fixes from the native app’s QA)', 
 		expect(bc.drawings.get(bc.byName('Sky').drawing)?.size).toBe(0);
 	});
 });
+
+describe('drawing together: a busy canvas', () => {
+	it('takes in what came while it was busy by itself, with no change of its own', async () => {
+		const session = new FakeSession();
+		const hc = new FakeCanvas(['Sky', 'Hills']);
+		hc.addGroup(hc.byName('Hills').id);
+		const host = new Together(A, 'Ana', hc, session.net(A));
+		session.apps.set(A, host);
+		await host.startHost();
+		await session.settle();
+		// Bo's canvas is busy (someone's live stroke being drawn) as the project comes in
+		const bc = new FakeCanvas([]);
+		const bo = new Together(B, 'Bo', bc, session.net(B));
+		session.apps.set(B, bo);
+		bc.busy = true;
+		bo.startJoin(A);
+		await session.settle();
+		hc.paint(hc.byName('Sky').id, 7, 7, 70);
+		await host.localChanged();
+		await session.settle();
+		expect(bo.waiting).toBe(true);
+		expect(bc.groupList).toEqual([]);
+		// the stroke ends; nothing changes on Bo's canvas after it
+		bc.busy = false;
+		await new Promise((r) => setTimeout(r, 150));
+		expect(bo.waiting).toBe(false);
+		expect(bc.pixel(bc.byName('Sky').id, 7, 7)).toBe(70);
+		expect(bc.groupList).toHaveLength(1);
+		expect(bc.byName('Hills').group).toBe(bc.groupList[0].id);
+		// and once the session is over, nothing more goes in
+		bo.close();
+		bc.busy = true;
+		await bo.onEdit(99, A, { k: 'rename', lid: host.lidOf(hc.byName('Sky').id)!, name: 'Sea' });
+		bc.busy = false;
+		await new Promise((r) => setTimeout(r, 120));
+		expect(bo.waiting).toBe(false);
+	});
+});

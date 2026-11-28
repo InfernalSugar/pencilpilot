@@ -202,6 +202,8 @@ export function cut(s: string, n: number): string {
 }
 
 const LID = /^[0-9a-f]{12}:[0-9]{1,12}$/;
+/** how soon what couldn't go into a busy canvas is tried again */
+const RETRY_MS = 50;
 const MEMBER = /^[0-9a-f]{64}$/;
 const int = (v: unknown) => Number.isInteger(v) && Math.abs(v as number) < 1e6;
 
@@ -2014,13 +2016,7 @@ export class Together {
 		try {
 			do {
 				this.#again = false;
-				// (one that keeps failing, e.g. the last layer can't go, is given up after a while)
-				while (this.#structure.length) {
-					const op = this.#structure[0];
-					if (!op.f() && ++op.tries < 50) break;
-					this.#structure.shift();
-				}
-				for (const k of [...this.#pending]) this.#put(k);
+				this.#flush(true);
 				// a layer made here outside the session's way (duplicate, paste, import)
 				const known = new Set(this.ids.values());
 				const all = this.canvas.layers();
@@ -2299,7 +2295,56 @@ export class Together {
 
 	/** Do it now, or (the canvas busy mid-stroke) after the next change. */
 	#later(f: () => boolean) {
-		if (this.#structure.length || !f()) this.#structure.push({ f, tries: 0 });
+		if (this.#structure.length || !f()) {
+			this.#structure.push({ f, tries: 0 });
+			this.#retrySoon();
+		}
+	}
+
+	#retryTimer: ReturnType<typeof setTimeout> | undefined;
+	#closed = false;
+
+	/**
+	 * Something couldn't go into the canvas (busy: a stroke here, or someone's live stroke
+	 * being drawn): tried again shortly, by itself, until it goes in. (Waiting for this
+	 * app's next change could be forever: nothing may change here.)
+	 */
+	#retrySoon() {
+		if (this.#retryTimer || this.#closed) return;
+		this.#retryTimer = setTimeout(() => {
+			this.#retryTimer = undefined;
+			if (this.#closed) return;
+			this.retry();
+			if (this.#structure.length || this.#pending.size) this.#retrySoon();
+		}, RETRY_MS);
+	}
+
+	/** Put in what couldn't go in yet (layer changes, then tiles): those that can now do. */
+	retry() {
+		this.#flush(false);
+	}
+
+	/** `count`: a change that keeps failing (e.g. the last layer can't go) is given up after
+	 * 50 of this app's changes (not counting tries made while waiting for a busy canvas) */
+	#flush(count: boolean) {
+		while (this.#structure.length) {
+			const op = this.#structure[0];
+			if (!op.f() && (!count || ++op.tries < 50)) break;
+			this.#structure.shift();
+		}
+		for (const k of [...this.#pending]) this.#put(k);
+	}
+
+	/** Whether something waits to go into the canvas. */
+	get waiting(): boolean {
+		return this.#structure.length > 0 || this.#pending.size > 0;
+	}
+
+	/** The session is over for this app: nothing more goes into the canvas. */
+	close() {
+		this.#closed = true;
+		clearTimeout(this.#retryTimer);
+		this.#retryTimer = undefined;
 	}
 
 	#refreshLock(lid: string) {
@@ -2317,14 +2362,20 @@ export class Together {
 			const on = this.#maskOn.get(lid) ?? !!t;
 			if (this.canvas.putMask(id, on ? pack(t ?? new Map()) : new Uint8Array()))
 				this.#pending.delete(k);
-			else this.#pending.add(k);
+			else {
+				this.#pending.add(k);
+				this.#retrySoon();
+			}
 			return;
 		}
 		const t = this.cache.get(k);
 		if (!t) return;
 		const d = this.localOf(did);
 		if (this.canvas.put(d, pack(t))) this.#pending.delete(k);
-		else this.#pending.add(k);
+		else {
+			this.#pending.add(k);
+			this.#retrySoon();
+		}
 	}
 }
 
