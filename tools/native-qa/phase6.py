@@ -320,7 +320,8 @@ class Native:
         e = {k: v for k, v in os.environ.items() if k not in ("DISPLAY", "WAYLAND_DISPLAY")}
         e.update(NOWHERE)
         e.update({"WAYLAND_DISPLAY": self.mutter.name, "DBUS_SESSION_BUS_ADDRESS": self.mutter.bus,
-                  "PENCILPILOT_DIALOG_ANSWER": "",
+                  # a dialog (Save as, for a joined project without a file) answers with this
+                  "PENCILPILOT_DIALOG_ANSWER": os.path.join(self.home, "saved.ppstudio"),
                   "XDG_CONFIG_HOME": os.path.join(self.home, "config"),
                   "XDG_STATE_HOME": os.path.join(self.home, "state"),
                   "XDG_DATA_HOME": os.path.join(self.home, "data"),
@@ -1542,20 +1543,24 @@ def scenario_x_pair(out, native_hosts=True, strokes=5):
     projects = env_bin("PP_PROJECTS")
     res = {"load": load(), "nativeHosts": native_hosts, "hz": int(os.environ.get("PP_HZ", "60"))}
     s = n = probe = None
+    tag = "xn" if native_hosts else "xs"
     try:
-        s = Studio(studio, out, "x", project=os.path.join(projects, "empty.ppstudio" if not native_hosts else "tiny.ppstudio"),
+        s = Studio(studio, out, tag, project=os.path.join(projects, "empty.ppstudio" if not native_hosts else "tiny.ppstudio"),
                    name="Studio")
         s.open()
         if native_hosts:
-            n = Native(native_bin, out, "x", 40, project=os.path.join(projects, "empty.ppstudio"), host=True,
+            n = Native(native_bin, out, tag, 40, project=os.path.join(projects, "empty.ppstudio"), host=True,
                        name="Nat", args=["--workspace", "animate"])
             invite = n.invite
         else:
             info = s.host()
             invite = info["invite"]
-            n = Native(native_bin, out, "x", 40, project=os.path.join(projects, "tiny.ppstudio"), join=invite,
+            n = Native(native_bin, out, tag, 40, project=os.path.join(projects, "tiny.ppstudio"), join=invite,
                        name="Nat", args=["--workspace", "animate"])
-        probe = Peer(env_bin("PP_PEER"), out, "x", invite=invite, name="Probe")
+        probe = Peer(env_bin("PP_PEER"), out, tag, invite=invite, name="Probe")
+        time.sleep(0.5)
+        # (the probe gets the host's project too, to compare with what's on the wire)
+        probe.direct(probe.members()["members"][0]["id"], {"k": "snap.req"})
         if native_hosts:
             jinfo, _ = s.join(invite)
             res["studioMembers"] = len(jinfo["members"])
@@ -1570,7 +1575,7 @@ def scenario_x_pair(out, native_hosts=True, strokes=5):
         else:
             sent_s = s.pen([wave(i) for i in range(strokes)])
             time.sleep(2.0)
-            sent_n = [n.inp.stroke(native_wave(i, y0=500)) for i in range(3)]
+            sent_n = [n.inp.stroke(native_wave(i, y0=330)) for i in range(3)]
             res["studioToNativeEvents"] = len(s.take()["ev"])
         time.sleep(2.5)
         res["studioSaved"] = s.save()
@@ -1583,7 +1588,11 @@ def scenario_x_pair(out, native_hosts=True, strokes=5):
         res["nativeEditKinds"] = {}
         for e in native_edits(st):
             res["nativeEditKinds"][e["kind"]] = res["nativeEditKinds"].get(e["kind"], 0) + 1
-        nproj = os.path.join(out, "native-x", "tiny.ppstudio" if not native_hosts else "empty.ppstudio")
+        nproj = os.path.join(out, f"native-{tag}", "empty.ppstudio")
+        if not native_hosts:
+            # joined: the project is the host's, saved where Save as's dialog was answered
+            nproj = os.path.join(out, f"native-{tag}", "saved.ppstudio")
+            res["nativeSavedJoined"] = os.path.exists(nproj)
         sp, _ = project_pixels(res["studioSaved"])
         np_, _ = project_pixels(nproj)
         shared = sorted(set(sp) & set(np_) - {"Ink"})
