@@ -443,6 +443,11 @@ pub struct Group {
 }
 
 impl Layer {
+    /// The group it's in (0: none).
+    pub fn group(&self) -> u32 {
+        self.group
+    }
+
     fn new(id: u32, props: LayerProps) -> Self {
         Self {
             id,

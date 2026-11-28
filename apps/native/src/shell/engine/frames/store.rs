@@ -47,6 +47,10 @@ pub enum Kept {
 pub struct Store {
     /// drawings kept here: not in the painter, or in it unchanged since they came back
     pub drawings: HashMap<u32, Arc<Kept>>,
+    /// tiles of drawings in the painter as they came from others (drawing together):
+    /// straight RGBA8, compressed, exactly as sent; saving and passing them on uses these
+    /// (the painter's own pixels would round them), until a tile is changed here
+    pub exact: HashMap<u32, HashMap<Key, Arc<FileTile>>>,
     /// the project file's tiles, compressed, by hash
     pub file: HashMap<String, Arc<FileTile>>,
     /// where each drawing read from the file had its tiles (kept through changes: a save

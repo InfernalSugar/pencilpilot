@@ -85,6 +85,8 @@ pub struct LiveOut {
     /// checks: each piece of points says when its first point was drawn ("t", ns)
     pub stamp: bool,
     first_ns: Option<u64>,
+    /// the stroke's style (to say its start again)
+    style: Option<Value>,
 }
 
 impl LiveOut {
@@ -94,8 +96,26 @@ impl LiveOut {
         }
         self.flush();
         self.k += 1;
+        self.style = Some(style.clone());
         self.out
             .push(json!({"live": {"type": "begin", "k": self.k, "style": style}}));
+    }
+
+    /// The stroke's start said again (one lost, or come before someone was ready, then
+    /// still shows: a start twice is a fresh piece of the same stroke there).
+    pub fn begin_again(&mut self) {
+        if self.on
+            && let Some(st) = self.style.clone()
+        {
+            self.flush();
+            self.out
+                .push(json!({"live": {"type": "begin", "k": self.k, "style": st}}));
+        }
+    }
+
+    /// Points gathered and not gone yet.
+    pub fn has_points(&self) -> bool {
+        !self.pts.is_empty()
     }
 
     pub fn point(&mut self, x: f32, y: f32, pressure: f32, dt_ms: f64) {
