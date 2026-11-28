@@ -258,6 +258,8 @@ pub struct Together {
     pub live_out: live::LiveOut,
     live_sent_at: Option<Instant>,
     begin_at: Option<Instant>,
+    /// a stroke's start said again so many times
+    begins: u32,
     cursors: HashMap<String, (f32, f32, Instant)>,
     cursor_sent: Option<((f32, f32), Instant)>,
     /// the layers' settings as last told (a change here is told again)
@@ -266,6 +268,8 @@ pub struct Together {
     asks: std::collections::VecDeque<port::Ask>,
     /// what to come back with after a break (the session as it was left)
     pub saved: Option<Box<net::Saved>>,
+    /// came back once after losing touch (not again on its own)
+    reconnected: bool,
     /// the interface's lists need making again
     ui_dirty: bool,
     /// when this app's last stroke ended (for the tiles it sends), ns
@@ -563,6 +567,7 @@ pub fn leave(e: &mut Engine, s: &mut State, why: Option<String>) {
         saved: saved.or_else(|| t.saved.take()),
         // (the session's timeline as it was: coming back goes on from it)
         win: std::mem::take(&mut t.win),
+        reconnected: t.reconnected,
         stats,
         ..Default::default()
     };
@@ -629,13 +634,18 @@ pub fn tick(e: &mut Engine, s: &mut State, now: Instant) -> bool {
         .is_none_or(|t| t.elapsed() >= LIVE_EVERY)
         || !e.together.live_out.on;
     if due {
-        if e.together.live_out.on
-            && e.together
-                .begin_at
-                .is_some_and(|t| t.elapsed() >= LIVE_BEGIN_AGAIN)
-        {
+        // (soon after the start, then now and then: a stroke's first datagram can be lost
+        // on a link that has been quiet)
+        let gap = match e.together.begins {
+            0 => Duration::from_millis(40),
+            1 => Duration::from_millis(100),
+            2 => Duration::from_millis(200),
+            _ => LIVE_BEGIN_AGAIN,
+        };
+        if e.together.live_out.on && e.together.begin_at.is_some_and(|t| t.elapsed() >= gap) {
             e.together.live_out.begin_again();
             e.together.begin_at = Some(Instant::now());
+            e.together.begins += 1;
         }
         let msgs = e.together.live_out.take();
         if !msgs.is_empty() {
@@ -758,6 +768,7 @@ fn take(e: &mut Engine, s: &mut State, msg: net::In) -> bool {
         }
         In::Synced(frame) => {
             e.together.stats.synced_ns = Some(now_ns());
+            e.together.reconnected = false;
             if let Some(f) = frame {
                 s.frame = f.min(s.frames.saturating_sub(1));
             }
@@ -829,17 +840,29 @@ fn take(e: &mut Engine, s: &mut State, msg: net::In) -> bool {
             members,
             invite,
         } => {
+            let before = s.together.info.as_ref().map_or(0, |i| i.members.len());
+            let alone = you && members.len() == 1 && before > 1;
             if let Some(info) = &mut s.together.info {
                 info.members = members;
                 info.host = you;
                 info.invite = invite;
             }
             note_members(e, s);
+            // took over alone: the others may still be there (this app lost touch with
+            // them, not they with each other): back to them if they are
+            if alone {
+                reconnect(e, s, "Lost touch with the others: finding them again…");
+            }
             true
         }
         In::Closed { why, saved } => {
             if saved.is_some() {
                 e.together.saved = saved;
+            }
+            // lost (not left): back once, to whoever is still there
+            if why.is_some() && !e.together.reconnected && e.together.saved.is_some() {
+                reconnect(e, s, "The session was lost: finding the others again…");
+                return true;
             }
             let why = why.map(|w| format!("The session was lost ({w})."));
             leave(
@@ -849,6 +872,17 @@ fn take(e: &mut Engine, s: &mut State, msg: net::In) -> bool {
             );
             true
         }
+    }
+}
+
+/// Lost touch: leave, and come back to whoever of the session is online (or host it again
+/// if no one is), once; the person is told.
+fn reconnect(e: &mut Engine, s: &mut State, say: &str) {
+    leave(e, s, None);
+    if let Some(saved) = e.together.saved.clone() {
+        e.together.reconnected = true;
+        s.together.say(say);
+        start(e, s, net::Start::Rejoin(saved));
     }
 }
 
@@ -1000,6 +1034,7 @@ pub fn stroke_begins(e: &mut Engine, s: &State) {
     if on {
         t.live_out.begin(live::style(s));
         t.begin_at = Some(Instant::now());
+        t.begins = 0;
         // (the start goes at once)
         t.live_sent_at = None;
     }
