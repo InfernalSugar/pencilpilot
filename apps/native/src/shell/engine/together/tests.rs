@@ -373,3 +373,38 @@ fn what_this_app_doesnt_show_goes_round_unchanged() {
     assert_eq!(t.scenes[0].cuts[0].transition.as_deref(), Some("dissolve"));
     assert_eq!(t.palettes.len(), 1);
 }
+
+/// A project from a file with scenes and cuts, hosted here: a joiner gets its drawings'
+/// pixels too (kept as the file has them), in every cut.
+#[test]
+fn a_project_from_a_file_is_shared_whole() {
+    let Ok(path) = std::env::var("PP_MULTI") else {
+        return;
+    };
+    let mut host = App::new("Ana");
+    assert!(crate::shell::engine::files::open_path(
+        &mut host.e,
+        &mut host.s,
+        std::path::Path::new(&path)
+    ));
+    host.tick();
+    host.e.together.auto = Some(Start::Host);
+    until(&mut [&mut host], 20, "hosting", |a| {
+        a[0].e.together.synced()
+    });
+    let code = host.s.together.info.as_ref().unwrap().invite.clone();
+    let mut guest = App::new("Ben");
+    guest.e.together.auto = Some(Start::Join(code));
+    until(&mut [&mut host, &mut guest], 30, "joining", |a| {
+        a[1].e.together.synced()
+    });
+    settle(&mut [&mut host, &mut guest], 500);
+    eprintln!(
+        "host frame {} guest frame {}; host store {} guest store {}",
+        host.s.frame,
+        guest.s.frame,
+        host.e.frames.store.drawings.len(),
+        guest.e.frames.store.drawings.len()
+    );
+    same(&mut host, &mut guest, "the same picture");
+}

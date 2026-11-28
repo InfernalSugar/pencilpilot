@@ -306,7 +306,10 @@ pub fn project(e: &Engine, s: &State, doc: &mut Doc) -> Result<(Project, SaveTim
     );
     use super::super::frames::store::Kept;
     let store = &e.frames.store;
-    let on = |x: i32, y: i32| x >= 0 && y >= 0 && x < cols && y < rows;
+    // a shared project (drawing together) keeps paint past the canvas's edge, as the current
+    // app does (its copies and this one's stay the same); otherwise the canvas cuts it
+    let shared = !e.together.view.ids.is_empty();
+    let on = |x: i32, y: i32| x >= 0 && y >= 0 && (shared || (x < cols && y < rows));
     let mut kept_refs: HashMap<u32, Vec<TileRef>> = HashMap::new();
     // (drawing, tile, where: None the painter, Some(i) the store's i-th tile)
     let mut jobs: Vec<(u32, (i32, i32), Option<usize>)> = Vec::new();
@@ -410,7 +413,7 @@ pub fn project(e: &Engine, s: &State, doc: &mut Doc) -> Result<(Project, SaveTim
                     (w as usize).saturating_sub(x0).min(TILE),
                     (h as usize).saturating_sub(y0).min(TILE),
                 );
-                if !as_came && (wn < TILE || hn < TILE) {
+                if !as_came && !shared && (wn < TILE || hn < TILE) {
                     for row in 0..TILE {
                         let from = if row < hn { wn } else { 0 };
                         px[(row * TILE + from) * 4..(row + 1) * TILE * 4].fill(0);
