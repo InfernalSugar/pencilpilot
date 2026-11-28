@@ -5135,6 +5135,44 @@ impl Painter {
         ch
     }
 
+    /// Tiles of this picture (`rgba`) not composited yet since a compositor of the app's own
+    /// took their changes ([`Painter::take_changes`]).
+    pub fn stale_tiles(&self) -> usize {
+        self.stale.len()
+    }
+
+    /// Composite up to `most` of those tiles into this picture (on every core natively): it
+    /// catches up a little at a time, while nothing else happens.
+    pub fn flush_some(&mut self, most: usize) {
+        let keys: Vec<TileKey> = self.stale.iter().copied().take(most).collect();
+        for k in &keys {
+            self.stale.remove(k);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        let done: Vec<ComposedTile> = {
+            use rayon::prelude::*;
+            keys.par_iter()
+                .filter_map(|&k| self.composite_tile(k))
+                .collect()
+        };
+        #[cfg(target_arch = "wasm32")]
+        let done: Vec<ComposedTile> = keys
+            .iter()
+            .filter_map(|&k| self.composite_tile(k))
+            .collect();
+        let w = self.width as i32;
+        for t in done {
+            let tw = (t.x1 - t.x0) as usize;
+            for (row, y) in (t.y0..t.y1).enumerate() {
+                let dst = ((y * w + t.x0) * 4) as usize;
+                for (i, px) in t.px[row * tw..(row + 1) * tw].iter().enumerate() {
+                    self.rgba[dst + i * 4..dst + i * 4 + 3].copy_from_slice(px);
+                    self.rgba[dst + i * 4 + 3] = 255;
+                }
+            }
+        }
+    }
+
     /// Each layer as the compositor combines it, bottom first: its group's eye and
     /// opacity and the view's hidden layers applied, as `flush` does.
     pub fn composite_layers(&self) -> Vec<LayerComposite> {

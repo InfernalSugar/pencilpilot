@@ -30,6 +30,19 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import canvas_window as cw  # noqa: E402
 
 FIXTURES = os.environ.get("PP_QA_FIXTURES", "")
+# how long after the launch scrubbing starts (the project opened and shown by then; its
+# drawings going up to the GPU meanwhile): PP_QA_SCRUB_WAIT seconds
+SCRUB_WAIT = float(os.environ.get("PP_QA_SCRUB_WAIT", "2.5"))
+VRAM = next((p for p in ("/sys/class/drm/card0/device/mem_info_vram_used",
+                         "/sys/class/drm/card1/device/mem_info_vram_used") if os.path.exists(p)), None)
+
+
+def vram_mib():
+    """The GPU's memory in use, the whole machine's (MiB), where the driver says (amdgpu)."""
+    if not VRAM:
+        return None
+    with open(VRAM) as f:
+        return int(f.read()) / 2**20
 # each project: Right taps through it (its cut, less one), and its cut
 PROJECTS = {"drawings500": 99, "layers20-4k": 23}
 CUT = {"drawings500": 100, "layers20-4k": 24}
@@ -54,7 +67,7 @@ def scrub(binary, out, name, hz, run):
     try:
         path = os.path.join(FIXTURES, f"{name}.ppstudio")
         app = cw.App(binary, m, out, f"gl-scrub-{name}-{hz}-{run}", 12, "animate", args=[path])
-        time.sleep(2.5)
+        time.sleep(SCRUB_WAIT)
         inp = cw.Input()
         inp.to(560, 330)
         time.sleep(0.3)
@@ -106,6 +119,7 @@ def play(binary, out, name, hz, run, secs=6.0):
     m = cw.Mutter(out, hz)
     try:
         path = os.path.join(FIXTURES, f"{name}.ppstudio")
+        vram0 = vram_mib()
         app = cw.App(binary, m, out, f"gl-play-{name}-{hz}-{run}", 12, "animate", args=[path])
         time.sleep(2.5)
         inp = cw.Input()
@@ -115,10 +129,11 @@ def play(binary, out, name, hz, run, secs=6.0):
         c0 = cpu_ticks(app.p.pid)
         inp.key("Return")
         t0 = cw.mono_ns()
-        peak = 0
+        peak, vpeak = 0, 0
         while cw.mono_ns() - t0 < secs * 1e9:
             time.sleep(0.1)
             peak = max(peak, app.pss_kib() or 0)
+            vpeak = max(vpeak, vram_mib() or 0)
         t1 = cw.mono_ns()
         c1 = cpu_ticks(app.p.pid)
         inp.key("Return")
@@ -153,16 +168,21 @@ def play(binary, out, name, hz, run, secs=6.0):
     offs = sorted(c[0] - kk * 1e9 / 24 for c, kk in zip(changes, ks))
     t_start = offs[len(offs) // 2]
     err = [abs(c[0] - (t_start + kk * 1e9 / 24)) / 1e6 for c, kk in zip(changes, ks)]
+    # against the cut's own clock (the app's: when each frame was due): signed, + is late
+    clock = [(f["shownNs"] - f["dueNs"]) / 1e6 for f in fr if f.get("dueNs")]
     span = (changes[-1][0] - changes[0][0]) / 1e9
     half = 500 / hz
     return {
         "played": True, "framesPerSecond": round((len(changes) - 1) / span, 3),
         "skippedOrRepeated": skips, "offScheduleMs": q(err), "halfRefreshMs": round(half, 2),
         "onTime": max(err) <= half + 0.5,
+        "vsClockMs": clock and {"mean": round(sum(clock) / len(clock), 2), "min": round(min(clock), 2),
+                                "max": round(max(clock), 2), "first": [round(c, 2) for c in clock[:3]]},
         "firstFrameWaitMs": round((first_frame - t0) / 1e6, 1),
         "cpuOfOneCore": round(cpu, 3),
         "pssMiB": {"before": pss_before and round(pss_before / 1024, 1), "peak": round(peak / 1024, 1)},
         "gpuLayers": st.get("gpuLayers"),
+        "vramMiBMachineDelta": vram0 is not None and round(vpeak - vram0, 1),
     }
 
 
@@ -176,6 +196,7 @@ def main():
         os.makedirs(out, exist_ok=True)
         env = {k: v for k, v in os.environ.items() if k not in ("DISPLAY", "WAYLAND_DISPLAY")}
         env["PENCILPILOT_NO_SYSTEM_WINDOWS"] = "1"
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
         os.execvpe("dbus-run-session", ["dbus-run-session", "--", sys.executable, "-I",
                                         os.path.realpath(__file__), "--inner", binary, out] + args[2:], env)
     binary, out = args[1], args[2]

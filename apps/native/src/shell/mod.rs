@@ -259,6 +259,11 @@ struct FrameRec {
     export: Option<(u32, u32)>,
     /// when it reached the screen, ns
     shown_ns: Option<u64>,
+    /// drawn as soon as it could be (not late, for the pen): how long such frames take to
+    /// reach the screen once handed over is what playback leads by
+    at_once: bool,
+    /// playback: when this frame was due on screen (its place on the cut's clock), ns
+    due_ns: Option<u64>,
 }
 
 pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
@@ -283,6 +288,8 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
     let mut canvas: Option<Canvas> = None;
     // how long the last frames playback moved on took to make, ns
     let mut play_work: std::collections::VecDeque<u64> = std::collections::VecDeque::new();
+    // how long the last frames drawn at once took from being handed over to being shown, ns
+    let mut shown_delay: std::collections::VecDeque<u64> = std::collections::VecDeque::new();
     // the timeline frame last handed over; when input last came
     let mut last_sheet_frame = u32::MAX;
     let mut last_input = std::time::Instant::now();
@@ -313,16 +320,24 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
         // `show_delay`; half a refresh more picks the refresh nearest each frame's time.
         // While playing, frames are made a little ahead (as long as the slowest recent one
         // took) and handed over when due (`hold`), so how long one takes doesn't move it.
-        // (playing, frames are drawn at once: they show a refresh after being handed over)
-        let show_delay = if s.playing {
-            pacer.refresh_ns()
-        } else {
-            pacer.show_delay_ns(pencilpilot_window::clock::now_ns())
+        // (playing, frames are drawn at once and handed over when due: a frame handed over
+        // at a moment shows at the first refresh after the compositor's own delay, on
+        // average that delay and half a refresh later, which is what's measured; handed
+        // over that long before its time it shows on the refresh nearest its time)
+        let lead_ns = match (s.playing, shown_delay.len()) {
+            (true, n) if n > 0 => shown_delay.iter().sum::<u64>() / n as u64,
+            // (nothing measured yet: half a refresh, the delay with no compositor latency)
+            (true, _) => pacer.refresh_ns() / 2,
+            (false, _) => {
+                pacer.show_delay_ns(pencilpilot_window::clock::now_ns()) + pacer.refresh_ns() / 2
+            }
         };
-        let lead_shown = std::time::Duration::from_nanos(show_delay + pacer.refresh_ns() / 2);
+        let lead_shown = std::time::Duration::from_nanos(lead_ns);
         let ahead = if s.playing {
-            let most = play_work.iter().copied().max().unwrap_or(2_000_000) + 500_000;
-            std::time::Duration::from_nanos(most.min(pacer.refresh_ns() * 3 / 4))
+            // (the slowest recent one and half again: a busy GPU makes some slower; at most
+            // 20 ms, half a frame of a 24 fps cut)
+            let most = play_work.iter().copied().max().unwrap_or(2_000_000);
+            std::time::Duration::from_nanos((most * 3 / 2 + 500_000).min(20_000_000))
         } else {
             std::time::Duration::ZERO
         };
@@ -613,6 +628,14 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(e) = &mut eng {
                     e.sound.shown(r.sheet_frame, p.at_ns);
                 }
+                let delay = p.at_ns.saturating_sub(r.drawn_ns);
+                // (one that missed a refresh or two says nothing about the compositor's delay)
+                if r.at_once && delay < 2 * pacer.refresh_ns().max(1) {
+                    shown_delay.push_back(delay);
+                    if shown_delay.len() > 64 {
+                        shown_delay.pop_front();
+                    }
+                }
             }
             presented += 1;
             first_shown.get_or_insert(started.elapsed().as_secs_f64() * 1e3);
@@ -763,6 +786,8 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
         )?;
         // playback: a new frame drawn at once is handed over when due (it was made ahead)
         let moved_on = s.playing && s.frame != last_sheet_frame;
+        let at_once = plan.is_none();
+        let mut due_ns = None;
         if moved_on && plan.is_none() {
             let made = pencilpilot_window::clock::now_ns().saturating_sub(work_from);
             play_work.push_back(made);
@@ -770,6 +795,13 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
                 play_work.pop_front();
             }
             if let Some(due) = eng.as_ref().and_then(engine::frames::play_due) {
+                let now = std::time::Instant::now();
+                due_ns = Some(if due >= now {
+                    pencilpilot_window::clock::now_ns() + (due - now).as_nanos() as u64
+                } else {
+                    pencilpilot_window::clock::now_ns()
+                        .saturating_sub((now - due).as_nanos() as u64)
+                });
                 let hold = due.checked_sub(lead_shown).unwrap_or(due);
                 let wait = hold.saturating_duration_since(std::time::Instant::now());
                 if !wait.is_zero() && wait < std::time::Duration::from_millis(50) {
@@ -807,6 +839,8 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             doc_gen: s.doc_id,
             export: s.export_progress,
             shown_ns: None,
+            at_once,
+            due_ns,
         });
     }
     if let (Some(path), Some(e)) = (&opts.save_doc, &mut eng) {
@@ -822,7 +856,7 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
             .iter()
             .map(|r| {
                 format!(
-                    "{{\"frame\": {}, \"inputMs\": {}, \"receivedNs\": {}, \"events\": {}, \"drawnNs\": {}, \"shownNs\": {}, \"sheetFrame\": {}, \"workNs\": {}, \"gpuNs\": {}, \"wakeNs\": {}, \"passNs\": {}, \"askedNs\": {}, \"doc\": [{}, {}], \"docGen\": {}, \"export\": {}}}",
+                    "{{\"frame\": {}, \"inputMs\": {}, \"receivedNs\": {}, \"events\": {}, \"drawnNs\": {}, \"shownNs\": {}, \"sheetFrame\": {}, \"workNs\": {}, \"gpuNs\": {}, \"wakeNs\": {}, \"passNs\": {}, \"askedNs\": {}, \"doc\": [{}, {}], \"docGen\": {}, \"export\": {}, \"dueNs\": {}}}",
                     r.frame,
                     opt(r.input.map(|i| i.0 as u64)),
                     opt(r.input.map(|i| i.1)),
@@ -839,7 +873,8 @@ pub fn run_window(opts: RunOptions) -> Result<(), Box<dyn std::error::Error>> {
                     r.doc.1,
                     r.doc_gen,
                     r.export
-                        .map_or("null".to_string(), |(d, n)| format!("[{d}, {n}]"))
+                        .map_or("null".to_string(), |(d, n)| format!("[{d}, {n}]")),
+                    opt(r.due_ns)
                 )
             })
             .collect();

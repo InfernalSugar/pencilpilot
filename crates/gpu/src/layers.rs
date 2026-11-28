@@ -829,9 +829,10 @@ impl Compositor {
         }
     }
 
-    /// Whether anything is to be composited.
+    /// Whether anything is to be composited. (Tiles staged ahead of being shown go up with
+    /// the next frame drawn, whenever that is.)
     pub fn pending(&self) -> bool {
-        self.any_dirty || !self.staged.is_empty()
+        self.any_dirty
     }
 
     /// The frame's description written for the shader; the tiles to composite listed.
@@ -968,6 +969,13 @@ impl Compositor {
                     depth: 1,
                 }),
         ]
+    }
+
+    /// Composite what's pending now and wait (for measuring).
+    pub fn composite_pending(&mut self, gpu: &Gpu) -> Result<()> {
+        let r = gpu.run(|d, cmd| unsafe { self.record(d, cmd) });
+        self.done.clear();
+        r
     }
 
     /// Composite every tile now and wait (for measuring: how long the GPU takes).

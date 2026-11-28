@@ -11,3 +11,7 @@ apps/web/static/references/
 .claude/worktrees/
 data/
 crates/ref-filters/models/
+
+# Python bytecode
+__pycache__/
+*.pyc
