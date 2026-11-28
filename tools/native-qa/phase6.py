@@ -1854,18 +1854,25 @@ SENT = {}
 
 
 def sent_to_shown(st, t0, hz):
-    """From the driver's own send times: each press and pen move to the first frame drawn
-    after it that had input, on screen. Independent of the app's own accounting of which
-    input a frame shows (it can only read late, never early: the event may have gone in a
-    later frame still)."""
+    """From the driver's own send times (independent of which input the app says a frame
+    shows): for each press and pen move, bounds on its time to screen. `upper`: the first
+    frame whose oldest input was received after the send (it holds this event or a later
+    one: never early; for a press, with nothing older waiting, it is the press's own
+    frame). `lower`: the first frame with input drawn after the send (it may not hold the
+    event yet: never late)."""
     fr = sorted((f for f in st["frames"] if f["events"] and f["shownNs"]), key=lambda f: f["drawnNs"])
     drawn = [f["drawnNs"] for f in fr]
+    byrecv = sorted((f for f in fr if f["receivedNs"]), key=lambda f: f["receivedNs"])
+    recv = [f["receivedNs"] for f in byrecv]
     import bisect
-    out = {"press": [], "move": []}
+    out = {}
     for kind, t in SENT.get(t0, []):
         i = bisect.bisect_right(drawn, t)
+        j = bisect.bisect_left(recv, t)
         if i < len(fr):
-            out[kind].append((fr[i]["shownNs"] - t) / 1e6)
+            out.setdefault(kind + "Lower", []).append((fr[i]["shownNs"] - t) / 1e6)
+        if j < len(byrecv):
+            out.setdefault(kind + "Upper", []).append((byrecv[j]["shownNs"] - t) / 1e6)
     return {k: dist(v) for k, v in out.items()}
 
 
