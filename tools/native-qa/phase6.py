@@ -1875,16 +1875,19 @@ def peer_live(p, k, y, n=40):
     p.presence({"live": {"type": "end", "k": k}})
 
 
-def scenario_x_crowd(out, members=8, strokes=20, rate=2.0):
+def scenario_x_crowd(out, members=8, strokes=20, rate=2.0, with_studio=True):
     """Eight in one session: the native app hosts (windowed), the current app and six
     scripted members join; the six draw at once (a live stroke, then its tiles, `rate` a
     second each) and move cursors. Meanwhile the native app draws (canvas_window.py's
     latency run): its pen to screen and rate against the same run alone; others' edits to
     screen; every edit reaching everyone; both apps' saved layers holding everyone's last
-    tiles; memory."""
+    tiles; memory. `with_studio=False`: seven scripted members instead (the gate's pen
+    number: in real use each member is on a computer of their own, so only the native
+    app and the members' cheap network traffic share this machine)."""
     projects = env_bin("PP_PROJECTS")
     hz = int(os.environ.get("PP_HZ", "60"))
-    res = {"load": load(), "hz": hz, "members": members}
+    res = {"load": load(), "hz": hz, "members": members, "withStudio": with_studio}
+    scripted = members - (2 if with_studio else 1)
     n = s = None
     peers = []
     try:
@@ -1893,10 +1896,11 @@ def scenario_x_crowd(out, members=8, strokes=20, rate=2.0):
         # alone first: the same drawing with nobody else drawing
         time.sleep(1.0)
         a0, a1, _ = native_drawing(n, 4.0)
-        s = Studio(env_bin("PP_STUDIO"), out, "crowd", project=os.path.join(projects, "tiny.ppstudio"), name="Stu")
-        s.open()
-        s.join(n.invite)
-        for i in range(members - 2):
+        if with_studio:
+            s = Studio(env_bin("PP_STUDIO"), out, "crowd", project=os.path.join(projects, "tiny.ppstudio"), name="Stu")
+            s.open()
+            s.join(n.invite)
+        for i in range(scripted):
             peers.append(Peer(env_bin("PP_PEER"), out, f"crowd{i}", invite=n.invite, name=f"M{i}"))
         time.sleep(2.0)
         lids = []
@@ -1906,7 +1910,8 @@ def scenario_x_crowd(out, members=8, strokes=20, rate=2.0):
             p.edit(peer_timeline(lid, did))
             lids.append((lid, did))
         time.sleep(1.5)
-        s.take()
+        if s:
+            s.take()
         res["pssBeforeMiB"] = round((n.pss_kib() or 0) / 1024, 1)
         t_start = mono_ns()
         threads = []
@@ -1931,18 +1936,19 @@ def scenario_x_crowd(out, members=8, strokes=20, rate=2.0):
             t.join()
         t_end = mono_ns()
         time.sleep(3.0)
-        page = s.take()
-        res["studioTilesEdits"] = sum(1 for e in page["ev"] if e["kind"] == "edit" and e.get("k") == "tiles")
+        if s:
+            page = s.take()
+            res["studioTilesEdits"] = sum(1 for e in page["ev"] if e["kind"] == "edit" and e.get("k") == "tiles")
         n.inp.combo("Control_L", "s")
         time.sleep(2.0)
-        ps = s.save()
+        ps = s.save() if s else None
         res["pssAfterMiB"] = round((n.pss_kib() or 0) / 1024, 1)
         st = n.wait()
         n = None
         res["penAlone"] = pen_numbers(st, a0, a1, hz)
         res["penWhileOthersDraw"] = pen_numbers(st, b0, b1, hz)
         res["incoming"] = incoming_numbers(st, t_start, t_end + 3_000_000_000, hz)
-        expected = (members - 2) * strokes
+        expected = scripted * strokes
         got = []
         for p in peers:
             got.append(sum(1 for e in p.events() if e["ev"] == "edit" and (e.get("body") or {}).get("k") == "tiles"
@@ -1952,7 +1958,7 @@ def scenario_x_crowd(out, members=8, strokes=20, rate=2.0):
         res["nativeTilesEditsSent"] = (st or {}).get("together", {}).get("tilesSent")
         nat = os.path.join(out, "native-crowd", "empty.ppstudio")
         pn, _ = project_pixels(nat)
-        pst, _ = project_pixels(ps)
+        pst = project_pixels(ps)[0] if ps else None
         lay = {}
         for i, p in enumerate(peers):
             name = f"M{i} layer"
@@ -1961,6 +1967,8 @@ def scenario_x_crowd(out, members=8, strokes=20, rate=2.0):
                 for x, y, px in stroke_tiles(100 * i + k2):
                     want[(x, y)] = px
             for tag, pp in (("native", pn), ("studio", pst)):
+                if pp is None:
+                    continue
                 have = pp.get(name, [[None]])[-1]
                 c = compare_tiles(want, (have[0] if have else None) or {})
                 lay[f"{tag}:{name}"] = {k3: c[k3] for k3 in ("equal", "samePremul1", "tiles", "maxPremulDiff")}
@@ -2505,8 +2513,14 @@ def scenario_x_groups(out):
         res["studioGroups"] = ms.get("groups")
         res["nativeLayerGroups"] = [(l["name"], l.get("group")) for l in mn["layers"]]
         res["studioLayerGroups"] = [(l["name"], l.get("group")) for l in ms["layers"]]
-        res["pass"] = bool(ms.get("groups")) and bool(mn.get("groups")) and \
-            [g for _, g in res["nativeLayerGroups"]].count(0) == [g for _, g in res["studioLayerGroups"]].count(0)
+        res["nativeLayers"] = [(l["name"], l.get("group"), l.get("visible"), l.get("locked")) for l in mn["layers"]]
+        res["studioLayers"] = [(l["name"], l.get("group"), l.get("visible"), l.get("locked")) for l in ms["layers"]]
+        # the session's layers (as the snapshot has them): grouped the same in both copies
+        # (a joiner's own pre-join layers, hidden, aren't the session's)
+        shared = {x["name"] for x in (res.get("snapshotLayers") or [])}
+        grp = lambda m: {l["name"]: bool(l.get("group")) for l in m["layers"] if l["name"] in shared}
+        res["sharedGrouping"] = {"native": grp(mn), "studio": grp(ms)}
+        res["pass"] = bool(ms.get("groups")) and bool(mn.get("groups")) and grp(mn) == grp(ms)
     finally:
         if probe:
             probe.leave()
@@ -2785,6 +2799,7 @@ SCENARIOS = {
     "studio-revoke": scenario_studio_revoke,
     "studio-join4k": scenario_studio_join4k,
     "x-crowd": scenario_x_crowd,
+    "x-crowd-peers": lambda out: scenario_x_crowd(out, with_studio=False),
     "x-timeline-merge": scenario_x_timeline_merge,
     "x-join4k-native-joins": lambda out: scenario_x_join4k(out, True),
     "x-join4k-studio-joins": lambda out: scenario_x_join4k(out, False),
