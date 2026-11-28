@@ -45,7 +45,7 @@
 //! - Edits come back numbered, the app's own too. Pass each one to
 //!   [`Together::on_edit`] in the session's order.
 //! - Call [`Together::local_changed`] a moment after the canvas changes (the studio waits
-//!   120 ms of quiet), and again after a busy canvas frees up.
+//!   40 ms of quiet), and again after a busy canvas frees up.
 //! - Chat bodies (`{k: 'chat'}`) arrive as direct messages too. Check
 //!   [`chat::chat_text`] first, and hand the rest to [`Together::on_direct`].
 //!
@@ -55,10 +55,10 @@
 //!   doesn't travel, where the studio would send it again.
 //! - **Local drawing numbers can differ.** A joiner numbers the drawings it meets in key
 //!   order (the session hands over JSON with sorted keys). Shared ids are the same.
-//! - **Odd input is skipped, not thrown on.** A snapshot layer without `writers`, or
-//!   tiles at places that aren't numbers, is left out; together.ts throws mid-join.
-//! - **Half characters go.** A name cut through a surrogate pair loses the half,
-//!   where the studio keeps a lone surrogate.
+//! - (The studio now also skips odd snapshot parts, and keeps no half characters in
+//!   names: those differences are gone.)
+//! - Call [`Together::local_changed`] about 40 ms after the canvas settles, as the studio
+//!   now does: a stroke's tiles then reach the others within 100 ms of its end.
 
 pub mod chat;
 pub mod edit;
@@ -76,6 +76,7 @@ pub use saved::{SavedMember, SavedShare};
 pub use shared::{Ask, Shared, SharedGroup, SharedLayer};
 pub use tiles::{TILE, TILE_BYTES, TileMap, decode_tile, diff_tiles, encode_tile, pack, unpack};
 pub use timeline::Timeline;
+pub use together::tile_parts;
 pub use together::{
     CanvasPort, GroupChange, GroupSettings, LayerPatch, Notice, Out, PortGroup, PortLayer, Strokes,
     Together,

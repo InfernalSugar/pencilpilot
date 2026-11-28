@@ -2521,11 +2521,15 @@
 		togetherTick++;
 	}
 
-	/** the canvas changed: send this app's changes a moment later (one batch per pause) */
+	/**
+	 * the canvas changed: send this app's changes a moment later (one batch per pause; a
+	 * stroke's tiles go about 40 ms after it ends, well within the 100 ms others wait for
+	 * them; a send already going takes in what changes meanwhile)
+	 */
 	function togetherChanged() {
 		if (!together) return;
 		clearTimeout(togetherTimer);
-		togetherTimer = setTimeout(() => void together?.localChanged(), 120);
+		togetherTimer = setTimeout(() => void together?.localChanged(), 40);
 	}
 
 	/** Back to this project's shared session: join who's online, or host it again. */

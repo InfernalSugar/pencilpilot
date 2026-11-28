@@ -383,6 +383,12 @@ async function run(steps: Step[]) {
 			case 'paint':
 				c.paint(layerId(a, st.layer), st.x, st.y, st.v);
 				break;
+			case 'fill':
+				for (let i = 0; i < st.n; i++) c.paint(layerId(a, st.layer), i % 20, Math.floor(i / 20), st.v);
+				break;
+			case 'wipe':
+				c.drawings.get(c.drawingOf(layerId(a, st.layer)))!.clear();
+				break;
 			case 'paintD':
 				c.drawings.get(drawing(a, st.d))!.set(`${st.x},${st.y}`, tile(st.v));
 				break;
