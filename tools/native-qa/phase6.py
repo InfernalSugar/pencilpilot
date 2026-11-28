@@ -797,6 +797,7 @@ class NativePeer:
     file; answers read from its log."""
 
     def __init__(self, binary, out, tag):
+        self.out = out
         self.home = os.path.join(out, f"npeer-{tag}")
         shutil.rmtree(self.home, ignore_errors=True)
         os.makedirs(self.home)
@@ -1942,48 +1943,56 @@ def scenario_x_crowd(out, members=8, strokes=20, rate=2.0):
 
 
 def scenario_x_timeline_merge(out):
-    """Two scripted members each make a layer and send a timeline that has only their own
-    track (as a member does before the other's new drawing reached it), then tiles. The
-    native app must keep both members' drawings on their layers: a layer's track comes from
-    those who may draw on it (the current app's rule since #340). The same against the
-    current app is the reference."""
+    """Scripted members make a layer each and send a timeline that has only their own track
+    (as a member does before another's new drawing reached it), then tiles; the app must
+    keep every member's drawing on its layer. Two cases: `race`, the timeline right after
+    the layer (as an app sends them when a new layer's first stroke ends); `merge`, a second
+    apart, so only the rule "a layer's track comes from those who may draw on it" (#340)
+    keeps the first member's track. The current app is the reference."""
     res = {"load": load()}
     for who in ("native", "studio"):
-        a = s = None
-        peers = []
-        try:
-            if who == "native":
-                a = NativePeer(np_bin(), out, "tlm")
-                a.do(cmd="open", path=os.path.join(env_bin("PP_PROJECTS"), "empty.ppstudio"))
-                invite = a.do(cmd="host", name="Nat")["state"]["info"]["invite"]
-            else:
-                s = Studio(env_bin("PP_STUDIO"), out, "tlm", project=os.path.join(env_bin("PP_PROJECTS"), "empty.ppstudio"))
-                s.open()
-                invite = s.host()["invite"]
-            peers = [Peer(env_bin("PP_PEER"), out, f"tlm-{who}{i}", invite=invite, name=f"P{i}") for i in range(2)]
-            time.sleep(1.0)
-            for i, p in enumerate(peers):
-                lid = peer_layer(p)
-                did = f"{p.id[:12]}:{50 + i}"
-                p.edit(peer_timeline(lid, did))
-                t = stroke_tiles(10 + i)
-                p.edit({"k": "tiles", "lid": lid, "did": did, "set": [[x, y, encode_tile(px)] for x, y, px in t], "clear": []})
-            time.sleep(2.0)
-            if a:
-                path = os.path.join(a.home, "saved.ppstudio")
-                a.do(cmd="save", path=path)
-            else:
-                path = s.save()
-            pp, _ = project_pixels(path)
-            res[who] = {n: [len(f) if f is not None else None for f in v[-1]] for n, v in pp.items()}
-            res[f"{who}Pass"] = all((res[who].get(f"P{i} layer") or [None])[0] == 4 for i in range(2))
-        finally:
-            for p in peers:
-                p.leave()
-            if a:
-                a.quit()
-            if s:
-                s.quit()
+        for case, gap in (("race", 0.0), ("merge", 1.0)):
+            a = s = None
+            peers = []
+            try:
+                if who == "native":
+                    a = NativePeer(np_bin(), out, f"tlm-{case}")
+                    a.do(cmd="open", path=os.path.join(env_bin("PP_PROJECTS"), "empty.ppstudio"))
+                    invite = a.do(cmd="host", name="Nat")["state"]["info"]["invite"]
+                else:
+                    s = Studio(env_bin("PP_STUDIO"), out, f"tlm-{case}",
+                               project=os.path.join(env_bin("PP_PROJECTS"), "empty.ppstudio"))
+                    s.open()
+                    invite = s.host()["invite"]
+                peers = [Peer(env_bin("PP_PEER"), out, f"tlm-{who}-{case}{i}", invite=invite, name=f"P{i}")
+                         for i in range(2)]
+                time.sleep(1.0)
+                for i, p in enumerate(peers):
+                    lid = peer_layer(p)
+                    did = f"{p.id[:12]}:{50 + i}"
+                    time.sleep(gap)
+                    p.edit(peer_timeline(lid, did))
+                    t = stroke_tiles(10 + i)
+                    p.edit({"k": "tiles", "lid": lid, "did": did,
+                            "set": [[x, y, encode_tile(px)] for x, y, px in t], "clear": []})
+                    time.sleep(gap)
+                time.sleep(2.0)
+                if a:
+                    path = os.path.join(a.home, "saved.ppstudio")
+                    a.do(cmd="save", path=path)
+                else:
+                    path = s.save()
+                pp, _ = project_pixels(path)
+                got = {n: [len(f) if f is not None else None for f in v[-1]] for n, v in pp.items()}
+                res[f"{who}-{case}"] = {"layers": got,
+                                        "pass": all((got.get(f"P{i} layer") or [None])[0] == 4 for i in range(2))}
+            finally:
+                for p in peers:
+                    p.leave()
+                if a:
+                    a.quit()
+                if s:
+                    s.quit()
     return res
 
 
@@ -2087,6 +2096,125 @@ def scenario_x_join4k_nn(out):
     return res
 
 
+def scenario_x_garbage_native(out):
+    """A member sends the native app (hosting) edits no app may take (unknown kinds,
+    AI-made content, broken ones, others' layers, a nonsense live stroke), then a good one:
+    the native app stays in the session and takes only the good one."""
+    res = {"load": load()}
+    a = NativePeer(np_bin(), out, "garb")
+    p = None
+    try:
+        a.do(cmd="open", path=os.path.join(env_bin("PP_PROJECTS"), "empty.ppstudio"))
+        info = a.do(cmd="host", name="Nat")["state"]["info"]
+        p = Peer(env_bin("PP_PEER"), out, "garb-n", invite=info["invite"], name="Mallory")
+        time.sleep(0.8)
+        lid, t = garbage_into("native", a, p, info["me"])
+        st = a.state()
+        res["stillInSession"] = st["live"] and len(st["info"]["members"]) == 2
+        path = os.path.join(a.home, "after.ppstudio")
+        a.do(cmd="save", path=path)
+        pp, m = project_pixels(path)
+        res["layers"] = [l["name"] for l in m["layers"]]
+        have = (pp.get("After garbage") or [[None]])[-1]
+        c = compare_tiles({(x, y): px for x, y, px in t}, (have[0] if have else None) or {})
+        res["goodEditTaken"] = {k: c[k] for k in ("equal", "samePremul1", "tiles")}
+        real = [n for n in res["layers"] if not n.endswith("(drawing now)")]
+        res["livePreviewSaved"] = [n for n in res["layers"] if n.endswith("(drawing now)")]
+        res["pass"] = bool(res["stillInSession"] and c["samePremul1"] and len(real) == 2)
+    finally:
+        if p:
+            p.leave()
+        a.quit()
+    return res
+
+
+def scenario_x_host_leaves(out, leaver="studio"):
+    """The host leaves mid-session: someone takes over, the others carry on drawing and
+    stay the same. `leaver`: the current app hosts and leaves (the native app and a member
+    stay), or the native app hosts and leaves (the current app and a member stay)."""
+    projects = env_bin("PP_PROJECTS")
+    res = {"load": load(), "hostThatLeaves": leaver}
+    a = s = probe = None
+    try:
+        a = NativePeer(np_bin(), out, f"hl-{leaver}")
+        a.do(cmd="open", path=os.path.join(projects, "empty.ppstudio"))
+        s = Studio(env_bin("PP_STUDIO"), out, f"hl-{leaver}", project=os.path.join(projects, "tiny.ppstudio"), name="Stu")
+        s.open()
+        if leaver == "studio":
+            invite = s.host()["invite"]
+            a.do(cmd="join", code=invite, name="Nat")
+        else:
+            invite = a.do(cmd="host", name="Nat")["state"]["info"]["invite"]
+            s.join(invite)
+        probe = Peer(env_bin("PP_PEER"), out, f"hl-{leaver}", invite=invite, name="Probe")
+        time.sleep(2.0)
+        # the stayer draws once before
+        if leaver == "studio":
+            a.do(cmd="stroke", y=300)
+        else:
+            s.pen([wave(0, y0=0.6)])
+        time.sleep(2.0)
+        t_leave = mono_ns()
+        if leaver == "studio":
+            s.leave()
+        else:
+            a.do(cmd="op", op="Together: leave")
+        hc = probe.wait_for(lambda e: e["ev"] in ("host_changed", "closed"), 30)
+        res["probeSaw"] = hc and {"ev": hc["ev"], "afterMs": round((hc["t"] - t_leave) / 1e6, 1),
+                                  "newHostIsNative": hc.get("host") == (a.state()["info"] or {}).get("me")}
+        time.sleep(2.0)
+        if leaver == "studio":
+            st = a.state()
+            res["nativeAfter"] = {"live": st["live"], "host": (st["info"] or {}).get("host"),
+                                  "members": len((st["info"] or {}).get("members", []))}
+            # the session goes on: the native app draws, the member sees it
+            before = sum(1 for e in probe.events() if (e.get("body") or {}).get("k") == "tiles")
+            a.do(cmd="stroke", y=500)
+            time.sleep(2.0)
+            res["tilesReachTheMemberAfter"] = sum(1 for e in probe.events() if (e.get("body") or {}).get("k") == "tiles") > before
+        else:
+            info = s.invoke("share_status")
+            res["studioAfter"] = info and {"host": info["host"], "members": len(info["members"])}
+            before = sum(1 for e in probe.events() if (e.get("body") or {}).get("k") == "tiles")
+            s.pen([wave(2, y0=0.7)])
+            time.sleep(2.0)
+            res["tilesReachTheMemberAfter"] = sum(1 for e in probe.events() if (e.get("body") or {}).get("k") == "tiles") > before
+            res["nativeAfterLeaving"] = {"live": a.state()["live"]}
+    finally:
+        if probe:
+            probe.leave()
+        if a:
+            a.quit()
+        if s:
+            s.quit()
+    return res
+
+
+def scenario_x_solo(out):
+    """A solo project never opens a connection: the native app (windowed, a project open,
+    drawing) and the current app with no session hold no UDP or TCP socket."""
+    projects = env_bin("PP_PROJECTS")
+    res = {"load": load()}
+    n = Native(env_bin("PP_NATIVE"), out, "solo", 9, project=os.path.join(projects, "empty.ppstudio"),
+               args=["--workspace", "draw"])
+    try:
+        n.inp.stroke(native_wave(0))
+        time.sleep(2.0)
+        res["nativeSockets"] = sockets_of(n.pid)
+    finally:
+        n.wait()
+    s = Studio(env_bin("PP_STUDIO"), out, "solo", project=os.path.join(projects, "empty.ppstudio"))
+    try:
+        s.open()
+        s.pen([wave(0)])
+        time.sleep(1.0)
+        res["studioAppSockets"] = sockets_of(s.pid)
+    finally:
+        s.quit()
+    res["pass"] = not res["nativeSockets"]
+    return res
+
+
 SCENARIOS = {
     "studio-wire": scenario_studio_wire,
     "studio-pair": scenario_studio_pair,
@@ -2101,6 +2229,10 @@ SCENARIOS = {
     "x-join4k-native-joins": lambda out: scenario_x_join4k(out, True),
     "x-join4k-studio-joins": lambda out: scenario_x_join4k(out, False),
     "x-join4k-native-native": scenario_x_join4k_nn,
+    "x-garbage-native": scenario_x_garbage_native,
+    "x-host-leaves-studio": lambda out: scenario_x_host_leaves(out, "studio"),
+    "x-host-leaves-native": lambda out: scenario_x_host_leaves(out, "native"),
+    "x-solo": scenario_x_solo,
 }
 
 
