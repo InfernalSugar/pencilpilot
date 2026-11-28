@@ -14,6 +14,7 @@
 pub mod export;
 pub mod files;
 pub mod frames;
+pub mod sound;
 pub mod tools;
 
 use brush::{Painter, set_brush_rgb};
@@ -129,6 +130,8 @@ pub struct Engine {
     pub files: files::Files,
     /// an export in progress ([`export`])
     pub exporter: export::Exporter,
+    /// the scene's sound ([`sound`])
+    pub sound: sound::Sounds,
     lifts: u64,
 }
 
@@ -145,6 +148,7 @@ impl Engine {
             lifts: 0,
             files: files::Files::default(),
             exporter: export::Exporter::default(),
+            sound: sound::Sounds::default(),
         }
     }
 
@@ -261,6 +265,7 @@ impl Engine {
             Action::Undo => self.painter.undo(),
             Action::Redo => self.painter.redo(),
             _ => {
+                sound::apply(self, s, a);
                 files::apply(self, s, a)
                     || export::apply(self, s, a)
                     || tools::apply(self, s, a)
@@ -274,7 +279,10 @@ impl Engine {
     pub fn tick(&mut self, s: &mut State, now: std::time::Instant) -> bool {
         let f = files::tick(self, s, now);
         let x = export::tick(self, s, now);
-        frames::tick(self, s, now) | f | x
+        let p = frames::tick(self, s, now);
+        // (after playback's: it follows the clock playback has just set)
+        let n = sound::tick(self, s, now);
+        p | f | x | n
     }
 
     /// When [`Engine::tick`] next has something to do (the shell sleeps until then).
@@ -283,6 +291,7 @@ impl Engine {
             frames::next_tick_at(self, s),
             files::next_tick_at(self, s),
             export::next_tick_at(self, s),
+            sound::next_tick_at(self, s),
         ]
         .into_iter()
         .flatten()

@@ -42,6 +42,8 @@ pub struct Job {
     pub runs: Vec<Vec<u32>>,
     /// MP4: x264 with less memory (see `pencilpilot_export::Spec::lean`)
     pub lean: bool,
+    /// a video's sound: mixed to a WAV file before the video starts (on the writer's thread)
+    pub sound: Option<crate::shell::engine::sound::ExportSound>,
 }
 
 /// From the window to the renderer, in order.
@@ -94,6 +96,8 @@ pub struct Shared {
     pub used: AtomicUsize,
     /// the renderer is done (the tiles' thread stops)
     pub rendered_all: AtomicBool,
+    /// how long mixing the sound took, ms
+    pub sound_ms: AtomicU32,
 }
 
 /// The window's spare tiles: topped up below LOW, kept to at most HIGH (32 MB).
@@ -180,6 +184,7 @@ pub fn spawn(job: Job) -> (mpsc::Sender<Msg>, Arc<Shared>, mpsc::Receiver<Outcom
         offered: AtomicUsize::new(0),
         used: AtomicUsize::new(0),
         rendered_all: AtomicBool::new(false),
+        sound_ms: AtomicU32::new(0),
     });
     // the window's tile memory, kept topped up on a thread of its own (the renderer is busy
     // for a whole frame at a time)
@@ -262,10 +267,23 @@ pub fn spawn(job: Job) -> (mpsc::Sender<Msg>, Arc<Shared>, mpsc::Receiver<Outcom
         .expect("a thread");
 
     let sh = shared.clone();
+    let sound = job.sound;
     std::thread::Builder::new()
         .name("export-write".into())
         .spawn(move || {
             lower_priority();
+            let mut spec = spec;
+            // the sound first (it waits for files still being decoded): FFmpeg reads it as the
+            // video comes
+            if let Some(snd) = sound.filter(|_| video) {
+                let t = Instant::now();
+                match snd.write_wav() {
+                    Ok(wav) => spec.audio = wav,
+                    Err(e) => eprintln!("export: the sound couldn't be mixed: {e}"),
+                }
+                sh.sound_ms
+                    .store(t.elapsed().as_millis() as u32, Ordering::Relaxed);
+            }
             let (result, mut stats) = write(spec, &out_rx, &sh);
             stats.wall = started.elapsed();
             let _ = done_tx.send(Outcome { result, stats });
@@ -464,9 +482,13 @@ fn write(
     rx: &mpsc::Receiver<Out>,
     sh: &Shared,
 ) -> (Result<PathBuf, String>, Stats) {
+    let wav = spec.audio.clone();
     let mut job = match pencilpilot_export::Job::begin(spec) {
         Ok(j) => j,
         Err(e) => {
+            if let Some(w) = wav {
+                let _ = std::fs::remove_file(w);
+            }
             sh.cancel.store(true, Ordering::Relaxed);
             // (the renderer's numbers, once it's stopped)
             let stats = drain(rx);

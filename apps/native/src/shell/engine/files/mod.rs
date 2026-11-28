@@ -125,6 +125,8 @@ struct Snapshot {
     palette: (String, Vec<(String, [f32; 4])>),
     notes: Vec<Note>,
     cut: String,
+    /// the sound's clips (moved, muted)
+    sound: Vec<(String, String, i64, u32, bool)>,
 }
 
 impl Snapshot {
@@ -143,6 +145,7 @@ impl Snapshot {
             palette: (s.palette_name.clone(), s.palette.clone()),
             notes: s.notes.clone(),
             cut: s.cut_name.clone(),
+            sound: s.sound.clips.iter().map(|c| c.key()).collect(),
         }
     }
 }
@@ -529,6 +532,8 @@ pub(super) fn replace(e: &mut Engine, s: &mut State, painter: Painter) {
 
 /// What's open now is what's saved.
 fn mark_saved(e: &mut Engine, s: &mut State) {
+    // (a document just opened or made: its sound's clips first, as they're saved)
+    super::sound::load_doc(e, s, Instant::now());
     e.files.saved_edits = e.painter.history_changes();
     e.files.saved = Some(Snapshot::of(s));
     e.files.unsaved_since = None;
