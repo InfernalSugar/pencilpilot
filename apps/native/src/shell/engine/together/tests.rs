@@ -84,7 +84,47 @@ fn same(a: &mut App, b: &mut App, what: &str) {
         }
         assert!(
             t.elapsed() < Duration::from_secs(10),
-            "{what}: {n} pixels differ, the first at {first:?}"
+            "{what}: {n} pixels differ, the first at {first:?} ({:?} vs {:?}); frame {} tracks {:?} shows {:?}; layers {:?} / {:?}; timelines {} / {}; inflight {} {}",
+            first.map(|(x, y)| pa[(y * w + x) * 4..][..4].to_vec()),
+            first.map(|(x, y)| pb[(y * w + x) * 4..][..4].to_vec()),
+            a.s.frame,
+            a.s.sheet
+                .tracks
+                .iter()
+                .map(|t| (
+                    t.layer,
+                    t.cels
+                        .iter()
+                        .map(|c| (c.drawing, c.hold))
+                        .collect::<Vec<_>>()
+                ))
+                .take(2)
+                .collect::<Vec<_>>(),
+            a.e.painter
+                .layers()
+                .iter()
+                .map(|l| (l.id, a.e.painter.layer_drawing(l.id)))
+                .collect::<Vec<_>>(),
+            a.s.layers
+                .iter()
+                .map(|l| (&l.name, l.visible))
+                .collect::<Vec<_>>(),
+            b.s.layers
+                .iter()
+                .map(|l| (&l.name, l.visible))
+                .collect::<Vec<_>>(),
+            a.e.together
+                .session_tl
+                .as_ref()
+                .map_or(String::new(), |t| t["scenes"][0]["cuts"][0]["tracks"]
+                    .to_string()),
+            b.e.together
+                .session_tl
+                .as_ref()
+                .map_or(String::new(), |t| t["scenes"][0]["cuts"][0]["tracks"]
+                    .to_string()),
+            a.e.together.tl_inflight,
+            b.e.together.tl_inflight,
         );
         a.tick();
         b.tick();
@@ -226,6 +266,30 @@ fn two_apps_draw_together() {
     );
 }
 
+/// Where two values differ (paths).
+fn differs(at: &str, a: &serde_json::Value, b: &serde_json::Value, out: &mut Vec<String>) {
+    use serde_json::Value;
+    match (a, b) {
+        (Value::Object(x), Value::Object(y)) => {
+            for k in x.keys().chain(y.keys()) {
+                let p = format!("{at}.{k}");
+                match (x.get(k), y.get(k)) {
+                    (Some(u), Some(v)) => differs(&p, u, v, out),
+                    (u, v) if u != v => out.push(format!("{p}: {u:?} vs {v:?}")),
+                    _ => {}
+                }
+            }
+        }
+        (Value::Array(x), Value::Array(y)) if x.len() == y.len() => {
+            for (i, (u, v)) in x.iter().zip(y).enumerate() {
+                differs(&format!("{at}[{i}]"), u, v, out);
+            }
+        }
+        _ if a != b => out.push(format!("{at}: {a} vs {b}")),
+        _ => {}
+    }
+}
+
 /// What this app doesn't show (other scenes and cuts, markers, sound clips, notes, the
 /// camera, mouth charts, palettes; masks, line strokes and sound files from another app)
 /// comes back unchanged from it, and a joiner gets it from it as host: it only changes
@@ -328,11 +392,12 @@ fn what_this_app_doesnt_show_goes_round_unchanged() {
             .remove(&own);
         tl
     };
-    assert_eq!(
-        without(back.clone()),
-        without(rich.clone()),
-        "only the guest's own track changed"
-    );
+    let (a, b) = (without(back.clone()), without(rich.clone()));
+    if a != b {
+        let mut diff = Vec::new();
+        differs("", &a, &b, &mut diff);
+        panic!("only the guest's own track changed, but: {diff:?}");
+    }
     let cels = back["scenes"][0]["cuts"][0]["tracks"][own.as_str()].clone();
     assert!(
         cels.as_array()

@@ -419,6 +419,13 @@ fn show(e: &mut Engine, s: &State) -> bool {
     false
 }
 
+/// The exposures changed from outside (drawing together: someone's timeline): each layer
+/// shows its drawing for the frame again.
+pub fn sheet_changed(e: &mut Engine, s: &mut State) -> bool {
+    sync(e, s);
+    show(e, s)
+}
+
 /// The painter shows the frame's drawings now (the GPU may have shown them without it, while
 /// scrubbing or playing): before anything is done on the frame.
 pub fn catch_up(e: &mut Engine, s: &State) {
