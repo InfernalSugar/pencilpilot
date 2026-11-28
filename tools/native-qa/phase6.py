@@ -188,17 +188,26 @@ def sockets_of(pid):
 # a headless mutter
 
 class Mutter:
-    def __init__(self, out, tag, size, hz, own_bus=False):
+    """A headless mutter on a D-Bus bus of its own (which starts no services): its
+    RemoteDesktop is this one's only. `bus` is that bus's address."""
+
+    def __init__(self, out, tag, size, hz, own_bus=True):
         self.name = f"q6-{tag}-{os.getpid()}"
         self.log = open(os.path.join(out, f"mutter-{tag}.log"), "a")
-        cmd = ["mutter", "--headless", "--no-x11", "--wayland-display", self.name,
-               "--virtual-monitor", f"{size}@{hz}"]
-        if own_bus:
-            # its RemoteDesktop and other names on a bus of its own
-            cmd = ["dbus-run-session", "--config-file", bus_conf(out), "--"] + cmd
         env = {k: v for k, v in os.environ.items() if k not in ("DISPLAY", "WAYLAND_DISPLAY")}
-        self.p = subprocess.Popen(cmd, stdout=self.log, stderr=self.log, env=env)
+        self.daemon = None
+        self.bus = os.environ.get("DBUS_SESSION_BUS_ADDRESS")
+        if own_bus:
+            self.daemon = subprocess.Popen(
+                ["dbus-daemon", "--config-file", bus_conf(out), "--nofork", "--print-address=1", "--print-pid=2"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, env=env)
+            self.bus = self.daemon.stdout.readline().strip()
+            env["DBUS_SESSION_BUS_ADDRESS"] = self.bus
+        self.p = subprocess.Popen(
+            ["mutter", "--headless", "--no-x11", "--wayland-display", self.name,
+             "--virtual-monitor", f"{size}@{hz}"], stdout=self.log, stderr=self.log, env=env)
         if not wait_sock(self.name):
+            self.stop()
             raise RuntimeError(f"mutter {tag} did not start")
         time.sleep(0.5)
 
@@ -208,6 +217,174 @@ class Mutter:
             self.p.wait(5)
         except subprocess.TimeoutExpired:
             pass
+        if self.daemon:
+            kill_tree(self.daemon.pid)
+
+
+MON_W, MON_H = 1440, 900
+# the native app's default 1280 x 800 window, centred on the 1440 x 900 monitor
+WIN_OFF = (80, 50)
+BTN_LEFT = 0x110
+KEYSYM = {"Shift_L": 0xFFE1, "Control_L": 0xFFE3, "s": 0x73, "z": 0x7A, "Escape": 0xFF1B}
+
+
+class Input:
+    """mutter's RemoteDesktop on a given bus (as canvas_window.py's, for several mutters)."""
+
+    def __init__(self, bus_address):
+        import dbus
+        self.dbus = dbus
+        bus = dbus.bus.BusConnection(bus_address)
+        self.bus = bus
+        name = "org.gnome.Mutter.RemoteDesktop"
+        rd = bus.get_object(name, "/org/gnome/Mutter/RemoteDesktop")
+        path = dbus.Interface(rd, name).CreateSession()
+        self.s = dbus.Interface(bus.get_object(name, path), name + ".Session")
+        self.s.Start()
+        self.at = (0.0, 0.0)
+        time.sleep(0.4)
+        self.s.NotifyPointerMotionRelative(dbus.Double(-100000), dbus.Double(-100000))
+        self.key("Shift_L")
+        time.sleep(0.05)
+
+    def to(self, x, y):
+        sx, sy = x + WIN_OFF[0], y + WIN_OFF[1]
+        dx, dy = sx - self.at[0], sy - self.at[1]
+        if dx or dy:
+            self.s.NotifyPointerMotionRelative(self.dbus.Double(dx), self.dbus.Double(dy))
+        self.at = (sx, sy)
+
+    def button(self, b, down):
+        self.s.NotifyPointerButton(self.dbus.Int32(b), self.dbus.Boolean(down))
+
+    def key(self, name, down=None):
+        k = self.dbus.UInt32(KEYSYM[name])
+        if down is None:
+            self.s.NotifyKeyboardKeysym(k, True)
+            self.s.NotifyKeyboardKeysym(k, False)
+        else:
+            self.s.NotifyKeyboardKeysym(k, self.dbus.Boolean(down))
+
+    def combo(self, mod, key):
+        self.key(mod, True)
+        time.sleep(0.03)
+        self.key(key)
+        time.sleep(0.03)
+        self.key(mod, False)
+
+    def stroke(self, pts, interval=1 / 240):
+        """A drag through window points; when each point was sent (CLOCK_MONOTONIC ns)."""
+        times = []
+        self.to(*pts[0])
+        time.sleep(0.02)
+        t0 = time.monotonic()
+        self.button(BTN_LEFT, True)
+        times.append(mono_ns())
+        for i, p in enumerate(pts[1:], 1):
+            wait = t0 + i * interval - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+            self.to(*p)
+            times.append(mono_ns())
+        time.sleep(interval)
+        self.button(BTN_LEFT, False)
+        times.append(mono_ns())
+        return times
+
+    def stop(self):
+        try:
+            self.s.Stop()
+        except Exception:
+            pass
+
+
+class Native:
+    """The native app on a headless mutter of its own (its own bus too), hosting or joining
+    through its check hook (`--host` / `--join <invite>`, `--name`), its `--stats` read when
+    it quits."""
+
+    def __init__(self, binary, out, tag, secs, hz=None, project=None, host=False, join=None,
+                 name=None, args=(), input=True, env=None):
+        hz = hz or int(os.environ.get("PP_HZ", "60"))
+        self.out, self.tag = out, tag
+        self.mutter = Mutter(out, f"native-{tag}", f"{MON_W}x{MON_H}", hz)
+        self.home = os.path.join(out, f"native-{tag}")
+        shutil.rmtree(self.home, ignore_errors=True)
+        os.makedirs(self.home)
+        self.stats = os.path.join(self.home, "stats.json")
+        self.doc = os.path.join(self.home, "doc.png")
+        self.project = None
+        if project:
+            self.project = os.path.join(self.home, os.path.basename(project))
+            shutil.copy(project, self.project)
+        e = {k: v for k, v in os.environ.items() if k not in ("DISPLAY", "WAYLAND_DISPLAY")}
+        e.update(NOWHERE)
+        e.update({"WAYLAND_DISPLAY": self.mutter.name, "DBUS_SESSION_BUS_ADDRESS": self.mutter.bus,
+                  "PENCILPILOT_DIALOG_ANSWER": "",
+                  "XDG_CONFIG_HOME": os.path.join(self.home, "config"),
+                  "XDG_STATE_HOME": os.path.join(self.home, "state"),
+                  "XDG_DATA_HOME": os.path.join(self.home, "data"),
+                  "XDG_CACHE_HOME": os.path.join(self.home, "cache")})
+        e.update(env or {})
+        cmd = [binary, "--quit-after", str(secs), "--stats", self.stats, "--save-doc", self.doc]
+        if host:
+            cmd.append("--host")
+        if join:
+            cmd += ["--join", join]
+        if name:
+            cmd += ["--name", name]
+        cmd += list(args)
+        if self.project:
+            cmd.append(self.project)
+        self.launched = mono_ns()
+        self.errlog = open(os.path.join(self.home, "stderr.log"), "w")
+        self.p = subprocess.Popen(cmd, env=e, stdout=subprocess.PIPE, stderr=self.errlog, text=True)
+        self.pid = self.p.pid
+        self.invite = None
+        self.lines = []
+        if host:
+            t = time.monotonic()
+            while time.monotonic() - t < 20:
+                line = self.p.stdout.readline()
+                if not line:
+                    break
+                self.lines.append(line)
+                m = line.strip()
+                i = m.find("pp1-")
+                if i >= 0:
+                    self.invite = m[i:].split()[0]
+                    break
+            if not self.invite:
+                raise RuntimeError(f"native {tag}: no invite on stdout ({self.lines[-3:]})")
+        self.inp = None
+        if input:
+            time.sleep(1.0)
+            self.inp = Input(self.mutter.bus)
+
+    def pss_kib(self):
+        try:
+            for line in open(f"/proc/{self.pid}/smaps_rollup"):
+                if line.startswith("Pss:"):
+                    return int(line.split()[1])
+        except OSError:
+            return None
+
+    def wait(self, extra=30):
+        try:
+            self.p.wait(extra + 60)
+        except subprocess.TimeoutExpired:
+            kill_tree(self.pid)
+        if self.inp:
+            self.inp.stop()
+        self.mutter.stop()
+        try:
+            return json.load(open(self.stats))
+        except (OSError, ValueError):
+            return None
+
+    def kill(self):
+        kill_tree(self.pid)
+        self.mutter.stop()
 
 
 # ------------------------------------------------------------------------------------------
@@ -300,7 +477,7 @@ class Studio:
     def __init__(self, binary, out, tag, hz=None, project=None, name="Studio", size="1920x1080"):
         hz = hz or int(os.environ.get("PP_HZ", "60"))
         self.out, self.tag = out, tag
-        self.mutter = Mutter(out, f"studio-{tag}", size, hz, own_bus=True)
+        self.mutter = Mutter(out, f"studio-{tag}", size, hz)
         self.home = os.path.join(out, f"studio-{tag}")
         data = os.path.join(self.home, "data")
         shutil.rmtree(data, ignore_errors=True)
