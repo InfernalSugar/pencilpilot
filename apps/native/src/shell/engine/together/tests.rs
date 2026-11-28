@@ -117,10 +117,10 @@ fn two_apps_draw_together() {
     let mut guest = App::new("Ben");
     guest.e.together.auto = Some(Start::Join(code));
     until(&mut [&mut host, &mut guest], 30, "joining", |a| {
-        a[1].s.together.synced && a[0].e.together.shared.layers.len() == 5
+        a[1].s.together.synced && a[0].e.together.shared.len() == 5
     });
     // the project arrived: the host's four layers and the guest's own, the same pictures
-    assert_eq!(guest.e.together.shared.layers.len(), 5);
+    assert_eq!(guest.e.together.shared.len(), 5);
     assert_eq!(
         guest.s.frame, host.s.frame,
         "the guest starts on the host's frame"
@@ -188,9 +188,20 @@ fn two_apps_draw_together() {
     host.s
         .actions
         .push(Action::Other(format!("{}{lid} {who}", ops::LET)));
-    until(&mut [&mut host, &mut guest], 20, "the answer", |a| {
-        !a[1].s.layers[clean].locked
-    });
+    let t = Instant::now();
+    while guest.s.layers[clean].locked {
+        if t.elapsed() > Duration::from_secs(20) {
+            panic!(
+                "the answer: the guest may draw {}, the host thinks {}; {:?}; who {who}",
+                guest.e.together.shared.can_draw(&lid, &who),
+                host.e.together.shared.can_draw(&lid, &who),
+                guest.s.layers
+            );
+        }
+        host.tick();
+        guest.tick();
+        std::thread::sleep(Duration::from_millis(2));
+    }
 
     // chat
     guest.s.together.chat_text = "hello".into();

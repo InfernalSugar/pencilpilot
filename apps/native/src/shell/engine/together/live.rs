@@ -14,9 +14,9 @@ use serde_json::{Value, json};
 
 use super::super::{BRUSHES, ERASER, parsed};
 
-/// The most points a datagram carries (four numbers each): a datagram must fit in one
-/// packet (about 1200 bytes; a bigger one is dropped), and the session adds its own.
-pub const POINTS_PER_MESSAGE: usize = 32;
+/// The most points a datagram carries (four numbers each, 96 numbers: the current app's
+/// pieces). A datagram must fit in one packet (about 1200 bytes; a bigger one is dropped).
+pub const POINTS_PER_MESSAGE: usize = 24;
 
 /// A brush's id on the wire: its file's name, as the current app names brushes.
 fn brush_id(name: &str) -> &'static str {
@@ -399,9 +399,9 @@ mod tests {
         }
         out.end(false);
         let msgs = out.take();
-        // begin, eight pieces of points (32 each, 26), end
-        assert_eq!(msgs.len(), 10, "{msgs:?}");
-        assert_eq!(msgs[1]["live"]["pts"].as_array().unwrap().len(), 32 * 4);
+        // begin, eleven pieces of points (24 each, 10), end
+        assert_eq!(msgs.len(), 13, "{msgs:?}");
+        assert_eq!(msgs[1]["live"]["pts"].as_array().unwrap().len(), 24 * 4);
         for m in &msgs {
             let wire = serde_json::json!({"from": "f".repeat(64), "body": m}).to_string();
             assert!(

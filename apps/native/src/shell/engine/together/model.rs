@@ -1,13 +1,11 @@
-//! Shared layers and who may draw on each, as every app keeps them (together.ts's
-//! `Shared`): one drawer per layer at a time, unless its owner lets others in; asks wait
-//! for the owner's answer. Edits that aren't allowed change nothing.
-//!
-//! This holds the part of the current app's rules the native app takes part in: layers
-//! (made, renamed, their look, removed, moved), their tiles, asking, granting, denying and
-//! revoking. Groups, masks, line strokes, adjustment layers and sound are left as they are
-//! (the native app doesn't make them in a session yet), but kept in snapshots it passes on.
+//! Shared layers and who may draw on each: `pencilpilot_together`'s [`Shared`] (the
+//! current app's rules, edit for edit), and what each edit it lets through changes for the
+//! native app to follow.
 
+use pencilpilot_together::{Edit, SharedLayer, parse_edit};
 use serde_json::{Value, json};
+
+pub use pencilpilot_together::Ask;
 
 /// A layer's id (and a drawing's): the maker's first 12 id characters and a number.
 pub fn is_lid(s: &str) -> bool {
@@ -19,35 +17,6 @@ pub fn is_lid(s: &str) -> bool {
             .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
         && (1..=12).contains(&b.len())
         && b.bytes().all(|c| c.is_ascii_digit())
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct Layer {
-    pub lid: String,
-    pub owner: String,
-    pub name: String,
-    pub writers: Vec<String>,
-    /// how it shows (set by whoever may draw on it): the current app's `look`, as it came
-    pub look: Option<Value>,
-    /// the rest as it came (an adjustment's settings, its group, line layers): passed on
-    pub rest: serde_json::Map<String, Value>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct Ask {
-    pub lid: String,
-    pub from: String,
-    pub why: String,
-    pub own: bool,
-    pub with: Option<String>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct Shared {
-    pub layers: Vec<Layer>,
-    /// groups as they came (passed on in snapshots)
-    pub groups: Vec<Value>,
-    pub asks: Vec<Ask>,
 }
 
 /// What an edit changed, for the app to follow.
@@ -69,257 +38,81 @@ pub enum Change {
         lid: String,
         to: String,
     },
-    /// anything else that's allowed (a kind this app doesn't follow)
+    /// anything else that's allowed (a kind this app doesn't follow yet: groups, masks,
+    /// line strokes, adjustment settings, sound)
     Other,
 }
 
-fn s(v: &Value, k: &str) -> Option<String> {
-    v.get(k).and_then(Value::as_str).map(str::to_string)
-}
+#[derive(Debug, Clone, Default)]
+pub struct Shared(pub pencilpilot_together::Shared);
 
 impl Shared {
-    pub fn get(&self, lid: &str) -> Option<&Layer> {
-        self.layers.iter().find(|l| l.lid == lid)
-    }
-
-    fn get_mut(&mut self, lid: &str) -> Option<&mut Layer> {
-        self.layers.iter_mut().find(|l| l.lid == lid)
+    pub fn get(&self, lid: &str) -> Option<&SharedLayer> {
+        self.0.layers.get(lid)
     }
 
     /// Bottom → top.
     pub fn order(&self) -> Vec<String> {
-        self.layers.iter().map(|l| l.lid.clone()).collect()
+        self.0.order.clone()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.layers.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.layers.is_empty()
+    }
+
+    pub fn asks(&self) -> &[Ask] {
+        &self.0.asks
     }
 
     pub fn can_draw(&self, lid: &str, who: &str) -> bool {
-        self.get(lid)
-            .is_some_and(|l| l.writers.iter().any(|w| w == who))
+        self.0.can_draw(lid, who)
     }
 
     pub fn owns(&self, lid: &str, who: &str) -> bool {
-        self.get(lid).is_some_and(|l| l.owner == who)
+        self.0.owns(lid, who)
     }
 
-    /// Takes an edit in: what it changed, or None when it isn't allowed (or isn't one).
-    pub fn apply(&mut self, from: &str, e: &Value) -> Option<Change> {
-        let k = e.get("k")?.as_str()?;
-        if matches!(k, "timeline") {
-            return Some(Change::Timeline);
+    /// Takes an edit in (checked against the closed list, then the rules): what it changed,
+    /// or None when it isn't one or isn't allowed.
+    pub fn apply(&mut self, from: &str, body: &Value) -> Option<Change> {
+        let e = parse_edit(body)?;
+        if !self.0.apply(from, &e) {
+            return None;
         }
-        if k == "sound" {
-            return Some(Change::Other);
-        }
-        let lid = s(e, "lid")?;
-        let has = self.get(&lid).is_some();
-        let writer = self.can_draw(&lid, from);
-        let owner = self.owns(&lid, from);
-        match k {
-            "layer" => {
-                let prefix = from.get(..12)?;
-                if has || !is_lid(&lid) || !lid.starts_with(&format!("{prefix}:")) {
-                    return None;
-                }
-                let name: String = s(e, "name")?.chars().take(60).collect();
-                let mut rest = serde_json::Map::new();
-                for key in ["adjust", "lines"] {
-                    if let Some(v) = e.get(key) {
-                        rest.insert(key.into(), v.clone());
-                    }
-                }
-                self.layers.push(Layer {
-                    lid: lid.clone(),
-                    owner: from.to_string(),
-                    name,
-                    writers: vec![from.to_string()],
-                    look: None,
-                    rest,
-                });
-                Some(Change::Made(lid))
-            }
-            "rename" if writer => {
-                let name: String = s(e, "name")?.chars().take(60).collect();
-                self.get_mut(&lid)?.name = name;
-                Some(Change::Renamed(lid))
-            }
-            "look" if writer => {
-                let look = e.get("look")?.clone();
-                look.get("blend")?.as_str()?;
-                look.get("opacity")?.as_f64()?;
-                self.get_mut(&lid)?.look = Some(look);
-                Some(Change::Look(lid))
-            }
-            "tiles" | "mask" | "lines" if writer => Some(if k == "tiles" {
-                Change::Tiles(lid)
-            } else {
-                Change::Other
-            }),
-            "adjust" | "pixels" if writer => Some(Change::Other),
-            "remove" if owner => {
-                self.layers.retain(|l| l.lid != lid);
-                self.asks
-                    .retain(|a| a.lid != lid && a.with.as_deref() != Some(&lid));
-                Some(Change::Removed(lid))
-            }
-            "move" | "place" if (k == "move" && owner) || (k == "place" && writer) => {
-                let to = e.get("to")?.as_u64()? as usize;
-                let i = self.layers.iter().position(|l| l.lid == lid)?;
-                let l = self.layers.remove(i);
-                let to = to.min(self.layers.len());
-                self.layers.insert(to, l);
-                Some(Change::Moved(lid))
-            }
-            "ask" if has => {
-                let own = e.get("own").and_then(Value::as_bool).unwrap_or(false);
-                if (own && owner) || (!own && writer) {
-                    return None;
-                }
-                let why = s(e, "why").unwrap_or_else(|| "draw".into());
-                if !matches!(why.as_str(), "draw" | "merge" | "group" | "delete") {
-                    return None;
-                }
-                self.asks.retain(|a| !(a.lid == lid && a.from == from));
-                self.asks.push(Ask {
-                    lid: lid.clone(),
-                    from: from.to_string(),
-                    why,
-                    own,
-                    with: s(e, "with").filter(|w| is_lid(w)),
-                });
-                Some(Change::Asked(lid))
-            }
-            "grant" if owner => {
-                let to = s(e, "to")?;
-                let handover = e.get("handover").and_then(Value::as_bool).unwrap_or(false);
-                self.asks.retain(|a| !(a.lid == lid && a.from == to));
-                let l = self.get_mut(&lid)?;
-                if handover {
-                    l.owner = to.clone();
-                    let rest: Vec<String> = l
-                        .writers
-                        .iter()
-                        .filter(|w| **w != to && *w != from)
-                        .cloned()
-                        .collect();
-                    l.writers = std::iter::once(to).chain(rest).collect();
-                } else if !l.writers.contains(&to) {
-                    l.writers.push(to);
-                }
-                Some(Change::Access(lid))
-            }
-            "deny" if owner => {
-                let to = s(e, "to")?;
-                self.asks.retain(|a| !(a.lid == lid && a.from == to));
-                Some(Change::Denied { lid, to })
-            }
-            "revoke" if owner => {
-                let to = s(e, "to")?;
-                let l = self.get_mut(&lid)?;
-                if to == l.owner {
-                    return None;
-                }
-                l.writers.retain(|w| *w != to);
-                Some(Change::Access(lid))
-            }
-            // groups: allowed or not by rules this app doesn't keep; passed over
-            "group" | "gset" | "ungroup" | "block" => None,
-            _ => None,
-        }
+        Some(match e {
+            Edit::Layer { lid, .. } => Change::Made(lid),
+            Edit::Rename { lid, .. } => Change::Renamed(lid),
+            Edit::Look { lid, .. } => Change::Look(lid),
+            Edit::Remove { lid } => Change::Removed(lid),
+            Edit::Move { lid, .. } | Edit::Place { lid, .. } => Change::Moved(lid),
+            Edit::Tiles { lid, .. } => Change::Tiles(lid),
+            Edit::Timeline { .. } => Change::Timeline,
+            Edit::Grant { lid, .. } | Edit::Revoke { lid, .. } => Change::Access(lid),
+            Edit::Ask { lid, .. } => Change::Asked(lid),
+            Edit::Deny { lid, to } => Change::Denied { lid, to },
+            _ => Change::Other,
+        })
     }
 
-    /// The layers, groups and asks as `snap.begin` carries them (together.ts's `snapshot`).
+    /// The layers, groups and asks as `snap.begin` carries them.
     pub fn snapshot(&self) -> Value {
-        let layers: Vec<Value> = self
-            .layers
-            .iter()
-            .map(|l| {
-                let mut o = l.rest.clone();
-                o.insert("lid".into(), json!(l.lid));
-                o.insert("owner".into(), json!(l.owner));
-                o.insert("name".into(), json!(l.name));
-                o.insert("writers".into(), json!(l.writers));
-                if let Some(look) = &l.look {
-                    o.insert("look".into(), look.clone());
-                }
-                Value::Object(o)
-            })
-            .collect();
-        let asks: Vec<Value> = self
-            .asks
-            .iter()
-            .map(|a| {
-                let mut o = json!({"lid": a.lid, "from": a.from, "why": a.why});
-                if a.own {
-                    o["own"] = json!(true);
-                }
-                if let Some(w) = &a.with {
-                    o["with"] = json!(w);
-                }
-                o
-            })
-            .collect();
-        json!({"layers": layers, "groups": self.groups, "asks": asks})
+        let (layers, groups, asks) = self.0.snapshot();
+        json!({"layers": layers, "groups": groups, "asks": asks})
     }
 
-    /// From a `snap.begin` (together.ts's `load`).
+    /// From a `snap.begin`.
     pub fn load(&mut self, v: &Value) {
-        self.layers.clear();
-        self.asks.clear();
-        self.groups = v
-            .get("groups")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        for l in v
-            .get("layers")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            let Some(lid) = s(l, "lid").filter(|x| is_lid(x)) else {
-                continue;
-            };
-            let Some(writers) = l.get("writers").and_then(Value::as_array) else {
-                continue;
-            };
-            if self.get(&lid).is_some() {
-                continue;
-            }
-            let mut rest = l.as_object().cloned().unwrap_or_default();
-            for k in ["lid", "owner", "name", "writers", "look"] {
-                rest.remove(k);
-            }
-            self.layers.push(Layer {
-                lid,
-                owner: s(l, "owner").unwrap_or_default(),
-                name: s(l, "name").unwrap_or_default().chars().take(60).collect(),
-                writers: writers
-                    .iter()
-                    .filter_map(|w| w.as_str().map(str::to_string))
-                    .collect(),
-                look: l.get("look").cloned(),
-                rest,
-            });
-        }
-        for a in v
-            .get("asks")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            let (Some(lid), Some(from)) = (s(a, "lid"), s(a, "from")) else {
-                continue;
-            };
-            if self.get(&lid).is_none() {
-                continue;
-            }
-            self.asks.push(Ask {
-                lid,
-                from,
-                why: s(a, "why").unwrap_or_else(|| "draw".into()),
-                own: a.get("own").and_then(Value::as_bool).unwrap_or(false),
-                with: s(a, "with"),
-            });
-        }
+        let list = |k: &str| {
+            v.get(k)
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+        };
+        self.0.load(&list("layers"), &list("groups"), &list("asks"));
     }
 }
 
@@ -354,7 +147,7 @@ mod tests {
             )
             .is_some()
         );
-        assert_eq!(sh.asks.len(), 1);
+        assert_eq!(sh.asks().len(), 1);
         assert!(
             sh.apply(
                 B,
@@ -368,7 +161,7 @@ mod tests {
             &json!({"k": "grant", "lid": l, "to": B, "handover": false}),
         )
         .unwrap();
-        assert!(sh.asks.is_empty() && sh.can_draw(l, B));
+        assert!(sh.asks().is_empty() && sh.can_draw(l, B));
         sh.apply(A, &json!({"k": "revoke", "lid": l, "to": B}))
             .unwrap();
         assert!(!sh.can_draw(l, B));
@@ -382,6 +175,7 @@ mod tests {
         // a snapshot loads back the same
         let mut other = Shared::default();
         other.load(&sh.snapshot());
-        assert_eq!(other.layers, sh.layers);
+        assert_eq!(other.0.order, sh.0.order);
+        assert_eq!(other.get(l), sh.get(l));
     }
 }

@@ -330,6 +330,14 @@ pub fn project(e: &Engine, s: &State, doc: &mut Doc) -> Result<(Project, SaveTim
                     .filter(|(_, (k, _))| on(k.0, k.1))
                     .map(|(i, (k, _))| (*d, *k, Some(i))),
             ),
+            // (from others, drawing together: their RGBA tiles)
+            Some(Kept::Wire(tiles)) => jobs.extend(
+                tiles
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (k, _))| on(k.0, k.1))
+                    .map(|(i, (k, _))| (*d, *k, Some(i))),
+            ),
             None => jobs.extend(
                 e.painter
                     .drawing_tile_keys(*d)
@@ -360,17 +368,20 @@ pub fn project(e: &Engine, s: &State, doc: &mut Doc) -> Result<(Project, SaveTim
                             return None;
                         }
                     }
-                    Some(i) => {
-                        let Some(Kept::Raw(t)) = store.drawings.get(&d).map(|k| &**k) else {
-                            return None;
-                        };
-                        let raw = miniz_oxide::inflate::decompress_to_vec_with_limit(
-                            &t.get(i)?.1,
-                            brush::DecodedTile::BYTES,
-                        )
-                        .ok()?;
-                        brush::encode_tile(&brush::DecodedTile::from_bytes(&raw)?, &mut px);
-                    }
+                    Some(i) => match store.drawings.get(&d).map(|k| &**k) {
+                        Some(Kept::Raw(t)) => {
+                            let raw = miniz_oxide::inflate::decompress_to_vec_with_limit(
+                                &t.get(i)?.1,
+                                brush::DecodedTile::BYTES,
+                            )
+                            .ok()?;
+                            brush::encode_tile(&brush::DecodedTile::from_bytes(&raw)?, &mut px);
+                        }
+                        Some(Kept::Wire(t)) => {
+                            px = super::super::frames::store::file_rgba(&t.get(i)?.1)?;
+                        }
+                        _ => return None,
+                    },
                 }
                 // (paint past the canvas's edge isn't part of the picture: as the file cuts
                 // tiles from a whole canvas)

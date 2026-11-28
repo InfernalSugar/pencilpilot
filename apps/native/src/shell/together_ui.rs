@@ -498,3 +498,152 @@ fn chat(f: &mut Frame, card: Rect, s: &mut State) {
     });
     s.actions.extend(actions);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shell::engine::together::{Access, ChatLine, CursorView, net::Info};
+    use crate::state::Workspace;
+
+    fn member(id: char, name: &str) -> pencilpilot_share::Member {
+        let key = pencilpilot_share::SecretKey::generate();
+        let _ = id;
+        pencilpilot_share::Member {
+            id: key.public().to_string(),
+            name: name.into(),
+            addr: pencilpilot_share::EndpointAddr::new(key.public()),
+        }
+    }
+
+    /// The dialog, the chat and cursors in their states, drawn off-screen (no window):
+    /// `PP_SHOTS` = where.
+    #[test]
+    #[ignore = "pictures: PP_SHOTS=dir cargo test -p pencilpilot-native -- --ignored together_pictures"]
+    fn together_pictures() {
+        let dir = std::env::var("PP_SHOTS").expect("PP_SHOTS");
+        let base = || {
+            let mut s = State::demo();
+            s.workspace = Workspace::Draw;
+            s
+        };
+        let mut shots: Vec<(&str, State)> = Vec::new();
+        let mut s = base();
+        s.together.open = true;
+        s.together.name = "Mina".into();
+        s.together.code = "pp1-AbCdEf".into();
+        shots.push(("start", s));
+        let mut s = base();
+        s.together.open = true;
+        s.together.name = "Mina".into();
+        s.together.busy = true;
+        s.together.error = "The invite has no one to ask.".into();
+        shots.push(("connecting", s));
+        let (me, sam, rin) = (member('a', "Mina"), member('b', "Sam"), member('c', "Rin"));
+        let live = |open: bool| {
+            let mut s = base();
+            s.together.open = open;
+            s.together.info = Some(Info {
+                invite: format!("pp1-{}", "Q".repeat(140)),
+                me: me.clone(),
+                members: vec![me.clone(), sam.clone(), rin.clone()],
+                host: true,
+            });
+            s.together.synced = true;
+            s.together.rows = vec![
+                Row {
+                    lid: "aaaaaaaaaaaa:3".into(),
+                    name: "Sam’s layer".into(),
+                    owner: "Sam".into(),
+                    mine: false,
+                    can_draw: false,
+                    asked: false,
+                    writers: vec![],
+                    asks: vec![],
+                },
+                Row {
+                    lid: "aaaaaaaaaaaa:2".into(),
+                    name: "Clean".into(),
+                    owner: "Mina".into(),
+                    mine: true,
+                    can_draw: true,
+                    asked: false,
+                    writers: vec![(rin.id.clone(), "Rin".into())],
+                    asks: vec![(
+                        sam.id.clone(),
+                        "Sam".into(),
+                        "asks to draw here".into(),
+                        false,
+                        true,
+                    )],
+                },
+            ];
+            s.together.access = vec![
+                Some(Access {
+                    lid: "aaaaaaaaaaaa:2".into(),
+                    mine: true,
+                    can_draw: true,
+                    owner: "Mina".into(),
+                    asked: false,
+                }),
+                Some(Access {
+                    lid: "aaaaaaaaaaaa:3".into(),
+                    mine: false,
+                    can_draw: false,
+                    owner: "Sam".into(),
+                    asked: false,
+                }),
+                None,
+                None,
+            ];
+            s.together.cursors = vec![CursorView {
+                id: sam.id.clone(),
+                name: "Sam".into(),
+                colour: crate::shell::engine::together::member_colour(&sam.id),
+                x: 900.0,
+                y: 420.0,
+            }];
+            s
+        };
+        shots.push(("live", live(true)));
+        let mut s = live(false);
+        s.together.chat_open = true;
+        for (who, mine, text) in [
+            (&sam, false, "Hold the anticipation two frames longer?"),
+            (&me, true, "On it"),
+            (&rin, false, "Arc on the hand: a touch higher"),
+        ] {
+            s.together.chat.push(ChatLine {
+                from: who.id.clone(),
+                name: who.name.clone(),
+                mine,
+                system: false,
+                text: text.into(),
+            });
+        }
+        s.together.chat.push(ChatLine {
+            from: String::new(),
+            name: String::new(),
+            mine: false,
+            system: true,
+            text: "Rin joined".into(),
+        });
+        shots.push(("chat-cursors", s));
+        let mut s = live(false);
+        s.together.unread = 3;
+        s.together.note = Some((
+            "Sam asks to draw on “Clean”: see Draw together.".into(),
+            std::time::Instant::now() + std::time::Duration::from_secs(60),
+        ));
+        shots.push(("note-unread", s));
+        for (name, mut s) in shots {
+            crate::shell::render_png(
+                &mut s,
+                1440,
+                900,
+                1.0,
+                &format!("{dir}/together-{name}.png"),
+            )
+            .unwrap();
+        }
+    }
+}

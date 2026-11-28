@@ -221,7 +221,13 @@ pub struct Stats {
     pub members_peak: usize,
     /// remote tile edits that waited (the painter busy) before going in
     pub deferred: u64,
+    /// joining: the project's tiles, and when the last came
+    pub snapshot_tiles: u64,
+    pub snapshot_last_ns: Option<u64>,
 }
+
+/// A tile as it came over the wire: where, and its bytes.
+type WireTile = ((i32, i32), std::sync::Arc<super::frames::store::FileTile>);
 
 /// A drawing's tiles to send.
 #[derive(Debug)]
@@ -277,6 +283,8 @@ pub struct Together {
     snap_seq: u64,
     snap_tl: Option<Value>,
     snap_frame: Option<u32>,
+    /// the project's drawings as they came (joining): kept compressed once it's in
+    snap_wire: HashMap<String, Vec<WireTile>>,
     last_seq: u64,
     n: u64,
     /// layers made here, made active once the session numbers them
@@ -558,7 +566,11 @@ fn ask(e: &mut Engine, s: &mut State, lid: &str) {
     if t.shared.can_draw(lid, &t.me) {
         return;
     }
-    if t.shared.asks.iter().any(|a| a.lid == lid && a.from == t.me) {
+    if t.shared
+        .asks()
+        .iter()
+        .any(|a| a.lid == lid && a.from == t.me)
+    {
         s.together.say("You've asked: it's theirs to say yes.");
         return;
     }
@@ -676,6 +688,10 @@ pub fn tick(e: &mut Engine, s: &mut State, now: Instant) -> bool {
         s.together.note = None;
         changed = true;
     }
+    // (the layers changed: their sharing is listed again)
+    if s.together.access.len() != s.sheet.tracks.len() {
+        e.together.ui_dirty = true;
+    }
     if std::mem::take(&mut e.together.ui_dirty) {
         refresh_ui(e, s);
         changed = true;
@@ -772,7 +788,7 @@ fn take(e: &mut Engine, s: &mut State, msg: net::In) -> bool {
         In::Direct {
             from,
             body,
-            tiles,
+            wire,
             at_ns,
         } => {
             if body.get("k").and_then(Value::as_str) == Some("chat") {
@@ -788,7 +804,7 @@ fn take(e: &mut Engine, s: &mut State, msg: net::In) -> bool {
                 }
                 return true;
             }
-            on_direct(e, s, &from, body, tiles, at_ns)
+            on_direct(e, s, &from, body, wire, at_ns)
         }
         In::Presence { from, body, at_ns } => {
             if let Some(ev) = body.get("live") {
@@ -1123,7 +1139,7 @@ fn on_direct(
     s: &mut State,
     from: &str,
     body: Value,
-    tiles: Option<net::Tiles>,
+    wire: Option<net::WireTiles>,
     at_ns: u64,
 ) -> bool {
     let k = body.get("k").and_then(Value::as_str).unwrap_or("");
@@ -1152,15 +1168,19 @@ fn on_direct(
             true
         }
         "snap.tiles" if !e.together.synced => {
-            if let Some(t) = tiles
-                && e.together.shared.get(&t.lid).is_some()
-                && model::is_lid(&t.did)
+            // (kept as they came, compressed, until the drawing is shown)
+            if let Some(w) = wire
+                && e.together.shared.get(&w.lid).is_some()
+                && model::is_lid(&w.did)
             {
-                put_tiles(e, s, from, t, at_ns, None, "snapshot");
+                let t = &mut e.together;
+                t.stats.snapshot_tiles += w.tiles.len() as u64;
+                t.stats.snapshot_last_ns = Some(at_ns);
+                t.snap_wire.entry(w.did).or_default().extend(w.tiles);
             }
+            let _ = from;
             false
         }
-        "snap.kept" if !e.together.synced => false,
         "snap.end" if !e.together.synced => {
             finish_join(e, s);
             true
@@ -1207,6 +1227,16 @@ fn finish_join(e: &mut Engine, s: &mut State) {
     }
     for lid in t.shared.order() {
         refresh_lock(e, &lid);
+    }
+    // the project's drawings, kept as they came (compressed): those shown are decoded as
+    // they're shown
+    for (did, tiles) in std::mem::take(&mut e.together.snap_wire) {
+        let d = local_of(e, &did);
+        e.frames.store.drawings.insert(
+            d,
+            std::sync::Arc::new(super::frames::store::Kept::Wire(tiles)),
+        );
+        e.frames.remote_changed(d);
     }
     super::frames::tick(e, s, Instant::now());
     if let Some(tl) = e.together.snap_tl.take() {
@@ -1331,16 +1361,9 @@ fn on_edit(
                     e.together.shared.get(&lid).and_then(|l| l.look.clone()),
                 )
             {
-                let visible = look.get("visible").and_then(Value::as_bool).unwrap_or(true);
-                let opacity = look
-                    .get("opacity")
-                    .and_then(Value::as_f64)
-                    .unwrap_or(1.0)
-                    .clamp(0.0, 1.0) as f32;
-                let blend = look
-                    .get("blend")
-                    .and_then(Value::as_str)
-                    .and_then(brush::Blend::parse);
+                let visible = look.visible;
+                let opacity = look.opacity.clamp(0.0, 1.0) as f32;
+                let blend = brush::Blend::parse(&look.blend);
                 e.together
                     .looks_sent
                     .insert(lid.clone(), (visible, opacity));
@@ -1442,11 +1465,14 @@ fn make_layer(e: &mut Engine, lid: &str) {
     }
     e.together.ids.insert(lid.to_string(), id);
     if let Some(look) = &l.look {
-        let visible = look.get("visible").and_then(Value::as_bool).unwrap_or(true);
-        let opacity = look.get("opacity").and_then(Value::as_f64).unwrap_or(1.0) as f32;
+        let (visible, opacity) = (look.visible, look.opacity.clamp(0.0, 1.0) as f32);
+        let blend = brush::Blend::parse(&look.blend);
         set_props(e, id, |p| {
             p.visible = visible;
-            p.opacity = opacity.clamp(0.0, 1.0);
+            p.opacity = opacity;
+            if let Some(b) = blend {
+                p.blend = b;
+            }
         });
     }
     refresh_lock(e, lid);
@@ -1642,14 +1668,7 @@ fn local_changes(e: &mut Engine, s: &mut State, now: Instant) {
     for (lid, visible, opacity, blend) in looks {
         let was = e.together.looks_sent.get(&lid).copied();
         let base = e.together.shared.get(&lid).and_then(|l| l.look.clone());
-        let was = was.or_else(|| {
-            base.map(|b| {
-                (
-                    b.get("visible").and_then(Value::as_bool).unwrap_or(true),
-                    b.get("opacity").and_then(Value::as_f64).unwrap_or(1.0) as f32,
-                )
-            })
-        });
+        let was = was.or_else(|| base.map(|b| (b.visible, b.opacity as f32)));
         let was = was.unwrap_or((true, 1.0));
         if was.0 != visible || (was.1 - opacity).abs() > 1e-3 {
             e.together
@@ -1682,9 +1701,18 @@ fn local_changes(e: &mut Engine, s: &mut State, now: Instant) {
 /// layer this app may draw on.
 pub fn stroke_begins(e: &mut Engine, s: &State) {
     let t = &mut e.together;
+    let active = e.painter.active_layer();
+    // (a hidden or locked layer takes no paint: nothing to show the others)
+    let paints = e
+        .painter
+        .layers()
+        .iter()
+        .find(|l| l.id == active)
+        .is_some_and(|l| l.props.visible && !l.props.locked);
     let on = t.live()
         && t.synced
-        && t.lid_of(e.painter.active_layer())
+        && paints
+        && t.lid_of(active)
             .is_some_and(|l| t.shared.can_draw(l, &t.me));
     t.live_out.on = on;
     t.live_out.stamp = t.stats_on;
@@ -1722,8 +1750,12 @@ fn send_out(e: &mut Engine, _s: &State, until: Instant) {
                 keys,
                 t_ns,
             } => {
-                // a drawing put away compressed: decoded and sent from the network thread
-                if !e.painter.has_drawing(d) {
+                // a drawing kept compressed (put away, or unchanged since the file was read:
+                // then the painter's copy is the same): sent from the network thread, as it
+                // is kept where it can be
+                if keys.is_none() && e.frames.store.drawings.contains_key(&d)
+                    || !e.painter.has_drawing(d)
+                {
                     if let Some(job) = e.frames.store.job(d) {
                         e.together.send(net::Cmd::Kept { to, lid, did, job });
                     }
@@ -1787,7 +1819,7 @@ fn refresh_ui(e: &Engine, s: &mut State) {
                 owner: ui_names(&l.owner),
                 asked: t
                     .shared
-                    .asks
+                    .asks()
                     .iter()
                     .any(|a| a.lid == *lid && a.from == t.me),
             })
@@ -1795,9 +1827,10 @@ fn refresh_ui(e: &Engine, s: &mut State) {
         .collect();
     let rows: Vec<Row> = t
         .shared
-        .layers
+        .order()
         .iter()
         .rev()
+        .filter_map(|lid| t.shared.get(lid))
         .map(|l| Row {
             lid: l.lid.clone(),
             name: l.name.clone(),
@@ -1806,7 +1839,7 @@ fn refresh_ui(e: &Engine, s: &mut State) {
             can_draw: l.writers.contains(&t.me),
             asked: t
                 .shared
-                .asks
+                .asks()
                 .iter()
                 .any(|a| a.lid == l.lid && a.from == t.me),
             writers: l
@@ -1817,7 +1850,7 @@ fn refresh_ui(e: &Engine, s: &mut State) {
                 .collect(),
             asks: t
                 .shared
-                .asks
+                .asks()
                 .iter()
                 .filter(|a| a.lid == l.lid && l.owner == t.me)
                 .map(|a| {
@@ -1832,7 +1865,7 @@ fn refresh_ui(e: &Engine, s: &mut State) {
                         ui_names(&a.from),
                         text.to_string(),
                         a.own,
-                        a.why == "draw",
+                        a.why.as_str() == "draw",
                     )
                 })
                 .collect(),
@@ -1853,13 +1886,6 @@ fn refresh_ui(e: &Engine, s: &mut State) {
     s.together.rows = rows;
     s.together.cursors = cursors;
     s.together.synced = t.synced;
-}
-
-/// The interface's lists follow the layers (after the frames part synced them).
-pub fn after_sync(e: &mut Engine) {
-    if e.together.live() {
-        e.together.ui_dirty = true;
-    }
 }
 
 /// `--stats`: the session's record, as JSON (null when there was none).
@@ -1894,7 +1920,7 @@ pub fn stats_json(e: &Engine, s: &State, shown_after: &dyn Fn(u64) -> Option<u64
     });
     let members = s.together.info.as_ref().map_or(0, |i| i.members.len());
     format!(
-        "{{\"host\": {}, \"members\": {members}, \"membersPeak\": {}, \"startedNs\": {}, \"joinedNs\": {}, \"syncedNs\": {}, \"bytesSent\": {sent}, \"bytesReceived\": {received}, \"liveSent\": {}, \"tilesSent\": {}, \"deferred\": {}, \"sharedLayers\": {}, \"edits\": [{}]}}",
+        "{{\"host\": {}, \"members\": {members}, \"membersPeak\": {}, \"startedNs\": {}, \"joinedNs\": {}, \"syncedNs\": {}, \"bytesSent\": {sent}, \"bytesReceived\": {received}, \"liveSent\": {}, \"tilesSent\": {}, \"deferred\": {}, \"snapshotTiles\": {}, \"snapshotLastNs\": {}, \"sharedLayers\": {}, \"edits\": [{}]}}",
         s.together.info.as_ref().is_some_and(|i| i.host),
         t.stats.members_peak,
         opt(t.stats.started_ns),
@@ -1903,7 +1929,9 @@ pub fn stats_json(e: &Engine, s: &State, shown_after: &dyn Fn(u64) -> Option<u64
         t.stats.live_sent,
         t.stats.tiles_sent,
         t.stats.deferred,
-        t.shared.layers.len(),
+        t.stats.snapshot_tiles,
+        opt(t.stats.snapshot_last_ns),
+        t.shared.len(),
         edits.join(", ")
     )
 }
