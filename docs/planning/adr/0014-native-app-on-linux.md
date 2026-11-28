@@ -412,3 +412,104 @@ Each step is its own PR, with tests that need no window on the screen.
   the budget, until the frames' timing is known); the real device's latency on the owner's PipeWire (only ALSA
   `null` was opened here); adding sounds and lip-sync (the current app's) aren't ported yet;
   undo for clip moves.
+
+## Phase 6: drawing together (2026-11-28)
+
+The native app takes part in the current app's live sessions (ADR-0013): it hosts, joins with
+a `pp1-` code, and draws with others, the current app included, in the same session. **The rule
+for a mixed session:** the native app never destroys or alters what it doesn't support.
+
+- **The session's state is `crates/together`'s `Together`** (the current app's `together.ts`,
+  ported, edit for edit): layers, groups, who may draw on each, asks, the whole timeline (every
+  scene and cut, notes, markers, sound clips, mouth charts, stages, palettes), masks, line
+  strokes, sound files, the joiner's snapshot, coming back after a break. It runs on the
+  session's own thread (`engine/together/net.rs`, a small tokio runtime around
+  `crates/share`'s `Session`), never on the window's.
+- **The canvas is asked, not shared** (`engine/together/port.rs`, `serve.rs`): `Together`'s
+  `CanvasPort` calls go to the window's thread, which answers them between frames (3 ms a
+  tick at most) and never waits on the session's. The heavy work stays on the session's
+  thread: a drawing's tiles encoded from the painter's copy, tiles put in decoded and
+  compared there (a hash each: only those that changed reach the painter). A pipe the window's
+  wait watches wakes it (`crates/window`'s `Waker`): no polling.
+- **What the native app doesn't show stays as it came:**
+  - the timeline is the session's, whole; only the tracks of the cut the native app shows (the
+    sheet) are read back from it, and a static layer's length stays the session's;
+  - a layer's look comes back as the session set it, but for what changes here (eye,
+    opacity, blend where the native app has it): a blend mode or style it hasn't isn't
+    rewritten;
+  - line and adjustment layers made in the current app show their pixels (line layers) and stay
+    locked here; masks show; groups are kept (the painter's groups; shown in the layers panel,
+    changed in the current app);
+  - others' tiles are kept exactly as they came (straight RGBA, compressed) and used for saving
+    and passing on; a drawing not in the painter is kept compressed as it came.
+- **Saving a shared project:** the session's whole timeline and every drawing in it (other cuts'
+  too), its groups and the sound files it sent; tiles past the canvas are left out and tiles at
+  its edge are written as they are, as the current app's writer does; live-preview layers
+  aren't saved.
+- **Hosting a project from its file** shares its whole timeline: drawings of cuts the native
+  app doesn't show go as the file has them (no decoding).
+- **Joining** puts the project open aside (hidden, locked), as the current app does; a native
+  host's snapshot adds the project's size and frame (fields the current app ignores), and a
+  joiner whose project is another size opens one of that size.
+- **Live strokes:** this app's stroke goes as it's drawn, a frame's worth of points (24 a
+  datagram) at most every 16 ms; its start is said again soon after (40, 100, 200 ms) and then
+  every 0.5 s, so a start lost on a quiet link still shows. Others' are drawn with their brush on
+  a layer of their own until their tiles come (or 2 s after the stroke's end, a lost end).
+- **Losing touch:** a session lost (closed under it) or split (this app took over alone while
+  others were there) is told, and the native app goes back once to whoever of it is online, or
+  hosts it again. Leaving keeps the session to rejoin within the app's run.
+- **Identity:** the current app's key file (`$XDG_DATA_HOME/app.pencilpilot.studio/share/key`).
+  **Checks never use a relay**; `--host` / `--join <code>` / `--name` start a session without the
+  interface, for checks only; `PENCILPILOT_WIRE_LOG` writes what this app sends (no pixels).
+- **Measured** (release, native ↔ native on loopback, each on a headless mutter and D-Bus of
+  its own; 3 runs, load average 2.4–3.6 except the 8-member runs, whose 16 processes load the
+  machine themselves to 4–11):
+
+  | What | Budget | 165 Hz | 60 Hz |
+  |---|---|---|---|
+  | Pen to the other's screen (live), p99 | 50 ms | 6.2–6.6 ms | 13.3–13.5 ms (one run 29.7) |
+  | Stroke's end to its tiles shown there, worst | 100 ms | 15–21 ms | 30 ms |
+  | Pen to screen while the other draws, p99 | 10.06 / 20.67 ms | 8.3–9.5 ms | 18.5–18.6 ms |
+  | Missed frames while both draw | 0 | 0–3 | 0–1 |
+  | Joining 4K × 20 layers: connected → drawable | 3 s | 1.03–1.11 s (a current-app host: 0.67 s) | |
+  | — memory, peak PSS (joiner / host) | 600 MiB | 439–467 / 447–456 MiB (joining a current-app host: 383–536) | |
+  | Another member's 4K picture coming in while drawing: PSS; pen p99 | 600 MiB | 588–619 MiB; 8.1–8.4 ms (4 missed) | 33.5 ms (2 missed) |
+  | 8 members drawing at once | none lost | every edit; all 8 pictures the same | |
+  | — pen to screen meanwhile, p99 | 10.06 ms | 8.5–12.9 ms (4–7 missed); the same app with no one drawing 8.4–12.8 | |
+
+  With the current app (QA's harness, run here): first strokes, timeline merges, the whole
+  timeline both ways (but the current app's copy of a file a native host shares, below),
+  offline 5 s and 40 s, big erases pass.
+- **Since:** the crate's cache is compressed and tiles come in as they came over the wire
+  (`put_deflated`: kept compressed, shared with the crate's copy, decoded on the session's own
+  few threads, at a lower priority than the window's); the window answers the session's
+  questions back to back while it joins (waiting up to a tick's room for the next, not a loop
+  of the window each); a stroke's start goes out at pen-down straight from the window's thread
+  (not behind the session thread's work); the window no longer spins when work is due within
+  the frames' lead while not playing (it was waking at once again and again, idle);
+  taking over as host in a hand-over waits 5 s for the others to come over before calling the
+  session lost.
+- **Stroke starts** (what decided the 60 Hz pen numbers): the frame for a press was counted
+  from the pointer's hover before it (a move with nothing to show, which drew no frame; now
+  dropped), so a stroke's first frame read 33.5 ms. What's left is mutter's: after a pause
+  it shows the first frame 8.4–8.6 ms after it's handed over (every time, at a phase of its
+  own), so the stroke's second frame, for the refresh after, shows ~21.6 ms after its first
+  sample came: at 60 Hz the p99 of strokes with pauses is 21.6 ms against 20.67 (165 Hz:
+  7.2–7.4 ms, 0 missed). Thumbnails of drawings kept out of the painter (the strips', made
+  when a project opens) are made on the session's low-priority threads from what's kept, not
+  by decoding each 4K drawing into the painter on the window's thread (4–12 ms a tick for the
+  first seconds: what QA saw as the frames tick during a join that came right after launch);
+  the painter's own picture catches up 32 tiles a tick (0.8 ms), and the session's questions
+  take at most 1 ms a tick while the pen is down.
+- **A live stroke's start** leaves at the pen event: the other native app receives it
+  0.15–0.31 ms after the pen goes down (passing state goes out on a thread of its own, never
+  the window's nor behind the session's work); what a native stroke's start takes to arrive
+  in the current app beyond that (0–35 ms) is spent on its side, after the datagram came.
+- **Open:** the 60 Hz stroke-start frame above; a host's pen while a 4K join is served misses a
+  refresh now and then at 60 Hz (no window-thread phase over 3 ms then; both apps and both
+  compositors share this machine). The current app joining a native host that opened a file with several
+  scenes saves no pixels for that file's layers, though they're on the wire (native joiners
+  get them). The pen while 8 draw at 165 Hz.
+- **Phase 7 parity (not yet):** rejoining a session from the project file (the current app keeps
+  it in `extra.share`); drawing on line layers and editing groups natively; layer styles drawn;
+  adjustment layers shown; the invite as a QR code.

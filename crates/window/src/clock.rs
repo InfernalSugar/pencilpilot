@@ -60,6 +60,41 @@ pub fn wait_readable(fd: &BorrowedFd<'_>, ns: u64) -> bool {
     }
 }
 
+/// Wait up to `ns` for `a` or `b` to have something to read: (a has, b has).
+pub fn wait_readable2(a: &BorrowedFd<'_>, b: &BorrowedFd<'_>, ns: u64) -> (bool, bool) {
+    let mut p = [
+        PollFd {
+            fd: a.as_raw_fd(),
+            events: POLLIN,
+            revents: 0,
+        },
+        PollFd {
+            fd: b.as_raw_fd(),
+            events: POLLIN,
+            revents: 0,
+        },
+    ];
+    let t = Timespec {
+        sec: (ns / 1_000_000_000).min(i64::MAX as u64) as i64,
+        nsec: (ns % 1_000_000_000) as i64,
+    };
+    // (u64::MAX: no deadline)
+    let tp: *const Timespec = if ns == u64::MAX { std::ptr::null() } else { &t };
+    loop {
+        // SAFETY: two live pollfds, a timeout on the stack (or none), no signal mask change
+        let r = unsafe { ppoll(p.as_mut_ptr(), 2, tp, std::ptr::null()) };
+        if r >= 0 {
+            return (
+                r > 0 && p[0].revents & POLLIN != 0,
+                r > 0 && p[1].revents & POLLIN != 0,
+            );
+        }
+        if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+            return (false, false);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

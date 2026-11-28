@@ -155,6 +155,8 @@ pub fn project(e: &Engine, s: &State, doc: &mut Doc) -> Result<(Project, SaveTim
         .painter
         .layers()
         .iter()
+        // (others' strokes as they draw them, drawing together, aren't the project's)
+        .filter(|pl| !e.frames.previews.contains(&pl.id))
         .map(|pl| {
             let id = fid(pl.id);
             let mut l = base
@@ -170,9 +172,26 @@ pub fn project(e: &Engine, s: &State, doc: &mut Doc) -> Result<(Project, SaveTim
             l.blend = pl.props.blend.as_str().into();
             l.alpha_lock = pl.props.alpha_lock;
             l.clip = pl.props.clip;
+            // (drawing together: the session's groups, as the painter keeps them)
+            if !e.together.view.ids.is_empty() {
+                l.group = pl.group();
+            }
             l
         })
         .collect();
+    if !e.together.view.ids.is_empty() {
+        m.groups = e
+            .painter
+            .groups()
+            .iter()
+            .map(|g| ppstudio::Group {
+                id: g.id,
+                name: g.name.clone(),
+                visible: g.visible,
+                opacity: g.opacity,
+            })
+            .collect();
+    }
     let here: HashSet<u32> = m.layers.iter().map(|l| l.id).collect();
     m.active_layer = s
         .sheet
@@ -253,6 +272,139 @@ pub fn project(e: &Engine, s: &State, doc: &mut Doc) -> Result<(Project, SaveTim
         .retain(|l, _| l.parse::<u32>().is_ok_and(|id| here.contains(&id)));
     m.timeline.mouth_charts.retain(|c| here.contains(&c.layer));
 
+    // ---- drawing together: the session's whole timeline (every scene and cut, as everyone
+    // has it), its drawings with it (kept as they came) ----
+    if let Some(tl) = super::super::together::serve::session_timeline(e, s) {
+        let lay = |p: u32| Some(fid(p)).filter(|l| *l != 0 && here.contains(l));
+        let add = |d: u32, p: u32, drawings: &mut Vec<(u32, u32)>| {
+            if d != 0 && !drawings.iter().any(|(x, _)| *x == d) {
+                drawings.push((d, p));
+            }
+        };
+        scenes = tl
+            .scenes
+            .iter()
+            .map(|sc| ppstudio::Scene {
+                name: sc.name.clone(),
+                cuts: sc
+                    .cuts
+                    .iter()
+                    .map(|c| Cut {
+                        name: c.name.clone(),
+                        tracks: c
+                            .tracks
+                            .iter()
+                            .filter_map(|(p, ex)| {
+                                let l = lay(*p)?;
+                                let v = ex
+                                    .iter()
+                                    .map(|x| {
+                                        add(x.drawing, *p, &mut drawings);
+                                        Exposure {
+                                            drawing: (x.drawing != 0).then(|| name_of(x.drawing)),
+                                            length: x.length.max(1),
+                                        }
+                                    })
+                                    .collect();
+                                Some((l, v))
+                            })
+                            .collect(),
+                        camera: c.camera.map(|k| ppstudio::Camera {
+                            x: k.x,
+                            y: k.y,
+                            width: k.width,
+                            height: k.height,
+                        }),
+                        action: c.action.clone(),
+                        dialogue: c.dialogue.clone(),
+                        transition: c.transition.clone(),
+                    })
+                    .collect(),
+                audio: sc
+                    .audio
+                    .iter()
+                    .map(|a| ppstudio::AudioClip {
+                        name: a.name.clone(),
+                        file: a.file.clone(),
+                        start: a.start.round() as i64,
+                        gain: a.gain as f32,
+                        muted: a.muted,
+                    })
+                    .collect(),
+                markers: sc
+                    .markers
+                    .iter()
+                    .map(|x| ppstudio::Marker {
+                        frame: x.frame,
+                        label: x.label.clone(),
+                    })
+                    .collect(),
+            })
+            .collect();
+        (doc.scene, doc.cut) = e.together.win.shown;
+        doc.had_scenes = true;
+        // sound files the session sent go in the file; a clip whose file this app hasn't
+        // (nor the file before) can't be written, and is left out
+        for (f, b) in e.together.win.sounds() {
+            p.audio.insert(f.clone(), b.to_vec());
+        }
+        let has = |f: &str| {
+            p.audio.contains_key(f)
+                || doc
+                    .source
+                    .as_ref()
+                    .is_some_and(|o| o.has(&format!("audio/{f}")))
+        };
+        for sc in &mut scenes {
+            sc.audio.retain(|a| has(&a.file));
+        }
+        m.timeline.static_layers = tl.statics.iter().filter_map(|p| lay(*p)).collect();
+        kinds = tl
+            .kinds
+            .iter()
+            .filter(|(d, _)| drawings.iter().any(|(x, _)| x == *d))
+            .map(|(d, k)| (name_of(*d), k.clone()))
+            .collect();
+        m.timeline.mouth_charts = tl
+            .mouths
+            .iter()
+            .filter_map(|c| {
+                Some(ppstudio::MouthChart {
+                    layer: lay(c.layer)?,
+                    shapes: c
+                        .shapes
+                        .iter()
+                        .filter(|(_, d)| **d != 0)
+                        .map(|(k, d)| {
+                            add(*d, c.layer, &mut drawings);
+                            (k.clone(), name_of(*d))
+                        })
+                        .collect(),
+                })
+            })
+            .collect();
+        m.timeline.layer_stages = tl
+            .stages
+            .iter()
+            .filter_map(|(p, st)| Some((lay(*p)?.to_string(), st.clone())))
+            .collect();
+        m.timeline.palettes = tl
+            .palettes
+            .iter()
+            .map(|p| ppstudio::Palette {
+                name: p.name.clone(),
+                colours: p
+                    .colours
+                    .iter()
+                    .map(|c| ppstudio::PaletteColour {
+                        name: c.name.clone(),
+                        hex: c.hex.clone(),
+                    })
+                    .collect(),
+            })
+            .collect();
+    }
+
     // ---- drawings: the open cut's from the painter, the rest as the file had them ----
     let mut keep: HashSet<String> = HashSet::new();
     for (i, c) in scenes.iter().flat_map(|sc| &sc.cuts).enumerate() {
@@ -304,6 +456,10 @@ pub fn project(e: &Engine, s: &State, doc: &mut Doc) -> Result<(Project, SaveTim
     );
     use super::super::frames::store::Kept;
     let store = &e.frames.store;
+    // tiles past the canvas aren't written (as the current app's writer leaves them out); a
+    // shared project's tiles at its edge are written as they are, as that writer writes them
+    // (a solo project's are cut at the edge)
+    let shared = !e.together.view.ids.is_empty();
     let on = |x: i32, y: i32| x >= 0 && y >= 0 && x < cols && y < rows;
     let mut kept_refs: HashMap<u32, Vec<TileRef>> = HashMap::new();
     // (drawing, tile, where: None the painter, Some(i) the store's i-th tile)
@@ -324,6 +480,15 @@ pub fn project(e: &Engine, s: &State, doc: &mut Doc) -> Result<(Project, SaveTim
                 );
             }
             Some(Kept::Raw(tiles)) => jobs.extend(
+                tiles
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (k, _))| on(k.0, k.1))
+                    .map(|(i, (k, _))| (*d, *k, Some(i))),
+            ),
+            // (from others, drawing together: their RGBA tiles, kept as they came, past the
+            // canvas's edge too, as the current app keeps them)
+            Some(Kept::Wire(tiles)) => jobs.extend(
                 tiles
                     .iter()
                     .enumerate()
@@ -354,29 +519,43 @@ pub fn project(e: &Engine, s: &State, doc: &mut Doc) -> Result<(Project, SaveTim
         jobs.par_iter()
             .filter_map(|&(d, (x, y), at)| {
                 let mut px = vec![0u8; TILE * TILE * 4];
+                // (a tile as it came from someone, drawing together: its bytes exactly)
+                let mut as_came = false;
                 match at {
                     None => {
-                        if !painter.drawing_tile_rgba(d, (x, y), &mut px) {
+                        if let Some(t) = store.exact.get(&d).and_then(|m| m.get(&(x, y)))
+                            && let Some(b) = super::super::frames::store::file_rgba(t)
+                        {
+                            px = b;
+                            as_came = true;
+                        } else if !painter.drawing_tile_rgba(d, (x, y), &mut px) {
                             return None;
                         }
                     }
-                    Some(i) => {
-                        let Some(Kept::Raw(t)) = store.drawings.get(&d).map(|k| &**k) else {
-                            return None;
-                        };
-                        let raw = miniz_oxide::inflate::decompress_to_vec_with_limit(
-                            &t.get(i)?.1,
-                            brush::DecodedTile::BYTES,
-                        )
-                        .ok()?;
-                        brush::encode_tile(&brush::DecodedTile::from_bytes(&raw)?, &mut px);
-                    }
+                    Some(i) => match store.drawings.get(&d).map(|k| &**k) {
+                        Some(Kept::Raw(t)) => {
+                            let raw = miniz_oxide::inflate::decompress_to_vec_with_limit(
+                                &t.get(i)?.1,
+                                brush::DecodedTile::BYTES,
+                            )
+                            .ok()?;
+                            brush::encode_tile(&brush::DecodedTile::from_bytes(&raw)?, &mut px);
+                        }
+                        Some(Kept::Wire(t)) => {
+                            px = super::super::frames::store::file_rgba(&t.get(i)?.1)?;
+                            as_came = true;
+                        }
+                        _ => return None,
+                    },
                 }
                 // (paint past the canvas's edge isn't part of the picture: as the file cuts
                 // tiles from a whole canvas)
-                let (x0, y0) = (x as usize * TILE, y as usize * TILE);
-                let (wn, hn) = ((w as usize - x0).min(TILE), (h as usize - y0).min(TILE));
-                if wn < TILE || hn < TILE {
+                let (x0, y0) = (x.max(0) as usize * TILE, y.max(0) as usize * TILE);
+                let (wn, hn) = (
+                    (w as usize).saturating_sub(x0).min(TILE),
+                    (h as usize).saturating_sub(y0).min(TILE),
+                );
+                if !as_came && !shared && (wn < TILE || hn < TILE) {
                     for row in 0..TILE {
                         let from = if row < hn { wn } else { 0 };
                         px[(row * TILE + from) * 4..(row + 1) * TILE * 4].fill(0);

@@ -3564,7 +3564,9 @@ dependencies = [
 name = "pencilpilot-native"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "cosmic-text",
+ "data-encoding",
  "gif",
  "hokusai",
  "libc",
@@ -3573,12 +3575,15 @@ dependencies = [
  "pencilpilot-export",
  "pencilpilot-gpu",
  "pencilpilot-ppstudio",
+ "pencilpilot-share",
  "pencilpilot-sound",
+ "pencilpilot-together",
  "pencilpilot-ui",
  "pencilpilot-window",
  "png",
  "rayon",
  "serde_json",
+ "tokio",
  "zbus",
 ]
 

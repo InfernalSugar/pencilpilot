@@ -293,6 +293,11 @@ fn rgb(s: &State) -> [u8; 3] {
     [r, g, b]
 }
 
+/// The opacity strokes paint with now (0–1), as others' apps are told it.
+pub fn stroke_opacity(s: &State) -> f32 {
+    opacity(s)
+}
+
 fn opacity(s: &State) -> f32 {
     (s.panel.opacity / 100.0).clamp(0.0, 1.0)
 }

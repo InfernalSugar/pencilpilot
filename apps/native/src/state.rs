@@ -171,6 +171,8 @@ pub struct State {
     pub sheet: crate::shell::engine::frames::Sheet,
     /// the scene's sound: its clips on the timeline (`shell/engine/sound`)
     pub sound: crate::shell::engine::sound::SoundUi,
+    /// drawing together: the session, its members, chat (`shell/engine/together`)
+    pub together: crate::shell::engine::together::TogetherUi,
     /// each shell piece's own state (each defined in its piece's file)
     pub header: crate::shell::header::HeaderState,
     pub tools: crate::shell::tools::ToolsState,
@@ -287,6 +289,7 @@ impl State {
             quit_now: false,
             sheet: crate::shell::engine::frames::Sheet::demo(),
             sound: crate::shell::engine::sound::SoundUi::demo(),
+            together: Default::default(),
             header: Default::default(),
             tools: Default::default(),
             panel: Default::default(),

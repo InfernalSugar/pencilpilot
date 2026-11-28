@@ -853,9 +853,26 @@ fn layers(f: &mut Frame, body: Rect, s: &mut State) {
                 } else {
                     "Cel layer"
                 };
+                // drawing together: whose it is
+                let shared = s.together.access.get(i).cloned().flatten();
+                let what = match &shared {
+                    Some(a) if a.other.is_some() => a.other.unwrap_or_default().to_string(),
+                    Some(a) if a.group.is_some() => format!(
+                        "{} · in {}",
+                        if a.mine {
+                            "Yours".to_string()
+                        } else {
+                            format!("{}’s", a.owner)
+                        },
+                        a.group.clone().unwrap_or_default()
+                    ),
+                    Some(a) if a.mine => format!("Yours · {what}"),
+                    Some(a) => format!("{}’s · {what}", a.owner),
+                    None => what.to_string(),
+                };
                 let ink = if layer.visible { t.ink } else { MUTED };
                 let name = f.lay_out(&layer.name, &Style::body(13.0, ink).weight(600), None);
-                let sub = f.lay_out(what, &Style::body(12.0, MUTED), None);
+                let sub = f.lay_out(&what, &Style::body(12.0, MUTED), None);
                 let tx = kr.right() + 12.0;
                 let ty = lr.y + (row_h - name.height - sub.height) / 2.0;
                 f.put_text(&name, tx, ty);
@@ -873,13 +890,37 @@ fn layers(f: &mut Frame, body: Rect, s: &mut State) {
                 if layer_icon(f, &format!("panel/eye/{i}"), eye, path, layer.visible, tip) {
                     s.layers[i].visible = !layer.visible;
                 }
-                let (path, tip) = if layer.locked {
-                    (LOCK, "Unlock layer")
-                } else {
-                    (UNLOCKED, "Lock layer")
-                };
-                if layer_icon(f, &format!("panel/lock/{i}"), lock, path, layer.locked, tip) {
-                    s.layers[i].locked = !layer.locked;
+                match shared {
+                    // someone else's shared layer: the lock asks to draw on it
+                    Some(a) if !a.can_draw => {
+                        let tip = if a.asked {
+                            "Asked: it's theirs to say yes"
+                        } else {
+                            "Ask to draw here"
+                        };
+                        if layer_icon(f, &format!("panel/lock/{i}"), lock, LOCK, true, tip)
+                            && !a.asked
+                        {
+                            s.actions.push(Action::Other(format!(
+                                "{}{}",
+                                crate::shell::engine::together::ops::ASK,
+                                a.lid
+                            )));
+                        }
+                    }
+                    // a shared layer this app may draw on: open (the lock shows access)
+                    Some(_) => {}
+                    None => {
+                        let (path, tip) = if layer.locked {
+                            (LOCK, "Unlock layer")
+                        } else {
+                            (UNLOCKED, "Lock layer")
+                        };
+                        if layer_icon(f, &format!("panel/lock/{i}"), lock, path, layer.locked, tip)
+                        {
+                            s.layers[i].locked = !layer.locked;
+                        }
+                    }
                 }
             }
         },
